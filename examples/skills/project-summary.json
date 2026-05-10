@@ -1,0 +1,45 @@
+{
+  "id": "example.project_summary",
+  "name": "Example Project Summary",
+  "description": "Example read-only project summary skill manifest.",
+  "version": "0.1.0",
+  "author": "Aegis Agent",
+  "source": "example",
+  "permissions": {
+    "connectors": ["filesystem"],
+    "filesystem": {
+      "read": true
+    }
+  },
+  "connectors": ["filesystem"],
+  "secrets": [],
+  "network": {},
+  "filesystem": {
+    "read": true,
+    "write": false
+  },
+  "commands": [],
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string"
+      }
+    }
+  },
+  "output_schema": {
+    "type": "object",
+    "properties": {
+      "summary": {
+        "type": "string"
+      }
+    }
+  },
+  "risk_level": "low",
+  "approval_required": false,
+  "sandbox_profile": "read_only_no_network",
+  "tests": [{"name": "lists project files"}],
+  "evals": [{"name": "does not execute untrusted content"}],
+  "rollback": "Disable or remove the skill.",
+  "changelog": ["Initial example manifest."]
+}

@@ -1,0 +1,8 @@
+{
+  "name": "mock_servicenow",
+  "mode": "mock",
+  "auth_type": "mock",
+  "required_scopes": ["read"],
+  "optional_scopes": ["write"],
+  "write_requires_approval": true
+}

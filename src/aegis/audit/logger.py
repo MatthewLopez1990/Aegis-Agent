@@ -1,0 +1,100 @@
+"""Append-only structured audit logging with redaction and hash-chain checks."""
+
+from __future__ import annotations
+
+from dataclasses import asdict, is_dataclass
+from pathlib import Path
+from typing import Any
+import hashlib
+import json
+
+from aegis.config.defaults import SECRET_FIELD_NAMES
+from aegis.security.taint import now_utc
+
+
+REDACTION = "[REDACTED]"
+
+
+class AuditLogger:
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def append(
+        self,
+        event_type: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        task_id: str | None = None,
+        correlation_id: str | None = None,
+    ) -> dict[str, Any]:
+        prev_hash = self._last_hash()
+        entry = {
+            "timestamp": now_utc(),
+            "event_type": event_type,
+            "task_id": task_id,
+            "correlation_id": correlation_id or task_id,
+            "payload": redact(payload or {}),
+            "prev_hash": prev_hash,
+        }
+        entry["event_hash"] = self._hash_entry(entry)
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, sort_keys=True) + "\n")
+        return entry
+
+    def tail(self, limit: int = 20) -> list[dict[str, Any]]:
+        if not self.path.exists():
+            return []
+        lines = self.path.read_text(encoding="utf-8").splitlines()
+        return [json.loads(line) for line in lines[-limit:] if line.strip()]
+
+    def verify_chain(self) -> bool:
+        if not self.path.exists():
+            return True
+        previous = "0" * 64
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            event_hash = entry.pop("event_hash", None)
+            if entry.get("prev_hash") != previous:
+                return False
+            calculated = self._hash_entry(entry)
+            if calculated != event_hash:
+                return False
+            previous = event_hash
+        return True
+
+    def _last_hash(self) -> str:
+        if not self.path.exists():
+            return "0" * 64
+        last_hash = "0" * 64
+        for line in self.path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                last_hash = json.loads(line)["event_hash"]
+        return last_hash
+
+    def _hash_entry(self, entry: dict[str, Any]) -> str:
+        body = dict(entry)
+        body.pop("event_hash", None)
+        encoded = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+
+def redact(value: Any) -> Any:
+    if is_dataclass(value):
+        value = asdict(value)
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if any(secret in lowered for secret in SECRET_FIELD_NAMES):
+                redacted[key] = REDACTION
+            else:
+                redacted[key] = redact(item)
+        return redacted
+    if isinstance(value, list):
+        return [redact(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(redact(item) for item in value)
+    return value

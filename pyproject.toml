@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aegis-agent"
+version = "0.1.0"
+description = "Local-first, governed AI agent runtime MVP."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Aegis Agent Contributors" }]
+license = { text = "Apache-2.0" }
+dependencies = []
+
+[project.scripts]
+aegis = "aegis.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"aegis.web" = ["static/*.html", "static/*.css", "static/*.js"]

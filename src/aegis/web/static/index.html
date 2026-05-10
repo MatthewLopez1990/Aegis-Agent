@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Aegis Agent</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Aegis Agent</h1>
+        <p>Secure local-first agent runtime</p>
+      </div>
+      <button id="refresh">Refresh</button>
+    </header>
+
+    <main class="layout">
+      <section class="panel task-panel">
+        <h2>Submit Task</h2>
+        <form id="task-form">
+          <textarea id="task-request" rows="4" placeholder="Summarize my project safely"></textarea>
+          <input id="task-path" placeholder="Optional path">
+          <button type="submit">Submit</button>
+        </form>
+        <pre id="task-output"></pre>
+      </section>
+
+      <section class="panel">
+        <h2>Runtime</h2>
+        <div id="health" class="stat-grid"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Connectors</h2>
+        <div id="connectors" class="list"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Channels</h2>
+        <div id="channels" class="list"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Models</h2>
+        <form id="model-auth-form" class="inline-form auth-form">
+          <select id="model-provider">
+            <option value="openai">OpenAI</option>
+            <option value="openrouter">OpenRouter</option>
+          </select>
+          <input id="model-api-key" type="password" autocomplete="off" placeholder="API key">
+          <button type="submit">Login</button>
+          <button id="model-auth-logout" type="button">Logout</button>
+        </form>
+        <div id="model-providers" class="list compact"></div>
+        <div id="models" class="list compact"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Tools</h2>
+        <div id="tools" class="list compact"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Backends</h2>
+        <div id="backends" class="list compact"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Skill Hub</h2>
+        <div id="skill-hub" class="list compact"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Schedules</h2>
+        <form id="schedule-form" class="inline-form">
+          <input id="schedule-name" placeholder="Daily report">
+          <input id="schedule-cron" placeholder="@daily">
+          <input id="schedule-task" placeholder="Summarize my project">
+          <button type="submit">Create</button>
+        </form>
+        <div id="schedules" class="list"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Sessions</h2>
+        <form id="session-form" class="inline-form">
+          <input id="session-title" placeholder="Research session">
+          <button type="submit">New</button>
+        </form>
+        <div id="sessions" class="list"></div>
+      </section>
+
+      <section class="panel">
+        <h2>Audit Tail</h2>
+        <div id="audit" class="list compact"></div>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
