@@ -1,6 +1,6 @@
 # Roadmap
 
-## Next MVP Hardening
+## Next Product Hardening
 
 - Add a real policy file parser and admin policy profiles.
 - Add migration tooling for the SQLite schema.

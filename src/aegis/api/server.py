@@ -8,8 +8,10 @@ from typing import Any
 import json
 import mimetypes
 import re
+from urllib.parse import parse_qs, urlparse
 
 from aegis.agent.orchestrator import build_orchestrator
+from aegis.product.capabilities import build_product_dashboard
 
 
 def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1", port: int = 8765) -> None:
@@ -20,17 +22,21 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
         server_version = "AegisAgent/0.1"
 
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler name.
-            if self.path == "/":
+            parsed = urlparse(self.path)
+            path = parsed.path
+            query = parse_qs(parsed.query)
+
+            if path == "/":
                 self._static(static_root / "index.html")
                 return
-            if self.path.startswith("/static/"):
-                requested = (static_root / self.path.removeprefix("/static/")).resolve()
+            if path.startswith("/static/"):
+                requested = (static_root / path.removeprefix("/static/")).resolve()
                 if static_root not in (requested, *requested.parents):
                     self._json({"error": "invalid static path"}, status=403)
                     return
                 self._static(requested)
                 return
-            if self.path == "/health":
+            if path == "/health":
                 self._json(
                     {
                         "ok": True,
@@ -40,51 +46,75 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     }
                 )
                 return
-            if self.path == "/connectors":
+            if path == "/dashboard":
+                self._json(build_product_dashboard(orchestrator))
+                return
+            if path == "/connectors":
                 self._json({"connectors": orchestrator.connectors.list()})
                 return
-            if self.path == "/channels":
+            if path == "/channels":
                 self._json({"channels": orchestrator.channels.list_channels()})
                 return
-            if self.path == "/models":
+            if path == "/channel-events":
+                self._json({"events": orchestrator.channels.events(limit=int(query.get("limit", ["50"])[0]))})
+                return
+            if path == "/models":
                 self._json({"models": orchestrator.models.list_models()})
                 return
-            if self.path == "/model-providers":
+            if path == "/model-providers":
                 self._json({"providers": orchestrator.models.list_providers()})
                 return
-            if self.path == "/tools":
+            if path == "/tools":
                 self._json({"tools": orchestrator.tool_catalog.list()})
                 return
-            if self.path == "/backends":
+            if path == "/backends":
                 self._json({"backends": orchestrator.execution_backends.list()})
                 return
-            if self.path == "/skill-hub":
+            if path == "/skill-hub":
                 self._json(orchestrator.skill_hub.search(""))
                 return
-            if self.path == "/schedules":
+            if path == "/schedules":
                 self._json({"schedules": orchestrator.schedules.list_schedules()})
                 return
-            if self.path == "/sessions":
+            if path == "/sessions":
                 self._json({"sessions": orchestrator.sessions.list_sessions()})
                 return
-            if self.path == "/audit":
-                self._json({"events": orchestrator.audit_logger.tail(50)})
+            if path == "/tasks":
+                self._json({"tasks": [_task_summary(row) for row in orchestrator.store.list_tasks(limit=int(query.get("limit", ["25"])[0]))]})
                 return
-            if self.path == "/kanban/boards":
+            if path == "/approvals":
+                status = query.get("status", [None])[0]
+                self._json({"approvals": orchestrator.approvals.list(status=status)})
+                return
+            if path == "/memory":
+                search = query.get("q", [""])[0]
+                self._json({"memories": orchestrator.memory.retrieve_relevant(search) if search else []})
+                return
+            if path == "/audit":
+                self._json({"events": orchestrator.audit_logger.tail(int(query.get("limit", ["50"])[0]))})
+                return
+            if path == "/kanban/boards":
                 self._json({"boards": orchestrator.kanban.list_boards()})
                 return
-            match = re.fullmatch(r"/tasks/([^/]+)", self.path)
+            match_cards = re.fullmatch(r"/kanban/boards/([^/]+)/cards", path)
+            if match_cards:
+                self._json({"cards": orchestrator.kanban.list_cards(match_cards.group(1))})
+                return
+            match = re.fullmatch(r"/tasks/([^/]+)", path)
             if match:
                 self._json(orchestrator.status(match.group(1)))
                 return
             self._json({"error": "not found"}, status=404)
 
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler name.
-            if self.path == "/tasks":
+            parsed = urlparse(self.path)
+            path = parsed.path
+
+            if path == "/tasks":
                 payload = self._read_json()
                 self._json(orchestrator.submit_task(str(payload["request"]), path=payload.get("path")))
                 return
-            if self.path == "/sessions":
+            if path == "/sessions":
                 payload = self._read_json()
                 self._json(
                     orchestrator.sessions.create_session(
@@ -95,7 +125,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     )
                 )
                 return
-            if self.path == "/models/auth/login":
+            if path == "/models/auth/login":
                 payload = self._read_json()
                 self._json(
                     {
@@ -104,7 +134,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     }
                 )
                 return
-            if self.path == "/models/auth/logout":
+            if path == "/models/auth/logout":
                 payload = self._read_json()
                 self._json(
                     {
@@ -113,7 +143,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     }
                 )
                 return
-            if self.path == "/schedules":
+            if path == "/schedules":
                 payload = self._read_json()
                 self._json(
                     orchestrator.schedules.create_schedule(
@@ -125,11 +155,11 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     )
                 )
                 return
-            if self.path == "/kanban/boards":
+            if path == "/kanban/boards":
                 payload = self._read_json()
                 self._json(orchestrator.kanban.create_board(str(payload["name"])))
                 return
-            match_card = re.fullmatch(r"/kanban/boards/([^/]+)/cards", self.path)
+            match_card = re.fullmatch(r"/kanban/boards/([^/]+)/cards", path)
             if match_card:
                 payload = self._read_json()
                 self._json(
@@ -141,7 +171,22 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     )
                 )
                 return
-            match = re.fullmatch(r"/tasks/([^/]+)/resume", self.path)
+            match_move = re.fullmatch(r"/kanban/cards/([^/]+)/move", path)
+            if match_move:
+                payload = self._read_json()
+                lane = str(payload["lane"])
+                orchestrator.kanban.move_card(match_move.group(1), lane)
+                self._json({"ok": True, "card_id": match_move.group(1), "lane": lane})
+                return
+            match_approval_approve = re.fullmatch(r"/approvals/([^/]+)/approve", path)
+            if match_approval_approve:
+                self._json(orchestrator.approvals.approve(match_approval_approve.group(1)))
+                return
+            match_approval_deny = re.fullmatch(r"/approvals/([^/]+)/deny", path)
+            if match_approval_deny:
+                self._json(orchestrator.approvals.deny(match_approval_deny.group(1)))
+                return
+            match = re.fullmatch(r"/tasks/([^/]+)/resume", path)
             if match:
                 self._json(orchestrator.resume_task(match.group(1)))
                 return
@@ -182,3 +227,12 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
         print("Aegis Agent API stopped", flush=True)
     finally:
         server.server_close()
+
+
+def _task_summary(row: dict[str, Any]) -> dict[str, Any]:
+    decoded = dict(row)
+    decoded["plan"] = json.loads(decoded.pop("plan_json", "[]"))
+    decoded["checkpoint"] = json.loads(decoded.pop("checkpoint_json", "{}"))
+    receipt_json = decoded.pop("receipt_json", None)
+    decoded["receipt"] = json.loads(receipt_json) if receipt_json else None
+    return decoded

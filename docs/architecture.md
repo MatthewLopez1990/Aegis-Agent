@@ -22,7 +22,7 @@ Aegis Agent is organized around explicit runtime boundaries:
 - Unsafe community skills: every skill needs a manifest, risk level, sandbox profile, permissions, tests, evals, rollback text, and validation.
 - Excessive permission blast radius: connectors declare scopes and high-risk operations require approval.
 - Exposed local gateways: network is allowlist-controlled and mock-mode by default.
-- Weak multi-agent isolation: the MVP does not implement recursive autonomous subagents; the model is a controlled root orchestrator design.
+- Weak multi-agent isolation: the current runtime does not implement recursive autonomous subagents; the model is a controlled root orchestrator design.
 - Stale or unsafe memory: memory carries source, provenance, confidence, sensitivity, confirmation timestamps, and deletion state.
 - Missing audit trails: tasks, policies, connectors, approvals, skills, memories, and receipts are logged.
 - Fragile long-running task execution: task state is durable in SQLite and approval-blocked work can resume.
@@ -40,4 +40,4 @@ Aegis Agent is organized around explicit runtime boundaries:
 
 ## Storage
 
-The MVP uses local SQLite for tasks, memory, skills, and approvals. Audit events are append-only JSONL with a hash chain. This keeps the runtime local-first while leaving a migration path to Postgres and external observability sinks.
+The current runtime uses local SQLite for tasks, memory, skills, and approvals. Audit events are append-only JSONL with a hash chain. This keeps the runtime local-first while leaving a migration path to Postgres and external observability sinks.

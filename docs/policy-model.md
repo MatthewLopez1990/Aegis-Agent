@@ -22,6 +22,6 @@ Possible decisions:
 - `require_admin_approval`
 - `quarantine`
 
-The MVP actively uses allow, deny, and require approval. Other decisions are defined for policy-file growth.
+The current runtime actively uses allow, deny, and require approval. Other decisions are defined for policy-file growth.
 
 See `examples/policies/default-policy.toml`.

@@ -25,6 +25,7 @@ from aegis.mcp.registry import McpRegistry
 from aegis.migration.openclaw import inspect_hermes_home, inspect_openclaw_home
 from aegis.models.registry import ModelRegistry
 from aegis.personality.context import ContextFileLoader, PERSONALITY_NAMES
+from aegis.product.capabilities import build_product_dashboard
 from aegis.scheduler.manager import ScheduleManager
 from aegis.security.secrets_broker import SecretsBroker
 from aegis.security.taint import Sensitivity
@@ -56,6 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subcommands.add_parser("init", help="Create default local configuration")
     subcommands.add_parser("health", help="Show local runtime health")
+    subcommands.add_parser("dashboard", help="Show product capability and security posture")
     server = subcommands.add_parser("serve", help="Run the local development API server")
     server.add_argument("--workspace", default=".")
     server.add_argument("--host", default="127.0.0.1")
@@ -249,6 +251,10 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
         audit = AuditLogger(config.audit_log_path)
         connectors = build_default_registry(config, audit)
         return {"ok": True, "data_dir": str(config.data_dir), "database": str(store.database_path), "audit_chain_ok": audit.verify_chain(), "connectors": connectors.status()}
+
+    if args.command == "dashboard":
+        orchestrator = build_orchestrator(data_dir=args.data_dir)
+        return build_product_dashboard(orchestrator)
 
     if args.command == "serve":
         serve(data_dir=args.data_dir, workspace=args.workspace, host=args.host, port=args.port)

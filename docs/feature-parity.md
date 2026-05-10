@@ -4,14 +4,12 @@ This document maps the public Hermes Agent and OpenClaw feature surface into Aeg
 
 ## Current Public Feature Surface
 
-Evidence used for this pass:
+Evidence used for the May 2026 pass:
 
 - Hermes README describes a self-improving agent with model switching, full TUI, messaging gateway, closed learning loop, scheduler, subagents, multiple terminal backends, and research tooling.
-- Hermes community Web UI describes layered local memory, automatic skills, scheduling, multi-surface access, 47 tools, MCP, voice mode, terminal backends, personalities, agent orchestration, and a three-panel browser UI.
-- OpenClaw docs describe agents as model, memory, tool, and channel layers with persistent memory, 5,700+ skills, 50+ channels, multi-step planning, and proactive scheduling.
-- OpenClaw channel docs describe adapter responsibilities: inbound normalization, outbound rendering, auth/webhooks, rich messages, and multi-channel deployment.
-- OpenClaw tool docs identify web search, calculator, file read/write, HTTP request, shell, memory store, and memory recall with risk levels.
-- OpenClaw model docs describe model-agnostic routing, local Ollama models, cloud providers, aliases, fallbacks, usage and cost controls.
+- Hermes v0.13 release notes emphasize durable Kanban, checkpoints, gateway auto-resume, watchdog scheduling, default redaction, role allowlists, stranger rejection, and OAuth TOCTOU fixes.
+- OpenClaw docs describe a single Gateway, built-in and plugin channels, multi-agent routing with isolated sessions, streaming and chunking, 35+ providers, media, Web Control UI, mobile nodes, browser automation, web search, cron jobs, skills, plugins, and workflow pipelines.
+- OpenClaw TUI docs describe local and gateway mode, header/status/footer, chat log with tool cards, autocomplete, slash commands, local shell commands, history, streaming, and connection repair.
 
 ## Implemented Support
 
@@ -23,8 +21,9 @@ Evidence used for this pass:
 
 ### TUI and Web GUI
 
-- `aegis tui` provides a terminal agent interface with task submission, status, approvals, connectors, channels, models, tools, sessions, and audit commands.
-- `aegis serve` provides a browser GUI with task submission plus panels for runtime health, connectors, channels, models, tools, schedules, sessions, and audit logs.
+- `aegis tui` provides a terminal command deck with task submission, status, recent tasks, approvals, security posture, capability groups, connectors, channels, models, tools, skills, schedules, sessions, work boards, backends, and audit commands.
+- `aegis serve` provides a browser GUI with task submission plus panels for runtime health, security controls, competitive parity targets, connectors, channels, models, tools, schedules, sessions, work boards, approvals, recent tasks, and audit logs.
+- `aegis dashboard` and `GET /dashboard` expose live runtime counts, security controls, capability groups, and parity targets without exposing raw secrets or payloads.
 
 ### Channels and Gateway
 

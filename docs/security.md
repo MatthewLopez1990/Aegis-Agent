@@ -19,7 +19,7 @@ Untrusted content is never treated as an instruction source. Files, web pages, e
 
 ## Secret Handling
 
-Do not put raw secrets in requests, memory, skill manifests, docs, or logs. The MVP secrets broker returns handles and audit logs redact secret-like field names.
+Do not put raw secrets in requests, memory, skill manifests, docs, or logs. The secrets broker returns handles and audit logs redact secret-like field names.
 
 ## Writes and Sends
 

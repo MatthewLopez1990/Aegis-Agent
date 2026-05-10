@@ -64,7 +64,7 @@ class ScheduleManager:
 
 
 def estimate_next_run(cron: str) -> str:
-    # Conservative MVP: supports common hourly/daily shorthand and otherwise schedules one hour out.
+    # Conservative implementation: supports common hourly/daily shorthand and otherwise schedules one hour out.
     current = datetime.now(UTC)
     if cron in {"@hourly", "0 * * * *"}:
         next_run = current.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)

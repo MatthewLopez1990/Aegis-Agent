@@ -26,7 +26,7 @@
 - Audit tampering.
 - Shell or network actions escaping policy.
 
-## MVP Controls
+## Current Controls
 
 - Context firewall and taint metadata.
 - Policy decisions with allow, deny, and require approval.

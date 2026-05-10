@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aegis-agent"
 version = "0.1.0"
-description = "Local-first, governed AI agent runtime MVP."
+description = "Local-first, governed AI agent runtime."
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "Aegis Agent Contributors" }]

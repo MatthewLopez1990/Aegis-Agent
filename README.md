@@ -1,8 +1,8 @@
 # Aegis Agent
 
-Aegis Agent is a local-first, governed AI agent runtime MVP. It focuses on durable tasks, scoped connectors, memory with provenance, governed skills, policy gates, human approvals, context isolation, and append-only audit receipts.
+Aegis Agent is a local-first, governed AI agent runtime. It focuses on durable tasks, scoped connectors, memory with provenance, governed skills, policy gates, human approvals, context isolation, and append-only audit receipts.
 
-This repository was scaffolded from `Agent.md`. It is an MVP, not a production-ready agent platform.
+The product direction is parity with modern personal-agent platforms while keeping Aegis stricter by default: external content is tainted, risky tools pause for approval, secrets stay brokered, and every action produces auditable evidence.
 
 ## Install
 
@@ -16,6 +16,7 @@ After install:
 
 ```bash
 aegis --help
+aegis dashboard
 aegis tui
 aegis serve --host 127.0.0.1 --port 8765
 ```
@@ -26,6 +27,7 @@ See `docs/install.md` for one-line archive/Git install commands.
 
 ```bash
 PYTHONPATH=src python3 -m aegis.cli.main init
+PYTHONPATH=src python3 -m aegis.cli.main dashboard
 PYTHONPATH=src python3 -m aegis.cli.main task submit "Summarize my project safely" --path .
 PYTHONPATH=src python3 -m aegis.cli.main connector list
 PYTHONPATH=src python3 -m aegis.cli.main audit verify
@@ -63,8 +65,8 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 ## What Is Implemented
 
 - CLI task submission, status, resume, evidence, approvals, memory, skills, connectors, and audit commands.
-- Dependency-free local API server for health checks, connector listing, task submission, status, and resume.
-- Dependency-free TUI and static Web GUI.
+- Dependency-free local API server for the product dashboard, health checks, connector listing, task submission, status, approvals, schedules, boards, and resume.
+- Dependency-free TUI command deck and browser GUI for runtime control, security posture, approvals, recent tasks, models, channels, tools, schedules, work boards, and audit evidence.
 - Durable SQLite task, memory, skill, and approval records in `.aegis/aegis.db`.
 - Append-only JSONL audit log with secret redaction and hash-chain verification.
 - Context firewall that labels trust classes and quarantines prompt-injection patterns in untrusted content.
@@ -89,6 +91,6 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - HTTP is mock-mode by default.
 - Connectors that need real credentials are mock or placeholder implementations.
 - Filesystem writes and shell execution are intentionally constrained.
-- This is an MVP foundation for the architecture, not a complete enterprise product.
+- Live third-party integrations still need per-provider credential flows, webhook verification, rate limiting, sandbox hardening, rollback logic, and tests before they should be enabled broadly.
 
 See `docs/getting-started.md`, `docs/security.md`, and `docs/architecture.md` for details.

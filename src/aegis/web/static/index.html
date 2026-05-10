@@ -8,92 +8,239 @@
   </head>
   <body>
     <header class="topbar">
-      <div>
-        <h1>Aegis Agent</h1>
-        <p>Secure local-first agent runtime</p>
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">A</span>
+        <div>
+          <h1>Aegis Agent</h1>
+          <p>Local-first governed agent runtime</p>
+        </div>
       </div>
-      <button id="refresh">Refresh</button>
+      <div class="top-actions">
+        <span id="app-status" class="status-pill">Starting</span>
+        <button id="refresh" type="button">Refresh</button>
+      </div>
     </header>
 
-    <main class="layout">
-      <section class="panel task-panel">
-        <h2>Submit Task</h2>
-        <form id="task-form">
-          <textarea id="task-request" rows="4" placeholder="Summarize my project safely"></textarea>
-          <input id="task-path" placeholder="Optional path">
-          <button type="submit">Submit</button>
-        </form>
-        <pre id="task-output"></pre>
+    <main class="app-shell">
+      <section class="hero-panel">
+        <div>
+          <p class="eyebrow">Security Control Center</p>
+          <h2>Govern every tool, channel, model, and memory before it touches real data.</h2>
+        </div>
+        <div id="runtime-stats" class="metric-grid"></div>
       </section>
 
-      <section class="panel">
-        <h2>Runtime</h2>
-        <div id="health" class="stat-grid"></div>
+      <section class="workbench">
+        <div class="command-panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Command</p>
+              <h3>Submit Task</h3>
+            </div>
+          </div>
+          <form id="task-form" class="task-form">
+            <textarea id="task-request" rows="5" placeholder="Summarize this project safely"></textarea>
+            <div class="input-row">
+              <input id="task-path" placeholder="Optional scoped path">
+              <button type="submit">Submit</button>
+            </div>
+          </form>
+          <pre id="task-output" aria-live="polite"></pre>
+        </div>
+
+        <aside class="side-stack">
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Human Gate</p>
+                <h3>Approvals</h3>
+              </div>
+            </div>
+            <div id="approvals" class="list"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Recent</p>
+                <h3>Tasks</h3>
+              </div>
+            </div>
+            <div id="tasks" class="list compact-list"></div>
+          </section>
+        </aside>
       </section>
 
-      <section class="panel">
-        <h2>Connectors</h2>
-        <div id="connectors" class="list"></div>
-      </section>
+      <section class="dashboard-grid">
+        <section class="panel span-2">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Controls</p>
+              <h3>Security Posture</h3>
+            </div>
+          </div>
+          <div id="security-controls" class="feature-grid"></div>
+        </section>
 
-      <section class="panel">
-        <h2>Channels</h2>
-        <div id="channels" class="list"></div>
-      </section>
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Parity</p>
+              <h3>Competitive Targets</h3>
+            </div>
+          </div>
+          <div id="competitor-targets" class="list"></div>
+        </section>
 
-      <section class="panel">
-        <h2>Models</h2>
-        <form id="model-auth-form" class="inline-form auth-form">
-          <select id="model-provider">
-            <option value="openai">OpenAI</option>
-            <option value="openrouter">OpenRouter</option>
-          </select>
-          <input id="model-api-key" type="password" autocomplete="off" placeholder="API key">
-          <button type="submit">Login</button>
-          <button id="model-auth-logout" type="button">Logout</button>
-        </form>
-        <div id="model-providers" class="list compact"></div>
-        <div id="models" class="list compact"></div>
-      </section>
+        <section class="panel span-3">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Coverage</p>
+              <h3>Capability Groups</h3>
+            </div>
+          </div>
+          <div id="capability-groups" class="feature-grid"></div>
+        </section>
 
-      <section class="panel">
-        <h2>Tools</h2>
-        <div id="tools" class="list compact"></div>
-      </section>
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Runtime</p>
+              <h3>Connectors</h3>
+            </div>
+          </div>
+          <div id="connectors" class="list compact-list"></div>
+        </section>
 
-      <section class="panel">
-        <h2>Backends</h2>
-        <div id="backends" class="list compact"></div>
-      </section>
+        <section class="panel span-2">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Gateway</p>
+              <h3>Channels</h3>
+            </div>
+          </div>
+          <div id="channels" class="list card-grid"></div>
+        </section>
 
-      <section class="panel">
-        <h2>Skill Hub</h2>
-        <div id="skill-hub" class="list compact"></div>
-      </section>
+        <section class="panel span-2">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Models</p>
+              <h3>Providers</h3>
+            </div>
+          </div>
+          <form id="model-auth-form" class="inline-form auth-form">
+            <select id="model-provider">
+              <option value="openai">OpenAI</option>
+              <option value="openrouter">OpenRouter</option>
+            </select>
+            <input id="model-api-key" type="password" autocomplete="off" placeholder="API key">
+            <button type="submit">Login</button>
+            <button id="model-auth-logout" type="button" class="secondary">Logout</button>
+          </form>
+          <div id="model-providers" class="list card-grid"></div>
+        </section>
 
-      <section class="panel">
-        <h2>Schedules</h2>
-        <form id="schedule-form" class="inline-form">
-          <input id="schedule-name" placeholder="Daily report">
-          <input id="schedule-cron" placeholder="@daily">
-          <input id="schedule-task" placeholder="Summarize my project">
-          <button type="submit">Create</button>
-        </form>
-        <div id="schedules" class="list"></div>
-      </section>
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Routes</p>
+              <h3>Models</h3>
+            </div>
+          </div>
+          <div id="models" class="list compact-list"></div>
+        </section>
 
-      <section class="panel">
-        <h2>Sessions</h2>
-        <form id="session-form" class="inline-form">
-          <input id="session-title" placeholder="Research session">
-          <button type="submit">New</button>
-        </form>
-        <div id="sessions" class="list"></div>
-      </section>
+        <section class="panel span-2">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Tooling</p>
+              <h3>Governed Tools</h3>
+            </div>
+          </div>
+          <div id="tools" class="list card-grid"></div>
+        </section>
 
-      <section class="panel">
-        <h2>Audit Tail</h2>
-        <div id="audit" class="list compact"></div>
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Execution</p>
+              <h3>Backends</h3>
+            </div>
+          </div>
+          <div id="backends" class="list compact-list"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Skills</p>
+              <h3>Skill Hub</h3>
+            </div>
+          </div>
+          <div id="skill-hub" class="list compact-list"></div>
+        </section>
+
+        <section class="panel span-2">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Automation</p>
+              <h3>Schedules</h3>
+            </div>
+          </div>
+          <form id="schedule-form" class="inline-form">
+            <input id="schedule-name" placeholder="Daily report">
+            <input id="schedule-cron" placeholder="@daily">
+            <input id="schedule-task" placeholder="Summarize my project">
+            <button type="submit">Create</button>
+          </form>
+          <div id="schedules" class="list"></div>
+        </section>
+
+        <section class="panel span-2">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Orchestration</p>
+              <h3>Work Boards</h3>
+            </div>
+          </div>
+          <form id="board-form" class="inline-form two-col">
+            <input id="board-name" placeholder="Launch board">
+            <button type="submit">Create Board</button>
+          </form>
+          <form id="card-form" class="inline-form card-form">
+            <select id="card-board"></select>
+            <input id="card-title" placeholder="Card title">
+            <input id="card-description" placeholder="Description">
+            <button type="submit">Add Card</button>
+          </form>
+          <div id="boards" class="list compact-list"></div>
+          <div id="cards" class="kanban-lanes"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Sessions</p>
+              <h3>Conversation State</h3>
+            </div>
+          </div>
+          <form id="session-form" class="inline-form two-col">
+            <input id="session-title" placeholder="Research session">
+            <button type="submit">New Session</button>
+          </form>
+          <div id="sessions" class="list compact-list"></div>
+        </section>
+
+        <section class="panel span-3">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Evidence</p>
+              <h3>Audit Tail</h3>
+            </div>
+          </div>
+          <div id="audit" class="list audit-list"></div>
+        </section>
       </section>
     </main>
     <script src="/static/app.js"></script>

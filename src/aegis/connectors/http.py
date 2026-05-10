@@ -53,7 +53,7 @@ class HttpConnector:
         return ConnectorResult(self.spec.name, "read", True, {"url": url, "domain": domain, "content": content})
 
     def write(self, request: ConnectorRequest) -> ConnectorResult:
-        return ConnectorResult(self.spec.name, "write", False, {}, error="http write is not implemented in MVP")
+        return ConnectorResult(self.spec.name, "write", False, {}, error="http write is not implemented in the current governed runtime")
 
     def dry_run(self, request: ConnectorRequest) -> ConnectorResult:
         url = str(request.params.get("url", ""))

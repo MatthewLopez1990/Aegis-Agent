@@ -1,4 +1,4 @@
-"""Sandboxed skill runtime for built-in governed MVP skills."""
+"""Sandboxed skill runtime for built-in governed skills."""
 
 from __future__ import annotations
 

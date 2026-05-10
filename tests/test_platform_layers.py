@@ -7,6 +7,7 @@ from pathlib import Path
 from aegis.agent.orchestrator import build_orchestrator
 from aegis.migration.openclaw import inspect_hermes_home, inspect_openclaw_home
 from aegis.personality.context import ContextFileLoader
+from aegis.product.capabilities import build_product_dashboard
 
 
 class PlatformLayerTests(unittest.TestCase):
@@ -59,6 +60,13 @@ class PlatformLayerTests(unittest.TestCase):
             proposal = orchestrator.learning_loop.propose_from_failure(task_id="task-1", failure_summary="needs retry")
             self.assertTrue(proposal.approval_required)
 
+            dashboard = build_product_dashboard(orchestrator)
+            self.assertEqual(dashboard["product"]["name"], "Aegis Agent")
+            self.assertGreaterEqual(dashboard["runtime"]["channels"], 50)
+            self.assertGreaterEqual(dashboard["runtime"]["approval_gated_tools"], 1)
+            self.assertTrue(any(control["name"] == "Context firewall" for control in dashboard["security_controls"]))
+            self.assertTrue(any(target["platform"] == "Hermes Agent" for target in dashboard["competitive_targets"]))
+
     def test_context_loader_and_migration_dry_runs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -78,6 +86,7 @@ class PlatformLayerTests(unittest.TestCase):
         self.assertTrue((static_root / "styles.css").exists())
         self.assertTrue((static_root / "app.js").exists())
         self.assertIn("Aegis Agent", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("Security Control Center", (static_root / "index.html").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

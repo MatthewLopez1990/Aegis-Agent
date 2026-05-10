@@ -42,8 +42,9 @@ Use `--archive` if the target machine does not have `git`.
 
 ```bash
 aegis --help
+aegis dashboard
 aegis tui
 aegis serve --host 127.0.0.1 --port 8765
 ```
 
-No `sudo`, npm, pnpm, yarn, or system package install is required by the current MVP. If Python virtual environments are unavailable, the installer automatically falls back to a source-copy launcher because Aegis currently has no third-party runtime dependencies.
+No `sudo`, npm, pnpm, yarn, or system package install is required by the current runtime. If Python virtual environments are unavailable, the installer automatically falls back to a source-copy launcher because Aegis currently has no third-party runtime dependencies.

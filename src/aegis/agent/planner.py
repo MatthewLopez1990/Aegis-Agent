@@ -1,4 +1,4 @@
-"""Simple deterministic task planner for the MVP runtime."""
+"""Simple deterministic task planner for the governed runtime."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ class TaskPlanner:
                         description="Dry-run destructive action; do not modify data until approved.",
                         connector="filesystem",
                         operation="dry_run_write",
-                        params={"path": path or ".", "content": "[destructive action blocked in MVP]"},
+                        params={"path": path or ".", "content": "[destructive action blocked pending explicit approval flow]"},
                         scopes=("write",),
                         risk_level=RiskLevel.HIGH,
                     ),
