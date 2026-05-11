@@ -1679,6 +1679,16 @@ class AegisTui(cmd.Cmd):
                 ),
             )
         )
+        provider_gap = next((item for item in dashboard.get("live_gap_backlog", []) if item.get("area") == "provider_and_channel_live_connectors"), None)
+        if provider_gap:
+            print()
+            print("Live Connector Readiness")
+            print(
+                _table(
+                    provider_gap.get("operator_checklist", []),
+                    (("control", "control", 28), ("state", "state", 24), ("detail", "detail", 84)),
+                )
+            )
 
     def do_audit(self, arg: str) -> None:
         """audit [export-siem [limit]] -- show audit tail or normalized SIEM JSONL."""

@@ -249,6 +249,11 @@ def _live_gap_backlog(
             "live_read_surfaces": live_read_connector_tools[:8],
             "implemented_live_adapters": live_connector_adapters,
             "available_live_adapters": available_live_connector_adapters,
+            "operator_checklist": _live_connector_operator_checklist(
+                live_connector_adapters,
+                available_live_connector_adapters,
+                live_read_connector_tools,
+            ),
             "next_steps": [
                 "Add per-provider credential handles and domain allowlists.",
                 "Keep live writes approval-gated with redacted receipts.",
@@ -399,6 +404,55 @@ def _available_live_connector_adapters(connectors: list[dict[str, Any]], config:
                 }
             )
     return adapters
+
+
+def _live_connector_operator_checklist(
+    live_connector_adapters: list[dict[str, Any]],
+    available_live_connector_adapters: list[dict[str, Any]],
+    live_read_connector_tools: list[str],
+) -> list[dict[str, str]]:
+    return [
+        {
+            "control": "credential_handles",
+            "state": "required_per_adapter",
+            "detail": "Use brokered secret handles for each live connector or outbound channel credential.",
+        },
+        {
+            "control": "network_allowlist",
+            "state": "required_per_domain",
+            "detail": "Allowlist each provider host before live reads, writes, or webhook sends leave the local runtime.",
+        },
+        {
+            "control": "live_enablement_flag",
+            "state": "required_per_adapter",
+            "detail": "Enable only the specific live write or outbound channel flag needed for the adapter under review.",
+        },
+        {
+            "control": "human_approval",
+            "state": "enforced",
+            "detail": "High-impact live writes and sends remain approval-gated before execution.",
+        },
+        {
+            "control": "receipt_redaction",
+            "state": "enforced",
+            "detail": "Live connector receipts expose operation summaries and hashes, not raw secret values.",
+        },
+        {
+            "control": "mock_fallback",
+            "state": "available",
+            "detail": "Adapters retain mock or dry-run paths while credentials, allowlists, or approvals are absent.",
+        },
+        {
+            "control": "read_surface_inventory",
+            "state": "available" if live_read_connector_tools else "pending",
+            "detail": f"{len(live_read_connector_tools)} live-read-capable tool surfaces are visible before write promotion.",
+        },
+        {
+            "control": "promotion_scope",
+            "state": "partial" if live_connector_adapters else "not_started" if available_live_connector_adapters else "needs_adapter",
+            "detail": f"{len(live_connector_adapters)} live adapters enabled; {len(available_live_connector_adapters)} opt-in adapters still available.",
+        },
+    ]
 
 
 _LIVE_CONNECTOR_CAPABILITIES = {

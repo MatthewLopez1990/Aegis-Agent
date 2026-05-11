@@ -421,6 +421,8 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn("x.live_read_surfaces", script)
         self.assertIn("x.implemented_live_adapters", script)
         self.assertIn("x.available_live_adapters", script)
+        self.assertIn("x.operator_checklist", script)
+        self.assertIn("Checklist:", script)
         self.assertIn("x.implemented_backend_adapters", script)
         self.assertIn("x.available_backend_adapters", script)
         self.assertIn("x.implemented_hardening_controls", script)

@@ -84,6 +84,12 @@ class TuiTests(unittest.TestCase):
             self.assertIn("provider_specific_media_adapter_expansion", rendered)
             self.assertIn("disabled_backend_denial", rendered)
             self.assertIn("live_connector_receipts.redacted_write_summary", rendered)
+            self.assertIn("Live Connector Readiness", rendered)
+            self.assertIn("credential_handles", rendered)
+            self.assertIn("required_per_adapter", rendered)
+            self.assertIn("network_allowlist", rendered)
+            self.assertIn("receipt_redaction", rendered)
+            self.assertIn("promotion_scope", rendered)
             self.assertIn("artifact_integrity.browser_media_receipts", rendered)
             self.assertIn("backend_activation.remote_execution_disabled", rendered)
 

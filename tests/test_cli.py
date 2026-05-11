@@ -72,6 +72,12 @@ class CliTests(unittest.TestCase):
             self.assertIn("available_live_adapters", provider_gap)
             self.assertIn("mock_graph", {adapter["name"] for adapter in provider_gap["available_live_adapters"]})
             self.assertTrue(all(adapter["raw_secret_values_included"] is False for adapter in provider_gap["available_live_adapters"]))
+            checklist = {item["control"]: item for item in provider_gap["operator_checklist"]}
+            self.assertEqual(checklist["credential_handles"]["state"], "required_per_adapter")
+            self.assertEqual(checklist["network_allowlist"]["state"], "required_per_domain")
+            self.assertEqual(checklist["human_approval"]["state"], "enforced")
+            self.assertEqual(checklist["receipt_redaction"]["state"], "enforced")
+            self.assertEqual(checklist["promotion_scope"]["state"], "not_started")
             backend_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "remote_backend_activation")
             self.assertEqual(backend_gap["status"], "backend_adapters_available_unconfigured")
             self.assertIn("available_backend_adapters", backend_gap)
