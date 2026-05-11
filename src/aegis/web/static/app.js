@@ -279,10 +279,11 @@ const refresh = async () => {
       meta: `${x.difficulty} · ${x.auth_type}`,
     }));
     setList("channel-events", channelEvents.events, (x) => ({
-      title: `${x.channel} · ${x.sender}`,
-      detail: x.normalized?.text || JSON.stringify(x.payload || {}),
-      meta: `${x.trust_class} · ${x.created_at}`,
-      tone: x.normalized?.text?.includes("QUARANTINED") ? "attention" : "",
+      title: `${x.channel} · ${x.normalized?.sender || "unknown"}`,
+      detail: channelEventDetail(x),
+      meta: `${x.direction || "event"} · ${x.status || "recorded"} · ${x.created_at}`,
+      tone: x.normalized?.approval_intent ? "ready" : x.normalized?.text?.includes("QUARANTINED") ? "attention" : "",
+      actions: channelApprovalIntentActions(x, approvals.approvals || []),
     }), "No inbound channel events");
     setList(
       "model-providers",
@@ -1103,6 +1104,30 @@ const approvalDecisionPayload = () => ({
   admin: Boolean(document.getElementById("approval-admin")?.checked),
 });
 
+const channelEventDetail = (event) => {
+  const intent = event.normalized?.approval_intent;
+  const textValue = event.normalized?.text || JSON.stringify(event.payload || {});
+  if (!intent) return textValue;
+  return `${textValue} Intent: ${intent.action} (${intent.matched_phrase})`;
+};
+
+const channelApprovalIntentActions = (event, pendingApprovals) => {
+  const intent = event.normalized?.approval_intent;
+  if (!intent || intent.auto_execute !== false || intent.requires_explicit_approval_id !== true) return "";
+  const candidates = pendingApprovals
+    .filter((approval) => approval?.status === "pending")
+    .filter((approval) => !event.session_id || !approval.session_id || approval.session_id === event.session_id)
+    .slice(0, 3);
+  if (!candidates.length) return "";
+  const label = intent.action === "approval_approve" ? "Approve" : intent.action === "approval_review" ? "Review" : "Deny";
+  return candidates
+    .map(
+      (approval) =>
+        `<button type="button" class="secondary" data-channel-intent-event="${escapeHtml(event.id)}" data-channel-intent-approval="${escapeHtml(approval.id)}">${label} ${escapeHtml(shortId(approval.id))}</button>`
+    )
+    .join("");
+};
+
 const renderApprovalDetail = (approval) => {
   state.selectedApproval = approval;
   const node = document.getElementById("approval-detail");
@@ -1734,6 +1759,21 @@ document.getElementById("approval-decisions").addEventListener("click", async (e
   if (sessionId) {
     await openSession(sessionId);
   }
+});
+
+document.getElementById("channel-events").addEventListener("click", async (event) => {
+  const eventId = event.target.dataset.channelIntentEvent;
+  const approvalId = event.target.dataset.channelIntentApproval;
+  if (!eventId || !approvalId) return;
+  await api("/channels/approval-intent/resolve", {
+    method: "POST",
+    body: JSON.stringify({
+      event_id: eventId,
+      approval_id: approvalId,
+      ...approvalDecisionPayload(),
+    }),
+  });
+  await refresh();
 });
 
 document.getElementById("approval-detail").addEventListener("click", async (event) => {
