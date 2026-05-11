@@ -267,7 +267,7 @@ def _live_gap_backlog(
             "sample_tools": facade_tools[:8],
             "next_steps": [
                 "Extend rendering toward real browser automation only after network, cookie, and JavaScript boundaries are enforceable.",
-                "Introduce a sandboxed media worker with no ambient workspace access.",
+                "Extend the local media worker toward stricter OS-level sandbox profiles before provider-backed media execution.",
                 "Gate any page mutation, recording, or generated media write behind approval.",
             ],
             "required_controls": ["sandbox_isolation", "taint_preservation", "artifact_hashing", "human_approval"],
@@ -289,10 +289,14 @@ def _live_gap_backlog(
                     "control": "no_raw_secret_capture",
                     "evidence": "browser/media metadata redacts secret-shaped fields and avoids raw prompt persistence",
                 },
+                {
+                    "control": "sandboxed_media_worker_process",
+                    "evidence": "deterministic local media artifacts are written by a subprocess with stdin-only payloads and a minimal environment",
+                },
             ],
             "remaining_depth_work": [
                 "real_browser_automation_boundaries",
-                "sandboxed_media_worker_process",
+                "os_level_media_worker_sandbox",
                 "provider_backed_media_execution",
             ],
             "evaluation_scenarios": ["artifact_integrity.browser_media_receipts"],

@@ -29,7 +29,7 @@ from xml.etree import ElementTree
 from uuid import uuid4
 import zipfile
 
-from aegis.audit.logger import AuditLogger
+from aegis.audit.logger import AuditLogger, redact
 from aegis.browser.controller import BrowserController
 from aegis.connectors.base import ConnectorRequest
 from aegis.connectors.http import _open_without_redirects, _private_network_error, _validate_url
@@ -335,9 +335,10 @@ class BuiltinToolExecutor:
         if name == "tts":
             text = str(params.get("text", ""))
             path = artifact_dir / f"{name}-{uuid4()}.wav"
-            duration_seconds = _write_tts_tone(path, text=text)
+            worker_result = _run_media_artifact_worker(artifact_dir=artifact_dir, artifact_name=path.name, tool=name, payload={"text": text})
+            duration_seconds = float(worker_result["duration_seconds"])
             artifact_receipt = _artifact_receipt(path)
-            sandbox_receipt = _media_sandbox_receipt(tool=name, mode="local_wav_tone")
+            sandbox_receipt = _media_sandbox_receipt(tool=name, mode="local_wav_tone", worker_result=worker_result)
             metadata_path = _write_tool_artifact_metadata(
                 artifact_dir=artifact_dir,
                 tool=name,
@@ -362,9 +363,9 @@ class BuiltinToolExecutor:
         if name == "voice_record":
             duration_seconds = _bounded_float(params.get("duration", 1), minimum=0.1, maximum=60.0, label="duration")
             path = artifact_dir / f"{name}-{uuid4()}.wav"
-            _write_silence_wav(path, duration_seconds=duration_seconds)
+            worker_result = _run_media_artifact_worker(artifact_dir=artifact_dir, artifact_name=path.name, tool=name, payload={"duration": duration_seconds})
             artifact_receipt = _artifact_receipt(path)
-            sandbox_receipt = _media_sandbox_receipt(tool=name, mode="local_wav_silence")
+            sandbox_receipt = _media_sandbox_receipt(tool=name, mode="local_wav_silence", worker_result=worker_result)
             metadata_path = _write_tool_artifact_metadata(
                 artifact_dir=artifact_dir,
                 tool=name,
@@ -389,9 +390,16 @@ class BuiltinToolExecutor:
             prompt = str(params.get("prompt", ""))
             source_path = str(params.get("source_path") or params.get("image_path") or "")
             path = artifact_dir / f"{name}-{uuid4()}.png"
-            width, height = _write_prompt_png(path, prompt=prompt, source=source_path)
+            worker_result = _run_media_artifact_worker(
+                artifact_dir=artifact_dir,
+                artifact_name=path.name,
+                tool=name,
+                payload={"prompt": prompt, "source": source_path},
+            )
+            width = int(worker_result["width"])
+            height = int(worker_result["height"])
             artifact_receipt = _artifact_receipt(path)
-            sandbox_receipt = _media_sandbox_receipt(tool=name, mode="local_png_preview")
+            sandbox_receipt = _media_sandbox_receipt(tool=name, mode="local_png_preview", worker_result=worker_result)
             metadata_path = _write_tool_artifact_metadata(
                 artifact_dir=artifact_dir,
                 tool=name,
@@ -2100,6 +2108,38 @@ def _artifact_receipt(path: Path) -> dict[str, Any]:
     }
 
 
+def _run_media_artifact_worker(*, artifact_dir: Path, artifact_name: str, tool: str, payload: dict[str, Any]) -> dict[str, Any]:
+    request = {"artifact_name": artifact_name, "tool": tool, **payload}
+    python_path_entries = [entry for entry in sys.path if entry]
+    if os.environ.get("PYTHONPATH"):
+        python_path_entries.extend(os.environ["PYTHONPATH"].split(os.pathsep))
+    env = {"PATH": os.environ.get("PATH", "")}
+    if python_path_entries:
+        env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(python_path_entries))
+    completed = subprocess.run(
+        [sys.executable, "-m", "aegis.tools.media_worker"],
+        input=json.dumps(request),
+        cwd=artifact_dir,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    if completed.returncode != 0:
+        error = str(redact((completed.stderr or completed.stdout or "media artifact worker failed")[:500]))
+        raise ToolExecutionError(error)
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        raise ToolExecutionError("media artifact worker returned invalid JSON") from exc
+    if not isinstance(result, dict) or not result.get("ok"):
+        raise ToolExecutionError(str(redact(str(result.get("error", "media artifact worker failed"))[:500])) if isinstance(result, dict) else "media artifact worker failed")
+    if not (artifact_dir / artifact_name).is_file():
+        raise ToolExecutionError("media artifact worker did not create artifact")
+    return {**result, "worker_process": "subprocess"}
+
+
 def _write_tool_artifact_metadata(
     *,
     artifact_dir: Path,
@@ -2129,11 +2169,16 @@ def _write_tool_artifact_metadata(
     return metadata_path
 
 
-def _media_sandbox_receipt(*, tool: str, mode: str) -> dict[str, Any]:
+def _media_sandbox_receipt(*, tool: str, mode: str, worker_result: dict[str, Any] | None = None) -> dict[str, Any]:
+    worker_result = worker_result or {}
     return {
-        "sandbox_profile": "local_artifact_worker_no_provider",
+        "sandbox_profile": "local_artifact_worker_subprocess_no_provider",
         "tool": tool,
         "mode": mode,
+        "worker_process": worker_result.get("worker_process", "subprocess"),
+        "worker_pid": worker_result.get("worker_pid"),
+        "stdin_payload_only": True,
+        "minimal_environment": True,
         "ambient_workspace_read": False,
         "ambient_network": False,
         "raw_prompt_or_text_persisted": False,

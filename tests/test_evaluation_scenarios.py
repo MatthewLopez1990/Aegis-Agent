@@ -131,7 +131,8 @@ class EvaluationScenarioTests(unittest.TestCase):
             media_metadata = Path(media["metadata_path"]).read_text(encoding="utf-8")
             self.assertRegex(media["artifact_sha256"], r"^[0-9a-f]{64}$")
             self.assertEqual(json.loads(media_metadata)["artifact_receipt"]["artifact_sha256"], media["artifact_sha256"])
-            self.assertEqual(json.loads(media_metadata)["sandbox_receipt"]["sandbox_profile"], "local_artifact_worker_no_provider")
+            self.assertEqual(json.loads(media_metadata)["sandbox_receipt"]["sandbox_profile"], "local_artifact_worker_subprocess_no_provider")
+            self.assertEqual(json.loads(media_metadata)["sandbox_receipt"]["worker_process"], "subprocess")
             self.assertFalse(json.loads(media_metadata)["sandbox_receipt"]["raw_prompt_or_text_persisted"])
             self.assertNotIn(scenarios["artifact_integrity.browser_media_receipts"].adversarial_input, media_metadata)
 
