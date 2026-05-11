@@ -548,6 +548,7 @@ def _implemented_backend_adapters(backends: list[dict[str, Any]]) -> list[dict[s
             "name": str(backend.get("name", "")),
             "status": "enabled",
             "local": bool(backend.get("local")),
+            "activation": backend.get("activation", {}),
             "raw_secret_values_included": False,
         }
         for backend in backends
@@ -565,13 +566,14 @@ def _available_backend_adapters(backends: list[dict[str, Any]]) -> list[dict[str
             {
                 "name": name,
                 "status": "available_opt_in",
-                "local": bool(backend.get("local")),
-                "persistent": bool(backend.get("persistent")),
-                "capabilities": list(_LIVE_BACKEND_CAPABILITIES[name]),
-                "required_controls": ["explicit_backend_enablement", "brokered_backend_auth", "scope_limits", "rollback_receipts"],
-                "raw_secret_values_included": False,
-            }
-        )
+            "local": bool(backend.get("local")),
+            "persistent": bool(backend.get("persistent")),
+            "capabilities": list(_LIVE_BACKEND_CAPABILITIES[name]),
+            "required_controls": ["explicit_backend_enablement", "brokered_backend_auth", "scope_limits", "rollback_receipts"],
+            "activation": backend.get("activation", {}),
+            "raw_secret_values_included": False,
+        }
+    )
     return adapters
 
 

@@ -986,6 +986,11 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("ssh", available_backend_names)
             self.assertIn("modal", available_backend_names)
             self.assertNotIn("singularity", available_backend_names)
+            available_backends = {adapter["name"]: adapter for adapter in backlog["remote_backend_activation"]["available_backend_adapters"]}
+            self.assertEqual(available_backends["docker"]["activation"]["preflight_status"], "ready_for_enablement")
+            self.assertEqual(available_backends["ssh"]["activation"]["preflight_status"], "blocked")
+            self.assertIn("allowlisted_hosts", {blocker["control"] for blocker in available_backends["ssh"]["activation"]["blockers"]})
+            self.assertIn("hosted_sandbox_api_url", {blocker["control"] for blocker in available_backends["modal"]["activation"]["blockers"]})
             backend_checklist = {item["control"]: item for item in backlog["remote_backend_activation"]["operator_checklist"]}
             self.assertEqual(backend_checklist["explicit_backend_enablement"]["state"], "required_per_backend")
             self.assertEqual(backend_checklist["brokered_backend_auth"]["state"], "required_per_backend")
@@ -1243,6 +1248,9 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("ssh", {adapter["name"] for adapter in live_gap["implemented_backend_adapters"]})
             self.assertNotIn("ssh", {adapter["name"] for adapter in live_gap["available_backend_adapters"]})
             self.assertIn("docker", {adapter["name"] for adapter in live_gap["available_backend_adapters"]})
+            implemented_backends = {adapter["name"]: adapter for adapter in live_gap["implemented_backend_adapters"]}
+            self.assertEqual(implemented_backends["ssh"]["activation"]["preflight_status"], "ready")
+            self.assertIn("allowlisted_hosts", implemented_backends["ssh"]["activation"]["configured_controls"])
             backend_checklist = {item["control"]: item for item in live_gap["operator_checklist"]}
             self.assertEqual(backend_checklist["provider_lifecycle_depth"]["state"], "partial")
             self.assertEqual(backend_checklist["brokered_backend_auth"]["state"], "required_per_backend")
@@ -1313,6 +1321,9 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("modal", {adapter["name"] for adapter in live_gap["implemented_backend_adapters"]})
             self.assertNotIn("modal", {adapter["name"] for adapter in live_gap["available_backend_adapters"]})
             self.assertIn("daytona", {adapter["name"] for adapter in live_gap["available_backend_adapters"]})
+            implemented_backends = {adapter["name"]: adapter for adapter in live_gap["implemented_backend_adapters"]}
+            self.assertEqual(implemented_backends["modal"]["activation"]["preflight_status"], "ready")
+            self.assertIn("hosted_sandbox_allowed_hosts", implemented_backends["modal"]["activation"]["configured_controls"])
             backend_checklist = {item["control"]: item for item in live_gap["operator_checklist"]}
             self.assertEqual(backend_checklist["provider_lifecycle_depth"]["state"], "partial")
             self.assertEqual(backend_checklist["rollback_receipts"]["state"], "enforced")
