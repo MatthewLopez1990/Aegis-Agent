@@ -541,6 +541,10 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 payload = self._read_json()
                 self._json(_with_browser_artifact_urls(orchestrator, orchestrator.browser.screenshot(session_id=str(_required(payload, "session_id")))))
                 return
+            if path == "/browser/render-screenshot":
+                payload = self._read_json()
+                self._json(_with_browser_artifact_urls(orchestrator, orchestrator.browser.render_screenshot(session_id=str(_required(payload, "session_id")))))
+                return
             if path == "/browser/click":
                 payload = self._read_json()
                 session_id = str(_required(payload, "session_id"))

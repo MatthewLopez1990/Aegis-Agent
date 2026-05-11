@@ -212,7 +212,7 @@ class BuiltinToolExecutor:
             result = self._execute_service_ticket_read(params=params)
         elif name == "service_ticket_write":
             result = self._execute_service_ticket_write(params=params, approved=approved)
-        elif name in {"browser", "browser_click", "browser_fill", "browser_screenshot", "browser_extract_table", "browser_close"}:
+        elif name in {"browser", "browser_click", "browser_fill", "browser_screenshot", "browser_render_screenshot", "browser_extract_table", "browser_close"}:
             if self.browser is None:
                 raise ToolExecutionError("browser controller is not configured")
             result = self._execute_browser(name, params, approved=approved)
@@ -1347,6 +1347,7 @@ class BuiltinToolExecutor:
             "browser_click": "click",
             "browser_fill": "fill",
             "browser_screenshot": "screenshot",
+            "browser_render_screenshot": "render_screenshot",
             "browser_extract_table": "extract_table",
             "browser_close": "close",
         }[name]
@@ -1364,6 +1365,10 @@ class BuiltinToolExecutor:
             if session_id is None:
                 raise ToolExecutionError("browser screenshot requires session_id")
             return self.browser.screenshot(session_id=session_id)
+        if action == "render_screenshot":
+            if session_id is None:
+                raise ToolExecutionError("browser render screenshot requires session_id")
+            return self.browser.render_screenshot(session_id=session_id)
         if action == "extract_table":
             if session_id is None:
                 raise ToolExecutionError("browser table extraction requires session_id")

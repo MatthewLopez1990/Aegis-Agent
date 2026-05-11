@@ -12,6 +12,7 @@ import zipfile
 from aegis.agent.orchestrator import build_orchestrator
 from aegis.approvals.models import ApprovalRequest
 from aegis.connectors.base import ConnectorResult
+import aegis.browser.controller as browser_controller_module
 from aegis.migration.openclaw import inspect_hermes_home, inspect_openclaw_home, preview_hermes_memory_import, preview_openclaw_memory_import
 from aegis.personality.context import ContextFileLoader
 from aegis.product.capabilities import build_product_dashboard
@@ -199,6 +200,27 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertRegex(browser_screenshot["artifact_hashes"]["metadata_txt_sha256"], r"^[0-9a-f]{64}$")
             self.assertRegex(browser_screenshot["artifact_hashes"]["evidence_json_sha256"], r"^[0-9a-f]{64}$")
             self.assertEqual(evidence_payload["artifact_hashes"]["snapshot_png_sha256"], browser_screenshot["artifact_hashes"]["snapshot_png_sha256"])
+            original_find_chrome = browser_controller_module._find_chrome_executable
+            original_capture_chrome = browser_controller_module._capture_chrome_screenshot
+            browser_controller_module._find_chrome_executable = lambda: "/usr/bin/google-chrome"
+            browser_controller_module._capture_chrome_screenshot = _fake_chrome_render
+            try:
+                browser_render = orchestrator.tools.execute("browser_render_screenshot", {"session_id": browser_session_id})
+            finally:
+                browser_controller_module._find_chrome_executable = original_find_chrome
+                browser_controller_module._capture_chrome_screenshot = original_capture_chrome
+            self.assertTrue(browser_render["ok"])
+            self.assertEqual(browser_render["artifact_type"], "png_sanitized_dom_render")
+            self.assertEqual(browser_render["mode"], "sanitized_dom_render_no_page_js")
+            self.assertEqual(browser_render["sandbox_receipt"]["sandbox_profile"], "sanitized_http_content_chrome_render")
+            self.assertTrue(browser_render["sandbox_receipt"]["dom_renderer_used"])
+            self.assertFalse(browser_render["sandbox_receipt"]["javascript_executed"])
+            self.assertTrue(Path(browser_render["artifact_path"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+            render_evidence = json.loads(Path(browser_render["evidence_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(render_evidence["capture_surface"], "sanitized_http_content_dom")
+            self.assertEqual(render_evidence["rendering_status"], "rendered")
+            self.assertEqual(render_evidence["sandbox_receipt"]["original_page_dom_executed"], False)
+            self.assertNotIn("abc123", Path(browser_render["metadata_path"]).read_text(encoding="utf-8"))
             browser_click = orchestrator.tools.execute("browser_click", {"session_id": browser_session_id, "selector": "#submit"}, approved=True)
             self.assertTrue(browser_click["ok"])
             self.assertEqual(browser_click["effect"], "virtual_click_recorded")
@@ -1195,6 +1217,7 @@ class PlatformLayerTests(unittest.TestCase):
         self.assertIn("browser-action-form", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("browser-table", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("Snapshot Note", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("Rendered PNG", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("Record Click", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("Record Fill", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("tool-run-form", (static_root / "index.html").read_text(encoding="utf-8"))
@@ -1298,6 +1321,7 @@ class PlatformLayerTests(unittest.TestCase):
         self.assertIn("/browser/navigate", app_js)
         self.assertIn("/browser/sessions/${encodeURIComponent(closeId)}/close", app_js)
         self.assertIn("/browser/table", app_js)
+        self.assertIn("/browser/render-screenshot", app_js)
         self.assertIn("/browser/click", app_js)
         self.assertIn("/browser/fill", app_js)
         self.assertIn("data-browser-close", app_js)
@@ -1385,6 +1409,12 @@ class _FakeSandboxResponse:
 
     def read(self, limit: int = -1) -> bytes:
         return b'{"job_id":"job-123","secret":"response_secret_should_not_surface"}'
+
+
+def _fake_chrome_render(*, executable: str, html_path: Path, output_path: Path, artifact_dir: Path, width: int = 960, height: int = 720) -> dict[str, object]:
+    del executable, html_path, artifact_dir
+    output_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-render")
+    return {"ok": True, "width": width, "height": height, "exit_code": 0, "error": None}
 
 
 if __name__ == "__main__":

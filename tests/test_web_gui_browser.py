@@ -461,6 +461,8 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn("Open Metadata", script)
         self.assertIn("payload.evidence_url", script)
         self.assertIn("Open Evidence", script)
+        self.assertIn("/browser/render-screenshot", script)
+        self.assertIn("browser-render-screenshot", markup)
         self.assertIn("data-browser-selector", script)
         self.assertIn('document.getElementById("browser-selector").value = selector', script)
         self.assertIn('document.getElementById("browser-fill-fields").value = JSON.stringify({ [selector]: "" }, null, 2)', script)

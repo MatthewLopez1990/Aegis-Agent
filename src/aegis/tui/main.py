@@ -73,7 +73,7 @@ TOOLS_COMMANDS = ("run",)
 SKILLS_COMMANDS = ("hub", "disable", "enable")
 REPAIR_COMMANDS = ("readiness", "review", "approve", "reject", "candidate", "generate-candidate", "synthesis-prompt", "synthesize-candidate", "review-candidate", "apply-candidate", "rollback-candidate", "attempt")
 SCHEDULE_COMMANDS = ("create", "memory-review-digest", "memory-review-escalation", "evaluation-run", "evaluation-suite", "due", "approve", "activate", "pause", "run-due")
-BROWSER_COMMANDS = ("session", "sessions", "close", "navigate", "extract", "table", "screenshot", "click", "fill")
+BROWSER_COMMANDS = ("session", "sessions", "close", "navigate", "extract", "table", "screenshot", "render", "click", "fill")
 MCP_COMMANDS = ("list", "register", "call")
 SESSION_COMMANDS = ("new", "open", "rename", "set-model", "set-personality", "activate", "archive", "pause", "append", "history", "tasks", "compact")
 TASKS_COMMANDS = ("all", "session")
@@ -1402,7 +1402,7 @@ class AegisTui(cmd.Cmd):
             print(f"evaluation review failed: {exc}")
 
     def do_browser(self, arg: str) -> None:
-        """browser session|sessions|close|navigate|extract|table|screenshot|click|fill -- operate the governed browser sandbox."""
+        """browser session|sessions|close|navigate|extract|table|screenshot|render|click|fill -- operate the governed browser sandbox."""
         raw_parts = arg.strip().split(maxsplit=1)
         raw_command = raw_parts[0] if raw_parts else "session"
         parts = [raw_command, raw_parts[1]] if raw_command == "fill" and len(raw_parts) > 1 else shlex.split(arg)
@@ -1446,6 +1446,9 @@ class AegisTui(cmd.Cmd):
                 return
             if command == "screenshot":
                 _print_json(self.orchestrator.browser.screenshot(session_id=self.browser_session_id))
+                return
+            if command == "render":
+                _print_json(self.orchestrator.browser.render_screenshot(session_id=self.browser_session_id))
                 return
             if command == "click":
                 if len(parts) < 2:
@@ -2372,7 +2375,7 @@ def _command_reference() -> str:
             "schedule approve|activate|pause <id>",
             "schedule run-due",
             "browser session|sessions|close|navigate <url>",
-            "browser extract|screenshot|click <selector>|fill <json>",
+            "browser extract|screenshot|render|click <selector>|fill <json>",
             "boards                 Work boards and cards",
             "backends               Execution backends",
             "audit                  Audit tail",

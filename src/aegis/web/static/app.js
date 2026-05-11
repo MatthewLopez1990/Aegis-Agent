@@ -2329,6 +2329,15 @@ document.getElementById("browser-screenshot").addEventListener("click", async ()
   await refresh();
 });
 
+document.getElementById("browser-render-screenshot").addEventListener("click", async () => {
+  if (!state.browserSessionId) {
+    renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
+    return;
+  }
+  renderBrowserOutput(await api("/browser/render-screenshot", { method: "POST", body: JSON.stringify({ session_id: state.browserSessionId }) }));
+  await refresh();
+});
+
 document.getElementById("browser-click").addEventListener("click", async () => {
   if (!state.browserSessionId) {
     renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });

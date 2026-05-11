@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import html
 import json
 import hashlib
 from html.parser import HTMLParser
 from pathlib import Path
+import shutil
 import struct
+import subprocess
+import tempfile
 from typing import Any
 from uuid import uuid4
 import zlib
@@ -208,6 +212,69 @@ class BrowserController:
             "evidence": evidence,
         }
         self.audit_logger.append("browser.screenshot_captured", response)
+        return response
+
+    def render_screenshot(self, *, session_id: str) -> dict[str, Any]:
+        session = self._require_session(session_id)
+        executable = _find_chrome_executable()
+        if not executable:
+            response = {
+                "ok": False,
+                "status": "renderer_unavailable",
+                "session_id": session_id,
+                "reason": "Chrome/Chromium executable was not found",
+                "mode": "sanitized_dom_render_unavailable",
+            }
+            self.audit_logger.append("browser.render_screenshot_unavailable", response)
+            return response
+        artifact = self.artifact_dir / f"{session_id}.rendered.png"
+        html_artifact = self.artifact_dir / f"{session_id}.rendered.html"
+        evidence_artifact = self.artifact_dir / f"{session_id}.rendered.evidence.json"
+        html_artifact.write_text(_renderable_sanitized_html(session), encoding="utf-8")
+        result = _capture_chrome_screenshot(
+            executable=executable,
+            html_path=html_artifact,
+            output_path=artifact,
+            artifact_dir=self.artifact_dir,
+        )
+        artifact_hashes = {"render_html_sha256": _file_sha256(html_artifact)}
+        if artifact.exists():
+            artifact_hashes["rendered_png_sha256"] = _file_sha256(artifact)
+        evidence = _browser_evidence(session, action="render_screenshot")
+        sandbox_receipt = _browser_render_sandbox_receipt(executable=executable, exit_code=result["exit_code"])
+        evidence_artifact.write_text(
+            json.dumps(
+                _browser_render_evidence_document(session, evidence=evidence, artifact_hashes=artifact_hashes, sandbox_receipt=sandbox_receipt, render_result=result),
+                indent=2,
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
+        artifact_hashes["evidence_json_sha256"] = _file_sha256(evidence_artifact)
+        session_artifacts = list(session.get("artifacts", []))
+        session_artifacts.extend(str(path) for path in (artifact, html_artifact, evidence_artifact) if path.exists())
+        session["artifacts"] = session_artifacts
+        session["updated_at"] = now_utc()
+        self._persist_sessions()
+        response = {
+            "ok": result["ok"],
+            "status": "rendered" if result["ok"] else "render_failed",
+            "session_id": session_id,
+            "artifact_path": str(artifact) if artifact.exists() else None,
+            "artifact_type": "png_sanitized_dom_render",
+            "mode": "sanitized_dom_render_no_page_js",
+            "width": result["width"],
+            "height": result["height"],
+            "metadata_path": str(html_artifact),
+            "evidence_path": str(evidence_artifact),
+            "evidence_artifact_type": "json_browser_render_evidence",
+            "artifact_hashes": artifact_hashes,
+            "sandbox_receipt": sandbox_receipt,
+            "url": session.get("current_url"),
+            "evidence": evidence,
+            "error": result.get("error"),
+        }
+        self.audit_logger.append("browser.render_screenshot_captured", response)
         return response
 
     def click(self, *, session_id: str, selector: str, approved: bool = False) -> dict[str, Any]:
@@ -639,6 +706,46 @@ def _browser_snapshot_evidence_document(
     }
 
 
+def _browser_render_evidence_document(
+    session: dict[str, Any],
+    *,
+    evidence: dict[str, Any],
+    artifact_hashes: dict[str, str],
+    sandbox_receipt: dict[str, Any],
+    render_result: dict[str, Any],
+) -> dict[str, Any]:
+    content = str(session.get("last_content", ""))
+    table_result = _extract_html_tables(content)
+    tables = table_result["tables"]
+    return {
+        "version": 1,
+        "captured_at": now_utc(),
+        "session_id": session.get("id"),
+        "url": session.get("current_url"),
+        "title": session.get("title"),
+        "capture_surface": "sanitized_http_content_dom",
+        "rendering_status": "rendered" if render_result.get("ok") else "render_failed",
+        "mode": "sanitized_dom_render_no_page_js",
+        "sandbox_receipt": dict(sandbox_receipt),
+        "limitations": [
+            "The rendered HTML is sanitized text and table content derived from the HTTP connector response.",
+            "Original page scripts, styles, forms, iframes, and remote subresources were not preserved.",
+            "The Chrome profile is temporary and cookies are not persisted.",
+        ],
+        "content_sha256": _content_hash(session),
+        "content_length": len(content),
+        "artifact_hashes": dict(artifact_hashes),
+        "interactive_element_count": len(session.get("interactive_elements", [])),
+        "interactive_elements": _normalize_interactive_elements(session.get("interactive_elements")),
+        "table_count": len(tables),
+        "table_row_counts": [len(table) for table in tables],
+        "clicks": _normalize_clicks(session.get("clicks")),
+        "form_state": _normalize_form_state(session.get("form_state")),
+        "render_exit_code": render_result.get("exit_code"),
+        "action_evidence": evidence,
+    }
+
+
 def _browser_sandbox_receipt() -> dict[str, Any]:
     return {
         "sandbox_profile": "http_content_session_state_no_js",
@@ -649,6 +756,123 @@ def _browser_sandbox_receipt() -> dict[str, Any]:
         "dom_renderer_used": False,
         "raw_secret_capture_allowed": False,
         "writes_confined_to": ".aegis/browser",
+    }
+
+
+def _browser_render_sandbox_receipt(*, executable: str, exit_code: int | None) -> dict[str, Any]:
+    return {
+        "sandbox_profile": "sanitized_http_content_chrome_render",
+        "ambient_workspace_read": False,
+        "ambient_network": "disabled_for_generated_file_capture",
+        "cookies_persisted": False,
+        "javascript_executed": False,
+        "original_page_dom_executed": False,
+        "dom_renderer_used": True,
+        "renderer": Path(executable).name,
+        "renderer_exit_code": exit_code,
+        "raw_secret_capture_allowed": False,
+        "writes_confined_to": ".aegis/browser",
+    }
+
+
+def _find_chrome_executable() -> str | None:
+    for executable in ("google-chrome", "chromium", "chromium-browser"):
+        path = shutil.which(executable)
+        if path:
+            return path
+    return None
+
+
+def _renderable_sanitized_html(session: dict[str, Any]) -> str:
+    content = str(session.get("last_content", ""))
+    text = " ".join(content.split())[:20_000]
+    tables = _extract_html_tables(content).get("tables", [])[:5]
+    rows = []
+    for table in tables:
+        row_html = []
+        for row in table[:25]:
+            cells = "".join(f"<td>{html.escape(str(cell))}</td>" for cell in row[:10])
+            row_html.append(f"<tr>{cells}</tr>")
+        if row_html:
+            rows.append(f"<table>{''.join(row_html)}</table>")
+    clicks = _normalize_clicks(session.get("clicks"))
+    form_state = _normalize_form_state(session.get("form_state"))
+    state_items = [f"<li>clicked {html.escape(item.get('selector', ''))}</li>" for item in clicks[-10:]]
+    state_items.extend(f"<li>{html.escape(selector)} = {html.escape(value)}</li>" for selector, value in sorted(form_state.items()))
+    state_html = f"<ul>{''.join(state_items)}</ul>" if state_items else "<p>No approved virtual interactions recorded.</p>"
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:;">
+  <title>{html.escape(str(session.get("title") or "Aegis render"))}</title>
+  <style>
+    body {{ margin: 0; font-family: Arial, sans-serif; color: #1f2933; background: #f7f9fb; }}
+    header {{ padding: 18px 24px; background: #17202a; color: white; }}
+    main {{ padding: 20px 24px; display: grid; gap: 16px; }}
+    section {{ background: white; border: 1px solid #d8dee4; border-radius: 6px; padding: 16px; }}
+    h1 {{ font-size: 22px; margin: 0 0 6px; }}
+    h2 {{ font-size: 15px; margin: 0 0 10px; color: #334155; }}
+    p, li, td {{ font-size: 13px; line-height: 1.45; }}
+    table {{ border-collapse: collapse; width: 100%; margin-top: 8px; }}
+    td {{ border: 1px solid #d8dee4; padding: 6px 8px; }}
+    .muted {{ color: #64748b; font-size: 12px; }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>{html.escape(str(session.get("title") or "Browser session"))}</h1>
+    <div class="muted">{html.escape(str(session.get("current_url") or ""))}</div>
+  </header>
+  <main>
+    <section><h2>Sanitized Text</h2><p>{html.escape(str(redact(text)))}</p></section>
+    <section><h2>Tables</h2>{''.join(rows) if rows else '<p>No tables detected.</p>'}</section>
+    <section><h2>Approved Virtual State</h2>{state_html}</section>
+  </main>
+</body>
+</html>
+"""
+
+
+def _capture_chrome_screenshot(
+    *,
+    executable: str,
+    html_path: Path,
+    output_path: Path,
+    artifact_dir: Path,
+    width: int = 960,
+    height: int = 720,
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="aegis-browser-render-", dir=artifact_dir) as profile_dir:
+        command = [
+            executable,
+            "--headless=new",
+            "--disable-background-networking",
+            "--disable-default-apps",
+            "--disable-extensions",
+            "--disable-gpu",
+            "--disable-sync",
+            "--disable-translate",
+            "--hide-scrollbars",
+            "--mute-audio",
+            "--no-first-run",
+            "--no-default-browser-check",
+            f"--user-data-dir={profile_dir}",
+            f"--window-size={width},{height}",
+            f"--screenshot={output_path}",
+            html_path.resolve().as_uri(),
+        ]
+        try:
+            completed = subprocess.run(command, cwd=artifact_dir, capture_output=True, text=True, timeout=15, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"ok": False, "width": width, "height": height, "exit_code": None, "error": str(exc)}
+    ok = completed.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0
+    return {
+        "ok": ok,
+        "width": width,
+        "height": height,
+        "exit_code": completed.returncode,
+        "error": None if ok else str(redact((completed.stderr or completed.stdout or "render failed")[:500])),
     }
 
 
