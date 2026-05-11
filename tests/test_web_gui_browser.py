@@ -27,6 +27,8 @@ class WebGuiBrowserSmokeTests(unittest.TestCase):
         self.assertIn(".brand-shield", styles)
         self.assertIn(".hero-shield", styles)
         self.assertIn("--shield:", styles)
+        self.assertIn("--shield-glow:", styles)
+        self.assertIn(".brand-shield::before", styles)
 
     def test_web_event_stream_parser_handles_chunk_boundaries(self) -> None:
         node = shutil.which("node")

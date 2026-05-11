@@ -12,6 +12,7 @@
   --shield: #49d38f;
   --shield-deep: #0f2f22;
   --shield-line: #77e6ad;
+  --shield-glow: rgb(73 211 143 / 14%);
   --green: #49d38f;
   --green-soft: #173627;
   --blue: #74b7ff;
@@ -155,6 +156,7 @@ p {
   border: 1px solid var(--shield-line);
   background:
     linear-gradient(145deg, rgb(119 230 173 / 24%), transparent 48%),
+    linear-gradient(180deg, rgb(255 255 255 / 7%), transparent 34%),
     var(--shield-deep);
   color: var(--shield);
   font-weight: 900;
@@ -177,17 +179,29 @@ p {
   clip-path: polygon(50% 0, 95% 16%, 82% 72%, 50% 100%, 18% 72%, 5% 16%);
 }
 
+.brand-shield::before,
+.hero-shield::before {
+  content: "";
+  position: absolute;
+  top: 15%;
+  bottom: 20%;
+  left: 50%;
+  width: 1px;
+  background: linear-gradient(180deg, transparent, rgb(119 230 173 / 48%), transparent);
+}
+
 .brand-shield span,
 .hero-shield span {
   position: relative;
   z-index: 1;
+  text-shadow: 0 0 18px var(--shield-glow);
 }
 
 .hero-shield {
   width: 82px;
   height: 96px;
   font-size: 39px;
-  box-shadow: 0 18px 38px rgb(73 211 143 / 12%);
+  box-shadow: 0 18px 38px var(--shield-glow);
 }
 
 .brand h1 {

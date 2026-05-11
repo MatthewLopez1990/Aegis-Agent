@@ -2490,20 +2490,22 @@ def _command_reference() -> str:
 
 def _aegis_logo(width: int) -> str:
     art = [
-        r"                  .-=================-.",
-        r"               .-'    A E G I S        '-.",
-        r"             .'      .-----------.        '.",
-        "            /       /  .-------.  \\         \\",
-        r"           ;       |  /  _____  \  |         ;",
-        r"           |       |  | / ___ \ |  |         |",
-        r"           |       |  || |___| ||  |         |",
-        r"           ;        \  \_______/  /          ;",
-        r"            \        '._       _.'          /",
-        r"             '.          '---'            .'",
-        r"               '-.                   .-'",
-        r"                  '----.       .----'",
-        r"                        \     /",
-        r"                         \___/",
+        "                         /\\",
+        r"                    ____/  \____",
+        r"                 .-'            '-.",
+        r"               .'    A E G I S     '.",
+        "              /   .--------------.   \\",
+        "             /   /   ________     \\   \\",
+        r"            ;   |   /  ____  \     |   ;",
+        r"            |   |   | |____| |     |   |",
+        r"            |   |   |  ____  |     |   |",
+        r"            ;   |   |_|    |_|     |   ;",
+        r"             \   \       ||       /   /",
+        r"              '.  '--------------'  .'",
+        r"                '-.              .-'",
+        r"                   '--.      .--'",
+        r"                       \    /",
+        r"                        \__/",
         r"        AEGIS SHIELD :: local-first governed runtime",
     ]
     return _boxed_lines("Aegis Shield Identity", art, width)
@@ -2568,15 +2570,19 @@ def _command_palette_lines(*, compact: bool = False) -> list[str]:
 
 
 def _command_menu(width: int) -> str:
-    lines: list[str] = []
+    lines: list[str] = [
+        "AEGIS SHIELD command groups",
+        "Pick an operation lane; every lane keeps policy, evidence, and context boundaries visible.",
+        "",
+    ]
     for group, commands in COMMAND_MENU_GROUPS:
-        lines.append(f"[{group}]")
+        lines.append(f"[{group}] Shield lane")
         for command, detail in commands:
             lines.append(f"  {command:<34} {detail}")
         lines.append("")
     if lines and not lines[-1]:
         lines.pop()
-    return _boxed_lines("Command Menu", lines, width)
+    return _boxed_lines("Shield Command Menu", lines, width)
 
 
 def _complete_options(options: tuple[str, ...], text: str) -> list[str]:
