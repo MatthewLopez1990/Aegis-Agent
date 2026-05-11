@@ -1838,7 +1838,7 @@ class AegisTui(cmd.Cmd):
             _section(
                 "Live Gap Backlog",
                 [
-                    f"{item['area']}: {item['status']} - gates {', '.join(item.get('verification_gates', [])[:3]) or 'none'} - hardened {', '.join(control.get('control', 'unknown') for control in item.get('implemented_hardening_controls', [])[:5]) or 'none'} - remaining {', '.join(item.get('remaining_depth_work', [])[:3]) or 'none'} - evals {', '.join(item.get('evaluation_scenarios', [])[:2]) or 'none'} - live adapters {', '.join(adapter.get('name', 'unknown') for adapter in item.get('implemented_live_adapters', [])[:3]) or 'none'} - backend adapters {', '.join(adapter.get('name', 'unknown') for adapter in item.get('implemented_backend_adapters', [])[:3]) or 'none'}"
+                    f"{item['area']}: {item['status']} - gates {', '.join(item.get('verification_gates', [])[:3]) or 'none'} - hardened {', '.join(control.get('control', 'unknown') for control in item.get('implemented_hardening_controls', [])[:8]) or 'none'} - remaining {', '.join(item.get('remaining_depth_work', [])[:3]) or 'none'} - evals {', '.join(item.get('evaluation_scenarios', [])[:2]) or 'none'} - live adapters {', '.join(adapter.get('name', 'unknown') for adapter in item.get('implemented_live_adapters', [])[:3]) or 'none'} - backend adapters {', '.join(adapter.get('name', 'unknown') for adapter in item.get('implemented_backend_adapters', [])[:3]) or 'none'}"
                     for item in dashboard.get("live_gap_backlog", [])
                 ],
                 width,

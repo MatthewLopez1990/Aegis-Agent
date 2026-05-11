@@ -53,7 +53,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(linked_session_task["session"]["title"], "Original resume context")
             self.assertIn(f"session show {session['id']}", [hint["command"] for hint in linked_session_task["action_hints"]])
             readiness = {row["state"]: row for row in result["implementation_readiness"]}
-            self.assertIn("local_png_preview", readiness["facade"]["statuses"])
+            self.assertIn("allowlisted_live_or_local", readiness["ready"]["statuses"])
             self.assertIn("backend_gate", readiness["backend_gate"]["statuses"])
             self.assertTrue(any(group["name"] == "Session continuity" for group in result["capability_groups"]))
             self.assertTrue(all(target["security_delta"] for target in result["competitive_targets"]))

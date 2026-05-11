@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import base64
 import csv
 import hashlib
 import io
@@ -332,6 +333,8 @@ class BuiltinToolExecutor:
         artifact_dir = root / ".aegis" / "tool-artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         artifact_dir.chmod(0o700)
+        if params.get("provider_url"):
+            return self._execute_live_media_provider(name=name, params=params, artifact_dir=artifact_dir)
         if name == "tts":
             text = str(params.get("text", ""))
             path = artifact_dir / f"{name}-{uuid4()}.wav"
@@ -451,6 +454,107 @@ class BuiltinToolExecutor:
             details={"text_artifact": True},
         )
         return {"ok": True, key: str(path), "artifact_path": str(path), "metadata_path": str(metadata_path), **artifact_receipt, "sandbox_receipt": sandbox_receipt, "mode": "local_placeholder_artifact"}
+
+    def _execute_live_media_provider(self, *, name: str, params: dict[str, Any], artifact_dir: Path) -> dict[str, Any]:
+        if name not in {"image_generate", "image_edit", "tts"}:
+            return {
+                "ok": False,
+                "tool": name,
+                "mode": "live_media_provider",
+                "status": "unsupported_provider_tool",
+                "reason": f"{name} does not support provider-backed media execution",
+                "required_controls": _live_media_required_controls(),
+            }
+        rest = self.connectors.get("generic_rest")
+        if not bool(getattr(rest, "live_writes", False)):
+            return {
+                "ok": False,
+                "tool": name,
+                "mode": "live_media_provider",
+                "status": "not_configured",
+                "reason": "live_rest_writes must be enabled before provider-backed media execution",
+                "required_controls": _live_media_required_controls(),
+            }
+        provider_url = str(params["provider_url"])
+        parsed = urlparse(provider_url)
+        domain = parsed.hostname or ""
+        validation_error = _validate_url(parsed) or (None if parsed.scheme == "https" else "media provider execution requires https")
+        if validation_error:
+            return {"ok": False, "tool": name, "mode": "live_media_provider", "status": "scope_rejected", "reason": validation_error, "required_controls": _live_media_required_controls()}
+        http = self.connectors.get("http")
+        allowlist = tuple(str(item) for item in getattr(http, "allowlist", ()))
+        if not _host_allowed(domain, allowlist):
+            return {"ok": False, "tool": name, "mode": "live_media_provider", "status": "scope_rejected", "reason": f"media provider host {domain!r} is not allowlisted", "required_controls": _live_media_required_controls()}
+        private_error = _private_network_error(domain)
+        if private_error:
+            return {"ok": False, "tool": name, "mode": "live_media_provider", "status": "scope_rejected", "reason": private_error, "required_controls": _live_media_required_controls()}
+        token_secret = str(params.get("token_secret") or "AEGIS_MEDIA_PROVIDER_TOKEN")
+        handle = self.secrets_broker.request_handle(name=token_secret, requester="media_provider", reason=f"{name} provider-backed artifact", scopes=("media:execute",))
+        if not handle.present:
+            return {"ok": False, "tool": name, "mode": "live_media_provider", "status": "not_configured", "reason": f"secret {token_secret!r} is not configured", "required_controls": _live_media_required_controls()}
+        token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="media_provider")
+        prompt = str(params.get("prompt", ""))
+        text = str(params.get("text", ""))
+        source_path = str(params.get("source_path") or params.get("image_path") or "")
+        request_payload = _live_media_request_payload(name=name, prompt=prompt, text=text, source_path=source_path)
+        live_result = _send_live_media_provider_request(url=provider_url, token=token, tool=name, payload=request_payload)
+        if not live_result["ok"]:
+            return {
+                "ok": False,
+                "tool": name,
+                "mode": "live_media_provider",
+                "status": "failed",
+                "domain": domain,
+                "http_status": live_result["http_status"],
+                "error": live_result.get("error"),
+                "provider_receipt": _live_media_provider_receipt(domain=domain, http_status=live_result["http_status"], request_payload=request_payload, handle_present=handle.present),
+            }
+        media_bytes = live_result["content"]
+        extension, mime_type = _live_media_extension_and_mime(name=name, declared_mime=str(live_result.get("mime_type", "")), content=media_bytes)
+        path = artifact_dir / f"{name}-{uuid4()}.{extension}"
+        path.write_bytes(media_bytes)
+        path.chmod(0o600)
+        artifact_receipt = _artifact_receipt(path)
+        sandbox_receipt = _media_sandbox_receipt(tool=name, mode=f"live_provider_{extension}", worker_result={"provider_domain": domain})
+        provider_receipt = _live_media_provider_receipt(domain=domain, http_status=live_result["http_status"], request_payload=request_payload, handle_present=handle.present)
+        details = {
+            "mime_type": mime_type,
+            "prompt_length": len(prompt),
+            "text_length": len(text),
+            "source_present": bool(source_path),
+            "provider_receipt": provider_receipt,
+        }
+        if name in {"image_generate", "image_edit"}:
+            metadata = _local_image_metadata(path)
+            details.update({"width": metadata.get("width"), "height": metadata.get("height")})
+        if name == "tts" and live_result.get("duration_seconds") is not None:
+            details["duration_seconds"] = live_result["duration_seconds"]
+        metadata_path = _write_tool_artifact_metadata(
+            artifact_dir=artifact_dir,
+            tool=name,
+            artifact_path=path,
+            mode=f"live_provider_{extension}",
+            artifact_receipt=artifact_receipt,
+            sandbox_receipt=sandbox_receipt,
+            details=details,
+        )
+        result = {
+            "ok": True,
+            "asset_path": str(path),
+            "artifact_path": str(path),
+            "metadata_path": str(metadata_path),
+            **artifact_receipt,
+            "sandbox_receipt": sandbox_receipt,
+            "provider_receipt": provider_receipt,
+            "mode": f"live_provider_{extension}",
+            "mime_type": mime_type,
+            "domain": domain,
+        }
+        if name in {"image_generate", "image_edit"}:
+            result.update({"width": details.get("width"), "height": details.get("height")})
+        if name == "tts" and live_result.get("duration_seconds") is not None:
+            result["duration_seconds"] = live_result["duration_seconds"]
+        return result
 
     def _delegate_subagent(self, *, params: dict[str, Any], task_id: str | None) -> dict[str, Any]:
         assert self.kanban is not None
@@ -2172,10 +2276,14 @@ def _write_tool_artifact_metadata(
         "artifact_receipt": dict(artifact_receipt),
         "sandbox_receipt": dict(sandbox_receipt),
         "details": details,
-        "limitations": [
-            "Local artifact generated without a live media provider.",
-            "Receipt metadata avoids storing raw prompt or text content.",
-        ],
+        "limitations": list(
+            sandbox_receipt.get(
+                "limitations",
+                [
+                    "Receipt metadata avoids storing raw prompt or text content.",
+                ],
+            )
+        ),
     }
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
     metadata_path.chmod(0o600)
@@ -2184,26 +2292,168 @@ def _write_tool_artifact_metadata(
 
 def _media_sandbox_receipt(*, tool: str, mode: str, worker_result: dict[str, Any] | None = None) -> dict[str, Any]:
     worker_result = worker_result or {}
+    live_provider_used = "provider_domain" in worker_result
     return {
-        "sandbox_profile": "local_artifact_worker_subprocess_no_provider",
+        "sandbox_profile": "live_provider_media_artifact" if live_provider_used else "local_artifact_worker_subprocess_no_provider",
         "tool": tool,
         "mode": mode,
-        "worker_process": worker_result.get("worker_process", "subprocess"),
+        "worker_process": worker_result.get("worker_process", "provider_https_request" if live_provider_used else "subprocess"),
         "worker_pid": worker_result.get("worker_pid"),
-        "stdin_payload_only": True,
-        "minimal_environment": True,
+        "stdin_payload_only": not live_provider_used,
+        "minimal_environment": not live_provider_used,
         "os_resource_limits": bool(worker_result.get("os_resource_limits")),
         "process_session_isolated": bool(worker_result.get("process_session_isolated")),
         "ambient_workspace_read": False,
-        "ambient_network": False,
+        "ambient_network": "allowlisted_https_provider_only" if live_provider_used else False,
         "raw_prompt_or_text_persisted": False,
         "writes_confined_to": ".aegis/tool-artifacts",
-        "live_provider_used": False,
+        "live_provider_used": live_provider_used,
+        "provider_domain": worker_result.get("provider_domain"),
         "limitations": [
+            "Provider-backed media execution stores only the returned local artifact and redacted receipts.",
+            "No microphone, speaker, camera, browser capture device, raw prompt/text persistence, raw provider response body, or raw secret value is used.",
+        ]
+        if live_provider_used
+        else [
             "Deterministic local artifact worker only.",
             "No external media provider, microphone, speaker, camera, or browser capture device is invoked.",
         ],
     }
+
+
+def _live_media_required_controls() -> list[str]:
+    return ["human_approval", "live_rest_writes_enabled", "network_allowlist", "secret_broker", "artifact_hashing", "redacted_receipts"]
+
+
+def _live_media_request_payload(*, name: str, prompt: str, text: str, source_path: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {"tool": name}
+    if name in {"image_generate", "image_edit"}:
+        payload["prompt"] = prompt
+    if name == "tts":
+        payload["text"] = text
+    if source_path:
+        payload["source_present"] = True
+        payload["source_sha256"] = hashlib.sha256(source_path.encode("utf-8", errors="replace")).hexdigest()
+    return payload
+
+
+def _live_media_provider_receipt(*, domain: str, http_status: int, request_payload: dict[str, Any], handle_present: bool) -> dict[str, Any]:
+    encoded = json.dumps(request_payload, sort_keys=True, default=str).encode("utf-8")
+    return {
+        "receipt_schema": "redacted_media_provider_receipt_v1",
+        "domain": domain,
+        "http_status": http_status,
+        "payload_sha256": hashlib.sha256(encoded).hexdigest(),
+        "payload_keys": sorted(request_payload),
+        "payload_bytes": len(encoded),
+        "secret_handle_present": handle_present,
+        "raw_secret_values_included": False,
+        "raw_prompt_or_text_included": False,
+        "raw_response_body_included": False,
+    }
+
+
+def _send_live_media_provider_request(*, url: str, token: str, tool: str, payload: dict[str, Any]) -> dict[str, Any]:
+    body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    request = Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "Aegis-Agent/0.1",
+        },
+    )
+    try:
+        response_context = _open_without_redirects(request, timeout=30)
+    except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            return {"ok": False, "http_status": exc.code, "error": "HTTP redirects are not followed by the governed media provider adapter"}
+        return {"ok": False, "http_status": exc.code, "error": f"media provider failed with status {exc.code}"}
+    except URLError as exc:
+        return {"ok": False, "http_status": 0, "error": f"media provider request failed: {exc.reason}"}
+    with response_context as response:
+        status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+        raw = response.read(12 * 1024 * 1024)
+        content_type = str(getattr(response, "headers", {}).get("Content-Type", ""))
+    if not 200 <= status < 300:
+        return {"ok": False, "http_status": status, "error": f"media provider failed with status {status}"}
+    decoded_json: dict[str, Any] | None = None
+    if "json" in content_type.lower() or raw.strip().startswith(b"{"):
+        try:
+            candidate = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {"ok": False, "http_status": status, "error": "media provider JSON response could not be decoded"}
+        if not isinstance(candidate, dict):
+            return {"ok": False, "http_status": status, "error": "media provider JSON response must be an object"}
+        decoded_json = candidate
+        encoded_media = _media_base64_from_provider_json(candidate, tool=tool)
+        if not encoded_media:
+            return {"ok": False, "http_status": status, "error": "media provider JSON response did not include base64 media"}
+        try:
+            content = base64.b64decode(encoded_media, validate=True)
+        except ValueError:
+            return {"ok": False, "http_status": status, "error": "media provider returned invalid base64 media"}
+        mime_type = str(candidate.get("mime_type") or candidate.get("mime") or candidate.get("content_type") or "")
+    else:
+        content = raw
+        mime_type = content_type
+    if not content:
+        return {"ok": False, "http_status": status, "error": "media provider returned an empty artifact"}
+    if len(content) > 10 * 1024 * 1024:
+        return {"ok": False, "http_status": status, "error": "media provider artifact exceeds the 10 MiB local artifact limit"}
+    result: dict[str, Any] = {"ok": True, "http_status": status, "content": content, "mime_type": mime_type}
+    if decoded_json is not None and decoded_json.get("duration_seconds") is not None:
+        try:
+            result["duration_seconds"] = round(float(decoded_json["duration_seconds"]), 3)
+        except (TypeError, ValueError):
+            pass
+    return result
+
+
+def _media_base64_from_provider_json(decoded: dict[str, Any], *, tool: str) -> str:
+    keys = ("audio_base64", "wav_base64", "data_base64", "data") if tool == "tts" else ("image_base64", "png_base64", "b64_json", "data_base64", "data")
+    for key in keys:
+        value = decoded.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    images = decoded.get("images")
+    if isinstance(images, list) and images:
+        first = images[0]
+        if isinstance(first, dict):
+            for key in ("b64_json", "image_base64", "data"):
+                value = first.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    audio = decoded.get("audio")
+    if isinstance(audio, dict):
+        for key in ("data", "audio_base64", "b64_json"):
+            value = audio.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _live_media_extension_and_mime(*, name: str, declared_mime: str, content: bytes) -> tuple[str, str]:
+    normalized = declared_mime.split(";", 1)[0].strip().lower()
+    if name == "tts":
+        if content.startswith(b"RIFF") and content[8:12] == b"WAVE":
+            return "wav", "audio/wav"
+        if normalized in {"audio/mpeg", "audio/mp3"}:
+            return "mp3", normalized
+        if normalized == "audio/wav":
+            return "wav", normalized
+        raise ToolExecutionError("media provider TTS response must be WAV or MP3")
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png", "image/png"
+    if content.startswith(b"\xff\xd8"):
+        return "jpg", "image/jpeg"
+    if content.startswith(b"GIF87a") or content.startswith(b"GIF89a"):
+        return "gif", "image/gif"
+    if normalized in {"image/png", "image/jpeg", "image/jpg", "image/gif"}:
+        return {"image/png": "png", "image/jpeg": "jpg", "image/jpg": "jpg", "image/gif": "gif"}[normalized], normalized
+    raise ToolExecutionError("media provider image response must be PNG, JPEG, or GIF")
 
 
 def _backend_activation_requirements(*, name: str, backend: str) -> dict[str, Any]:
