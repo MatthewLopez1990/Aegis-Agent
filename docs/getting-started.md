@@ -2,7 +2,13 @@
 
 ## Install
 
-From the repository root on Linux or macOS:
+On Linux or macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MatthewLopez1990/Aegis-Agent/main/install.sh | sh
+```
+
+From a repository checkout:
 
 ```bash
 ./install.sh
