@@ -1790,6 +1790,7 @@ class AegisTui(cmd.Cmd):
         runtime = dashboard["runtime"]
         width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
         lines = [
+            _aegis_logo(width),
             _banner("Aegis Agent Command Deck", width),
             _stat_line(
                 (
@@ -1797,10 +1798,20 @@ class AegisTui(cmd.Cmd):
                     ("channels", runtime["channels"]),
                     ("tools", runtime["tools"]),
                     ("approval tools", runtime["approval_gated_tools"]),
+                ),
+                width,
+            ),
+            _stat_line(
+                (
                     ("providers", runtime["model_providers"]),
                     ("pending", runtime["pending_approvals"]),
                     ("session", _short_id(self.session["id"])),
                 ),
+                width,
+            ),
+            _section(
+                "Command Palette",
+                _command_palette_lines(),
                 width,
             ),
             _section(
@@ -1847,8 +1858,10 @@ class AegisTui(cmd.Cmd):
                 "Commands",
                 [
                     "Type a plain request to submit a task.",
-                    "dashboard | tasks [all|session <id>] | approvals | approval <id> | approve <id> | deny <id> | repairs | repair <id> | status [task] | resume [task] | pause [task] | cancel [task]",
-                    "session | evidence [task] | timeline [task] | events [task] | connectors | channels | models | tools | skills | schedules | schedule ... | browser ... | boards | backends | security | audit | exit",
+                    "Operate: dashboard | tasks [all|session <id>] | session | status [task] | resume [task] | pause [task] | cancel [task]",
+                    "Govern: approvals | approval <id> | approve <id> | deny <id> | security | audit | evidence [task] | timeline [task] | events [task]",
+                    "Build: models | tools | skills | memory | mcp | repairs | repair <id> | schedules | schedule ...",
+                    "Explore: capabilities | connectors | channels | browser ... | boards | backends",
                     "Slash aliases work too, for example /tasks or /submit summarize this repo.",
                 ],
                 width,
@@ -2325,7 +2338,12 @@ def _positional_without_flags(parts: list[str], flags: dict[str, int]) -> list[s
 def _command_reference() -> str:
     return "\n".join(
         (
+            _aegis_logo(min(shutil.get_terminal_size((100, 24)).columns, 100)),
             _paint("Aegis TUI Commands", "36;1"),
+            "",
+            "Command Palette",
+            "---------------",
+            *_command_palette_lines(),
             "",
             "submit <request>       Submit a governed task",
             "status [task_id]       Show task state and receipt",
@@ -2386,6 +2404,28 @@ def _command_reference() -> str:
     )
 
 
+def _aegis_logo(width: int) -> str:
+    art = [
+        r"      ___       ______   _______   ___   _______",
+        r"     /   \     |  ____| |  _____| |_ _| /  _____|",
+        r"    /  ^  \    | |__    | |  __    | |  | |_____",
+        "   /  /_\\  \\   |  __|   | | |_ |   | |  \\_____  \\",
+        r"  /  _____  \  | |____  | |__| |   | |   _____| |",
+        r" /__/     \__\ |______| |_______| |___| |_______/",
+        r"        AEGIS SHIELD :: governed local agent",
+    ]
+    return _boxed_lines("Aegis Identity", art, width)
+
+
+def _command_palette_lines() -> list[str]:
+    return [
+        "Operate  submit, dashboard, tasks, session, status, resume",
+        "Govern   approvals, approve, deny, security, audit, evidence",
+        "Build    models, tools, skills, memory, mcp, repair",
+        "Explore  capabilities, connectors, channels, browser, boards",
+    ]
+
+
 def _complete_options(options: tuple[str, ...], text: str) -> list[str]:
     return [option for option in options if option.startswith(text)]
 
@@ -2434,6 +2474,17 @@ def _banner(title: str, width: int) -> str:
     rule = "+" + "-" * (width - 2) + "+"
     text = f"| {_paint(title.ljust(inner), '36;1')} |"
     return "\n".join(("", rule, text, rule))
+
+
+def _boxed_lines(title: str, items: list[str], width: int) -> str:
+    inner = width - 4
+    rule = "+" + "-" * (width - 2) + "+"
+    title_line = f"| {_paint(title.ljust(inner), '36;1')} |"
+    body = []
+    for item in items:
+        for line in textwrap.wrap(item, width=inner, replace_whitespace=False, drop_whitespace=False) or [""]:
+            body.append(f"| {line.ljust(inner)} |")
+    return "\n".join(("", rule, title_line, rule, *body, rule))
 
 
 def _section(title: str, items: list[str], width: int) -> str:
