@@ -1335,6 +1335,38 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertFalse(invalid_backend["ok"])
             self.assertEqual(invalid_backend["status"], "scope_rejected")
 
+    def test_backend_gated_tool_denials_include_activation_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+
+            ssh = orchestrator.tools.execute("ssh_exec", {"host": "worker.example.com", "command": "uptime"}, approved=True)
+            self.assertFalse(ssh["ok"])
+            self.assertEqual(ssh["status"], "disabled")
+            self.assertEqual(ssh["activation_status"], "backend_adapter_required")
+            self.assertEqual(ssh["preflight_status"], "blocked")
+            self.assertEqual(ssh["activation"]["preflight_status"], "blocked")
+            self.assertIn("allowlisted_hosts", {blocker["control"] for blocker in ssh["activation"]["blockers"]})
+            self.assertIn("brokered_private_key", ssh["activation"]["configured_controls"])
+
+            hosted = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "modal", "command": "python3 -V"}, approved=True)
+            self.assertFalse(hosted["ok"])
+            self.assertEqual(hosted["status"], "disabled")
+            self.assertEqual(hosted["preflight_status"], "blocked")
+            hosted_blockers = {blocker["control"] for blocker in hosted["activation"]["blockers"]}
+            self.assertIn("hosted_sandbox_api_url", hosted_blockers)
+            self.assertIn("hosted_sandbox_allowed_hosts", hosted_blockers)
+            self.assertIn("brokered_token", hosted["activation"]["configured_controls"])
+
+            docker = orchestrator.tools.execute("docker_run", {"command": "run alpine echo hi"}, approved=True)
+            self.assertFalse(docker["ok"])
+            self.assertEqual(docker["status"], "disabled")
+            self.assertEqual(docker["preflight_status"], "ready_for_enablement")
+            self.assertEqual(docker["activation"]["blockers"], [])
+            self.assertIn("container_network_none", docker["activation"]["configured_controls"])
+
     def test_context_loader_and_migration_dry_runs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

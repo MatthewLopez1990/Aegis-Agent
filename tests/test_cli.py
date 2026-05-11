@@ -229,6 +229,33 @@ class CliTests(unittest.TestCase):
             self.assertTrue(approved["ok"])
             self.assertEqual(approved["operation"], "close_ticket")
 
+    def test_tool_run_backend_denial_reports_activation_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            parser = build_parser()
+
+            denied = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(root / ".aegis"),
+                        "tool",
+                        "run",
+                        "ssh_exec",
+                        '{"host":"worker.example.com","command":"uptime"}',
+                        "--workspace",
+                        str(root),
+                        "--approved",
+                    ]
+                )
+            )
+
+            self.assertFalse(denied["ok"])
+            self.assertEqual(denied["status"], "disabled")
+            self.assertEqual(denied["preflight_status"], "blocked")
+            self.assertEqual(denied["activation"]["preflight_status"], "blocked")
+            self.assertIn("allowlisted_hosts", {blocker["control"] for blocker in denied["activation"]["blockers"]})
+
     def test_session_update_and_task_submit_use_existing_session(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

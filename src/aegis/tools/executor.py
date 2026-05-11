@@ -856,7 +856,7 @@ class BuiltinToolExecutor:
         if name == "hosted_sandbox_exec" and backend_name not in {"modal", "daytona", "vercel_sandbox"}:
             return {"ok": False, "status": "scope_rejected", "tool": name, "backend": backend_name or "unknown", "reason": "hosted sandbox backend must be one of: modal, daytona, vercel_sandbox", "verification_gates": ["scope_escape_rejection"]}
         backend = self.execution_backends.get(backend_name) if self.execution_backends is not None else None
-        activation = _backend_activation_requirements(name=name, backend=backend_name)
+        activation = _backend_activation_requirements(name=name, backend=backend_name, backend_record=backend)
         if backend is not None and not backend["enabled"]:
             return {
                 "ok": False,
@@ -885,7 +885,7 @@ class BuiltinToolExecutor:
     def _execute_hosted_sandbox_backend(self, *, name: str, params: dict[str, Any], backend: dict[str, Any]) -> dict[str, Any]:
         config = dict(backend.get("adapter_config", {}))
         backend_name = str(backend.get("name", params.get("backend", "")))
-        activation = _backend_activation_requirements(name=name, backend=backend_name)
+        activation = _backend_activation_requirements(name=name, backend=backend_name, backend_record=backend)
         url = str(params.get("provider_url") or params.get("api_url") or config.get("api_url") or "")
         parsed = urlparse(url)
         domain = parsed.hostname or ""
@@ -945,7 +945,7 @@ class BuiltinToolExecutor:
     def _execute_ssh_backend(self, *, name: str, params: dict[str, Any], backend: dict[str, Any]) -> dict[str, Any]:
         config = dict(backend.get("adapter_config", {}))
         executable = _resolve_executable(str(config.get("executable", "ssh")))
-        activation = _backend_activation_requirements(name=name, backend="ssh")
+        activation = _backend_activation_requirements(name=name, backend="ssh", backend_record=backend)
         if executable is None:
             return {"ok": False, "status": "not_configured", "tool": name, "backend": "ssh", "reason": "ssh executable is not available", **activation}
         host = str(params.get("host", "")).strip()
@@ -1022,7 +1022,7 @@ class BuiltinToolExecutor:
     def _execute_docker_backend(self, *, name: str, params: dict[str, Any], backend: dict[str, Any]) -> dict[str, Any]:
         config = dict(backend.get("adapter_config", {}))
         executable = _resolve_executable(str(config.get("executable", "docker")))
-        activation = _backend_activation_requirements(name=name, backend="docker")
+        activation = _backend_activation_requirements(name=name, backend="docker", backend_record=backend)
         if executable is None:
             return {
                 "ok": False,
@@ -2460,16 +2460,41 @@ def _live_media_extension_and_mime(*, name: str, declared_mime: str, content: by
     raise ToolExecutionError("media provider image response must be PNG, JPEG, or GIF")
 
 
-def _backend_activation_requirements(*, name: str, backend: str) -> dict[str, Any]:
-    return {
-        "activation_status": "backend_adapter_required",
+def _backend_activation_requirements(*, name: str, backend: str, backend_record: dict[str, Any] | None = None) -> dict[str, Any]:
+    activation = backend_record.get("activation") if backend_record is not None else None
+    if isinstance(activation, dict):
+        return {
+            "activation": activation,
+            "activation_status": activation.get("status", "backend_adapter_required"),
+            "preflight_status": activation.get("preflight_status", "unknown"),
+            "required_controls": activation.get("required_controls", []),
+            "configured_controls": activation.get("configured_controls", []),
+            "blockers": activation.get("blockers", []),
+            "verification_gates": activation.get("verification_gates", []),
+            "next_steps": activation.get("next_steps", []),
+        }
+    fallback = {
+        "status": "backend_adapter_required",
+        "preflight_status": "unknown",
         "required_controls": ["brokered_backend_auth", "scope_limits", "resource_limits", "rollback_receipts"],
+        "configured_controls": [],
+        "blockers": [{"control": "backend_registry", "detail": f"{backend} backend metadata is not configured"}],
         "verification_gates": ["disabled_backend_denial", "approved_activation", "cleanup_receipt", "scope_escape_rejection"],
         "next_steps": [
             f"Configure the {backend} adapter for {name} with brokered credentials.",
             "Define workspace, network, CPU/memory/time, and artifact boundaries before enabling.",
             "Add cleanup and rollback receipts before any remote or container command can run.",
         ],
+    }
+    return {
+        "activation": fallback,
+        "activation_status": "backend_adapter_required",
+        "preflight_status": fallback["preflight_status"],
+        "required_controls": fallback["required_controls"],
+        "configured_controls": fallback["configured_controls"],
+        "blockers": fallback["blockers"],
+        "verification_gates": fallback["verification_gates"],
+        "next_steps": fallback["next_steps"],
     }
 
 
