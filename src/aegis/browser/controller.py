@@ -165,6 +165,7 @@ class BrowserController:
         sidecar = self.artifact_dir / f"{session_id}.txt"
         evidence_artifact = self.artifact_dir / f"{session_id}.evidence.json"
         width, height = _write_session_snapshot_png(artifact, session=session)
+        artifact.chmod(0o600)
         sidecar.write_text(
             "\n".join(
                 [
@@ -178,6 +179,7 @@ class BrowserController:
             ),
             encoding="utf-8",
         )
+        sidecar.chmod(0o600)
         artifact_hashes = {
             "snapshot_png_sha256": _file_sha256(artifact),
             "metadata_txt_sha256": _file_sha256(sidecar),
@@ -187,6 +189,7 @@ class BrowserController:
             json.dumps(_browser_snapshot_evidence_document(session, evidence=evidence, artifact_hashes=artifact_hashes, sandbox_receipt=sandbox_receipt), indent=2, sort_keys=True),
             encoding="utf-8",
         )
+        evidence_artifact.chmod(0o600)
         artifact_hashes["evidence_json_sha256"] = _file_sha256(evidence_artifact)
         session_artifacts = list(session.get("artifacts", []))
         session_artifacts.append(str(artifact))
@@ -231,6 +234,7 @@ class BrowserController:
         html_artifact = self.artifact_dir / f"{session_id}.rendered.html"
         evidence_artifact = self.artifact_dir / f"{session_id}.rendered.evidence.json"
         html_artifact.write_text(_renderable_sanitized_html(session), encoding="utf-8")
+        html_artifact.chmod(0o600)
         result = _capture_chrome_screenshot(
             executable=executable,
             html_path=html_artifact,
@@ -239,6 +243,7 @@ class BrowserController:
         )
         artifact_hashes = {"render_html_sha256": _file_sha256(html_artifact)}
         if artifact.exists():
+            artifact.chmod(0o600)
             artifact_hashes["rendered_png_sha256"] = _file_sha256(artifact)
         evidence = _browser_evidence(session, action="render_screenshot")
         sandbox_receipt = _browser_render_sandbox_receipt(executable=executable, exit_code=result["exit_code"])
@@ -250,6 +255,7 @@ class BrowserController:
             ),
             encoding="utf-8",
         )
+        evidence_artifact.chmod(0o600)
         artifact_hashes["evidence_json_sha256"] = _file_sha256(evidence_artifact)
         session_artifacts = list(session.get("artifacts", []))
         session_artifacts.extend(str(path) for path in (artifact, html_artifact, evidence_artifact) if path.exists())
