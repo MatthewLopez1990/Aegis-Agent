@@ -901,7 +901,13 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("artifact_integrity.browser_media_receipts", backlog["browser_and_media_depth"]["evaluation_scenarios"])
             self.assertIn("disabled_backend_denial", backlog["remote_backend_activation"]["verification_gates"])
             self.assertIn("backend_activation.remote_execution_disabled", backlog["remote_backend_activation"]["evaluation_scenarios"])
+            self.assertEqual(backlog["remote_backend_activation"]["status"], "backend_adapters_available_unconfigured")
             self.assertEqual(backlog["remote_backend_activation"]["implemented_backend_adapters"], [])
+            available_backend_names = {adapter["name"] for adapter in backlog["remote_backend_activation"]["available_backend_adapters"]}
+            self.assertIn("docker", available_backend_names)
+            self.assertIn("ssh", available_backend_names)
+            self.assertIn("modal", available_backend_names)
+            self.assertNotIn("singularity", available_backend_names)
 
     def test_product_dashboard_surfaces_configured_live_connector_adapters_without_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1056,7 +1062,10 @@ class PlatformLayerTests(unittest.TestCase):
             live_gap = next(item for item in dashboard["live_gap_backlog"] if item["area"] == "remote_backend_activation")
             self.assertEqual(live_gap["status"], "remote_backends_partially_live")
             self.assertIn("ssh", {adapter["name"] for adapter in live_gap["implemented_backend_adapters"]})
+            self.assertNotIn("ssh", {adapter["name"] for adapter in live_gap["available_backend_adapters"]})
+            self.assertIn("docker", {adapter["name"] for adapter in live_gap["available_backend_adapters"]})
             self.assertTrue(all(adapter["raw_secret_values_included"] is False for adapter in live_gap["implemented_backend_adapters"]))
+            self.assertTrue(all(adapter["raw_secret_values_included"] is False for adapter in live_gap["available_backend_adapters"]))
 
             rejected_host = orchestrator.tools.execute("ssh_exec", {"host": "evil.example.net", "command": "uptime"}, approved=True)
             self.assertFalse(rejected_host["ok"])
@@ -1120,6 +1129,8 @@ class PlatformLayerTests(unittest.TestCase):
             live_gap = next(item for item in dashboard["live_gap_backlog"] if item["area"] == "remote_backend_activation")
             self.assertEqual(live_gap["status"], "remote_backends_partially_live")
             self.assertIn("modal", {adapter["name"] for adapter in live_gap["implemented_backend_adapters"]})
+            self.assertNotIn("modal", {adapter["name"] for adapter in live_gap["available_backend_adapters"]})
+            self.assertIn("daytona", {adapter["name"] for adapter in live_gap["available_backend_adapters"]})
 
             rejected = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "modal", "command": "python3 -m http.server"}, approved=True)
             self.assertFalse(rejected["ok"])

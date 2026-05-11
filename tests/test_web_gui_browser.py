@@ -419,6 +419,7 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn("x.implemented_live_adapters", script)
         self.assertIn("x.available_live_adapters", script)
         self.assertIn("x.implemented_backend_adapters", script)
+        self.assertIn("x.available_backend_adapters", script)
         self.assertIn("x.evaluation_scenarios", script)
         self.assertIn("Evaluations:", script)
         self.assertIn("/evaluation/readiness?limit=20&include_live_gaps=1", script)

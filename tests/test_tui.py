@@ -66,6 +66,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("browser_and_media_depth", rendered)
             self.assertIn("remote_backend_activation", rendered)
             self.assertIn("live_connectors_available", rendered)
+            self.assertIn("backend_adapters_available", rendered)
             self.assertIn("human_approval", rendered)
             self.assertIn("approval_required_mutation", rendered)
             self.assertIn("disabled_backend_denial", rendered)

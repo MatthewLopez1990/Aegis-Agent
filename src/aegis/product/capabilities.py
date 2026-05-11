@@ -211,6 +211,7 @@ def _live_gap_backlog(
     facade_tools = readiness_by_state.get("facade", {}).get("sample_tools", [])
     backend_tools = readiness_by_state.get("backend_gate", {}).get("sample_tools", [])
     implemented_backends = _implemented_backend_adapters(backends)
+    available_backends = _available_backend_adapters(backends)
     provider_channel_status = (
         "live_connectors_partially_live"
         if live_connector_adapters
@@ -264,14 +265,23 @@ def _live_gap_backlog(
         {
             "area": "remote_backend_activation",
             "platforms": ["Hermes Agent", "OpenClaw"],
-            "status": "remote_backends_partially_live" if implemented_backends else "backend_adapter_required",
+            "status": (
+                "remote_backends_partially_live"
+                if implemented_backends
+                else "backend_adapters_available_unconfigured"
+                if available_backends
+                else "backend_adapter_required"
+            ),
             "detail": (
                 "Some nonlocal execution adapters are enabled with receipts; hosted sandbox backends still require provider-specific activation work."
                 if implemented_backends
+                else "Nonlocal execution adapters exist but are disabled by default; configure scoped credentials, allowlists, and rollback posture before use."
+                if available_backends
                 else "Enable backend-gated execution paths only after sandbox credentials, scope limits, rollback, and receipts are implemented."
             ),
             "sample_tools": backend_tools[:8],
             "implemented_backend_adapters": implemented_backends,
+            "available_backend_adapters": available_backends,
             "next_steps": [
                 "Add backend-specific auth checks through brokered handles.",
                 "Enforce workspace, network, resource, and rollback limits before dispatch.",
@@ -367,6 +377,35 @@ def _implemented_backend_adapters(backends: list[dict[str, Any]]) -> list[dict[s
         for backend in backends
         if backend.get("enabled") and backend.get("name") != "local"
     ]
+
+
+def _available_backend_adapters(backends: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    adapters: list[dict[str, Any]] = []
+    for backend in backends:
+        name = str(backend.get("name", ""))
+        if backend.get("enabled") or name not in _LIVE_BACKEND_CAPABILITIES:
+            continue
+        adapters.append(
+            {
+                "name": name,
+                "status": "available_opt_in",
+                "local": bool(backend.get("local")),
+                "persistent": bool(backend.get("persistent")),
+                "capabilities": list(_LIVE_BACKEND_CAPABILITIES[name]),
+                "required_controls": ["explicit_backend_enablement", "brokered_backend_auth", "scope_limits", "rollback_receipts"],
+                "raw_secret_values_included": False,
+            }
+        )
+    return adapters
+
+
+_LIVE_BACKEND_CAPABILITIES = {
+    "docker": ("container_limits", "network_none", "cleanup_receipt"),
+    "ssh": ("brokered_private_key", "allowlisted_hosts", "temporary_key_cleanup"),
+    "modal": ("hosted_sandbox_submission", "brokered_token", "allowlisted_https_api"),
+    "daytona": ("hosted_sandbox_submission", "brokered_token", "allowlisted_https_api"),
+    "vercel_sandbox": ("hosted_sandbox_submission", "brokered_token", "allowlisted_https_api"),
+}
 
 
 def _tool_implementation_readiness(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:

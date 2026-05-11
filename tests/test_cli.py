@@ -60,6 +60,11 @@ class CliTests(unittest.TestCase):
             self.assertIn("available_live_adapters", provider_gap)
             self.assertIn("mock_graph", {adapter["name"] for adapter in provider_gap["available_live_adapters"]})
             self.assertTrue(all(adapter["raw_secret_values_included"] is False for adapter in provider_gap["available_live_adapters"]))
+            backend_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "remote_backend_activation")
+            self.assertEqual(backend_gap["status"], "backend_adapters_available_unconfigured")
+            self.assertIn("available_backend_adapters", backend_gap)
+            self.assertIn("docker", {adapter["name"] for adapter in backend_gap["available_backend_adapters"]})
+            self.assertNotIn("singularity", {adapter["name"] for adapter in backend_gap["available_backend_adapters"]})
 
     def test_evaluation_readiness_can_block_on_live_parity_gaps(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
