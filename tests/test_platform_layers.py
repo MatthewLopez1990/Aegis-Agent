@@ -912,6 +912,12 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("receipt_redaction", backlog["provider_and_channel_live_connectors"]["verification_gates"])
             self.assertIn("live_connector_receipts.redacted_write_summary", backlog["provider_and_channel_live_connectors"]["evaluation_scenarios"])
             self.assertIn("approval_required_mutation", backlog["browser_and_media_depth"]["verification_gates"])
+            browser_hardening_controls = {control["control"] for control in backlog["browser_and_media_depth"]["implemented_hardening_controls"]}
+            self.assertIn("unsupported_selector_truthfulness", browser_hardening_controls)
+            self.assertIn("artifact_hash_stability", browser_hardening_controls)
+            self.assertIn("approval_required_mutation", browser_hardening_controls)
+            self.assertIn("no_raw_secret_capture", browser_hardening_controls)
+            self.assertIn("sandboxed_media_worker_process", backlog["browser_and_media_depth"]["remaining_depth_work"])
             self.assertIn("artifact_integrity.browser_media_receipts", backlog["browser_and_media_depth"]["evaluation_scenarios"])
             self.assertIn("disabled_backend_denial", backlog["remote_backend_activation"]["verification_gates"])
             self.assertIn("backend_activation.remote_execution_disabled", backlog["remote_backend_activation"]["evaluation_scenarios"])

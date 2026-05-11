@@ -272,6 +272,29 @@ def _live_gap_backlog(
             ],
             "required_controls": ["sandbox_isolation", "taint_preservation", "artifact_hashing", "human_approval"],
             "verification_gates": ["unsupported_selector_truthfulness", "artifact_hash_stability", "approval_required_mutation", "no_raw_secret_capture"],
+            "implemented_hardening_controls": [
+                {
+                    "control": "unsupported_selector_truthfulness",
+                    "evidence": "table extraction reports unsupported selectors without claiming a filtered result",
+                },
+                {
+                    "control": "artifact_hash_stability",
+                    "evidence": "browser and media artifacts emit SHA-256 hashes in structured receipts",
+                },
+                {
+                    "control": "approval_required_mutation",
+                    "evidence": "browser click/fill actions and generated media writes are approval-gated",
+                },
+                {
+                    "control": "no_raw_secret_capture",
+                    "evidence": "browser/media metadata redacts secret-shaped fields and avoids raw prompt persistence",
+                },
+            ],
+            "remaining_depth_work": [
+                "real_browser_automation_boundaries",
+                "sandboxed_media_worker_process",
+                "provider_backed_media_execution",
+            ],
             "evaluation_scenarios": ["artifact_integrity.browser_media_receipts"],
             "configured_provider_count": len(configured_providers),
         },
