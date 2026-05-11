@@ -521,11 +521,24 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_channel(self, arg: str) -> None:
-        """channel render|receive|send-webhook|send-email|send-chat-webhook|events -- inspect and exercise channel adapters."""
+        """channel render|receive|resolve-approval|send-webhook|send-email|send-chat-webhook|events -- inspect and exercise channel adapters."""
         parts = shlex.split(arg)
         if parts and parts[0] == "events":
             limit = int(parts[1]) if len(parts) > 1 else 20
             _print_json({"events": self.orchestrator.channels.events(limit=limit)})
+            return
+        if parts and parts[0] == "resolve-approval":
+            if len(parts) < 3:
+                print("usage: channel resolve-approval <event_id> <approval_id> [--actor name] [--reason text] [--admin]")
+                return
+            result = self.orchestrator.resolve_channel_approval_intent(
+                event_id=parts[1],
+                approval_id=parts[2],
+                actor=_option_value(parts, "--actor") or "",
+                reason=_flag_joined_value(parts, "--reason") or "",
+                admin="--admin" in parts,
+            )
+            _print_json({**result, "approval": _approval_with_session(self.orchestrator, result["approval"])})
             return
         if parts and parts[0] == "send-webhook":
             if len(parts) < 2:
@@ -561,7 +574,7 @@ class AegisTui(cmd.Cmd):
             _print_json({"message": self.orchestrator.channels.events(limit=1)[0]})
             return
         if len(parts) < 3 or parts[0] != "render":
-            print("usage: channel render <channel> <text> | channel receive <channel> <text> | channel send-webhook <text> --approved | channel send-email <subject> <text> --approved | channel send-chat-webhook <text> --approved | channel events [limit]")
+            print("usage: channel render <channel> <text> | channel receive <channel> <text> | channel resolve-approval <event_id> <approval_id> | channel send-webhook <text> --approved | channel send-email <subject> <text> --approved | channel send-chat-webhook <text> --approved | channel events [limit]")
             return
         channel = parts[1]
         text = " ".join(parts[2:])

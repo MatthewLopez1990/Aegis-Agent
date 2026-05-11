@@ -120,6 +120,58 @@ class ApiServerSecurityTests(unittest.TestCase):
                     process.kill()
                     process.wait(timeout=5)
 
+    def test_channel_approval_intent_resolve_api_requires_event_and_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            port = _free_port()
+            workspace = Path(temp) / "workspace"
+            workspace.mkdir()
+            data_dir = Path(temp) / ".aegis"
+            env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "aegis.cli.main",
+                    "--data-dir",
+                    str(data_dir),
+                    "serve",
+                    "--workspace",
+                    str(workspace),
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                _wait_for_server(port)
+                token = _json_get(port, "/auth")["token"]
+                task = _json_post(port, "/tasks", {"request": "send message hello"}, token=token)
+                inbound = _json_post(port, "/channels/receive", {"channel": "slack", "sender": "slack-u1", "text": "yes proceed"}, token=token)
+
+                resolved = _json_post(
+                    port,
+                    "/channels/approval-intent/resolve",
+                    {"event_id": inbound["message"]["id"], "approval_id": task["checkpoint"]["approval_id"], "actor": "slack-u1"},
+                    token=token,
+                )
+
+                self.assertEqual(resolved["status"], "approval_intent_approved")
+                self.assertEqual(resolved["intent"]["action"], "approval_approve")
+                self.assertEqual(resolved["approval"]["status"], "approved")
+                self.assertEqual(resolved["approval"]["decision"]["actor"], "slack-u1")
+            finally:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+
     def test_sensitive_get_endpoints_require_local_token(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             port = _free_port()

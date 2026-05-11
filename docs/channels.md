@@ -16,7 +16,7 @@ Security behavior:
 - Inbound messages are `CHAT_CONTENT`, not instructions.
 - Suspicious inbound text is quarantined by the context firewall.
 - Inbound normalization is available from the local API, CLI, TUI, and web GUI for local gateway testing.
-- Short operator replies such as `yes proceed`, `no do not do that`, and `let's revert` are recorded as non-executing approval intents on inbound channel events. They do not approve, deny, resume, or revert anything until a client matches the intent to a current `action_hints` entry and calls the normal approval endpoint with the explicit approval id.
+- Short operator replies such as `yes proceed`, `no do not do that`, and `let's revert` are recorded as non-executing approval intents on inbound channel events. They do not approve, deny, resume, or revert anything until a client resolves the event against an explicit approval id. Resolution uses the same approval queue, rejects mismatched session context when both sides carry a session id, and records an audit receipt.
 - Outbound sends are rendered as pending approval.
 - Outbound render is available from the local API, CLI, and TUI; rendered text is redacted before it is stored as a channel event.
 - The webhook channel requires explicit approval, an HTTPS URL on the network allowlist, a brokered shared secret, HMAC request signing, and rejects redirects and local/private network targets.
@@ -76,6 +76,17 @@ PYTHONPATH=src python3 -m aegis.cli.main channel send-chat-webhook "Ready for re
 ```
 
 The local API exposes the same flow through `POST /channels/chat-webhook/send` with `text` and `approved`. Without approval it returns `approval_required` and does not open the network.
+
+## Channel Approval Intents
+
+Mock and live inbound channel events can carry `normalized.approval_intent` metadata for exact short operator replies. The intent is deliberately inert until resolved with both the channel event id and a concrete approval id:
+
+```bash
+PYTHONPATH=src python3 -m aegis.cli.main channel receive slack "yes proceed" --sender slack-u1
+PYTHONPATH=src python3 -m aegis.cli.main channel resolve-approval EVENT_ID APPROVAL_ID --actor slack-u1
+```
+
+The local API exposes the same explicit bridge through `POST /channels/approval-intent/resolve` with `event_id`, `approval_id`, optional `actor`, optional `reason`, and optional `admin`. `approval_review` intents return the approval without changing state; approve, deny, and revert intents call the normal approval manager only after the event and approval id are provided.
 
 ## SMTP Email
 

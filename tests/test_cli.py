@@ -428,6 +428,34 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("abc123", json.dumps(events, sort_keys=True))
             self.assertNotIn("abc123", json.dumps(listed, sort_keys=True))
 
+    def test_channel_approval_intent_resolve_command_requires_event_and_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            parser = build_parser()
+            task = dispatch(parser.parse_args(["--data-dir", str(data_dir), "task", "submit", "send message hello", "--workspace", str(root)]))
+            inbound = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "receive", "slack", "yes proceed", "--sender", "slack-u1"]))
+
+            resolved = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "channel",
+                        "resolve-approval",
+                        inbound["message"]["id"],
+                        task["checkpoint"]["approval_id"],
+                        "--actor",
+                        "slack-u1",
+                    ]
+                )
+            )
+
+            self.assertEqual(resolved["status"], "approval_intent_approved")
+            self.assertEqual(resolved["approval"]["status"], "approved")
+            self.assertEqual(resolved["approval"]["decision"]["actor"], "slack-u1")
+            self.assertEqual(resolved["intent"]["action"], "approval_approve")
+
     def test_task_cancel_denies_pending_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

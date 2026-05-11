@@ -192,6 +192,39 @@ class ChannelWebhookTests(unittest.TestCase):
             self.assertEqual(revert_intent["action"], "approval_reject_or_revert_intent")
             self.assertNotIn("approval_intent", events[0]["normalized"])
 
+    def test_channel_approval_intent_resolves_only_with_explicit_approval_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            orchestrator = build_orchestrator(data_dir=root / ".aegis", workspace=root)
+            pending = orchestrator.submit_task("send message hello")
+            approval_id = pending["checkpoint"]["approval_id"]
+            orchestrator.channels.receive("slack", {"sender": "u1", "text": "yes proceed"})
+            event = orchestrator.channels.events(limit=1)[0]
+
+            resolved = orchestrator.resolve_channel_approval_intent(event_id=event["id"], approval_id=approval_id, actor="slack-u1")
+
+            approval = orchestrator.approvals.get(approval_id)
+            self.assertEqual(resolved["status"], "approval_intent_approved")
+            self.assertEqual(resolved["intent"]["action"], "approval_approve")
+            self.assertEqual(approval["status"], "approved")
+            self.assertEqual(approval["decision"]["actor"], "slack-u1")
+
+    def test_channel_approval_intent_rejects_session_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            orchestrator = build_orchestrator(data_dir=root / ".aegis", workspace=root)
+            task_session = orchestrator.sessions.create_session(title="Task session", channel="slack")
+            other_session = orchestrator.sessions.create_session(title="Other session", channel="slack")
+            pending = orchestrator.submit_task("send message hello", session_id=task_session["id"])
+            approval_id = pending["checkpoint"]["approval_id"]
+            orchestrator.channels.receive("slack", {"sender": "u1", "text": "yes proceed", "session_id": other_session["id"]})
+            event = orchestrator.channels.events(limit=1)[0]
+
+            with self.assertRaisesRegex(PermissionError, "session"):
+                orchestrator.resolve_channel_approval_intent(event_id=event["id"], approval_id=approval_id, actor="slack-u1")
+
+            self.assertEqual(orchestrator.approvals.get(approval_id)["status"], "pending")
+
     def test_signed_webhook_rejects_bad_signature_stale_timestamp_replay_and_oversize(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

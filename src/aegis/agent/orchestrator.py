@@ -798,6 +798,58 @@ class AgentOrchestrator:
             "status": "verified",
         }
 
+    def resolve_channel_approval_intent(
+        self,
+        *,
+        event_id: str,
+        approval_id: str,
+        actor: str = "",
+        reason: str = "",
+        admin: bool = False,
+    ) -> dict[str, Any]:
+        row = self.store.get_channel_event(event_id)
+        if not row:
+            raise KeyError(event_id)
+        event = _decode_channel_event(row)
+        if event.get("direction") != "inbound":
+            raise ValueError("approval intent must come from an inbound channel event")
+        normalized = event.get("normalized") if isinstance(event.get("normalized"), dict) else {}
+        intent = normalized.get("approval_intent") if isinstance(normalized, dict) else None
+        if not isinstance(intent, dict):
+            raise ValueError("channel event does not contain an approval intent")
+        if intent.get("auto_execute") is not False or intent.get("requires_explicit_approval_id") is not True:
+            raise PermissionError("channel approval intent is not explicit enough to resolve")
+        approval = self.approvals.get(approval_id)
+        _validate_channel_intent_session(event, approval, self.store)
+        action = str(intent.get("action") or "")
+        actor_name = actor or str(normalized.get("sender") or "channel-user")
+        decision_reason = reason or f"channel approval intent: {intent.get('matched_phrase', action)}"
+        if action == "approval_approve":
+            resolved = self.approvals.approve(approval_id, actor=actor_name, reason=decision_reason, admin=admin)
+            status = "approval_intent_approved"
+        elif action in {"approval_deny", "approval_reject_or_revert_intent"}:
+            resolved = self.approvals.deny(approval_id, actor=actor_name, reason=decision_reason, admin=admin)
+            status = "approval_intent_denied"
+        elif action == "approval_review":
+            resolved = approval
+            status = "approval_intent_review_only"
+        else:
+            raise ValueError(f"unsupported approval intent action: {action}")
+        self.audit_logger.append(
+            "channel.approval_intent_resolved",
+            {
+                "channel_event_id": event_id,
+                "channel": event.get("channel"),
+                "approval_id": approval_id,
+                "intent_action": action,
+                "status": status,
+                "actor": actor_name,
+                "admin": bool(admin),
+            },
+            task_id=resolved.get("task_id"),
+        )
+        return {"ok": True, "status": status, "event": event, "intent": intent, "approval": resolved}
+
     def send_webhook(self, *, text: str, approved: bool = False, session_id: str | None = None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
         config = self.config.webhook
         if not config.enabled or not config.outbound_enabled:
@@ -2846,6 +2898,39 @@ def _format_evaluation_suite_digest(suite_report: dict[str, Any], queue: dict[st
 def _context_ref(value: str | None) -> str | None:
     short = _short_identifier(value)
     return f"ctx-{short}" if short else None
+
+
+def _decode_channel_event(row: dict[str, Any]) -> dict[str, Any]:
+    decoded = dict(row)
+    decoded["payload"] = json.loads(str(decoded.pop("payload_json", "{}") or "{}"))
+    decoded["normalized"] = json.loads(str(decoded.pop("normalized_json", "{}") or "{}"))
+    return decoded
+
+
+def _validate_channel_intent_session(event: dict[str, Any], approval: dict[str, Any], store: LocalStore) -> None:
+    event_session_id = event.get("session_id")
+    approval_session_id = _approval_session_id(approval, store)
+    if event_session_id and approval_session_id and event_session_id != approval_session_id:
+        raise PermissionError("channel approval intent session does not match approval session")
+
+
+def _approval_session_id(approval: dict[str, Any], store: LocalStore) -> str | None:
+    task_id = approval.get("task_id")
+    if task_id:
+        task = store.get_task(str(task_id))
+        if task and task.get("session_id"):
+            return str(task["session_id"])
+    payload = approval.get("payload")
+    if isinstance(payload, dict):
+        if isinstance(payload.get("session_id"), str):
+            return payload["session_id"]
+        params = payload.get("params")
+        if isinstance(params, dict) and isinstance(params.get("session_id"), str):
+            return params["session_id"]
+        arguments = payload.get("arguments")
+        if isinstance(arguments, dict) and isinstance(arguments.get("session_id"), str):
+            return arguments["session_id"]
+    return None
 
 
 def _checkpoint_approval_id(result: dict[str, Any]) -> str | None:

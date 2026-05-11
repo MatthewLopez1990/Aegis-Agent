@@ -519,6 +519,11 @@ class LocalStore:
             rows = db.execute("SELECT * FROM channel_events ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 
+    def get_channel_event(self, event_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM channel_events WHERE id = ?", (event_id,)).fetchone()
+        return dict(row) if row else None
+
     def insert_model_usage(self, row: dict[str, Any]) -> None:
         with self.connect() as db:
             db.execute(

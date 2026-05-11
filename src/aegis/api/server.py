@@ -650,6 +650,17 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 orchestrator.channels.receive(str(_required(payload, "channel")), message_payload)
                 self._json({"status": "received", "message": orchestrator.channels.events(limit=1)[0]})
                 return
+            if path == "/channels/approval-intent/resolve":
+                payload = self._read_json()
+                result = orchestrator.resolve_channel_approval_intent(
+                    event_id=str(_required(payload, "event_id")),
+                    approval_id=str(_required(payload, "approval_id")),
+                    actor=str(payload.get("actor", "")),
+                    reason=str(payload.get("reason", "")),
+                    admin=bool(payload.get("admin", False)),
+                )
+                self._json({**result, "approval": _approval_summary(orchestrator, result["approval"])})
+                return
             if path == "/policy/evaluate":
                 payload = self._read_json()
                 decision = orchestrator.policy_gate.evaluate(_policy_request_from_payload(payload, workspace=str(workspace)))

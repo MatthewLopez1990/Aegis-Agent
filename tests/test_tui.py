@@ -269,6 +269,24 @@ class TuiTests(unittest.TestCase):
             self.assertNotIn("abc123", json.dumps(event, sort_keys=True))
             self.assertNotIn("abc123", json.dumps(inbound, sort_keys=True))
 
+    def test_channel_resolve_approval_intent_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tui = AegisTui(data_dir=root / ".aegis", workspace=root)
+            task = tui.orchestrator.submit_task("send message hello", session_id=tui.session["id"])
+            tui.orchestrator.channels.receive("slack", {"sender": "slack-u1", "text": "yes proceed", "session_id": tui.session["id"]})
+            event = tui.orchestrator.channels.events(limit=1)[0]
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                tui.onecmd(f"channel resolve-approval {event['id']} {task['checkpoint']['approval_id']} --actor slack-u1")
+
+            rendered = output.getvalue()
+            approval = tui.orchestrator.approvals.get(task["checkpoint"]["approval_id"])
+            self.assertIn("approval_intent_approved", rendered)
+            self.assertEqual(approval["status"], "approved")
+            self.assertEqual(approval["decision"]["actor"], "slack-u1")
+
     def test_tools_run_command_executes_and_preserves_approval_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

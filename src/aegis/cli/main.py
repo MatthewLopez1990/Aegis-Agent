@@ -331,6 +331,12 @@ def build_parser() -> argparse.ArgumentParser:
     channel_receive.add_argument("channel")
     channel_receive.add_argument("text")
     channel_receive.add_argument("--sender", default="local-user")
+    channel_resolve_approval = channel_sub.add_parser("resolve-approval", help="Resolve a recorded channel approval intent against an explicit approval id")
+    channel_resolve_approval.add_argument("event_id")
+    channel_resolve_approval.add_argument("approval_id")
+    channel_resolve_approval.add_argument("--actor", default="")
+    channel_resolve_approval.add_argument("--reason", default="")
+    channel_resolve_approval.add_argument("--admin", action="store_true")
     channel_render = channel_sub.add_parser("render", help="Render an outbound channel message pending approval")
     channel_render.add_argument("channel")
     channel_render.add_argument("text")
@@ -855,6 +861,16 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
         if args.channel_command == "receive":
             registry.receive(args.channel, {"sender": args.sender, "text": args.text})
             return {"message": registry.events(limit=1)[0]}
+        if args.channel_command == "resolve-approval":
+            orchestrator = build_orchestrator(data_dir=config.data_dir)
+            result = orchestrator.resolve_channel_approval_intent(
+                event_id=args.event_id,
+                approval_id=args.approval_id,
+                actor=args.actor,
+                reason=args.reason,
+                admin=args.admin,
+            )
+            return {**result, "approval": _approval_payload(orchestrator, result["approval"])}
         if args.channel_command == "render":
             return {
                 "status": "rendered_pending_approval",
