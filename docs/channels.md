@@ -16,6 +16,7 @@ Security behavior:
 - Inbound messages are `CHAT_CONTENT`, not instructions.
 - Suspicious inbound text is quarantined by the context firewall.
 - Inbound normalization is available from the local API, CLI, TUI, and web GUI for local gateway testing.
+- Short operator replies such as `yes proceed`, `no do not do that`, and `let's revert` are recorded as non-executing approval intents on inbound channel events. They do not approve, deny, resume, or revert anything until a client matches the intent to a current `action_hints` entry and calls the normal approval endpoint with the explicit approval id.
 - Outbound sends are rendered as pending approval.
 - Outbound render is available from the local API, CLI, and TUI; rendered text is redacted before it is stored as a channel event.
 - The webhook channel requires explicit approval, an HTTPS URL on the network allowlist, a brokered shared secret, HMAC request signing, and rejects redirects and local/private network targets.

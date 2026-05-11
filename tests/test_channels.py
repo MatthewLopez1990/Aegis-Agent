@@ -158,6 +158,40 @@ class ChannelWebhookTests(unittest.TestCase):
             self.assertNotIn("abc123", json.dumps(event, sort_keys=True))
             self.assertIn("[QUARANTINED_INSTRUCTION]", event["normalized"]["text"])
 
+    def test_inbound_approval_phrase_records_intent_without_state_change(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            orchestrator = build_orchestrator(data_dir=root / ".aegis", workspace=root)
+            pending = orchestrator.submit_task("send message hello")
+            approval_id = pending["checkpoint"]["approval_id"]
+
+            orchestrator.channels.receive("slack", {"sender": "u1", "text": "yes proceed", "session_id": "session-1"})
+
+            event = orchestrator.channels.events(limit=1)[0]
+            approval = orchestrator.approvals.get(approval_id)
+            intent = event["normalized"]["approval_intent"]
+            self.assertEqual(approval["status"], "pending")
+            self.assertEqual(event["channel"], "slack")
+            self.assertEqual(event["session_id"], "session-1")
+            self.assertEqual(intent["action"], "approval_approve")
+            self.assertEqual(intent["matched_phrase"], "yes proceed")
+            self.assertTrue(intent["requires_explicit_approval_id"])
+            self.assertFalse(intent["auto_execute"])
+            self.assertEqual(intent["safety"], "intent_only_no_state_change")
+
+    def test_inbound_approval_phrase_parser_is_conservative(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            orchestrator = build_orchestrator(data_dir=root / ".aegis", workspace=root)
+
+            orchestrator.channels.receive("discord", {"sender": "u1", "text": "let's revert"})
+            orchestrator.channels.receive("discord", {"sender": "u1", "text": "please approve this later"})
+
+            events = orchestrator.channels.events(limit=2)
+            revert_intent = events[1]["normalized"]["approval_intent"]
+            self.assertEqual(revert_intent["action"], "approval_reject_or_revert_intent")
+            self.assertNotIn("approval_intent", events[0]["normalized"])
+
     def test_signed_webhook_rejects_bad_signature_stale_timestamp_replay_and_oversize(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

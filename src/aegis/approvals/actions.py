@@ -2,7 +2,54 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+
+_APPROVAL_INTENT_PHRASES: dict[str, str] = {
+    "approve": "approval_approve",
+    "yes approve": "approval_approve",
+    "yes approve that plan": "approval_approve",
+    "yes proceed": "approval_approve",
+    "proceed": "approval_approve",
+    "continue": "approval_approve",
+    "deny": "approval_deny",
+    "no": "approval_deny",
+    "no do not do that": "approval_deny",
+    "no don't do that": "approval_deny",
+    "do not do that": "approval_deny",
+    "don't do that": "approval_deny",
+    "stop": "approval_deny",
+    "cancel": "approval_deny",
+    "revert": "approval_reject_or_revert_intent",
+    "let's revert": "approval_reject_or_revert_intent",
+    "lets revert": "approval_reject_or_revert_intent",
+    "cancel that plan": "approval_reject_or_revert_intent",
+    "reject and revert": "approval_reject_or_revert_intent",
+    "show approval": "approval_review",
+    "show risk": "approval_review",
+    "show payload": "approval_review",
+}
+
+
+def approval_intent_from_text(text: Any) -> dict[str, Any] | None:
+    """Parse short operator chat replies into non-executing approval intents."""
+
+    phrase = _normalize_approval_phrase(text)
+    if not phrase:
+        return None
+    action = _APPROVAL_INTENT_PHRASES.get(phrase)
+    if action is None:
+        return None
+    return {
+        "kind": "approval_intent",
+        "action": action,
+        "matched_phrase": phrase,
+        "requires_explicit_approval_id": True,
+        "auto_execute": False,
+        "safety": "intent_only_no_state_change",
+        "next_step": "Match this intent to a current approval action_hints entry before executing.",
+    }
 
 
 def approval_action_hints(approval: dict[str, Any], *, task_id: Any = None, session_id: Any = None, admin_required: bool = False) -> list[dict[str, Any]]:
@@ -82,3 +129,11 @@ def approval_action_hints(approval: dict[str, Any], *, task_id: Any = None, sess
             ]
         )
     return hints
+
+
+def _normalize_approval_phrase(text: Any) -> str:
+    value = str(text or "").strip().lower()
+    value = value.strip(" \t\r\n.!?")
+    value = value.replace("\u2019", "'")
+    value = re.sub(r"\s+", " ", value)
+    return value

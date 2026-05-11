@@ -6,6 +6,7 @@ from typing import Any
 from uuid import uuid4
 import json
 
+from aegis.approvals.actions import approval_intent_from_text
 from aegis.audit.logger import AuditLogger
 from aegis.channels.base import ChannelAdapter, ChannelMessage, ChannelResponse, ChannelSpec
 from aegis.audit.logger import redact
@@ -70,6 +71,10 @@ class ChannelRegistry:
         channel = message.channel
         item = self.firewall.label_content(message.text, source=f"channel:{channel}", trust_class=TrustClass.CHAT_CONTENT, connector_or_tool=channel)
         processed = self.firewall.process([item])
+        normalized: dict[str, Any] = {"sender": message.sender, "text": processed.model_context[0], "attachments": list(message.attachments)}
+        approval_intent = approval_intent_from_text(processed.items[0].content)
+        if approval_intent is not None:
+            normalized["approval_intent"] = approval_intent
         self.store.insert_channel_event(
             {
                 "id": str(uuid4()),
@@ -77,12 +82,20 @@ class ChannelRegistry:
                 "direction": "inbound",
                 "session_id": message.session_id,
                 "payload": _safe_payload(payload),
-                "normalized": {"sender": message.sender, "text": processed.model_context[0], "attachments": list(message.attachments)},
+                "normalized": normalized,
                 "status": status,
                 "created_at": now_utc(),
             }
         )
-        self.audit_logger.append("channel.inbound", {"channel": channel, "sender": message.sender, "session_id": message.session_id})
+        self.audit_logger.append(
+            "channel.inbound",
+            {
+                "channel": channel,
+                "sender": message.sender,
+                "session_id": message.session_id,
+                "approval_intent_action": approval_intent.get("action") if approval_intent else None,
+            },
+        )
 
     def has_delivery_id(self, channel: str, delivery_id: str) -> bool:
         for row in self.store.list_channel_events(limit=1000):
