@@ -69,6 +69,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn("backend_adapters_available", rendered)
             self.assertIn("human_approval", rendered)
             self.assertIn("approval_required_mutation", rendered)
+            self.assertIn("unsupported_selector_truthfulness", rendered)
+            self.assertIn("sandboxed_media_worker_process", rendered)
             self.assertIn("disabled_backend_denial", rendered)
             self.assertIn("live_connector_receipts.redacted_write_summary", rendered)
             self.assertIn("artifact_integrity.browser_media_receipts", rendered)
