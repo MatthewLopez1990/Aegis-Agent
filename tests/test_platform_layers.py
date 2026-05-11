@@ -849,6 +849,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertGreaterEqual(dashboard["runtime"]["limited_or_facade_tools"], 1)
             self.assertEqual(dashboard["runtime"]["sessions"], 1)
             self.assertGreaterEqual(dashboard["runtime"]["session_bound_recent_tasks"], 1)
+            self.assertTrue(any(task["id"] == session_task["id"] for task in dashboard["recent_session_tasks"]))
             dashboard_session_task = next(task for task in dashboard["recent_tasks"] if task["id"] == session_task["id"])
             self.assertEqual(dashboard_session_task["session_id"], session["id"])
             self.assertEqual(dashboard_session_task["session"]["title"], "Test")

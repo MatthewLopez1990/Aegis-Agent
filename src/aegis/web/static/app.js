@@ -456,6 +456,13 @@ const refresh = async () => {
       tone: x.status === "waiting_approval" ? "attention" : x.status === "completed" ? "ready" : "",
       actions: taskActions(x),
     }), taskSessionId && state.taskScope === "session" ? "No tasks in this session" : "No tasks");
+    setList("session-linked-tasks", dashboard.recent_session_tasks || [], (x) => ({
+      title: x.user_request,
+      detail: x.interpretation,
+      meta: `${shortId(x.id)} · ${x.status} · session ${taskSessionLabel(x)}`,
+      tone: x.status === "waiting_approval" ? "attention" : x.status === "completed" ? "ready" : "",
+      actions: taskActions(x),
+    }), "No session-linked tasks");
     setList("approvals", approvals.approvals, (x) => ({
       title: x.reason,
       detail: x.task_id ? `${x.task_id} · session ${approvalSessionLabel(x)}` : `runtime approval · session ${approvalSessionLabel(x)}`,

@@ -32,14 +32,26 @@ class CliTests(unittest.TestCase):
     def test_dashboard_command_reports_product_posture(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             parser = build_parser()
-            args = parser.parse_args(["--data-dir", str(Path(temp) / ".aegis"), "dashboard"])
+            data_dir = Path(temp) / ".aegis"
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=Path(temp))
+            session = orchestrator.sessions.create_session(title="Original resume context", channel="web")
+            session_task = orchestrator.submit_task("Summarize the session work safely.", session_id=session["id"])
+            for index in range(15):
+                orchestrator.submit_task(f"Summarize unscoped background task {index}.")
+            args = parser.parse_args(["--data-dir", str(data_dir), "dashboard"])
             result = dispatch(args)
 
             self.assertEqual(result["product"]["name"], "Aegis Agent")
             self.assertIn("security_controls", result)
             self.assertGreaterEqual(result["runtime"]["tools"], 47)
             self.assertIn("session_bound_recent_tasks", result["runtime"])
+            self.assertGreaterEqual(result["runtime"]["session_bound_recent_tasks"], 1)
             self.assertIn("limited_or_facade_tools", result["runtime"])
+            self.assertNotIn(session_task["id"], {task["id"] for task in result["recent_tasks"]})
+            self.assertIn(session_task["id"], {task["id"] for task in result["recent_session_tasks"]})
+            linked_session_task = next(task for task in result["recent_session_tasks"] if task["id"] == session_task["id"])
+            self.assertEqual(linked_session_task["session"]["title"], "Original resume context")
+            self.assertIn(f"session show {session['id']}", [hint["command"] for hint in linked_session_task["action_hints"]])
             readiness = {row["state"]: row for row in result["implementation_readiness"]}
             self.assertIn("local_png_preview", readiness["facade"]["statuses"])
             self.assertIn("backend_gate", readiness["backend_gate"]["statuses"])

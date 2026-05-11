@@ -19,7 +19,9 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
     approvals = orchestrator.approvals.list()
     pending_approvals = [_decode_pending_approval(orchestrator, approval) for approval in approvals if approval["status"] == "pending"]
     task_rows = orchestrator.store.list_tasks(limit=12)
+    session_task_rows = _recent_session_task_rows(orchestrator, task_rows, sessions, limit=12)
     tasks = [_decode_task(orchestrator, row) for row in task_rows]
+    session_tasks = [_decode_task(orchestrator, row) for row in session_task_rows]
     audit_chain_ok = orchestrator.audit_logger.verify_chain()
 
     high_risk_tools = [tool for tool in tools if tool["risk_level"] in {"high", "critical"}]
@@ -31,7 +33,6 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
     configured_providers = [provider for provider in providers if provider["auth_configured"] or provider["local"]]
     live_connector_adapters = _live_connector_adapters(connectors, orchestrator.config)
     available_live_connector_adapters = _available_live_connector_adapters(connectors, orchestrator.config)
-    session_bound_recent_tasks = [task for task in task_rows if task.get("session_id")]
     competitive_targets = _competitive_targets()
 
     return {
@@ -55,7 +56,7 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
             "model_providers": len(providers),
             "configured_or_local_providers": len(configured_providers),
             "sessions": len(sessions),
-            "session_bound_recent_tasks": len(session_bound_recent_tasks),
+            "session_bound_recent_tasks": len(session_task_rows),
             "schedules": len(schedules),
             "boards": len(boards),
             "recent_tasks": len(tasks),
@@ -122,7 +123,7 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
             {
                 "name": "Session continuity",
                 "state": "durable",
-                "coverage": f"{len(sessions)} sessions, {len(session_bound_recent_tasks)} linked recent tasks",
+                "coverage": f"{len(sessions)} sessions, {len(session_task_rows)} linked recent session tasks",
                 "detail": "Transcripts, task status, run events, approvals, and resume outcomes stay bound to the originating session.",
             },
             {
@@ -144,8 +145,20 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
         ),
         "implementation_readiness": implementation_readiness,
         "recent_tasks": tasks,
+        "recent_session_tasks": session_tasks,
         "pending_approvals": pending_approvals[:12],
     }
+
+
+def _recent_session_task_rows(orchestrator: Any, task_rows: list[dict[str, Any]], sessions: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    rows_by_id = {str(row["id"]): row for row in task_rows if row.get("session_id")}
+    for session in sessions:
+        session_id = str(session.get("id") or "")
+        if not session_id:
+            continue
+        for row in orchestrator.store.list_tasks(limit=3, session_id=session_id):
+            rows_by_id.setdefault(str(row["id"]), row)
+    return sorted(rows_by_id.values(), key=lambda row: str(row.get("created_at", "")), reverse=True)[:limit]
 
 
 def _competitive_targets() -> list[dict[str, Any]]:
