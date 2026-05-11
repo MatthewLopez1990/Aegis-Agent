@@ -749,6 +749,10 @@ class CliTests(unittest.TestCase):
                         'ssh_allowed_hosts = ["worker.example.com"]',
                         'ssh_key_secret = "PROJECT_SSH_KEY"',
                         "ssh_timeout_seconds = 7",
+                        'hosted_sandbox_api_url = "https://sandbox.example.com/run"',
+                        'hosted_sandbox_allowed_hosts = ["sandbox.example.com"]',
+                        'hosted_sandbox_token_secret = "PROJECT_SANDBOX_TOKEN"',
+                        "hosted_sandbox_timeout_seconds = 11",
                     ]
                 ),
                 encoding="utf-8",
@@ -765,6 +769,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(config.execution.ssh_allowed_hosts, ("worker.example.com",))
             self.assertEqual(config.execution.ssh_key_secret, "PROJECT_SSH_KEY")
             self.assertEqual(config.execution.ssh_timeout_seconds, 7)
+            self.assertEqual(config.execution.hosted_sandbox_api_url, "https://sandbox.example.com/run")
+            self.assertEqual(config.execution.hosted_sandbox_allowed_hosts, ("sandbox.example.com",))
+            self.assertEqual(config.execution.hosted_sandbox_token_secret, "PROJECT_SANDBOX_TOKEN")
+            self.assertEqual(config.execution.hosted_sandbox_timeout_seconds, 11)
 
     def test_config_loads_memory_retention_policy(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

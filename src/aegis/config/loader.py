@@ -68,6 +68,10 @@ class ExecutionConfig:
     ssh_allowed_hosts: tuple[str, ...] = ()
     ssh_key_secret: str = "AEGIS_SSH_PRIVATE_KEY"
     ssh_timeout_seconds: int = 30
+    hosted_sandbox_api_url: str | None = None
+    hosted_sandbox_allowed_hosts: tuple[str, ...] = ()
+    hosted_sandbox_token_secret: str = "AEGIS_HOSTED_SANDBOX_TOKEN"
+    hosted_sandbox_timeout_seconds: int = 60
 
 
 @dataclass(frozen=True)
@@ -145,6 +149,10 @@ def load_config(data_dir: str | Path | None = None, config_path: str | Path | No
         ssh_allowed_hosts=_string_tuple(execution.get("ssh_allowed_hosts", ()), field_name="execution.ssh_allowed_hosts"),
         ssh_key_secret=str(execution.get("ssh_key_secret", "AEGIS_SSH_PRIVATE_KEY")),
         ssh_timeout_seconds=_positive_int(execution.get("ssh_timeout_seconds", 30), default=30),
+        hosted_sandbox_api_url=str(execution["hosted_sandbox_api_url"]) if execution.get("hosted_sandbox_api_url") else None,
+        hosted_sandbox_allowed_hosts=_string_tuple(execution.get("hosted_sandbox_allowed_hosts", ()), field_name="execution.hosted_sandbox_allowed_hosts"),
+        hosted_sandbox_token_secret=str(execution.get("hosted_sandbox_token_secret", "AEGIS_HOSTED_SANDBOX_TOKEN")),
+        hosted_sandbox_timeout_seconds=_positive_int(execution.get("hosted_sandbox_timeout_seconds", 60), default=60),
     )
     webhook_config = WebhookChannelConfig(
         enabled=bool(webhook.get("enabled", False)),
@@ -240,6 +248,10 @@ def write_default_config(data_dir: str | Path | None = None) -> Path:
                     'ssh_allowed_hosts = []',
                     'ssh_key_secret = "AEGIS_SSH_PRIVATE_KEY"',
                     "ssh_timeout_seconds = 30",
+                    "# hosted_sandbox_api_url = \"https://sandbox.example.com/run\"",
+                    "hosted_sandbox_allowed_hosts = []",
+                    'hosted_sandbox_token_secret = "AEGIS_HOSTED_SANDBOX_TOKEN"',
+                    "hosted_sandbox_timeout_seconds = 60",
                     "",
                     "[memory]",
                     "# default_ttl_days = 365",

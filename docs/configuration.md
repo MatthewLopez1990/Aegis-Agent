@@ -30,6 +30,10 @@ ssh_executable = "ssh"
 ssh_allowed_hosts = []
 ssh_key_secret = "AEGIS_SSH_PRIVATE_KEY"
 ssh_timeout_seconds = 30
+# hosted_sandbox_api_url = "https://sandbox.example.com/run"
+hosted_sandbox_allowed_hosts = []
+hosted_sandbox_token_secret = "AEGIS_HOSTED_SANDBOX_TOKEN"
+hosted_sandbox_timeout_seconds = 60
 
 [memory]
 # Omit TTL settings to remember indefinitely. Set a default or per-type TTL
@@ -84,7 +88,7 @@ Secure defaults:
 - Data, audit logs, and brokered model auth secrets stay local.
 - Model-provider calls are policy-gated by the network allowlist, including local endpoints with a base URL.
 - Custom model URLs must use HTTPS unless they target a loopback host, and URL credentials are rejected before any API key is attached.
-- Only the local execution backend is enabled by default. Docker must be explicitly added to `[execution].enabled_backends`; approved container runs get CPU, memory, network, activation, execution, and cleanup receipts, and unsafe Docker flags such as host networking, mounts, and privileged mode are rejected. SSH must also be explicitly enabled, must target a configured `ssh_allowed_hosts` entry, uses a brokered private-key secret, rejects shell metacharacters, hashes the remote command instead of logging it raw, and removes temporary key material after execution.
+- Only the local execution backend is enabled by default. Docker must be explicitly added to `[execution].enabled_backends`; approved container runs get CPU, memory, network, activation, execution, and cleanup receipts, and unsafe Docker flags such as host networking, mounts, and privileged mode are rejected. SSH must also be explicitly enabled, must target a configured `ssh_allowed_hosts` entry, uses a brokered private-key secret, rejects shell metacharacters, hashes the remote command instead of logging it raw, and removes temporary key material after execution. Hosted sandbox backends (`modal`, `daytona`, and `vercel_sandbox`) must be explicitly enabled, must target `hosted_sandbox_allowed_hosts`, use an HTTPS API URL, require a brokered token, and return redacted submission receipts.
 - Memory retention is indefinite by default, but `[memory]` can assign default or per-type TTLs. Expired memories are excluded from retrieval and removed by manual or background cleanup. `[memory.escalation_routes.<route>]` can define team-specific review escalation thresholds with `max_age_days`, `limit`, and `scope` for routes such as `memory_ops`.
 - Memory recertification marks old confirmed memories for review instead of rewriting them. The default threshold is 90 days, and `[memory.recertification_days]` can shorten, lengthen, or disable recertification for individual memory types.
 - The signed webhook endpoint is disabled by default and stores only sanitized inbound metadata after HMAC verification. Approved outbound webhooks require HTTPS, the network allowlist, and a brokered shared secret.

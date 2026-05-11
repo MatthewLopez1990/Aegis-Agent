@@ -20,6 +20,9 @@ import sys
 import tarfile
 import tempfile
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request
 import wave
 import zlib
 from xml.etree import ElementTree
@@ -29,6 +32,7 @@ import zipfile
 from aegis.audit.logger import AuditLogger
 from aegis.browser.controller import BrowserController
 from aegis.connectors.base import ConnectorRequest
+from aegis.connectors.http import _open_without_redirects, _private_network_error, _validate_url
 from aegis.connectors.registry import ConnectorRegistry
 from aegis.execution.backends import ExecutionBackendRegistry
 from aegis.kanban.manager import KanbanManager
@@ -241,7 +245,7 @@ class BuiltinToolExecutor:
             if self.execution_backends is None:
                 raise ToolExecutionError("execution backend registry is not configured")
             result = self.execution_backends.select(str(params["backend"]))
-        elif name in {"package_install", "container_run", "docker_run", "ssh_exec"}:
+        elif name in {"package_install", "container_run", "docker_run", "ssh_exec", "hosted_sandbox_exec"}:
             result = self._execute_backend_gate(name=name, params=params)
         elif name in {"trajectory_generate", "trajectory_compress"}:
             result = self._execute_research_tool(name=name, params=params)
@@ -734,7 +738,9 @@ class BuiltinToolExecutor:
         }
 
     def _execute_backend_gate(self, *, name: str, params: dict[str, Any]) -> dict[str, Any]:
-        backend_name = {"container_run": "docker", "docker_run": "docker", "ssh_exec": "ssh"}.get(name, "local")
+        backend_name = {"container_run": "docker", "docker_run": "docker", "ssh_exec": "ssh", "hosted_sandbox_exec": str(params.get("backend", ""))}.get(name, "local")
+        if name == "hosted_sandbox_exec" and backend_name not in {"modal", "daytona", "vercel_sandbox"}:
+            return {"ok": False, "status": "scope_rejected", "tool": name, "backend": backend_name or "unknown", "reason": "hosted sandbox backend must be one of: modal, daytona, vercel_sandbox", "verification_gates": ["scope_escape_rejection"]}
         backend = self.execution_backends.get(backend_name) if self.execution_backends is not None else None
         activation = _backend_activation_requirements(name=name, backend=backend_name)
         if backend is not None and not backend["enabled"]:
@@ -750,6 +756,8 @@ class BuiltinToolExecutor:
             return self._execute_docker_backend(name=name, params=params, backend=backend)
         if backend_name == "ssh" and backend is not None:
             return self._execute_ssh_backend(name=name, params=params, backend=backend)
+        if backend_name in {"modal", "daytona", "vercel_sandbox"} and backend is not None:
+            return self._execute_hosted_sandbox_backend(name=name, params=params, backend=backend)
         return {
             "ok": False,
             "status": "not_configured",
@@ -758,6 +766,66 @@ class BuiltinToolExecutor:
             "params": sorted(params),
             "reason": "live execution adapter requires explicit sandbox/provider configuration",
             **activation,
+        }
+
+    def _execute_hosted_sandbox_backend(self, *, name: str, params: dict[str, Any], backend: dict[str, Any]) -> dict[str, Any]:
+        config = dict(backend.get("adapter_config", {}))
+        backend_name = str(backend.get("name", params.get("backend", "")))
+        activation = _backend_activation_requirements(name=name, backend=backend_name)
+        url = str(params.get("provider_url") or params.get("api_url") or config.get("api_url") or "")
+        parsed = urlparse(url)
+        domain = parsed.hostname or ""
+        validation_error = _validate_url(parsed) or (None if parsed.scheme == "https" else "hosted sandbox execution requires https")
+        if validation_error:
+            return {"ok": False, "status": "not_configured", "tool": name, "backend": backend_name, "reason": validation_error, **activation}
+        allowed_hosts = tuple(str(item) for item in config.get("allowed_hosts", ()))
+        if not _host_allowed(domain, allowed_hosts):
+            return {"ok": False, "status": "scope_rejected", "tool": name, "backend": backend_name, "reason": f"hosted sandbox API host {domain!r} is not allowlisted", "verification_gates": ["scope_escape_rejection"]}
+        private_error = _private_network_error(domain)
+        if private_error:
+            return {"ok": False, "status": "scope_rejected", "tool": name, "backend": backend_name, "reason": private_error, "verification_gates": ["scope_escape_rejection"]}
+        try:
+            command_args = _safe_remote_command_args(str(params.get("command", "")))
+        except ToolExecutionError as exc:
+            return {"ok": False, "status": "scope_rejected", "tool": name, "backend": backend_name, "reason": str(exc), "verification_gates": ["scope_escape_rejection"]}
+        token_secret = str(params.get("token_secret") or config.get("token_secret") or "AEGIS_HOSTED_SANDBOX_TOKEN")
+        handle = self.secrets_broker.request_handle(name=token_secret, requester="hosted_sandbox_backend", reason=f"{backend_name} sandbox execution", scopes=(f"{backend_name}:execute",))
+        if not handle.present:
+            return {"ok": False, "status": "not_configured", "tool": name, "backend": backend_name, "reason": f"secret {token_secret!r} is not configured", **activation}
+        token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="hosted_sandbox_backend")
+        timeout = int(config.get("timeout_seconds", 60))
+        command_hash = hashlib.sha256("\0".join([backend_name, *command_args]).encode("utf-8")).hexdigest()
+        started = now_utc()
+        live_result = _send_hosted_sandbox_request(url=url, token=token, backend=backend_name, command_args=command_args, command_hash=command_hash, timeout=timeout)
+        return {
+            "ok": live_result["ok"],
+            "status": "submitted" if live_result["ok"] else "failed",
+            "tool": name,
+            "backend": backend_name,
+            "domain": domain,
+            "http_status": live_result["http_status"],
+            "job_id": live_result.get("job_id"),
+            "activation_receipt": {
+                "status": "approved_activation",
+                "backend": backend_name,
+                "required_controls": ["human_approval", "brokered_backend_auth", "scope_limits", "rollback_receipts"],
+                "allowed_host": domain,
+                "secret_handle_present": handle.present,
+                "raw_secret_values_included": False,
+                "started_at": started,
+            },
+            "execution_receipt": {
+                "command_sha256": command_hash,
+                "argv_count": len(command_args),
+                "timeout_seconds": timeout,
+                "raw_command_logged": False,
+                "raw_response_body_included": False,
+            },
+            "cleanup_receipt": {
+                "status": "provider_managed",
+                "rollback": "cancel or delete the hosted sandbox job with the provider-specific console/API",
+            },
+            "error": live_result.get("error"),
         }
 
     def _execute_ssh_backend(self, *, name: str, params: dict[str, Any], backend: dict[str, Any]) -> dict[str, Any]:
@@ -2105,6 +2173,53 @@ def _safe_remote_command_args(command: str) -> list[str]:
         if arg.startswith("-") or not re.fullmatch(r"[A-Za-z0-9_./:=,@+-]+", arg):
             raise ToolExecutionError("ssh command arguments must be simple non-option tokens")
     return args
+
+
+def _send_hosted_sandbox_request(
+    *,
+    url: str,
+    token: str,
+    backend: str,
+    command_args: list[str],
+    command_hash: str,
+    timeout: int,
+) -> dict[str, Any]:
+    payload = {
+        "backend": backend,
+        "command_args": command_args,
+        "command_sha256": command_hash,
+        "requested_at": now_utc(),
+    }
+    body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    request = Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "Aegis-Agent/0.1",
+        },
+    )
+    try:
+        response_context = _open_without_redirects(request, timeout=timeout)
+    except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            return {"ok": False, "http_status": exc.code, "error": "HTTP redirects are not followed by the governed hosted sandbox adapter"}
+        return {"ok": False, "http_status": exc.code, "error": f"hosted sandbox request failed with status {exc.code}"}
+    except URLError as exc:
+        return {"ok": False, "http_status": 0, "error": f"hosted sandbox request failed: {exc.reason}"}
+    with response_context as response:
+        status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+        raw_body = response.read(4096).decode("utf-8", errors="replace")
+    job_id = ""
+    try:
+        decoded = json.loads(raw_body)
+        if isinstance(decoded, dict):
+            job_id = str(decoded.get("job_id") or decoded.get("id") or "")[:200]
+    except json.JSONDecodeError:
+        job_id = ""
+    return {"ok": 200 <= status < 300, "http_status": status, "job_id": job_id or None, "error": None if 200 <= status < 300 else f"hosted sandbox request failed with status {status}"}
 
 
 def _docker_args_for_tool(*, name: str, params: dict[str, Any], config: dict[str, Any]) -> list[str]:

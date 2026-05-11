@@ -32,6 +32,10 @@ class ExecutionBackendRegistry:
         ssh_allowed_hosts: tuple[str, ...] = (),
         ssh_key_secret: str = "AEGIS_SSH_PRIVATE_KEY",
         ssh_timeout_seconds: int = 30,
+        hosted_sandbox_api_url: str | None = None,
+        hosted_sandbox_allowed_hosts: tuple[str, ...] = (),
+        hosted_sandbox_token_secret: str = "AEGIS_HOSTED_SANDBOX_TOKEN",
+        hosted_sandbox_timeout_seconds: int = 60,
     ) -> None:
         enabled = set(enabled_backends)
         self.backends = (
@@ -59,6 +63,14 @@ class ExecutionBackendRegistry:
                 "timeout_seconds": ssh_timeout_seconds,
             },
         }
+        hosted_config = {
+            "api_url": hosted_sandbox_api_url,
+            "allowed_hosts": tuple(hosted_sandbox_allowed_hosts),
+            "token_secret": hosted_sandbox_token_secret,
+            "timeout_seconds": hosted_sandbox_timeout_seconds,
+        }
+        for hosted_backend in ("modal", "daytona", "vercel_sandbox"):
+            self.adapter_config[hosted_backend] = dict(hosted_config)
 
     def list(self) -> list[dict[str, Any]]:
         return [

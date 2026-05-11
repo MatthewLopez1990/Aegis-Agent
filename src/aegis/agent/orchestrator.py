@@ -125,6 +125,10 @@ class AgentOrchestrator:
             ssh_allowed_hosts=config.execution.ssh_allowed_hosts,
             ssh_key_secret=config.execution.ssh_key_secret,
             ssh_timeout_seconds=config.execution.ssh_timeout_seconds,
+            hosted_sandbox_api_url=config.execution.hosted_sandbox_api_url,
+            hosted_sandbox_allowed_hosts=config.execution.hosted_sandbox_allowed_hosts,
+            hosted_sandbox_token_secret=config.execution.hosted_sandbox_token_secret,
+            hosted_sandbox_timeout_seconds=config.execution.hosted_sandbox_timeout_seconds,
         )
         self.tool_catalog = ToolCatalog()
         self.tools = BuiltinToolExecutor(

@@ -78,7 +78,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - Live OpenAI, Anthropic, Mistral, Cohere, OpenRouter, Ollama, LM Studio, and custom OpenAI-compatible model invocation through the local secrets broker, plus model auth login.
 - Scheduler with review activation and governed run-due execution, session history, Kanban work boards, governed stdio MCP calls, SOUL/context-file loader, and dry-run migration inspection.
 - Built-in governed tool catalog with 47+ tools covering browser, web, files, shell, memory, media, voice, subagent, research, and MCP capabilities.
-- Seven execution backend definitions: local, Docker, SSH, Singularity, Modal, Daytona, and Vercel Sandbox. Docker and SSH are opt-in; approved runs emit activation, execution, and cleanup receipts, with Docker enforcing container limits and SSH requiring allowlisted hosts plus brokered private-key handles.
+- Seven execution backend definitions: local, Docker, SSH, Singularity, Modal, Daytona, and Vercel Sandbox. Docker, SSH, and hosted sandbox submissions are opt-in; approved runs emit activation, execution, and cleanup receipts, with Docker enforcing container limits, SSH requiring allowlisted hosts plus brokered private-key handles, and hosted sandbox calls requiring allowlisted HTTPS APIs plus brokered tokens.
 - Virtual skill hub facade representing large external registries without auto-downloading untrusted code.
 - Governed skill manifests, signed external skill manifests, and runtime permission enforcement.
 - Built-in safe project summary skill and disabled workflow candidate builder.
@@ -93,7 +93,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - HTTP is mock-mode by default and requires `live_http_reads = true` plus an allowlisted domain for live reads; redirects are not followed by the governed connector.
 - Connectors that need real credentials are mock or placeholder implementations.
 - Filesystem writes and shell execution are intentionally constrained.
-- Hosted remote execution backends remain disabled until provider-specific sandbox adapters and rollback receipts are implemented.
+- Hosted remote execution uses a guarded generic submission adapter today; deeper provider-specific lifecycle controls and rollback APIs still need to be implemented before broad production rollout.
 - Live third-party integrations still need per-provider credential flows, rate limiting, sandbox hardening, rollback logic, and tests before they should be enabled broadly.
 
 See `docs/getting-started.md`, `docs/security.md`, and `docs/architecture.md` for details.

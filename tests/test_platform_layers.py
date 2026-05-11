@@ -16,6 +16,7 @@ from aegis.migration.openclaw import inspect_hermes_home, inspect_openclaw_home,
 from aegis.personality.context import ContextFileLoader
 from aegis.product.capabilities import build_product_dashboard
 from aegis.security.taint import RiskLevel
+import aegis.tools.executor as executor_module
 
 
 class PlatformLayerTests(unittest.TestCase):
@@ -1033,6 +1034,69 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertFalse(rejected_command["ok"])
             self.assertEqual(rejected_command["status"], "scope_rejected")
 
+    def test_hosted_sandbox_backend_uses_brokered_token_and_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "",
+                        "[execution]",
+                        'enabled_backends = ["local", "modal"]',
+                        'hosted_sandbox_api_url = "https://sandbox.example.com/run"',
+                        'hosted_sandbox_allowed_hosts = ["sandbox.example.com"]',
+                        'hosted_sandbox_token_secret = "HOSTED_TOKEN"',
+                        "hosted_sandbox_timeout_seconds = 6",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="HOSTED_TOKEN", value="hosted_raw_secret")
+            captured: dict[str, object] = {}
+
+            original_open = executor_module._open_without_redirects
+            original_private_check = executor_module._private_network_error
+            executor_module._private_network_error = lambda hostname: None
+            executor_module._open_without_redirects = lambda request, *, timeout: _FakeSandboxResponse(request, timeout, captured)
+            try:
+                selected = orchestrator.tools.execute("terminal_backend", {"backend": "modal"}, approved=True)
+                run = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "modal", "command": "python3 script.py"}, approved=True)
+            finally:
+                executor_module._open_without_redirects = original_open
+                executor_module._private_network_error = original_private_check
+
+            self.assertTrue(selected["ok"])
+            self.assertTrue(run["ok"])
+            self.assertEqual(run["status"], "submitted")
+            self.assertEqual(run["job_id"], "job-123")
+            self.assertEqual(run["activation_receipt"]["backend"], "modal")
+            self.assertFalse(run["activation_receipt"]["raw_secret_values_included"])
+            self.assertFalse(run["execution_receipt"]["raw_command_logged"])
+            self.assertFalse(run["execution_receipt"]["raw_response_body_included"])
+            self.assertEqual(run["cleanup_receipt"]["status"], "provider_managed")
+            self.assertEqual(captured["authorization"], "Bearer hosted_raw_secret")
+            self.assertIn("command_args", json.loads(str(captured["body"])))
+            self.assertNotIn("hosted_raw_secret", json.dumps(run, sort_keys=True))
+            dashboard = build_product_dashboard(orchestrator)
+            live_gap = next(item for item in dashboard["live_gap_backlog"] if item["area"] == "remote_backend_activation")
+            self.assertEqual(live_gap["status"], "remote_backends_partially_live")
+            self.assertIn("modal", {adapter["name"] for adapter in live_gap["implemented_backend_adapters"]})
+
+            rejected = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "modal", "command": "python3 -m http.server"}, approved=True)
+            self.assertFalse(rejected["ok"])
+            self.assertEqual(rejected["status"], "scope_rejected")
+            invalid_backend = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "unknown", "command": "uptime"}, approved=True)
+            self.assertFalse(invalid_backend["ok"])
+            self.assertEqual(invalid_backend["status"], "scope_rejected")
+
     def test_context_loader_and_migration_dry_runs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1303,6 +1367,24 @@ class PlatformLayerTests(unittest.TestCase):
         self.assertIn("renderTaskTimeline", app_js)
         self.assertIn("renderApprovalDetail", app_js)
         self.assertIn("applySectionVisibility", app_js)
+
+
+class _FakeSandboxResponse:
+    def __init__(self, request, timeout: float, captured: dict[str, object]) -> None:  # noqa: ANN001
+        captured["authorization"] = request.headers.get("Authorization")
+        captured["body"] = request.data.decode("utf-8")
+        captured["timeout"] = timeout
+        self.status = 202
+        self.code = 202
+
+    def __enter__(self) -> "_FakeSandboxResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:  # noqa: ANN001
+        return False
+
+    def read(self, limit: int = -1) -> bytes:
+        return b'{"job_id":"job-123","secret":"response_secret_should_not_surface"}'
 
 
 if __name__ == "__main__":
