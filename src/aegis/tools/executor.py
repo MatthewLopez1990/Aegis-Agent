@@ -1467,6 +1467,10 @@ class BuiltinToolExecutor:
         }[name]
         action = str(params.get("action", default_action))
         session_id = str(params["session_id"]) if params.get("session_id") else None
+        live_actions = {"live_navigate", "live_click", "live_fill", "live_screenshot", "live_render_screenshot", "live_evaluate"}
+        if action in live_actions or bool(params.get("live")):
+            selector = str(params["selector"]) if params.get("selector") else None
+            return self.browser.deny_live_automation(action=action, session_id=session_id, selector=selector)
         if action == "session":
             return self.browser.create_session(label=str(params.get("label", "Browser session")))
         if action == "navigate":

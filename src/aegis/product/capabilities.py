@@ -276,7 +276,13 @@ def _live_gap_backlog(
                 "Gate any page mutation, recording, or generated media write behind approval.",
             ],
             "required_controls": ["sandbox_isolation", "taint_preservation", "artifact_hashing", "human_approval"],
-            "verification_gates": ["unsupported_selector_truthfulness", "artifact_hash_stability", "approval_required_mutation", "no_raw_secret_capture"],
+            "verification_gates": [
+                "unsupported_selector_truthfulness",
+                "artifact_hash_stability",
+                "approval_required_mutation",
+                "no_raw_secret_capture",
+                "disabled_live_browser_denial",
+            ],
             "implemented_hardening_controls": [
                 {
                     "control": "unsupported_selector_truthfulness",
@@ -310,6 +316,10 @@ def _live_gap_backlog(
                     "control": "browser_automation_boundary_receipts",
                     "evidence": "browser snapshot and render evidence records cookie, storage, script, subresource, network, and mutation boundaries before live automation is enabled",
                 },
+                {
+                    "control": "disabled_live_browser_denial",
+                    "evidence": "explicit live browser automation requests fail closed with activation preflight blockers",
+                },
             ],
             "remaining_depth_work": [
                 "live_browser_automation_adapter",
@@ -327,6 +337,7 @@ def _live_gap_backlog(
                     "os_level_media_worker_limits",
                     "provider_backed_media_artifacts",
                     "browser_automation_boundary_receipts",
+                    "disabled_live_browser_denial",
                 ],
                 remaining_depth_work=[
                     "live_browser_automation_adapter",
@@ -429,8 +440,8 @@ def _browser_media_operator_checklist(implemented_controls: list[str], remaining
         },
         {
             "control": "live_browser_automation",
-            "state": "not_started" if "live_browser_automation_adapter" in remaining else "ready_for_review",
-            "detail": "Real page automation stays blocked until network, cookie, JavaScript, and mutation boundaries are enforceable.",
+            "state": "blocked_with_preflight" if "disabled_live_browser_denial" in implemented else "not_started" if "live_browser_automation_adapter" in remaining else "ready_for_review",
+            "detail": "Real page automation stays blocked with explicit activation evidence until network, cookie, JavaScript, and mutation boundaries are enforceable.",
         },
         {
             "control": "provider_media_depth",

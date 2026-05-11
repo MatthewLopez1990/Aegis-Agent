@@ -78,6 +78,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(checklist["human_approval"]["state"], "enforced")
             self.assertEqual(checklist["receipt_redaction"]["state"], "enforced")
             self.assertEqual(checklist["promotion_scope"]["state"], "not_started")
+            browser_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "browser_and_media_depth")
+            self.assertIn("disabled_live_browser_denial", browser_gap["verification_gates"])
+            browser_checklist = {item["control"]: item for item in browser_gap["operator_checklist"]}
+            self.assertEqual(browser_checklist["live_browser_automation"]["state"], "blocked_with_preflight")
             backend_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "remote_backend_activation")
             self.assertEqual(backend_gap["status"], "backend_adapters_available_unconfigured")
             self.assertIn("available_backend_adapters", backend_gap)

@@ -162,6 +162,7 @@ class BrowserController:
         session = self._require_session(session_id)
         interactive_elements = _normalize_interactive_elements(session.get("interactive_elements"))
         selector_inventory = _selector_inventory(interactive_elements)
+        activation = _live_browser_activation_preflight()
         response = {
             "ok": True,
             "session_id": session_id,
@@ -179,6 +180,8 @@ class BrowserController:
                 "real_selector_events_dispatched": False,
                 "dom_mutation_supported": False,
             },
+            "activation": activation,
+            "preflight_status": activation["preflight_status"],
             "automation_boundaries": _browser_automation_boundaries(rendered=False),
             "mode": "http_content_no_js_selector_inventory",
             "taint": "WEB_CONTENT",
@@ -187,6 +190,27 @@ class BrowserController:
             "browser.selector_inventory_inspected",
             {"session_id": session_id, "url": _session_url(session), "interactive_element_count": len(interactive_elements)},
         )
+        return response
+
+    def deny_live_automation(self, *, action: str, session_id: str | None = None, selector: str | None = None) -> dict[str, Any]:
+        session = self._require_session(session_id) if session_id else None
+        activation = _live_browser_activation_preflight()
+        response = {
+            "ok": False,
+            "status": "blocked_pending_live_browser_adapter",
+            "action": action,
+            "session_id": session_id,
+            "url": _session_url(session) if session is not None else None,
+            "selector": _redacted_string(selector, limit=500) if selector is not None else None,
+            "reason": "live browser automation is disabled until isolation, network, script, storage, approval, and receipt controls are implemented",
+            "activation_status": activation["status"],
+            "preflight_status": activation["preflight_status"],
+            "activation": activation,
+            "automation_boundaries": _browser_automation_boundaries(rendered=False),
+            "unsupported_live_actions": _unsupported_live_browser_actions(),
+            "mode": "live_browser_adapter_denied",
+        }
+        self.audit_logger.append("browser.live_automation_denied", response)
         return response
 
     def screenshot(self, *, session_id: str) -> dict[str, Any]:
@@ -549,6 +573,45 @@ def _unsupported_live_browser_actions() -> list[str]:
         "dom_event_dispatch",
         "real_page_mutation",
     ]
+
+
+def _live_browser_activation_preflight() -> dict[str, Any]:
+    blockers = [
+        {"control": "live_browser_adapter", "detail": "no real browser automation adapter is enabled"},
+        {"control": "ephemeral_profile", "detail": "live automation must use a per-run browser profile with no persistent cookies or storage"},
+        {"control": "network_allowlist", "detail": "navigation and subresource requests must pass configured provider/domain allowlists"},
+        {"control": "script_policy", "detail": "page JavaScript execution policy must be explicit before live DOM automation"},
+        {"control": "cookie_and_storage_isolation", "detail": "cookies, local storage, and session storage must be isolated and redacted in receipts"},
+        {"control": "approval_gated_mutation", "detail": "real clicks, form fills, downloads, uploads, and page mutations must require matching approval"},
+        {"control": "redacted_artifact_receipts", "detail": "screenshots, DOM captures, console logs, and network traces must be hash-receipted and secret-redacted"},
+    ]
+    return {
+        "status": "live_browser_adapter_required",
+        "preflight_status": "blocked",
+        "configured_controls": [
+            "http_connector_navigation_allowlist",
+            "virtual_interaction_approval_gate",
+            "browser_automation_boundary_receipts",
+            "private_artifact_storage",
+            "artifact_hash_receipts",
+            "secret_redaction",
+        ],
+        "required_controls": [blocker["control"] for blocker in blockers],
+        "blockers": blockers,
+        "verification_gates": [
+            "disabled_live_browser_denial",
+            "allowlisted_navigation",
+            "script_policy_enforcement",
+            "cookie_storage_isolation",
+            "approval_required_mutation",
+            "redacted_artifact_receipts",
+        ],
+        "next_steps": [
+            "Add a browser automation adapter only after navigation, subresource, script, cookie, and storage boundaries are enforceable.",
+            "Keep every real page mutation approval-gated and bind approvals to the exact selector/action payload.",
+            "Record redacted hash receipts for screenshots, DOM snapshots, downloads, uploads, console logs, and network traces.",
+        ],
+    }
 
 
 def _title_from_text(content: str, *, fallback: str) -> str:
