@@ -331,6 +331,7 @@ class BuiltinToolExecutor:
         root = _workspace_root(self.connectors)
         artifact_dir = root / ".aegis" / "tool-artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
+        artifact_dir.chmod(0o700)
         if name == "tts":
             text = str(params.get("text", ""))
             path = artifact_dir / f"{name}-{uuid4()}.wav"
@@ -424,6 +425,7 @@ class BuiltinToolExecutor:
             "mode": "local_placeholder_artifact",
         }
         path.write_text("\n".join(f"{key}: {value}" for key, value in content.items() if value is not None), encoding="utf-8")
+        path.chmod(0o600)
         key = "asset_path"
         if name == "tts":
             key = "asset_path"
@@ -1613,6 +1615,7 @@ def _write_tts_tone(path: Path, *, text: str) -> float:
             value = amplitude if phase < sample_rate // 2 else -amplitude
             frames.extend(struct.pack("<h", value))
         handle.writeframes(bytes(frames))
+    path.chmod(0o600)
     return round(duration_seconds, 3)
 
 
@@ -1624,6 +1627,7 @@ def _write_silence_wav(path: Path, *, duration_seconds: float) -> None:
         handle.setsampwidth(2)
         handle.setframerate(sample_rate)
         handle.writeframes(b"\x00\x00" * frame_count)
+    path.chmod(0o600)
 
 
 def _write_prompt_png(path: Path, *, prompt: str, source: str = "") -> tuple[int, int]:
@@ -1648,6 +1652,7 @@ def _write_prompt_png(path: Path, *, prompt: str, source: str = "") -> tuple[int
         + _png_chunk(b"IDAT", zlib.compress(bytes(rows), level=9))
         + _png_chunk(b"IEND", b"")
     )
+    path.chmod(0o600)
     return width, height
 
 
@@ -2120,6 +2125,7 @@ def _write_tool_artifact_metadata(
         ],
     }
     metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+    metadata_path.chmod(0o600)
     return metadata_path
 
 

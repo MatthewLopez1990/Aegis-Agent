@@ -32,7 +32,7 @@ Implemented tool paths include calculator, filesystem read/write, allowlisted sh
 
 Image generation and edit-preview tools create deterministic local PNG files from prompt and source metadata after approval. They are useful for exercising artifact, review, and GUI flows without a network image provider, but they do not claim photorealistic model output.
 
-When a tool returns an artifact under `.aegis/tool-artifacts`, the local API adds an authenticated `artifact_url` such as `/tool-artifacts/<filename>`. The endpoint is constrained to a single artifact filename, rejects traversal, sends `X-Content-Type-Options: nosniff`, and only serves safe local content types for GUI preview/download workflows.
+When a tool returns an artifact under `.aegis/tool-artifacts`, the local API adds an authenticated `artifact_url` such as `/tool-artifacts/<filename>`. Generated media artifacts and prompt-free metadata sidecars are written with private file permissions, the artifact directory is kept private, and the endpoint is constrained to a single artifact filename, rejects traversal, sends `X-Content-Type-Options: nosniff`, and only serves safe local content types for GUI preview/download workflows.
 
 Web search live reads use the `http` connector. To enable them, configure `live_http_reads = true`, allowlist the provider domain, and pass `query` plus a provider-specific `provider_url` that returns JSON with `results`, `items`, `organic_results`, or `webPages.value`. Without `provider_url`, the tool performs a bounded local workspace text search and marks that a live connector is required for real web search.
 

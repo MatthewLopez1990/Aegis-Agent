@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import stat
 import tempfile
 import subprocess
 import sqlite3
@@ -300,6 +301,9 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertRegex(generated_image["artifact_sha256"], r"^[0-9a-f]{64}$")
             self.assertEqual(generated_image["artifact_bytes"], Path(generated_image["asset_path"]).stat().st_size)
             generated_metadata = json.loads(Path(generated_image["metadata_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(stat.S_IMODE(Path(generated_image["asset_path"]).stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(Path(generated_image["metadata_path"]).stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(Path(generated_image["asset_path"]).parent.stat().st_mode), 0o700)
             self.assertEqual(generated_metadata["artifact_receipt"]["artifact_sha256"], generated_image["artifact_sha256"])
             self.assertEqual(generated_metadata["sandbox_receipt"]["sandbox_profile"], "local_artifact_worker_no_provider")
             self.assertFalse(generated_metadata["sandbox_receipt"]["ambient_workspace_read"])
@@ -313,6 +317,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertTrue(Path(speech["asset_path"]).exists())
             self.assertEqual(Path(speech["asset_path"]).suffix, ".wav")
             self.assertEqual(Path(speech["asset_path"]).read_bytes()[:4], b"RIFF")
+            self.assertEqual(stat.S_IMODE(Path(speech["asset_path"]).stat().st_mode), 0o600)
             self.assertEqual(speech["mode"], "local_wav_tone")
             self.assertRegex(speech["artifact_sha256"], r"^[0-9a-f]{64}$")
             speech_metadata = json.loads(Path(speech["metadata_path"]).read_text(encoding="utf-8"))
@@ -321,6 +326,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertTrue(Path(voice["asset_path"]).exists())
             self.assertEqual(Path(voice["asset_path"]).suffix, ".wav")
             self.assertEqual(Path(voice["asset_path"]).read_bytes()[:4], b"RIFF")
+            self.assertEqual(stat.S_IMODE(Path(voice["metadata_path"]).stat().st_mode), 0o600)
             self.assertEqual(voice["mode"], "local_wav_silence")
             self.assertEqual(voice["duration_seconds"], 1.0)
             self.assertRegex(voice["artifact_sha256"], r"^[0-9a-f]{64}$")
