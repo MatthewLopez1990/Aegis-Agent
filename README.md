@@ -87,7 +87,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 ## Important Limits
 
-- OpenAI, Anthropic, Mistral, Cohere, OpenRouter, Ollama, LM Studio, and configured custom OpenAI-compatible invocation are connected; Google still needs a live adapter.
+- OpenAI, Anthropic, Google Gemini, Mistral, Cohere, OpenRouter, Ollama, LM Studio, and configured custom OpenAI-compatible invocation are connected through governed model adapters.
 - Model-provider egress, including local endpoints with a base URL, must pass the configured policy network allowlist.
 - Channel adapters are safe mock adapters until credentials and approval flows are configured; live webhook, chat webhook, and SMTP email slices are opt-in and store sanitized receipts when enabled.
 - HTTP is mock-mode by default and requires `live_http_reads = true` plus an allowlisted domain for live reads; redirects are not followed by the governed connector.

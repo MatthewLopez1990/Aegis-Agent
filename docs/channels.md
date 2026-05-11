@@ -23,7 +23,7 @@ Security behavior:
 - The email channel can send approved SMTP messages through brokered credentials, a network-allowlisted SMTP host, and sanitized channel events.
 - Recent channel activity is inspectable from the local API, CLI, TUI, and web GUI.
 - Real adapters must use brokered secrets, signature verification, rate limits, and scoped send approval.
-- When outbound webhook, chat webhook, or SMTP adapters are enabled, the product dashboard lists them as redacted implemented live adapters in the provider/channel live-gap backlog without exposing URLs, secret names, or message payloads.
+- When outbound webhook, chat webhook, or SMTP adapters are enabled, the product dashboard lists them as redacted implemented live adapters in the provider/channel live-gap backlog without exposing URLs, secret names, or message payloads. When disabled by default, the same channel families are listed as redacted available opt-in adapters so operators can distinguish missing implementation from unconfigured credentials.
 
 ## Signed Webhook
 

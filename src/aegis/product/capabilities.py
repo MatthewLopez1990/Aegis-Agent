@@ -30,6 +30,7 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
     limited_or_facade_tools = sum(item["count"] for item in implementation_readiness if item["state"] != "ready")
     configured_providers = [provider for provider in providers if provider["auth_configured"] or provider["local"]]
     live_connector_adapters = _live_connector_adapters(connectors, orchestrator.config)
+    available_live_connector_adapters = _available_live_connector_adapters(connectors, orchestrator.config)
     session_bound_recent_tasks = [task for task in task_rows if task.get("session_id")]
     competitive_targets = _competitive_targets()
 
@@ -132,7 +133,15 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
             },
         ],
         "competitive_targets": competitive_targets,
-        "live_gap_backlog": _live_gap_backlog(competitive_targets, implementation_readiness, configured_providers, tools, live_connector_adapters, backends),
+        "live_gap_backlog": _live_gap_backlog(
+            competitive_targets,
+            implementation_readiness,
+            configured_providers,
+            tools,
+            live_connector_adapters,
+            available_live_connector_adapters,
+            backends,
+        ),
         "implementation_readiness": implementation_readiness,
         "recent_tasks": tasks,
         "pending_approvals": pending_approvals[:12],
@@ -185,6 +194,7 @@ def _live_gap_backlog(
     configured_providers: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     live_connector_adapters: list[dict[str, Any]],
+    available_live_connector_adapters: list[dict[str, Any]],
     backends: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     readiness_by_state = {row["state"]: row for row in readiness}
@@ -201,10 +211,18 @@ def _live_gap_backlog(
     facade_tools = readiness_by_state.get("facade", {}).get("sample_tools", [])
     backend_tools = readiness_by_state.get("backend_gate", {}).get("sample_tools", [])
     implemented_backends = _implemented_backend_adapters(backends)
-    provider_channel_status = "live_connectors_partially_live" if live_connector_adapters else "live_connector_work_required"
+    provider_channel_status = (
+        "live_connectors_partially_live"
+        if live_connector_adapters
+        else "live_connectors_available_unconfigured"
+        if available_live_connector_adapters
+        else "live_connector_work_required"
+    )
     provider_channel_detail = (
         "Some provider or channel live adapters are configured; continue promoting remaining service integrations through scoped, allowlisted, approval-gated adapters."
         if live_connector_adapters
+        else "Live-capable connector adapters exist but are disabled by default; configure scoped credentials, allowlists, and approvals before production use."
+        if available_live_connector_adapters
         else "Promote write-capable service and channel integrations from mock-default mode into configured, scoped, allowlisted, approval-gated live adapters."
     )
     return [
@@ -216,6 +234,7 @@ def _live_gap_backlog(
             "sample_tools": mock_write_tools[:8],
             "live_read_surfaces": live_read_connector_tools[:8],
             "implemented_live_adapters": live_connector_adapters,
+            "available_live_adapters": available_live_connector_adapters,
             "next_steps": [
                 "Add per-provider credential handles and domain allowlists.",
                 "Keep live writes approval-gated with redacted receipts.",
@@ -287,6 +306,54 @@ def _live_connector_adapters(connectors: list[dict[str, Any]], config: Any) -> l
     if getattr(config.chat_webhook, "outbound_enabled", False):
         adapters.append({"kind": "channel", "name": "chat_webhook", "status": "live_outbound_enabled", "raw_secret_values_included": False})
     return adapters
+
+
+def _available_live_connector_adapters(connectors: list[dict[str, Any]], config: Any) -> list[dict[str, Any]]:
+    configured = {(adapter["kind"], adapter["name"]) for adapter in _live_connector_adapters(connectors, config)}
+    adapters: list[dict[str, Any]] = []
+    for connector in connectors:
+        name = str(connector.get("name", ""))
+        if name in _LIVE_CONNECTOR_CAPABILITIES and ("connector", name) not in configured:
+            adapters.append(
+                {
+                    "kind": "connector",
+                    "name": name,
+                    "status": "available_opt_in",
+                    "capabilities": list(_LIVE_CONNECTOR_CAPABILITIES[name]),
+                    "required_controls": ["enable_live_writes", "network_allowlist", "human_approval", "redacted_receipts"],
+                    "raw_secret_values_included": False,
+                }
+            )
+    for name in ("webhook", "email", "chat_webhook"):
+        if ("channel", name) not in configured:
+            adapters.append(
+                {
+                    "kind": "channel",
+                    "name": name,
+                    "status": "available_opt_in",
+                    "capabilities": list(_LIVE_CHANNEL_CAPABILITIES[name]),
+                    "required_controls": ["explicit_channel_config", "human_approval", "secret_broker_or_allowlist", "redacted_receipts"],
+                    "raw_secret_values_included": False,
+                }
+            )
+    return adapters
+
+
+_LIVE_CONNECTOR_CAPABILITIES = {
+    "github": ("issue_comment_write", "issue_create"),
+    "gitlab": ("issue_note_write", "merge_request_note_write"),
+    "generic_rest": ("https_rest_write",),
+    "mock_graph": ("calendar_write", "email_write", "contact_write"),
+    "mock_servicenow": ("ticket_write",),
+    "mock_messaging": ("message_send",),
+}
+
+
+_LIVE_CHANNEL_CAPABILITIES = {
+    "webhook": ("signed_webhook_send",),
+    "email": ("smtp_send",),
+    "chat_webhook": ("chat_webhook_send",),
+}
 
 
 def _implemented_backend_adapters(backends: list[dict[str, Any]]) -> list[dict[str, Any]]:

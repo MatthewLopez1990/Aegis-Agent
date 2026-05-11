@@ -56,6 +56,10 @@ class CliTests(unittest.TestCase):
             self.assertIn("live_connector_receipts.redacted_write_summary", provider_gap["evaluation_scenarios"])
             self.assertIn("calendar_write", provider_gap["sample_tools"])
             self.assertIn("calendar_read", provider_gap["live_read_surfaces"])
+            self.assertEqual(provider_gap["status"], "live_connectors_available_unconfigured")
+            self.assertIn("available_live_adapters", provider_gap)
+            self.assertIn("mock_graph", {adapter["name"] for adapter in provider_gap["available_live_adapters"]})
+            self.assertTrue(all(adapter["raw_secret_values_included"] is False for adapter in provider_gap["available_live_adapters"]))
 
     def test_evaluation_readiness_can_block_on_live_parity_gaps(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

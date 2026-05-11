@@ -887,7 +887,13 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("service_ticket_write", backlog["provider_and_channel_live_connectors"]["sample_tools"])
             self.assertNotIn("service_ticket_read", backlog["provider_and_channel_live_connectors"]["sample_tools"])
             self.assertIn("service_ticket_read", backlog["provider_and_channel_live_connectors"]["live_read_surfaces"])
+            self.assertEqual(backlog["provider_and_channel_live_connectors"]["status"], "live_connectors_available_unconfigured")
             self.assertEqual(backlog["provider_and_channel_live_connectors"]["implemented_live_adapters"], [])
+            available_live_adapter_names = {adapter["name"] for adapter in backlog["provider_and_channel_live_connectors"]["available_live_adapters"]}
+            self.assertIn("mock_graph", available_live_adapter_names)
+            self.assertIn("github", available_live_adapter_names)
+            self.assertIn("email", available_live_adapter_names)
+            self.assertTrue(all(adapter["raw_secret_values_included"] is False for adapter in backlog["provider_and_channel_live_connectors"]["available_live_adapters"]))
             self.assertIn("human_approval", backlog["provider_and_channel_live_connectors"]["required_controls"])
             self.assertIn("receipt_redaction", backlog["provider_and_channel_live_connectors"]["verification_gates"])
             self.assertIn("live_connector_receipts.redacted_write_summary", backlog["provider_and_channel_live_connectors"]["evaluation_scenarios"])
@@ -942,7 +948,10 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("webhook", adapter_names)
             self.assertIn("email", adapter_names)
             self.assertIn("chat_webhook", adapter_names)
+            self.assertNotIn("generic_rest", {adapter["name"] for adapter in live_gap["available_live_adapters"]})
+            self.assertIn("available_live_adapters", live_gap)
             self.assertTrue(all(adapter["raw_secret_values_included"] is False for adapter in live_gap["implemented_live_adapters"]))
+            self.assertTrue(all(adapter["raw_secret_values_included"] is False for adapter in live_gap["available_live_adapters"]))
             self.assertNotIn("AEGIS_CHAT_WEBHOOK_URL", json.dumps(live_gap, sort_keys=True))
 
     def test_configured_docker_backend_records_activation_execution_and_cleanup_receipts(self) -> None:

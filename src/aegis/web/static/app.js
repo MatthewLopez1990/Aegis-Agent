@@ -258,7 +258,7 @@ const refresh = async () => {
     }));
     setList("live-gap-backlog", dashboard.live_gap_backlog || [], (x) => ({
       title: x.area,
-      detail: `${x.detail} Live reads: ${(x.live_read_surfaces || []).slice(0, 6).join(", ") || "none"}. Live adapters: ${(x.implemented_live_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Backend adapters: ${(x.implemented_backend_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Controls: ${(x.required_controls || []).join(", ") || "none"}. Gates: ${(x.verification_gates || []).join(", ") || "none"}. Evaluations: ${(x.evaluation_scenarios || []).join(", ") || "none"}. Next: ${(x.next_steps || []).slice(0, 2).join(" ")}`,
+      detail: `${x.detail} Live reads: ${(x.live_read_surfaces || []).slice(0, 6).join(", ") || "none"}. Live adapters: ${(x.implemented_live_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Available adapters: ${(x.available_live_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Backend adapters: ${(x.implemented_backend_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Controls: ${(x.required_controls || []).join(", ") || "none"}. Gates: ${(x.verification_gates || []).join(", ") || "none"}. Evaluations: ${(x.evaluation_scenarios || []).join(", ") || "none"}. Next: ${(x.next_steps || []).slice(0, 2).join(" ")}`,
       meta: `${x.status} · ${(x.platforms || []).join(", ")} · tools ${(x.sample_tools || []).slice(0, 6).join(", ") || "none"}`,
     }), "No live gaps");
     setList("competitor-targets", dashboard.competitive_targets, (x) => ({

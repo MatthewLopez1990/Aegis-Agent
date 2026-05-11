@@ -417,6 +417,7 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn("x.next_steps", script)
         self.assertIn("x.live_read_surfaces", script)
         self.assertIn("x.implemented_live_adapters", script)
+        self.assertIn("x.available_live_adapters", script)
         self.assertIn("x.implemented_backend_adapters", script)
         self.assertIn("x.evaluation_scenarios", script)
         self.assertIn("Evaluations:", script)
