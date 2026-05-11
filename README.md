@@ -77,7 +77,8 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - Model provider abstraction for cloud, local, and custom providers with aliases, fallbacks, secret handles, and usage tracking.
 - Live OpenAI, Anthropic, Mistral, Cohere, OpenRouter, Ollama, LM Studio, and custom OpenAI-compatible model invocation through the local secrets broker, plus model auth login.
 - Scheduler with review activation and governed run-due execution, session history, Kanban work boards, governed stdio MCP calls, SOUL/context-file loader, and dry-run migration inspection.
-- Built-in governed tool catalog with 48+ tools covering browser, web, files, shell, memory, media, voice, subagent, research, and MCP capabilities.
+- Built-in governed tool catalog with 69 policy-visible tools covering browser, web, files, shell, memory, media, voice, subagent, research, and MCP capabilities.
+- Browser and media artifact flows now emit private local artifacts, SHA-256 receipts, sandbox metadata, and redacted artifact-facing session fields; the dashboard separates completed browser/media hardening controls from deeper work such as real browser automation boundaries and sandboxed provider-backed media workers.
 - Seven execution backend definitions: local, Docker, SSH, Singularity, Modal, Daytona, and Vercel Sandbox. Docker, SSH, and hosted sandbox submissions are opt-in; approved runs emit activation, execution, and cleanup receipts, with Docker enforcing container limits, SSH requiring allowlisted hosts plus brokered private-key handles, and hosted sandbox calls requiring allowlisted HTTPS APIs plus brokered tokens. The dashboard separates enabled remote adapters from disabled-but-implemented opt-in adapters so operators can distinguish configuration work from missing backend implementation.
 - Virtual skill hub facade representing large external registries without auto-downloading untrusted code.
 - Governed skill manifests, signed external skill manifests, and runtime permission enforcement.
@@ -93,7 +94,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - HTTP is mock-mode by default and requires `live_http_reads = true` plus an allowlisted domain for live reads; redirects are not followed by the governed connector.
 - Connectors that need real credentials are mock or placeholder implementations.
 - Filesystem writes and shell execution are intentionally constrained.
-- Browser rendering is limited to sanitized HTTP-content snapshots; Aegis still does not execute arbitrary page JavaScript or preserve cookies.
+- Browser rendering is limited to sanitized HTTP-content snapshots with private, redacted evidence artifacts; Aegis still does not execute arbitrary page JavaScript or preserve cookies.
 - Hosted remote execution uses a guarded generic submission adapter today; deeper provider-specific lifecycle controls and rollback APIs still need to be implemented before broad production rollout.
 - Live third-party integrations still need per-provider credential flows, rate limiting, sandbox hardening, rollback logic, and tests before they should be enabled broadly.
 
