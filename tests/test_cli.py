@@ -83,6 +83,12 @@ class CliTests(unittest.TestCase):
             self.assertIn("available_backend_adapters", backend_gap)
             self.assertIn("docker", {adapter["name"] for adapter in backend_gap["available_backend_adapters"]})
             self.assertNotIn("singularity", {adapter["name"] for adapter in backend_gap["available_backend_adapters"]})
+            backend_checklist = {item["control"]: item for item in backend_gap["operator_checklist"]}
+            self.assertEqual(backend_checklist["explicit_backend_enablement"]["state"], "required_per_backend")
+            self.assertEqual(backend_checklist["brokered_backend_auth"]["state"], "required_per_backend")
+            self.assertEqual(backend_checklist["scope_limits"]["state"], "enforced")
+            self.assertEqual(backend_checklist["rollback_receipts"]["state"], "enforced")
+            self.assertEqual(backend_checklist["provider_lifecycle_depth"]["state"], "not_started")
 
     def test_evaluation_readiness_can_block_on_live_parity_gaps(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

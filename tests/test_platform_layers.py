@@ -960,6 +960,14 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("ssh", available_backend_names)
             self.assertIn("modal", available_backend_names)
             self.assertNotIn("singularity", available_backend_names)
+            backend_checklist = {item["control"]: item for item in backlog["remote_backend_activation"]["operator_checklist"]}
+            self.assertEqual(backend_checklist["explicit_backend_enablement"]["state"], "required_per_backend")
+            self.assertEqual(backend_checklist["brokered_backend_auth"]["state"], "required_per_backend")
+            self.assertEqual(backend_checklist["scope_limits"]["state"], "enforced")
+            self.assertEqual(backend_checklist["resource_limits"]["state"], "required_per_backend")
+            self.assertEqual(backend_checklist["rollback_receipts"]["state"], "enforced")
+            self.assertEqual(backend_checklist["disabled_backend_denial"]["state"], "enforced")
+            self.assertEqual(backend_checklist["provider_lifecycle_depth"]["state"], "not_started")
 
     def test_provider_backed_media_artifact_uses_allowlisted_brokered_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1209,6 +1217,9 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("ssh", {adapter["name"] for adapter in live_gap["implemented_backend_adapters"]})
             self.assertNotIn("ssh", {adapter["name"] for adapter in live_gap["available_backend_adapters"]})
             self.assertIn("docker", {adapter["name"] for adapter in live_gap["available_backend_adapters"]})
+            backend_checklist = {item["control"]: item for item in live_gap["operator_checklist"]}
+            self.assertEqual(backend_checklist["provider_lifecycle_depth"]["state"], "partial")
+            self.assertEqual(backend_checklist["brokered_backend_auth"]["state"], "required_per_backend")
             self.assertTrue(all(adapter["raw_secret_values_included"] is False for adapter in live_gap["implemented_backend_adapters"]))
             self.assertTrue(all(adapter["raw_secret_values_included"] is False for adapter in live_gap["available_backend_adapters"]))
 
@@ -1276,6 +1287,9 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("modal", {adapter["name"] for adapter in live_gap["implemented_backend_adapters"]})
             self.assertNotIn("modal", {adapter["name"] for adapter in live_gap["available_backend_adapters"]})
             self.assertIn("daytona", {adapter["name"] for adapter in live_gap["available_backend_adapters"]})
+            backend_checklist = {item["control"]: item for item in live_gap["operator_checklist"]}
+            self.assertEqual(backend_checklist["provider_lifecycle_depth"]["state"], "partial")
+            self.assertEqual(backend_checklist["rollback_receipts"]["state"], "enforced")
 
             rejected = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "modal", "command": "python3 -m http.server"}, approved=True)
             self.assertFalse(rejected["ok"])

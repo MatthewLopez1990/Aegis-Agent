@@ -339,6 +339,7 @@ def _live_gap_backlog(
             "sample_tools": backend_tools[:8],
             "implemented_backend_adapters": implemented_backends,
             "available_backend_adapters": available_backends,
+            "operator_checklist": _remote_backend_operator_checklist(implemented_backends, available_backends),
             "next_steps": [
                 "Add backend-specific auth checks through brokered handles.",
                 "Enforce workspace, network, resource, and rollback limits before dispatch.",
@@ -503,6 +504,46 @@ def _available_backend_adapters(backends: list[dict[str, Any]]) -> list[dict[str
             }
         )
     return adapters
+
+
+def _remote_backend_operator_checklist(implemented_backends: list[dict[str, Any]], available_backends: list[dict[str, Any]]) -> list[dict[str, str]]:
+    return [
+        {
+            "control": "explicit_backend_enablement",
+            "state": "required_per_backend",
+            "detail": "Nonlocal backends stay disabled until the runtime config names the exact backend.",
+        },
+        {
+            "control": "brokered_backend_auth",
+            "state": "required_per_backend",
+            "detail": "SSH keys and hosted sandbox tokens must resolve through secret handles, not raw config values.",
+        },
+        {
+            "control": "scope_limits",
+            "state": "enforced",
+            "detail": "Remote dispatch enforces allowed hosts, workspace boundaries, and command argument constraints.",
+        },
+        {
+            "control": "resource_limits",
+            "state": "required_per_backend",
+            "detail": "Container and hosted executions need bounded CPU, memory, timeout, file, and network posture.",
+        },
+        {
+            "control": "rollback_receipts",
+            "state": "enforced",
+            "detail": "Activation, execution, and cleanup receipts are recorded without raw command or secret capture.",
+        },
+        {
+            "control": "disabled_backend_denial",
+            "state": "enforced",
+            "detail": "Backend-gated tools fail closed while a backend is absent, disabled, or outside policy.",
+        },
+        {
+            "control": "provider_lifecycle_depth",
+            "state": "partial" if implemented_backends else "not_started" if available_backends else "needs_adapter",
+            "detail": f"{len(implemented_backends)} nonlocal backends enabled; {len(available_backends)} opt-in adapters still available.",
+        },
+    ]
 
 
 _LIVE_BACKEND_CAPABILITIES = {

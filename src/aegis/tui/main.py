@@ -1689,6 +1689,16 @@ class AegisTui(cmd.Cmd):
                     (("control", "control", 28), ("state", "state", 24), ("detail", "detail", 84)),
                 )
             )
+        backend_gap = next((item for item in dashboard.get("live_gap_backlog", []) if item.get("area") == "remote_backend_activation"), None)
+        if backend_gap:
+            print()
+            print("Remote Backend Readiness")
+            print(
+                _table(
+                    backend_gap.get("operator_checklist", []),
+                    (("control", "control", 30), ("state", "state", 24), ("detail", "detail", 82)),
+                )
+            )
 
     def do_audit(self, arg: str) -> None:
         """audit [export-siem [limit]] -- show audit tail or normalized SIEM JSONL."""

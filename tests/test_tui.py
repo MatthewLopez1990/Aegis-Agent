@@ -92,6 +92,11 @@ class TuiTests(unittest.TestCase):
             self.assertIn("promotion_scope", rendered)
             self.assertIn("artifact_integrity.browser_media_receipts", rendered)
             self.assertIn("backend_activation.remote_execution_disabled", rendered)
+            self.assertIn("Remote Backend Readiness", rendered)
+            self.assertIn("explicit_backend_enablement", rendered)
+            self.assertIn("brokered_backend_auth", rendered)
+            self.assertIn("resource_limits", rendered)
+            self.assertIn("provider_lifecycle_depth", rendered)
 
     def test_tui_completes_commands_and_common_subcommands(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
