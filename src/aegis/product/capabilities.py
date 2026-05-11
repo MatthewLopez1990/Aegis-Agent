@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from aegis.connectors.base import live_connector_activation
+
 
 def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
     """Return a product-facing dashboard without exposing raw secrets or payloads."""
@@ -469,6 +471,13 @@ def _available_live_connector_adapters(connectors: list[dict[str, Any]], config:
                     "status": "available_opt_in",
                     "capabilities": list(_LIVE_CONNECTOR_CAPABILITIES[name]),
                     "required_controls": ["enable_live_writes", "network_allowlist", "human_approval", "redacted_receipts"],
+                    "activation": live_connector_activation(
+                        connector=name,
+                        operation="live_write",
+                        enabled=False,
+                        approved=False,
+                        allowlist=tuple(str(item) for item in connector.get("allowlist", ())),
+                    ),
                     "raw_secret_values_included": False,
                 }
             )
@@ -481,10 +490,30 @@ def _available_live_connector_adapters(connectors: list[dict[str, Any]], config:
                     "status": "available_opt_in",
                     "capabilities": list(_LIVE_CHANNEL_CAPABILITIES[name]),
                     "required_controls": ["explicit_channel_config", "human_approval", "secret_broker_or_allowlist", "redacted_receipts"],
+                    "activation": _live_channel_activation(name),
                     "raw_secret_values_included": False,
                 }
             )
     return adapters
+
+
+def _live_channel_activation(name: str) -> dict[str, Any]:
+    return {
+        "status": "live_channel_required",
+        "preflight_status": "blocked",
+        "required_controls": ["explicit_channel_config", "human_approval", "secret_broker_or_allowlist", "redacted_receipts"],
+        "configured_controls": ["redacted_receipts"],
+        "blockers": [
+            {"control": "explicit_channel_config", "detail": f"{name} outbound channel is not fully enabled"},
+            {"control": "human_approval", "detail": f"{name} outbound sends require approval before delivery"},
+            {"control": "secret_broker_or_allowlist", "detail": f"{name} credentials or provider target must be brokered and allowlisted"},
+        ],
+        "verification_gates": ["disabled_channel_denial", "approved_send", "receipt_redaction"],
+        "next_steps": [
+            f"Configure only the scoped outbound {name} channel needed for the deployment.",
+            "Keep sends approval-gated and store only redacted delivery receipts.",
+        ],
+    }
 
 
 def _live_connector_operator_checklist(

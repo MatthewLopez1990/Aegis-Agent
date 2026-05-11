@@ -32,7 +32,7 @@ import zipfile
 
 from aegis.audit.logger import AuditLogger, redact
 from aegis.browser.controller import BrowserController
-from aegis.connectors.base import ConnectorRequest
+from aegis.connectors.base import ConnectorRequest, ConnectorResult
 from aegis.connectors.http import _open_without_redirects, _private_network_error, _validate_url
 from aegis.connectors.registry import ConnectorRegistry
 from aegis.execution.backends import ExecutionBackendRegistry
@@ -693,7 +693,7 @@ class BuiltinToolExecutor:
                 approved=approved,
             )
         )
-        return {"ok": result.ok, "url": result.data.get("url", params["url"]), "status": result.data.get("status"), "mode": result.data.get("mode"), "accepted": result.data.get("accepted", {}), "rollback": result.rollback, "error": result.error}
+        return {"ok": result.ok, "url": result.data.get("url", params["url"]), "status": result.data.get("status"), "mode": result.data.get("mode"), "accepted": result.data.get("accepted", {}), **_connector_activation_fields(result), "rollback": result.rollback, "error": result.error}
 
     def _execute_web_extract(self, *, params: dict[str, Any]) -> dict[str, Any]:
         read = self.connectors.get("http").read(ConnectorRequest(operation="read", params={"url": str(params["url"])}, scopes=("read",)))
@@ -1244,6 +1244,7 @@ class BuiltinToolExecutor:
             "connector": result.connector,
             "mode": result.data.get("mode", "mock"),
             "accepted": result.data.get("accepted", {}),
+            **_connector_activation_fields(result),
             "rollback": result.rollback,
             "error": result.error,
         }
@@ -1290,6 +1291,7 @@ class BuiltinToolExecutor:
             "connector": result.connector,
             "mode": result.data.get("mode", "mock"),
             "accepted": result.data.get("accepted", {}),
+            **_connector_activation_fields(result),
             "rollback": result.rollback,
             "error": result.error,
         }
@@ -1314,6 +1316,7 @@ class BuiltinToolExecutor:
             "connector": result.connector,
             "mode": result.data.get("mode", "mock"),
             "accepted": result.data.get("accepted", {}),
+            **_connector_activation_fields(result),
             "rollback": result.rollback,
             "error": result.error,
         }
@@ -1324,14 +1327,14 @@ class BuiltinToolExecutor:
         if name == "github_pr":
             if requested in {"comment", "comment_on_pull_request", "write"}:
                 result = connector.write(ConnectorRequest(operation="comment_on_pull_request", params=params, scopes=("write",), approved=approved))
-                return {"ok": result.ok, "operation": "comment_on_pull_request", "connector": result.connector, "accepted": result.data.get("accepted", {}), "rollback": result.rollback, "error": result.error}
+                return {"ok": result.ok, "operation": "comment_on_pull_request", "connector": result.connector, "accepted": result.data.get("accepted", {}), **_connector_activation_fields(result), "rollback": result.rollback, "error": result.error}
             if params.get("provider_url") or params.get("api_url"):
                 return self._execute_github_live_read(kind="pull_request", operation="read_pull_request", params=params)
             result = connector.read(ConnectorRequest(operation="read_pull_request", params=params, scopes=("read",)))
             return {"ok": result.ok, "operation": "read_pull_request", "connector": result.connector, "data": result.data.get("data", {}), "taint": "CONNECTOR_CONTENT", "error": result.error}
         if requested in {"create", "create_issue", "write"}:
             result = connector.write(ConnectorRequest(operation="create_issue", params=params, scopes=("write",), approved=approved))
-            return {"ok": result.ok, "operation": "create_issue", "connector": result.connector, "accepted": result.data.get("accepted", {}), "rollback": result.rollback, "error": result.error}
+            return {"ok": result.ok, "operation": "create_issue", "connector": result.connector, "accepted": result.data.get("accepted", {}), **_connector_activation_fields(result), "rollback": result.rollback, "error": result.error}
         if params.get("provider_url") or params.get("api_url"):
             return self._execute_github_live_read(kind="issue", operation="read_issue", params=params)
         result = connector.read(ConnectorRequest(operation="read_issue", params=params, scopes=("read",)))
@@ -1365,14 +1368,14 @@ class BuiltinToolExecutor:
         if name == "gitlab_merge_request":
             if requested in {"comment", "note", "comment_on_merge_request", "write"}:
                 result = connector.write(ConnectorRequest(operation="comment_on_merge_request", params=params, scopes=("write",), approved=approved))
-                return {"ok": result.ok, "operation": "comment_on_merge_request", "connector": result.connector, "accepted": result.data.get("accepted", {}), "rollback": result.rollback, "error": result.error}
+                return {"ok": result.ok, "operation": "comment_on_merge_request", "connector": result.connector, "accepted": result.data.get("accepted", {}), **_connector_activation_fields(result), "rollback": result.rollback, "error": result.error}
             if params.get("provider_url") or params.get("api_url"):
                 return self._execute_gitlab_live_read(kind="merge_request", operation="read_merge_request", params=params)
             result = connector.read(ConnectorRequest(operation="read_merge_request", params=params, scopes=("read",)))
             return {"ok": result.ok, "operation": "read_merge_request", "connector": result.connector, "data": result.data.get("data", {}), "taint": "CONNECTOR_CONTENT", "error": result.error}
         if requested in {"create", "create_issue", "write"}:
             result = connector.write(ConnectorRequest(operation="create_issue", params=params, scopes=("write",), approved=approved))
-            return {"ok": result.ok, "operation": "create_issue", "connector": result.connector, "accepted": result.data.get("accepted", {}), "rollback": result.rollback, "error": result.error}
+            return {"ok": result.ok, "operation": "create_issue", "connector": result.connector, "accepted": result.data.get("accepted", {}), **_connector_activation_fields(result), "rollback": result.rollback, "error": result.error}
         if params.get("provider_url") or params.get("api_url"):
             return self._execute_gitlab_live_read(kind="issue", operation="read_issue", params=params)
         result = connector.read(ConnectorRequest(operation="read_issue", params=params, scopes=("read",)))
@@ -1451,6 +1454,7 @@ class BuiltinToolExecutor:
             "ticket_id": str(payload.get("id") or payload.get("number") or f"mock-{operation}"),
             "mode": result.data.get("mode", "mock"),
             "accepted": result.data.get("accepted", {}),
+            **_connector_activation_fields(result),
             "rollback": result.rollback,
             "error": result.error,
         }
@@ -1538,6 +1542,13 @@ def safe_eval(expression: str) -> float:
 
 def _jsonish(data: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in data.items() if key != "content"}
+
+
+def _connector_activation_fields(result: ConnectorResult) -> dict[str, Any]:
+    activation = result.data.get("activation")
+    if not isinstance(activation, dict):
+        return {}
+    return {"activation": activation, "preflight_status": activation.get("preflight_status", "unknown")}
 
 
 def _json_object(content: str) -> dict[str, Any]:

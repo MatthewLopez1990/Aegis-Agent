@@ -955,6 +955,11 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("mock_graph", available_live_adapter_names)
             self.assertIn("github", available_live_adapter_names)
             self.assertIn("email", available_live_adapter_names)
+            available_live_adapters = {adapter["name"]: adapter for adapter in backlog["provider_and_channel_live_connectors"]["available_live_adapters"]}
+            self.assertEqual(available_live_adapters["github"]["activation"]["preflight_status"], "blocked")
+            self.assertIn("live_enablement_flag", {blocker["control"] for blocker in available_live_adapters["github"]["activation"]["blockers"]})
+            self.assertEqual(available_live_adapters["email"]["activation"]["status"], "live_channel_required")
+            self.assertIn("explicit_channel_config", {blocker["control"] for blocker in available_live_adapters["email"]["activation"]["blockers"]})
             self.assertTrue(all(adapter["raw_secret_values_included"] is False for adapter in backlog["provider_and_channel_live_connectors"]["available_live_adapters"]))
             checklist = {item["control"]: item for item in backlog["provider_and_channel_live_connectors"]["operator_checklist"]}
             self.assertEqual(checklist["credential_handles"]["state"], "required_per_adapter")
@@ -1382,6 +1387,40 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(docker["preflight_status"], "ready_for_enablement")
             self.assertEqual(docker["activation"]["blockers"], [])
             self.assertIn("container_network_none", docker["activation"]["configured_controls"])
+
+    def test_live_connector_tool_denials_include_activation_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+
+            github = orchestrator.tools.execute(
+                "github_issue",
+                {"operation": "create", "api_url": "https://api.github.com/repos/example/aegis/issues", "title": "Live issue"},
+                approved=True,
+            )
+            self.assertFalse(github["ok"])
+            self.assertEqual(github["preflight_status"], "blocked")
+            self.assertEqual(github["activation"]["status"], "live_connector_required")
+            self.assertIn("live_enablement_flag", {blocker["control"] for blocker in github["activation"]["blockers"]})
+            self.assertFalse(github["activation"]["blockers"][0]["detail"].endswith("GITHUB_TOKEN"))
+
+            calendar = orchestrator.tools.execute(
+                "calendar_write",
+                {"api_url": "https://graph.microsoft.com/v1.0/me/events", "event": {"subject": "Planning"}},
+                approved=True,
+            )
+            self.assertFalse(calendar["ok"])
+            self.assertEqual(calendar["preflight_status"], "blocked")
+            self.assertIn("live_enablement_flag", {blocker["control"] for blocker in calendar["activation"]["blockers"]})
+            self.assertIn("redacted_receipts", calendar["activation"]["configured_controls"])
+
+            rest = orchestrator.tools.execute("rest_call", {"method": "POST", "url": "https://example.com/api", "payload": {"ok": True}}, approved=True)
+            self.assertTrue(rest["ok"])
+            self.assertEqual(rest["data"]["mode"], "mock_write")
+            self.assertEqual(rest["data"]["activation"]["preflight_status"], "blocked")
+            self.assertIn("live_enablement_flag", {blocker["control"] for blocker in rest["data"]["activation"]["blockers"]})
 
     def test_context_loader_and_migration_dry_runs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

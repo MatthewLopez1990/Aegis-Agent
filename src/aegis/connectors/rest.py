@@ -9,7 +9,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request
 
-from aegis.connectors.base import ConnectorRequest, ConnectorResult, require_scope
+from aegis.connectors.base import ConnectorRequest, ConnectorResult, live_connector_activation, require_scope
 from aegis.connectors.http import HttpConnector, _open_without_redirects, _private_network_error, _validate_url
 
 
@@ -33,11 +33,17 @@ class GenericRestConnector(HttpConnector):
 
     def write(self, request: ConnectorRequest) -> ConnectorResult:
         require_scope(request, "write", connector=self.spec.name)
-        if not request.approved:
-            return ConnectorResult(self.spec.name, request.operation, False, {}, error="REST write requires approval")
         url = str(request.params["url"])
         parsed = urlparse(url)
         domain = parsed.hostname or ""
+        if not request.approved:
+            return ConnectorResult(
+                self.spec.name,
+                request.operation,
+                False,
+                {"activation": live_connector_activation(connector=self.spec.name, operation=request.operation, enabled=self.live_writes, approved=False, allowlist=self.allowlist, domain=domain)},
+                error="REST write requires approval",
+            )
         validation_error = _validate_url(parsed)
         if validation_error:
             return ConnectorResult(self.spec.name, request.operation, False, {}, error=validation_error)
@@ -74,6 +80,7 @@ class GenericRestConnector(HttpConnector):
                 "status": 202,
                 "mode": "mock_write",
                 "accepted": summary,
+                "activation": live_connector_activation(connector=self.spec.name, operation=request.operation, enabled=False, approved=True, allowlist=self.allowlist, domain=domain),
             },
             rollback="provider-specific rollback required for REST writes",
         )

@@ -70,7 +70,10 @@ class CliTests(unittest.TestCase):
             self.assertIn("calendar_read", provider_gap["live_read_surfaces"])
             self.assertEqual(provider_gap["status"], "live_connectors_available_unconfigured")
             self.assertIn("available_live_adapters", provider_gap)
-            self.assertIn("mock_graph", {adapter["name"] for adapter in provider_gap["available_live_adapters"]})
+            available_live_adapters = {adapter["name"]: adapter for adapter in provider_gap["available_live_adapters"]}
+            self.assertIn("mock_graph", available_live_adapters)
+            self.assertEqual(available_live_adapters["mock_graph"]["activation"]["preflight_status"], "blocked")
+            self.assertIn("live_enablement_flag", {blocker["control"] for blocker in available_live_adapters["mock_graph"]["activation"]["blockers"]})
             self.assertTrue(all(adapter["raw_secret_values_included"] is False for adapter in provider_gap["available_live_adapters"]))
             checklist = {item["control"]: item for item in provider_gap["operator_checklist"]}
             self.assertEqual(checklist["credential_handles"]["state"], "required_per_adapter")

@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 from urllib.request import Request
 
 from aegis.audit.logger import redact
-from aegis.connectors.base import ConnectorRequest, ConnectorResult, ConnectorSpec, require_scope
+from aegis.connectors.base import ConnectorRequest, ConnectorResult, ConnectorSpec, live_connector_activation, require_scope
 from aegis.connectors.http import _open_without_redirects, _private_network_error, _validate_url
 from aegis.connectors.mock_service import MockServiceConnector
 from aegis.security.secrets_broker import SecretsBroker
@@ -72,17 +72,26 @@ class MockGraphConnector(MockServiceConnector):
         if not self._is_live_write_request(request):
             return super().write(request)
         require_scope(request, "write", connector=self.spec.name)
-        if not request.approved:
-            return ConnectorResult(self.spec.name, request.operation, False, {}, error=f"{_write_label(request.operation)} live write requires approval")
-        if request.operation == "create_event" and not self.live_calendar_writes:
-            return ConnectorResult(self.spec.name, request.operation, False, {}, error="calendar live writes are disabled")
-        if request.operation in {"draft_email", "send_email"} and not self.live_email_writes:
-            return ConnectorResult(self.spec.name, request.operation, False, {}, error="email live writes are disabled")
-        if request.operation in {"create_contact", "update_contact"} and not self.live_contact_writes:
-            return ConnectorResult(self.spec.name, request.operation, False, {}, error="contact live writes are disabled")
         url = str(request.params.get("api_url") or request.params.get("provider_url") or "")
         parsed = urlparse(url)
         domain = parsed.hostname or ""
+        enabled = self._live_enabled_for_operation(request.operation)
+        if not request.approved:
+            return ConnectorResult(
+                self.spec.name,
+                request.operation,
+                False,
+                {"activation": live_connector_activation(connector=self.spec.name, operation=request.operation, enabled=enabled, approved=False, allowlist=self.allowlist, domain=domain)},
+                error=f"{_write_label(request.operation)} live write requires approval",
+            )
+        if not enabled:
+            return ConnectorResult(
+                self.spec.name,
+                request.operation,
+                False,
+                {"activation": live_connector_activation(connector=self.spec.name, operation=request.operation, enabled=False, approved=True, allowlist=self.allowlist, domain=domain)},
+                error=f"{_write_label(request.operation)} live writes are disabled",
+            )
         validation_error = _validate_url(parsed)
         if validation_error:
             return ConnectorResult(self.spec.name, request.operation, False, {}, error=validation_error)
@@ -102,7 +111,13 @@ class MockGraphConnector(MockServiceConnector):
             scopes=(scope,),
         )
         if not handle.present:
-            return ConnectorResult(self.spec.name, request.operation, False, {}, error=f"secret {token_secret!r} is not configured")
+            return ConnectorResult(
+                self.spec.name,
+                request.operation,
+                False,
+                {"activation": live_connector_activation(connector=self.spec.name, operation=request.operation, enabled=True, approved=True, allowlist=self.allowlist, domain=domain, token_present=False)},
+                error=f"secret {token_secret!r} is not configured",
+            )
         try:
             token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="graph_connector")
             if request.operation == "create_event":
@@ -141,6 +156,15 @@ class MockGraphConnector(MockServiceConnector):
 
     def _allowed(self, domain: str) -> bool:
         return any(domain == allowed or domain.endswith(f".{allowed}") for allowed in self.allowlist)
+
+    def _live_enabled_for_operation(self, operation: str) -> bool:
+        if operation == "create_event":
+            return self.live_calendar_writes
+        if operation in {"draft_email", "send_email"}:
+            return self.live_email_writes
+        if operation in {"create_contact", "update_contact"}:
+            return self.live_contact_writes
+        return False
 
     @staticmethod
     def _is_live_write_request(request: ConnectorRequest) -> bool:

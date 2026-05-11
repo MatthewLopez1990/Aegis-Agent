@@ -8,7 +8,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request
 
-from aegis.connectors.base import ConnectorRequest, ConnectorResult, ConnectorSpec, require_scope
+from aegis.connectors.base import ConnectorRequest, ConnectorResult, ConnectorSpec, live_connector_activation, require_scope
 from aegis.connectors.http import _open_without_redirects, _private_network_error, _validate_url
 from aegis.connectors.mock_service import MockServiceConnector, _summarize_params
 from aegis.security.secrets_broker import SecretsBroker
@@ -51,15 +51,27 @@ class MockMessagingConnector(MockServiceConnector):
         if not self._is_live_write_request(request):
             return super().write(request)
         require_scope(request, "write", connector=self.spec.name)
-        if request.operation not in self.write_operations:
-            return ConnectorResult(self.spec.name, request.operation, False, {}, error=f"unsupported messaging write operation: {request.operation}")
-        if not request.approved:
-            return ConnectorResult(self.spec.name, request.operation, False, {}, error="messaging live write requires approval")
-        if not self.live_writes:
-            return ConnectorResult(self.spec.name, request.operation, False, {}, error="messaging live writes are disabled")
         url = str(request.params.get("api_url") or request.params.get("provider_url") or request.params.get("webhook_url") or "")
         parsed = urlparse(url)
         domain = parsed.hostname or ""
+        if request.operation not in self.write_operations:
+            return ConnectorResult(self.spec.name, request.operation, False, {}, error=f"unsupported messaging write operation: {request.operation}")
+        if not request.approved:
+            return ConnectorResult(
+                self.spec.name,
+                request.operation,
+                False,
+                {"activation": live_connector_activation(connector=self.spec.name, operation=request.operation, enabled=self.live_writes, approved=False, allowlist=self.allowlist, domain=domain)},
+                error="messaging live write requires approval",
+            )
+        if not self.live_writes:
+            return ConnectorResult(
+                self.spec.name,
+                request.operation,
+                False,
+                {"activation": live_connector_activation(connector=self.spec.name, operation=request.operation, enabled=False, approved=True, allowlist=self.allowlist, domain=domain)},
+                error="messaging live writes are disabled",
+            )
         validation_error = _validate_url(parsed)
         if validation_error:
             return ConnectorResult(self.spec.name, request.operation, False, {}, error=validation_error)
@@ -78,7 +90,13 @@ class MockMessagingConnector(MockServiceConnector):
             scopes=("messaging:write",),
         )
         if not handle.present:
-            return ConnectorResult(self.spec.name, request.operation, False, {}, error=f"secret {token_secret!r} is not configured")
+            return ConnectorResult(
+                self.spec.name,
+                request.operation,
+                False,
+                {"activation": live_connector_activation(connector=self.spec.name, operation=request.operation, enabled=True, approved=True, allowlist=self.allowlist, domain=domain, token_present=False)},
+                error=f"secret {token_secret!r} is not configured",
+            )
         try:
             token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="mock_messaging_connector")
         except KeyError as exc:

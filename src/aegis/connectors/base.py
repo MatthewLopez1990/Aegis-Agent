@@ -93,3 +93,46 @@ def operation_kind(spec: ConnectorSpec, operation: str) -> str:
     if "execute" in scopes or "write" in scopes:
         return "write"
     return "read"
+
+
+def live_connector_activation(
+    *,
+    connector: str,
+    operation: str,
+    enabled: bool,
+    approved: bool,
+    allowlist: tuple[str, ...] = (),
+    domain: str = "",
+    token_present: bool | None = None,
+) -> dict[str, Any]:
+    configured_controls = ["redacted_receipts"]
+    blockers: list[dict[str, str]] = []
+    if enabled:
+        configured_controls.append("live_enablement_flag")
+    else:
+        blockers.append({"control": "live_enablement_flag", "detail": f"{connector} live writes are disabled"})
+    if approved:
+        configured_controls.append("human_approval")
+    else:
+        blockers.append({"control": "human_approval", "detail": f"{operation} requires approval before a live connector write"})
+    if allowlist and (not domain or any(domain == allowed or domain.endswith(f".{allowed}") for allowed in allowlist)):
+        configured_controls.append("network_allowlist")
+    else:
+        blockers.append({"control": "network_allowlist", "detail": "provider domain must be configured and allowlisted before live writes"})
+    if token_present is True:
+        configured_controls.append("brokered_token")
+    elif token_present is False:
+        blockers.append({"control": "brokered_token", "detail": "provider credential must resolve through the secrets broker"})
+    return {
+        "status": "live_connector_required",
+        "preflight_status": "blocked" if blockers else "ready",
+        "required_controls": ["live_enablement_flag", "network_allowlist", "human_approval", "brokered_token", "redacted_receipts"],
+        "configured_controls": configured_controls,
+        "blockers": blockers,
+        "verification_gates": ["mock_fallback", "disabled_live_write_denial", "approved_write", "receipt_redaction"],
+        "next_steps": [
+            f"Enable only the scoped live-write flag for {connector} after the blockers are cleared.",
+            "Keep provider hosts allowlisted and credentials brokered by secret handle.",
+            "Record redacted write receipts and provider-specific rollback guidance for every live write.",
+        ],
+    }
