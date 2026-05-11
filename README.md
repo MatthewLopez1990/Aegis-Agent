@@ -66,7 +66,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 - CLI task submission, status, resume, evidence, approvals, memory, skills, connectors, and audit commands.
 - Dependency-free local API server for the product dashboard, health checks, connector listing, task submission, status, approvals, schedules, boards, and resume.
-- Dependency-free TUI command deck with an Aegis ASCII identity banner, grouped command palette, and browser GUI for runtime control, task resume/cancel, security posture, approvals, recent tasks, session-linked task recovery, models, channels, tools, schedules, work boards, and audit evidence.
+- Dependency-free TUI command deck with an Aegis ASCII identity banner, grouped command palette, polished `menu` view, and browser GUI for runtime control, task resume/cancel, security posture, approvals, recent tasks, session-linked task recovery, models, channels, tools, schedules, work boards, and audit evidence.
 - Durable SQLite task, memory, skill, and approval records in `.aegis/aegis.db`.
 - Append-only JSONL audit log with secret redaction and hash-chain verification.
 - Context firewall that labels trust classes and quarantines prompt-injection patterns in untrusted content.

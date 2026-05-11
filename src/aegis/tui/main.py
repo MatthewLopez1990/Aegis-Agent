@@ -47,6 +47,8 @@ TOP_LEVEL_COMMANDS = (
     "help",
     "mcp",
     "memory",
+    "menu",
+    "menus",
     "migrate",
     "models",
     "pause",
@@ -1733,6 +1735,15 @@ class AegisTui(cmd.Cmd):
         """help -- show command reference."""
         print(_command_reference())
 
+    def do_menu(self, arg: str) -> None:
+        """menu -- show the grouped command menu."""
+        width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
+        print(_command_menu(width))
+
+    def do_menus(self, arg: str) -> None:
+        """menus -- show the grouped command menu."""
+        self.do_menu(arg)
+
     def do_exit(self, arg: str) -> bool:
         """exit -- quit."""
         return True
@@ -1811,7 +1822,7 @@ class AegisTui(cmd.Cmd):
             ),
             _section(
                 "Command Palette",
-                _command_palette_lines(),
+                _command_palette_lines(compact=True),
                 width,
             ),
             _section(
@@ -2336,14 +2347,13 @@ def _positional_without_flags(parts: list[str], flags: dict[str, int]) -> list[s
 
 
 def _command_reference() -> str:
+    width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
     return "\n".join(
         (
-            _aegis_logo(min(shutil.get_terminal_size((100, 24)).columns, 100)),
+            _aegis_logo(width),
             _paint("Aegis TUI Commands", "36;1"),
             "",
-            "Command Palette",
-            "---------------",
-            *_command_palette_lines(),
+            _command_menu(width),
             "",
             "submit <request>       Submit a governed task",
             "status [task_id]       Show task state and receipt",
@@ -2362,6 +2372,7 @@ def _command_reference() -> str:
             "approve <id> [--admin] Approve a gated action",
             "deny <id> [--admin]    Deny a gated action",
             "dashboard              Runtime command deck",
+            "menu                   Grouped command menu",
             "security               Security controls",
             "capabilities           Capability groups",
             "connectors             Connector health",
@@ -2417,13 +2428,74 @@ def _aegis_logo(width: int) -> str:
     return _boxed_lines("Aegis Identity", art, width)
 
 
-def _command_palette_lines() -> list[str]:
-    return [
-        "Operate  submit, dashboard, tasks, session, status, resume",
-        "Govern   approvals, approve, deny, security, audit, evidence",
-        "Build    models, tools, skills, memory, mcp, repair",
-        "Explore  capabilities, connectors, channels, browser, boards",
-    ]
+COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
+    (
+        "Operate",
+        (
+            ("submit <request>", "start a governed task"),
+            ("dashboard", "runtime command deck"),
+            ("tasks [all|session <id>]", "recent task lanes"),
+            ("session", "active transcript context"),
+            ("status|resume|pause|cancel", "task controls"),
+        ),
+    ),
+    (
+        "Govern",
+        (
+            ("approvals", "pending gates"),
+            ("approval <id>", "inspect before action"),
+            ("approve|deny <id>", "decide gated work"),
+            ("security", "policy posture"),
+            ("audit|evidence|timeline|events", "receipts and replay"),
+        ),
+    ),
+    (
+        "Build",
+        (
+            ("models", "provider routes and auth"),
+            ("tools run <name> <json>", "safe tool execution"),
+            ("skills [hub query]", "governed skill hub"),
+            ("memory search|create|review", "durable memory"),
+            ("mcp|repair|schedules", "extensions and self-repair"),
+        ),
+    ),
+    (
+        "Explore",
+        (
+            ("capabilities", "parity and readiness"),
+            ("connectors|channels", "integration surfaces"),
+            ("browser session|render", "sandboxed browser work"),
+            ("boards|backends", "work and execution planes"),
+        ),
+    ),
+)
+
+
+def _command_palette_lines(*, compact: bool = False) -> list[str]:
+    if compact:
+        return [
+            "Operate  submit, dashboard, tasks, session, status, resume",
+            "Govern   approvals, approve, deny, security, audit, evidence",
+            "Build    models, tools, skills, memory, mcp, repair",
+            "Explore  capabilities, connectors, channels, browser, boards",
+        ]
+    lines: list[str] = []
+    for group, commands in COMMAND_MENU_GROUPS:
+        command_names = ", ".join(command for command, _detail in commands)
+        lines.append(f"{group:<8} {command_names}")
+    return lines
+
+
+def _command_menu(width: int) -> str:
+    lines: list[str] = []
+    for group, commands in COMMAND_MENU_GROUPS:
+        lines.append(f"[{group}]")
+        for command, detail in commands:
+            lines.append(f"  {command:<34} {detail}")
+        lines.append("")
+    if lines and not lines[-1]:
+        lines.pop()
+    return _boxed_lines("Command Menu", lines, width)
 
 
 def _complete_options(options: tuple[str, ...], text: str) -> list[str]:
