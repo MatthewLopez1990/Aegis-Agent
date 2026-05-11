@@ -705,6 +705,7 @@ def _browser_snapshot_evidence_document(
         "rendering_status": "not_rendered",
         "mode": "local_png_session_snapshot_no_dom_render",
         "sandbox_receipt": dict(sandbox_receipt),
+        "automation_boundaries": _browser_automation_boundaries(rendered=False),
         "limitations": [
             "No page JavaScript was executed.",
             "No browser cookies or remote browser profile were used.",
@@ -744,6 +745,7 @@ def _browser_render_evidence_document(
         "rendering_status": "rendered" if render_result.get("ok") else "render_failed",
         "mode": "sanitized_dom_render_no_page_js",
         "sandbox_receipt": dict(sandbox_receipt),
+        "automation_boundaries": _browser_automation_boundaries(rendered=True),
         "limitations": [
             "The rendered HTML is sanitized text and table content derived from the HTTP connector response.",
             "Original page scripts, styles, forms, iframes, and remote subresources were not preserved.",
@@ -768,9 +770,16 @@ def _browser_sandbox_receipt() -> dict[str, Any]:
         "sandbox_profile": "http_content_session_state_no_js",
         "ambient_workspace_read": False,
         "ambient_network": "http_connector_allowlist_only",
+        "navigation_network": "http_connector_allowlist_only",
+        "remote_subresources_loaded": False,
         "cookies_persisted": False,
+        "cookie_jar_persisted": False,
+        "local_storage_persisted": False,
+        "session_storage_persisted": False,
         "javascript_executed": False,
+        "page_javascript_allowed": False,
         "dom_renderer_used": False,
+        "real_page_mutation_allowed": False,
         "raw_secret_capture_allowed": False,
         "writes_confined_to": ".aegis/browser",
     }
@@ -781,14 +790,49 @@ def _browser_render_sandbox_receipt(*, executable: str, exit_code: int | None) -
         "sandbox_profile": "sanitized_http_content_chrome_render",
         "ambient_workspace_read": False,
         "ambient_network": "disabled_for_generated_file_capture",
+        "navigation_network": "disabled_for_generated_file_capture",
+        "remote_subresources_loaded": False,
         "cookies_persisted": False,
+        "cookie_jar_persisted": False,
+        "local_storage_persisted": False,
+        "session_storage_persisted": False,
         "javascript_executed": False,
+        "page_javascript_allowed": False,
         "original_page_dom_executed": False,
         "dom_renderer_used": True,
+        "real_page_mutation_allowed": False,
         "renderer": Path(executable).name,
         "renderer_exit_code": exit_code,
         "raw_secret_capture_allowed": False,
         "writes_confined_to": ".aegis/browser",
+    }
+
+
+def _browser_automation_boundaries(*, rendered: bool) -> dict[str, Any]:
+    return {
+        "boundary_schema": "browser_automation_boundaries_v1",
+        "capture_surface": "sanitized_generated_html" if rendered else "http_content_session_state",
+        "navigation_network": "disabled_for_generated_file_capture" if rendered else "http_connector_allowlist_only",
+        "remote_subresources_loaded": False,
+        "page_javascript_allowed": False,
+        "original_page_dom_executed": False,
+        "cookies_persisted": False,
+        "cookie_jar_persisted": False,
+        "local_storage_persisted": False,
+        "session_storage_persisted": False,
+        "real_selector_events_dispatched": False,
+        "real_page_mutation_allowed": False,
+        "virtual_interactions_only": True,
+        "raw_secret_capture_allowed": False,
+        "required_before_live_browser_adapter": [
+            "ephemeral_profile",
+            "network_allowlist",
+            "subresource_policy",
+            "script_policy",
+            "cookie_and_storage_isolation",
+            "approval_gated_mutation",
+            "redacted_artifact_receipts",
+        ],
     }
 
 

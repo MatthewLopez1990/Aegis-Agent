@@ -301,9 +301,13 @@ def _live_gap_backlog(
                     "control": "provider_backed_media_artifacts",
                     "evidence": "approved image and TTS tools can call allowlisted HTTPS media providers with brokered tokens and redacted artifact receipts",
                 },
+                {
+                    "control": "browser_automation_boundary_receipts",
+                    "evidence": "browser snapshot and render evidence records cookie, storage, script, subresource, network, and mutation boundaries before live automation is enabled",
+                },
             ],
             "remaining_depth_work": [
-                "real_browser_automation_boundaries",
+                "live_browser_automation_adapter",
                 "stricter_platform_media_sandbox_profiles",
                 "provider_specific_media_adapter_expansion",
             ],
