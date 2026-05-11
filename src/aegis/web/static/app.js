@@ -124,6 +124,21 @@ const connectorPolicyMeta = (connector) => {
   ].filter(Boolean).join(" · ");
 };
 
+const backendBlockerSummary = (activation) => {
+  const blockers = activation?.blockers || [];
+  if (!blockers.length) return "none";
+  return blockers.slice(0, 4).map((blocker) => blocker.control || "unknown").join(", ");
+};
+
+const backendActivationSummary = (backends) => {
+  const rows = (backends || []).slice(0, 6).map((backend) => {
+    const activation = backend.activation || {};
+    const blockers = backendBlockerSummary(activation);
+    return `${backend.name}:${activation.preflight_status || activation.status || "unknown"}${blockers !== "none" ? ` blockers ${blockers}` : ""}`;
+  });
+  return rows.join("; ") || "none";
+};
+
 const setFeatureGrid = (id, rows, mapper) => {
   const node = document.getElementById(id);
   node.replaceChildren(
@@ -258,7 +273,7 @@ const refresh = async () => {
     }));
     setList("live-gap-backlog", dashboard.live_gap_backlog || [], (x) => ({
       title: x.area,
-      detail: `${x.detail} Live reads: ${(x.live_read_surfaces || []).slice(0, 6).join(", ") || "none"}. Live adapters: ${(x.implemented_live_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Available adapters: ${(x.available_live_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Backend adapters: ${(x.implemented_backend_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Available backends: ${(x.available_backend_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Readiness checklist: ${(x.operator_checklist || []).slice(0, 8).map((item) => `${item.control}:${item.state}`).join(", ") || "none"}. Hardened: ${(x.implemented_hardening_controls || []).slice(0, 8).map((control) => control.control).join(", ") || "none"}. Remaining depth: ${(x.remaining_depth_work || []).slice(0, 6).join(", ") || "none"}. Controls: ${(x.required_controls || []).join(", ") || "none"}. Gates: ${(x.verification_gates || []).join(", ") || "none"}. Evaluations: ${(x.evaluation_scenarios || []).join(", ") || "none"}. Next: ${(x.next_steps || []).slice(0, 2).join(" ")}`,
+      detail: `${x.detail} Live reads: ${(x.live_read_surfaces || []).slice(0, 6).join(", ") || "none"}. Live adapters: ${(x.implemented_live_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Available adapters: ${(x.available_live_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Backend adapters: ${(x.implemented_backend_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Available backends: ${(x.available_backend_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Backend preflight: ${backendActivationSummary([...(x.implemented_backend_adapters || []), ...(x.available_backend_adapters || [])])}. Readiness checklist: ${(x.operator_checklist || []).slice(0, 8).map((item) => `${item.control}:${item.state}`).join(", ") || "none"}. Hardened: ${(x.implemented_hardening_controls || []).slice(0, 8).map((control) => control.control).join(", ") || "none"}. Remaining depth: ${(x.remaining_depth_work || []).slice(0, 6).join(", ") || "none"}. Controls: ${(x.required_controls || []).join(", ") || "none"}. Gates: ${(x.verification_gates || []).join(", ") || "none"}. Evaluations: ${(x.evaluation_scenarios || []).join(", ") || "none"}. Next: ${(x.next_steps || []).slice(0, 2).join(" ")}`,
       meta: `${x.status} · ${(x.platforms || []).join(", ")} · tools ${(x.sample_tools || []).slice(0, 6).join(", ") || "none"}`,
     }), "No live gaps");
     setList("competitor-targets", dashboard.competitive_targets, (x) => ({
@@ -309,8 +324,8 @@ const refresh = async () => {
     }));
     setList("backends", backends.backends, (x) => ({
       title: x.name,
-      detail: `${x.description}${x.activation?.required_controls?.length ? ` Controls: ${x.activation.required_controls.join(", ")}. Gates: ${x.activation.verification_gates.join(", ")}` : ""}`,
-      meta: `${x.risk_level} · ${x.enabled ? "enabled" : "disabled"} · ${x.activation?.status || "unknown"}`,
+      detail: `${x.description}${x.activation?.required_controls?.length ? ` Controls: ${x.activation.required_controls.join(", ")}. Gates: ${x.activation.verification_gates.join(", ")}. Blockers: ${backendBlockerSummary(x.activation)}` : ""}`,
+      meta: `${x.risk_level} · ${x.enabled ? "enabled" : "disabled"} · ${x.activation?.status || "unknown"} · ${x.activation?.preflight_status || "unknown"}`,
       tone: x.enabled ? "ready" : "",
     }));
     if (!state.browserSessionId && browserSessions.sessions.length) {

@@ -1726,6 +1726,16 @@ class AegisTui(cmd.Cmd):
                     (("control", "control", 30), ("state", "state", 24), ("detail", "detail", 82)),
                 )
             )
+            backend_rows = _backend_preflight_rows(backend_gap)
+            if backend_rows:
+                print()
+                print("Remote Backend Activation Preflight")
+                print(
+                    _table(
+                        backend_rows,
+                        (("backend", "backend", 18), ("preflight", "preflight", 24), ("blockers", "blockers", 70)),
+                    )
+                )
 
     def do_audit(self, arg: str) -> None:
         """audit [export-siem [limit]] -- show audit tail or normalized SIEM JSONL."""
@@ -1907,7 +1917,7 @@ class AegisTui(cmd.Cmd):
             _section(
                 "Live Gap Backlog",
                 [
-                    f"{item['area']}: {item['status']} - gates {', '.join(item.get('verification_gates', [])[:3]) or 'none'} - hardened {', '.join(control.get('control', 'unknown') for control in item.get('implemented_hardening_controls', [])[:8]) or 'none'} - remaining {', '.join(item.get('remaining_depth_work', [])[:3]) or 'none'} - evals {', '.join(item.get('evaluation_scenarios', [])[:2]) or 'none'} - live adapters {', '.join(adapter.get('name', 'unknown') for adapter in item.get('implemented_live_adapters', [])[:3]) or 'none'} - backend adapters {', '.join(adapter.get('name', 'unknown') for adapter in item.get('implemented_backend_adapters', [])[:3]) or 'none'}"
+                    f"{item['area']}: {item['status']} - gates {', '.join(item.get('verification_gates', [])[:3]) or 'none'} - hardened {', '.join(control.get('control', 'unknown') for control in item.get('implemented_hardening_controls', [])[:8]) or 'none'} - remaining {', '.join(item.get('remaining_depth_work', [])[:3]) or 'none'} - evals {', '.join(item.get('evaluation_scenarios', [])[:2]) or 'none'} - live adapters {', '.join(adapter.get('name', 'unknown') for adapter in item.get('implemented_live_adapters', [])[:3]) or 'none'} - backend adapters {', '.join(adapter.get('name', 'unknown') for adapter in item.get('implemented_backend_adapters', [])[:3]) or 'none'} - backend preflight {_backend_preflight_summary(item)}"
                     for item in dashboard.get("live_gap_backlog", [])
                 ],
                 width,
@@ -2643,6 +2653,26 @@ def _stat_line(stats: tuple[tuple[str, object], ...], width: int) -> str:
     cells = [f"{label}: {_paint(str(value), '32;1')}" for label, value in stats]
     line = "  ".join(cells)
     return textwrap.shorten(line, width=width, placeholder="...")
+
+
+def _backend_preflight_rows(gap: dict[str, Any]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for backend in list(gap.get("implemented_backend_adapters", [])) + list(gap.get("available_backend_adapters", [])):
+        activation = backend.get("activation", {}) if isinstance(backend, dict) else {}
+        blockers = activation.get("blockers", []) if isinstance(activation, dict) else []
+        rows.append(
+            {
+                "backend": str(backend.get("name", "unknown")) if isinstance(backend, dict) else "unknown",
+                "preflight": str(activation.get("preflight_status") or activation.get("status") or "unknown") if isinstance(activation, dict) else "unknown",
+                "blockers": ", ".join(str(blocker.get("control", "unknown")) for blocker in blockers[:4]) if blockers else "none",
+            }
+        )
+    return rows
+
+
+def _backend_preflight_summary(gap: dict[str, Any]) -> str:
+    rows = _backend_preflight_rows(gap)
+    return "; ".join(f"{row['backend']}:{row['preflight']}{' blockers ' + row['blockers'] if row['blockers'] != 'none' else ''}" for row in rows[:4]) or "none"
 
 
 def _table(rows: list[dict[str, Any]], columns: tuple[tuple[str, str, int], ...]) -> str:
