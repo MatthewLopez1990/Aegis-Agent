@@ -9,6 +9,9 @@
   --text: #edf3f7;
   --muted: #9cacb8;
   --subtle: #71828f;
+  --shield: #49d38f;
+  --shield-deep: #0f2f22;
+  --shield-line: #77e6ad;
   --green: #49d38f;
   --green-soft: #173627;
   --blue: #74b7ff;
@@ -143,16 +146,48 @@ p {
   min-width: 0;
 }
 
-.brand-mark {
+.brand-shield,
+.hero-shield {
   display: grid;
-  width: 38px;
-  height: 38px;
   place-items: center;
-  border: 1px solid #64daa0;
-  border-radius: 8px;
-  background: var(--green-soft);
-  color: var(--green);
-  font-weight: 800;
+  position: relative;
+  flex: 0 0 auto;
+  border: 1px solid var(--shield-line);
+  background:
+    linear-gradient(145deg, rgb(119 230 173 / 24%), transparent 48%),
+    var(--shield-deep);
+  color: var(--shield);
+  font-weight: 900;
+  clip-path: polygon(50% 0, 92% 15%, 82% 72%, 50% 100%, 18% 72%, 8% 15%);
+}
+
+.brand-shield {
+  width: 40px;
+  height: 46px;
+  font-size: 18px;
+}
+
+.brand-shield::after,
+.hero-shield::after {
+  content: "";
+  position: absolute;
+  inset: 9px 13px 13px;
+  border: 1px solid rgb(119 230 173 / 46%);
+  border-top-width: 2px;
+  clip-path: polygon(50% 0, 95% 16%, 82% 72%, 50% 100%, 18% 72%, 5% 16%);
+}
+
+.brand-shield span,
+.hero-shield span {
+  position: relative;
+  z-index: 1;
+}
+
+.hero-shield {
+  width: 82px;
+  height: 96px;
+  font-size: 39px;
+  box-shadow: 0 18px 38px rgb(73 211 143 / 12%);
 }
 
 .brand h1 {
@@ -225,6 +260,16 @@ p {
   gap: 18px;
   align-items: center;
   padding: 18px;
+}
+
+.hero-copy {
+  min-width: 0;
+}
+
+.hero-brand-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
 }
 
 .hero-panel h2 {
@@ -961,6 +1006,10 @@ pre {
     flex-direction: column;
   }
 
+  .brand {
+    align-items: center;
+  }
+
   .top-actions {
     width: 100%;
     justify-content: space-between;
@@ -972,6 +1021,16 @@ pre {
 
   .hero-panel h2 {
     font-size: 21px;
+  }
+
+  .hero-brand-row {
+    align-items: flex-start;
+  }
+
+  .hero-shield {
+    width: 62px;
+    height: 74px;
+    font-size: 29px;
   }
 
   .metric-grid,

@@ -624,6 +624,7 @@ class CliTests(unittest.TestCase):
             session = dispatch(parser.parse_args(["--data-dir", str(data_dir), "session", "create", "CLI approval session"]))
             task = dispatch(parser.parse_args(["--data-dir", str(data_dir), "task", "submit", "send message hello", "--workspace", str(root), "--session-id", session["id"]]))
             approval_id = task["checkpoint"]["approval_id"]
+            pending_listed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "approval", "list"]))
 
             approved = dispatch(
                 parser.parse_args(
@@ -651,6 +652,13 @@ class CliTests(unittest.TestCase):
             self.assertIn(f"session show {session['id']}", [hint["command"] for hint in approved["action_hints"]])
             self.assertIn(f"session history {session['id']}", [hint["command"] for hint in approved["action_hints"]])
             self.assertIn(f"task resume {task['id']}", [hint["command"] for hint in approved["action_hints"]])
+            approved_actions = {hint["action"]: hint for hint in approved["action_hints"]}
+            self.assertIn("proceed", approved_actions["task_resume"]["utterances"])
+            pending_actions = {hint["action"]: hint for hint in pending_listed["approvals"][0]["action_hints"]}
+            self.assertIn("show approval", pending_actions["approval_review"]["utterances"])
+            self.assertIn("yes proceed", pending_actions["approval_approve"]["utterances"])
+            self.assertIn("no do not do that", pending_actions["approval_deny"]["utterances"])
+            self.assertIn("let's revert", pending_actions["approval_reject_or_revert_intent"]["utterances"])
             self.assertEqual(listed["approvals"][0]["decision"]["actor"], "cli-admin")
             self.assertEqual(listed["approvals"][0]["session_id"], session["id"])
             self.assertIn(f"session show {session['id']}", [hint["command"] for hint in listed["approvals"][0]["action_hints"]])

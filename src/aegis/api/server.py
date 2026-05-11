@@ -14,6 +14,7 @@ import time
 from urllib.parse import parse_qs, unquote, urlparse
 
 from aegis.agent.orchestrator import build_orchestrator
+from aegis.approvals.actions import approval_action_hints
 from aegis.approvals.models import ApprovalRequest
 from aegis.channels.base import ChannelResponse
 from aegis.memory.models import MemoryType
@@ -1442,7 +1443,6 @@ def _approval_summary(orchestrator: Any, approval: dict[str, Any]) -> dict[str, 
     decoded = dict(approval)
     decoded["session_id"] = None
     decoded["session"] = None
-    decoded["action_hints"] = []
     task_id = decoded.get("task_id")
     if task_id:
         try:
@@ -1456,19 +1456,13 @@ def _approval_summary(orchestrator: Any, approval: dict[str, Any]) -> dict[str, 
         if payload_session_id:
             decoded["session_id"] = payload_session_id
             decoded["session"] = _session_summary(orchestrator, payload_session_id)
-    hints: list[dict[str, str]] = []
-    if decoded.get("session_id"):
-        session_id = str(decoded["session_id"])
-        hints.extend(
-            [
-                {"label": "Show Session", "command": f"session show {session_id}", "action": "session_show", "session_id": session_id},
-                {"label": "Session History", "command": f"session history {session_id}", "action": "session_history", "session_id": session_id},
-            ]
-        )
-    if decoded.get("status") == "approved" and task_id:
-        task_id_text = str(task_id)
-        hints.append({"label": "Resume", "command": f"task resume {task_id_text}", "action": "task_resume", "task_id": task_id_text})
-    decoded["action_hints"] = hints
+    request_payload = decoded.get("payload") if isinstance(decoded.get("payload"), dict) else {}
+    decoded["action_hints"] = approval_action_hints(
+        decoded,
+        task_id=task_id,
+        session_id=decoded.get("session_id"),
+        admin_required=bool(request_payload.get("admin_required")) if isinstance(request_payload, dict) else False,
+    )
     return decoded
 
 

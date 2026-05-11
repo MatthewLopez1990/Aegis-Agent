@@ -15,6 +15,19 @@ from urllib.request import Request, urlopen
 
 
 class WebGuiBrowserSmokeTests(unittest.TestCase):
+    def test_web_shell_uses_shield_branding(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "src" / "aegis" / "web" / "static"
+        markup = (root / "index.html").read_text(encoding="utf-8")
+        styles = (root / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('class="brand-shield"', markup)
+        self.assertIn("Shielded local-first agent runtime", markup)
+        self.assertIn("Aegis Shield Console", markup)
+        self.assertIn('class="hero-shield"', markup)
+        self.assertIn(".brand-shield", styles)
+        self.assertIn(".hero-shield", styles)
+        self.assertIn("--shield:", styles)
+
     def test_web_event_stream_parser_handles_chunk_boundaries(self) -> None:
         node = shutil.which("node")
         if node is None:

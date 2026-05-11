@@ -1362,7 +1362,7 @@ class PlatformLayerTests(unittest.TestCase):
         self.assertTrue((static_root / "styles.css").exists())
         self.assertTrue((static_root / "app.js").exists())
         self.assertIn("Aegis Agent", (static_root / "index.html").read_text(encoding="utf-8"))
-        self.assertIn("Security Control Center", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("Aegis Shield Console", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("task-result", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("task-events", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("task-evidence", (static_root / "index.html").read_text(encoding="utf-8"))

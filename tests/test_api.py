@@ -683,6 +683,10 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(session_approval_detail["session"]["title"], "Updated API session")
                 self.assertIn(f"session show {web_session['id']}", [hint["command"] for hint in session_approval_detail["action_hints"]])
                 self.assertIn(f"session history {web_session['id']}", [hint["command"] for hint in session_approval_detail["action_hints"]])
+                session_approval_actions = {hint["action"]: hint for hint in session_approval_detail["action_hints"]}
+                self.assertIn("yes proceed", session_approval_actions["approval_approve"]["utterances"])
+                self.assertIn("no do not do that", session_approval_actions["approval_deny"]["utterances"])
+                self.assertIn("let's revert", session_approval_actions["approval_reject_or_revert_intent"]["utterances"])
                 self.assertEqual(tool_session_approval["session_id"], web_session["id"])
                 self.assertEqual(tool_session_approval["session"]["title"], "Updated API session")
                 self.assertIn(f"session show {web_session['id']}", [hint["command"] for hint in tool_session_approval["action_hints"]])

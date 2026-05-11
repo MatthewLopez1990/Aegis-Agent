@@ -11,6 +11,7 @@ from typing import Any
 
 from aegis.api.server import serve
 from aegis.agent.orchestrator import build_orchestrator
+from aegis.approvals.actions import approval_action_hints
 from aegis.audit.logger import AuditLogger
 from aegis.channels.base import ChannelResponse
 from aegis.channels.registry import ChannelRegistry
@@ -1200,7 +1201,6 @@ def _approval_payload(orchestrator: Any, row: dict[str, Any]) -> dict[str, Any]:
     payload = dict(row)
     payload["session_id"] = None
     payload["session"] = None
-    payload["action_hints"] = []
     task_id = payload.get("task_id")
     if task_id:
         try:
@@ -1213,19 +1213,13 @@ def _approval_payload(orchestrator: Any, row: dict[str, Any]) -> dict[str, Any]:
         payload_session_id = payload["payload"].get("session_id")
         if isinstance(payload_session_id, str):
             payload["session_id"] = payload_session_id
-    hints: list[dict[str, str]] = []
-    if payload.get("session_id"):
-        session_id = str(payload["session_id"])
-        hints.extend(
-            [
-                {"label": "Show Session", "command": f"session show {session_id}", "action": "session_show", "session_id": session_id},
-                {"label": "Session History", "command": f"session history {session_id}", "action": "session_history", "session_id": session_id},
-            ]
-        )
-    if payload.get("status") == "approved" and task_id:
-        task_id_text = str(task_id)
-        hints.append({"label": "Resume", "command": f"task resume {task_id_text}", "action": "task_resume", "task_id": task_id_text})
-    payload["action_hints"] = hints
+    request_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+    payload["action_hints"] = approval_action_hints(
+        payload,
+        task_id=task_id,
+        session_id=payload.get("session_id"),
+        admin_required=bool(request_payload.get("admin_required")) if isinstance(request_payload, dict) else False,
+    )
     return payload
 
 

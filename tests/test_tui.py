@@ -52,8 +52,9 @@ class TuiTests(unittest.TestCase):
                 tui.onecmd("capabilities")
 
             rendered = output.getvalue()
-            self.assertIn("Aegis Identity", rendered)
+            self.assertIn("Aegis Shield Identity", rendered)
             self.assertIn("AEGIS SHIELD", rendered)
+            self.assertIn("local-first governed runtime", rendered)
             self.assertIn("Command Palette", rendered)
             self.assertIn("Operate  submit, dashboard, tasks, session", rendered)
             self.assertIn("Govern   approvals, approve, deny", rendered)
@@ -120,7 +121,7 @@ class TuiTests(unittest.TestCase):
                 tui.onecmd("help")
                 tui.onecmd("menu")
             help_rendered = output.getvalue()
-            self.assertIn("Aegis Identity", help_rendered)
+            self.assertIn("Aegis Shield Identity", help_rendered)
             self.assertIn("AEGIS SHIELD", help_rendered)
             self.assertIn("Command Menu", help_rendered)
             self.assertIn("[Operate]", help_rendered)
@@ -196,6 +197,9 @@ class TuiTests(unittest.TestCase):
             self.assertIn("session", rendered)
             self.assertIn(f"session open {tui.session['id']}", rendered)
             self.assertIn(f"session history {tui.session['id']}", rendered)
+            self.assertIn("yes approve that plan", rendered)
+            self.assertIn("no do not do that", rendered)
+            self.assertIn("let's revert", rendered)
             self.assertIn("events ", rendered)
             self.assertIn("timeline ", rendered)
             self.assertIn("Aegis TUI", rendered)
@@ -219,6 +223,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn("session", rendered)
             self.assertIn(f"session open {tui.session['id']}", rendered)
             self.assertIn(f"session history {tui.session['id']}", rendered)
+            self.assertIn("proceed", rendered)
+            self.assertIn(f"task resume {result['id']}", rendered)
             self.assertIn(tui.session["id"][:8], rendered)
 
     def test_submit_records_one_session_turn(self) -> None:

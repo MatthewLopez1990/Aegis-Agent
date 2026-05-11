@@ -15,6 +15,7 @@ import sys
 import textwrap
 
 from aegis.agent.orchestrator import build_orchestrator
+from aegis.approvals.actions import approval_action_hints
 from aegis.approvals.models import ApprovalRequest
 from aegis.channels.base import ChannelResponse
 from aegis.memory.models import MemoryType
@@ -2009,8 +2010,7 @@ def _print_approval_result(approval: dict[str, Any]) -> None:
         print(f"actor    {decision.get('actor')}{' (admin)' if decision.get('admin') else ''}")
         if decision.get("reason"):
             print(textwrap.fill(f"decision {decision.get('reason')}", width=min(shutil.get_terminal_size((100, 24)).columns, 100), subsequent_indent="         "))
-    if status == "approved" and task_id:
-        print(_paint(f"next     resume {task_id}", "33;1"))
+    _print_approval_action_hints(approval)
     print()
 
 
@@ -2046,9 +2046,26 @@ def _print_approval_detail(approval: dict[str, Any]) -> None:
     if isinstance(payload, dict):
         print(_paint("payload", "36;1"))
         print(textwrap.indent(json.dumps(payload, indent=2, sort_keys=True), "  "))
-    admin_flag = " --admin" if isinstance(payload, dict) and payload.get("admin_required") else ""
-    print(_paint(f"next     approve {approval.get('id')}{admin_flag}  OR  deny {approval.get('id')}{admin_flag}", "33;1"))
+    _print_approval_action_hints(approval)
     print()
+
+
+def _print_approval_action_hints(approval: dict[str, Any]) -> None:
+    hints = approval.get("action_hints", [])
+    if not isinstance(hints, list) or not hints:
+        return
+    commands = [str(hint.get("command")) for hint in hints if isinstance(hint, dict) and hint.get("command")]
+    phrases = []
+    for hint in hints:
+        if not isinstance(hint, dict):
+            continue
+        for phrase in hint.get("utterances", []):
+            if isinstance(phrase, str) and phrase not in phrases:
+                phrases.append(phrase)
+    if commands:
+        print(_paint(f"next     {'  OR  '.join(commands[:3])}", "33;1"))
+    if phrases:
+        print(textwrap.fill(f"say      {', '.join(phrases[:12])}", width=min(shutil.get_terminal_size((100, 24)).columns, 100), subsequent_indent="         "))
 
 
 def _print_repair_detail(proposal: dict[str, Any]) -> None:
@@ -2450,15 +2467,23 @@ def _command_reference() -> str:
 
 def _aegis_logo(width: int) -> str:
     art = [
-        r"      ___       ______   _______   ___   _______",
-        r"     /   \     |  ____| |  _____| |_ _| /  _____|",
-        r"    /  ^  \    | |__    | |  __    | |  | |_____",
-        "   /  /_\\  \\   |  __|   | | |_ |   | |  \\_____  \\",
-        r"  /  _____  \  | |____  | |__| |   | |   _____| |",
-        r" /__/     \__\ |______| |_______| |___| |_______/",
-        r"        AEGIS SHIELD :: governed local agent",
+        r"                  .-=================-.",
+        r"               .-'    A E G I S        '-.",
+        r"             .'      .-----------.        '.",
+        "            /       /  .-------.  \\         \\",
+        r"           ;       |  /  _____  \  |         ;",
+        r"           |       |  | / ___ \ |  |         |",
+        r"           |       |  || |___| ||  |         |",
+        r"           ;        \  \_______/  /          ;",
+        r"            \        '._       _.'          /",
+        r"             '.          '---'            .'",
+        r"               '-.                   .-'",
+        r"                  '----.       .----'",
+        r"                        \     /",
+        r"                         \___/",
+        r"        AEGIS SHIELD :: local-first governed runtime",
     ]
-    return _boxed_lines("Aegis Identity", art, width)
+    return _boxed_lines("Aegis Shield Identity", art, width)
 
 
 COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
@@ -2677,6 +2702,13 @@ def _approval_with_session(orchestrator: Any, approval: dict[str, Any]) -> dict[
         if payload_session_id:
             payload["session_id"] = payload_session_id
             payload["session"] = _safe_session_summary(orchestrator, payload_session_id)
+    request_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+    payload["action_hints"] = approval_action_hints(
+        payload,
+        task_id=task_id,
+        session_id=payload.get("session_id"),
+        admin_required=bool(request_payload.get("admin_required")) if isinstance(request_payload, dict) else False,
+    )
     return payload
 
 
@@ -2707,14 +2739,23 @@ def _safe_session_summary(orchestrator: Any, session_id: str) -> dict[str, Any] 
 def _approval_list_row(orchestrator: Any, row: dict[str, Any]) -> dict[str, Any]:
     payload = _approval_with_session(orchestrator, row)
     session_label = ""
-    next_actions = f"approval {payload.get('id')}"
+    action_hints = payload.get("action_hints", [])
+    other_commands = [
+        str(hint.get("command"))
+        for hint in action_hints
+        if isinstance(hint, dict) and hint.get("command") and not str(hint.get("action", "")).startswith("session_")
+    ]
     session = payload.get("session")
     if isinstance(session, dict):
         session_label = f"{_short_id(session.get('id', payload.get('session_id', '')))} {session.get('title') or ''}".strip()
     elif payload.get("session_id"):
         session_label = _short_id(payload.get("session_id"))
+    session_commands: list[str] = []
     if payload.get("session_id"):
-        next_actions = f"session open {payload.get('session_id')}; session history {payload.get('session_id')}; {next_actions}"
+        session_id = str(payload["session_id"])
+        session_commands = [f"session open {session_id}", f"session history {session_id}"]
+    commands = [*session_commands, *other_commands]
+    next_actions = "; ".join(commands[:4]) or f"approval {payload.get('id')}"
     return {**payload, "task_short_id": _short_id(payload.get("task_id", "")), "session_label": session_label, "next_actions": next_actions}
 
 
