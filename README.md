@@ -9,7 +9,7 @@ The product direction is parity with modern personal-agent platforms while keepi
 Linux and macOS:
 
 ```bash
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/MatthewLopez1990/Aegis-Agent/main/install.sh | sh
 ```
 
 After install:
@@ -21,7 +21,7 @@ aegis tui
 aegis serve --host 127.0.0.1 --port 8765
 ```
 
-See `docs/install.md` for one-line archive/Git install commands.
+From a local checkout, run `./install.sh`. See `docs/install.md` for archive/Git variants and custom install locations.
 
 ## Run From Source
 

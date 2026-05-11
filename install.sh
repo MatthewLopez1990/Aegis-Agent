@@ -8,6 +8,7 @@ BIN_DIR="${AEGIS_BIN_DIR:-"$HOME/.local/bin"}"
 SOURCE_DIR="${AEGIS_SOURCE_DIR:-}"
 REPO_URL="${AEGIS_REPO_URL:-}"
 ARCHIVE_URL="${AEGIS_ARCHIVE_URL:-}"
+DEFAULT_ARCHIVE_URL="${AEGIS_DEFAULT_ARCHIVE_URL:-"https://github.com/MatthewLopez1990/Aegis-Agent/archive/refs/heads/main.tar.gz"}"
 QUIET=0
 
 usage() {
@@ -15,6 +16,7 @@ usage() {
 Install Aegis Agent for Linux or macOS.
 
 Usage:
+  curl -fsSL https://raw.githubusercontent.com/MatthewLopez1990/Aegis-Agent/main/install.sh | sh
   ./install.sh
   ./install.sh --source /path/to/aegis-agent
   ./install.sh --archive https://example.com/aegis-agent.tar.gz
@@ -26,6 +28,7 @@ Environment:
   AEGIS_SOURCE_DIR   Local source checkout path.
   AEGIS_ARCHIVE_URL  Source tar.gz URL.
   AEGIS_REPO_URL     Git repository URL.
+  AEGIS_DEFAULT_ARCHIVE_URL  Archive URL used by the zero-argument remote installer.
   PYTHON             Python executable override.
 
 After install:
@@ -115,6 +118,11 @@ PYTHON_BIN=$(find_python) || fail "Python 3.11+ is required"
 
 if [ -z "$SOURCE_DIR" ] && [ -f "./pyproject.toml" ] && [ -d "./src/aegis" ]; then
   SOURCE_DIR=$(pwd)
+fi
+
+if [ -z "$SOURCE_DIR" ] && [ -z "$ARCHIVE_URL" ] && [ -z "$REPO_URL" ]; then
+  ARCHIVE_URL="$DEFAULT_ARCHIVE_URL"
+  log "No local checkout detected; installing from $ARCHIVE_URL"
 fi
 
 TMP_DIR=""
