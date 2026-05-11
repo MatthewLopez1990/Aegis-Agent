@@ -22,6 +22,12 @@ PYTHONPATH=src python3 -m aegis.cli.main init
 
 This creates `.aegis/config.toml`, `.aegis/aegis.db`, and `.aegis/audit.jsonl`.
 
+Check the local schema migration status:
+
+```bash
+PYTHONPATH=src python3 -m aegis.cli.main migrate schema
+```
+
 ## Submit a Safe Task
 
 ```bash
@@ -35,11 +41,12 @@ The runtime creates a durable task record, reads the scoped filesystem through t
 ```bash
 PYTHONPATH=src python3 -m aegis.cli.main task submit "send message hello"
 PYTHONPATH=src python3 -m aegis.cli.main approval list --status pending
-PYTHONPATH=src python3 -m aegis.cli.main approval approve APPROVAL_ID
+PYTHONPATH=src python3 -m aegis.cli.main approval approve APPROVAL_ID --actor local-user --reason "reviewed payload"
 PYTHONPATH=src python3 -m aegis.cli.main task resume TASK_ID
 ```
 
 The task pauses until approval is recorded.
+If a policy profile returns `require_admin_approval`, approve with `--admin`; a regular approval records reviewer evidence but will not unblock that gate.
 
 ## Run Tests
 
@@ -60,6 +67,10 @@ Endpoints:
 - `POST /tasks`
 - `GET /tasks/{task_id}`
 - `POST /tasks/{task_id}/resume`
+- `POST /tasks/{task_id}/pause`
+- `POST /tasks/{task_id}/cancel`
+
+Task status and pause/resume/cancel responses include the linked session snapshot when the task was submitted inside a conversation session.
 
 ## Run TUI
 

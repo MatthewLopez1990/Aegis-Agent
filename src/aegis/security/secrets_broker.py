@@ -9,6 +9,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from aegis.security.taint import now_utc
+from aegis.storage.state import ensure_private_file
 
 
 @dataclass(frozen=True)
@@ -71,12 +72,27 @@ class SecretsBroker:
     def has_secret(self, name: str) -> bool:
         return self.secret_source(name) is not None
 
+    def has_stored_secret(self, name: str) -> bool:
+        return self.stored_secret_source(name) is not None
+
     def secret_source(self, name: str) -> str | None:
         if name in os.environ:
             return "environment"
+        return self.stored_secret_source(name)
+
+    def stored_secret_source(self, name: str) -> str | None:
         if self.store_path is None:
             return "memory" if name in self._memory_store else None
         return "local" if name in self._read_store()["secrets"] else None
+
+    def resolve_stored_secret(self, name: str) -> str:
+        if self.store_path is None:
+            value = self._memory_store.get(name)
+        else:
+            value = self._read_store()["secrets"].get(name)
+        if value is None:
+            raise KeyError(f"local secret {name!r} is not configured")
+        return value
 
     def _lookup_secret(self, name: str) -> str | None:
         if name in os.environ:
@@ -98,9 +114,9 @@ class SecretsBroker:
     def _write_store(self, data: dict[str, object]) -> None:
         if self.store_path is None:
             return
-        self.store_path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_file(self.store_path)
         payload = {"version": 1, "secrets": data.get("secrets", {})}
         with self.store_path.open("w", encoding="utf-8") as handle:
             json.dump(payload, handle, sort_keys=True, indent=2)
             handle.write("\n")
-        os.chmod(self.store_path, 0o600)
+        ensure_private_file(self.store_path)

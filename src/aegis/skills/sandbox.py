@@ -7,6 +7,22 @@ SANDBOX_PROFILES = {
     "no_tools": {"network": False, "filesystem": "none", "secrets": False, "shell": False},
     "read_only_no_network": {"network": False, "filesystem": "read", "secrets": False, "shell": False},
     "mock_connectors_only": {"network": False, "filesystem": "none", "secrets": False, "shell": False, "connectors": "mock"},
+    "isolated_process_no_network": {
+        "network": False,
+        "filesystem": "read",
+        "secrets": False,
+        "shell": "isolated_python",
+        "process": "python_json",
+        "cwd": "source",
+    },
+    "isolated_process_ephemeral": {
+        "network": False,
+        "filesystem": "none",
+        "secrets": False,
+        "shell": "isolated_python",
+        "process": "python_json",
+        "cwd": "ephemeral",
+    },
 }
 
 

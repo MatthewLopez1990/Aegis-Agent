@@ -14,7 +14,7 @@ Aegis Agent is organized around explicit runtime boundaries:
 - `ConnectorRegistry`: exposes scoped connectors.
 - `ApprovalManager`: records human approval decisions.
 - `AuditLogger`: writes redacted hash-chained JSONL logs.
-- `EvidenceBundleBuilder`: assembles task state plus related audit events.
+- `EvidenceBundleBuilder`: assembles task state plus task-specific audit events, so evidence/timeline views remain complete even after unrelated audit activity.
 
 ## Comparable Platform Weaknesses Addressed
 
@@ -40,4 +40,4 @@ Aegis Agent is organized around explicit runtime boundaries:
 
 ## Storage
 
-The current runtime uses local SQLite for tasks, memory, skills, and approvals. Audit events are append-only JSONL with a hash chain. This keeps the runtime local-first while leaving a migration path to Postgres and external observability sinks.
+The current runtime uses local SQLite for tasks, memory, skills, approvals, schedules, sessions, channels, model usage, Kanban, and MCP registrations. Schema changes run through a forward-only `schema_migrations` table with checksums so drift is detected at startup. Audit events are append-only JSONL with a hash chain. This keeps the runtime local-first while leaving a migration path to Postgres and external observability sinks.

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from aegis.connectors.base import ConnectorRequest, ConnectorResult, ConnectorSpec
+from aegis.connectors.base import ConnectorRequest, ConnectorResult, ConnectorSpec, require_scope
 from aegis.security.taint import RiskLevel, Sensitivity
 
 
@@ -40,6 +40,7 @@ class LocalFilesystemConnector:
         return scope == "read" or (scope == "write" and self.allow_write)
 
     def read(self, request: ConnectorRequest) -> ConnectorResult:
+        require_scope(request, "read", connector=self.spec.name)
         operation = request.operation
         if operation == "list":
             path = self._resolve(request.params.get("path", "."))
@@ -53,6 +54,7 @@ class LocalFilesystemConnector:
         return ConnectorResult(self.spec.name, "read", True, {"path": str(path), "content": content}, (str(path),))
 
     def write(self, request: ConnectorRequest) -> ConnectorResult:
+        require_scope(request, "write", connector=self.spec.name)
         if not self.allow_write or not request.approved:
             return ConnectorResult(self.spec.name, "write", False, {}, error="filesystem write requires explicit approval and write-enabled connector")
         path = self._resolve(request.params["path"])
@@ -62,6 +64,7 @@ class LocalFilesystemConnector:
         return ConnectorResult(self.spec.name, "write", True, {"path": str(path)}, (str(path),), rollback="restore from backup or version control")
 
     def dry_run(self, request: ConnectorRequest) -> ConnectorResult:
+        require_scope(request, "write", connector=self.spec.name)
         path = self._resolve(request.params.get("path", "."))
         return ConnectorResult(
             self.spec.name,

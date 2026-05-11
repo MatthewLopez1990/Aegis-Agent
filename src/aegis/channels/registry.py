@@ -8,6 +8,7 @@ import json
 
 from aegis.audit.logger import AuditLogger
 from aegis.channels.base import ChannelAdapter, ChannelMessage, ChannelResponse, ChannelSpec
+from aegis.audit.logger import redact
 from aegis.memory.store import LocalStore
 from aegis.security.context_firewall import ContextFirewall
 from aegis.security.taint import TrustClass, now_utc
@@ -62,6 +63,11 @@ class ChannelRegistry:
     def receive(self, channel: str, payload: dict[str, Any]) -> ChannelMessage:
         adapter = self.adapters[channel]
         message = adapter.normalize_inbound(payload)
+        self.record_inbound(message, payload=payload)
+        return message
+
+    def record_inbound(self, message: ChannelMessage, *, payload: dict[str, Any], status: str = "received") -> None:
+        channel = message.channel
         item = self.firewall.label_content(message.text, source=f"channel:{channel}", trust_class=TrustClass.CHAT_CONTENT, connector_or_tool=channel)
         processed = self.firewall.process([item])
         self.store.insert_channel_event(
@@ -70,18 +76,32 @@ class ChannelRegistry:
                 "channel": channel,
                 "direction": "inbound",
                 "session_id": message.session_id,
-                "payload": payload,
+                "payload": _safe_payload(payload),
                 "normalized": {"sender": message.sender, "text": processed.model_context[0], "attachments": list(message.attachments)},
-                "status": "received",
+                "status": status,
                 "created_at": now_utc(),
             }
         )
         self.audit_logger.append("channel.inbound", {"channel": channel, "sender": message.sender, "session_id": message.session_id})
-        return message
+
+    def has_delivery_id(self, channel: str, delivery_id: str) -> bool:
+        for row in self.store.list_channel_events(limit=1000):
+            if row["channel"] != channel or row["direction"] != "inbound":
+                continue
+            payload = json.loads(row["payload_json"])
+            if payload.get("delivery_id") == delivery_id:
+                return True
+        return False
 
     def render(self, response: ChannelResponse) -> dict[str, Any]:
         adapter = self.adapters[response.channel]
-        rendered = adapter.render_outbound(response)
+        safe_response = ChannelResponse(
+            channel=response.channel,
+            text=str(redact(response.text)),
+            channel_hints=response.channel_hints,
+            metadata=response.metadata,
+        )
+        rendered = adapter.render_outbound(safe_response)
         self.store.insert_channel_event(
             {
                 "id": str(uuid4()),
@@ -96,6 +116,30 @@ class ChannelRegistry:
         )
         self.audit_logger.append("channel.outbound_rendered", {"channel": response.channel, "requires_approval": adapter.spec.approval_required_for_send})
         return rendered
+
+    def record_outbound_delivery(self, *, channel: str, session_id: str | None, payload: dict[str, Any], delivery: dict[str, Any]) -> None:
+        self.store.insert_channel_event(
+            {
+                "id": str(uuid4()),
+                "channel": channel,
+                "direction": "outbound",
+                "session_id": session_id,
+                "payload": _safe_payload(payload),
+                "normalized": delivery,
+                "status": str(delivery.get("status", "delivery_recorded")),
+                "created_at": now_utc(),
+            }
+        )
+        self.audit_logger.append(
+            "channel.outbound_delivered",
+            {
+                "channel": channel,
+                "delivery_id": delivery.get("delivery_id"),
+                "status": delivery.get("status"),
+                "domain": delivery.get("domain"),
+                "signed": delivery.get("signed"),
+            },
+        )
 
     def events(self, limit: int = 50) -> list[dict[str, Any]]:
         events = []
@@ -164,6 +208,7 @@ def default_channel_specs() -> tuple[ChannelSpec, ...]:
         ("discourse", ("topics", "posts"), True, True, "api_key", "medium"),
         ("reddit", ("posts", "comments"), True, True, "oauth", "medium"),
         ("webhook", ("json",), True, True, "shared_secret", "easy"),
+        ("chat_webhook", ("json", "markdown"), True, True, "webhook_url_secret", "easy"),
         ("rss", ("feed_items",), False, False, "none", "easy"),
         ("mqtt", ("topics",), False, True, "broker_credentials", "medium"),
         ("nats", ("subjects",), False, True, "token", "medium"),
@@ -183,3 +228,17 @@ def default_channel_specs() -> tuple[ChannelSpec, ...]:
         ("browser_chat", ("html", "buttons", "cards"), True, False, "local", "easy"),
     )
     return tuple(ChannelSpec(*entry) for entry in names)
+
+
+def _safe_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_keys = payload.get("raw_keys")
+    safe: dict[str, Any] = {"raw_keys": list(raw_keys) if isinstance(raw_keys, list) else sorted(payload)}
+    for key in ("sender", "session_id", "delivery_id"):
+        if key in payload:
+            safe[key] = str(redact(str(payload[key])))
+    for key in ("payload_hash", "body_bytes", "verified_at"):
+        if key in payload:
+            safe[key] = payload[key]
+    if "attachments" in payload and isinstance(payload["attachments"], list):
+        safe["attachments"] = [str(redact(str(item))) for item in payload["attachments"][:25]]
+    return safe

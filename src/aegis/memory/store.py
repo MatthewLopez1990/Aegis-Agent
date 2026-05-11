@@ -9,13 +9,18 @@ import json
 import sqlite3
 
 from aegis.security.taint import now_utc
+from aegis.storage.migrations import apply_migrations, backup_sqlite_database, external_migration_plan, external_migration_runner, migration_plan, migration_status
+from aegis.storage.state import ensure_private_file
+
+STOPWORDS = {"a", "an", "and", "are", "as", "for", "in", "is", "it", "of", "on", "or", "the", "to", "was", "with"}
 
 
 class LocalStore:
     def __init__(self, database_path: str | Path) -> None:
         self.database_path = Path(database_path)
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        ensure_private_file(self.database_path)
         self.initialize()
+        ensure_private_file(self.database_path)
 
     @contextmanager
     def connect(self):
@@ -29,167 +34,44 @@ class LocalStore:
 
     def initialize(self) -> None:
         with self.connect() as db:
-            db.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS tasks (
-                  id TEXT PRIMARY KEY,
-                  user_request TEXT NOT NULL,
-                  interpretation TEXT NOT NULL,
-                  status TEXT NOT NULL,
-                  plan_json TEXT NOT NULL,
-                  risk_level TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  checkpoint_json TEXT NOT NULL,
-                  receipt_json TEXT
-                );
+            apply_migrations(db)
 
-                CREATE TABLE IF NOT EXISTS memories (
-                  id TEXT PRIMARY KEY,
-                  type TEXT NOT NULL,
-                  content TEXT NOT NULL,
-                  summary TEXT NOT NULL,
-                  source TEXT NOT NULL,
-                  provenance_json TEXT NOT NULL,
-                  confidence REAL NOT NULL,
-                  sensitivity TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  last_confirmed_at TEXT,
-                  expires_at TEXT,
-                  owner TEXT NOT NULL,
-                  scope TEXT NOT NULL,
-                  tags_json TEXT NOT NULL,
-                  search_text TEXT NOT NULL,
-                  redaction_status TEXT NOT NULL,
-                  deleted INTEGER NOT NULL DEFAULT 0
-                );
+    def schema_status(self) -> dict[str, object]:
+        with self.connect() as db:
+            return migration_status(db)
 
-                CREATE TABLE IF NOT EXISTS skills (
-                  id TEXT PRIMARY KEY,
-                  manifest_json TEXT NOT NULL,
-                  enabled INTEGER NOT NULL,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL
-                );
+    def schema_plan(self) -> dict[str, object]:
+        with self.connect() as db:
+            return migration_plan(db)
 
-                CREATE TABLE IF NOT EXISTS approvals (
-                  id TEXT PRIMARY KEY,
-                  task_id TEXT,
-                  reason TEXT NOT NULL,
-                  status TEXT NOT NULL,
-                  risk_level TEXT NOT NULL,
-                  payload_json TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL
-                );
+    def backup(self, destination: str | Path | None = None) -> dict[str, object]:
+        return backup_sqlite_database(self.database_path, destination)
 
-                CREATE TABLE IF NOT EXISTS sessions (
-                  id TEXT PRIMARY KEY,
-                  title TEXT NOT NULL,
-                  channel TEXT NOT NULL,
-                  status TEXT NOT NULL,
-                  model TEXT,
-                  personality TEXT,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  metadata_json TEXT NOT NULL
-                );
+    def external_schema_plan(self, target: str) -> dict[str, object]:
+        return external_migration_plan(target)
 
-                CREATE TABLE IF NOT EXISTS messages (
-                  id TEXT PRIMARY KEY,
-                  session_id TEXT NOT NULL,
-                  role TEXT NOT NULL,
-                  content TEXT NOT NULL,
-                  trust_class TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  metadata_json TEXT NOT NULL
-                );
+    def external_schema_runner(self, target: str, *, output_dir: str | Path, force: bool = False) -> dict[str, object]:
+        return external_migration_runner(target, output_dir=output_dir, force=force)
 
-                CREATE TABLE IF NOT EXISTS schedules (
-                  id TEXT PRIMARY KEY,
-                  name TEXT NOT NULL,
-                  natural_language TEXT NOT NULL,
-                  cron TEXT NOT NULL,
-                  task_request TEXT NOT NULL,
-                  channel TEXT NOT NULL,
-                  status TEXT NOT NULL,
-                  next_run_at TEXT,
-                  last_run_at TEXT,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  metadata_json TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS channel_events (
-                  id TEXT PRIMARY KEY,
-                  channel TEXT NOT NULL,
-                  direction TEXT NOT NULL,
-                  session_id TEXT,
-                  payload_json TEXT NOT NULL,
-                  normalized_json TEXT NOT NULL,
-                  status TEXT NOT NULL,
-                  created_at TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS model_usage (
-                  id TEXT PRIMARY KEY,
-                  provider TEXT NOT NULL,
-                  model TEXT NOT NULL,
-                  task_id TEXT,
-                  session_id TEXT,
-                  input_tokens INTEGER NOT NULL,
-                  output_tokens INTEGER NOT NULL,
-                  estimated_cost REAL NOT NULL,
-                  created_at TEXT NOT NULL,
-                  metadata_json TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS kanban_boards (
-                  id TEXT PRIMARY KEY,
-                  name TEXT NOT NULL,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  metadata_json TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS kanban_cards (
-                  id TEXT PRIMARY KEY,
-                  board_id TEXT NOT NULL,
-                  title TEXT NOT NULL,
-                  description TEXT NOT NULL,
-                  lane TEXT NOT NULL,
-                  owner TEXT,
-                  risk_level TEXT NOT NULL,
-                  task_id TEXT,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  metadata_json TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS mcp_servers (
-                  id TEXT PRIMARY KEY,
-                  name TEXT NOT NULL,
-                  command TEXT NOT NULL,
-                  allowed_tools_json TEXT NOT NULL,
-                  enabled INTEGER NOT NULL,
-                  approval_required INTEGER NOT NULL,
-                  created_at TEXT NOT NULL,
-                  updated_at TEXT NOT NULL,
-                  metadata_json TEXT NOT NULL
-                );
-                """
-            )
-
-    def insert_task(self, *, task_id: str, user_request: str, interpretation: str, status: str, plan: list[dict[str, Any]], risk_level: str) -> None:
+    def insert_task(
+        self,
+        *,
+        task_id: str,
+        user_request: str,
+        interpretation: str,
+        status: str,
+        plan: list[dict[str, Any]],
+        risk_level: str,
+        session_id: str | None = None,
+    ) -> None:
         timestamp = now_utc()
         with self.connect() as db:
             db.execute(
                 """
                 INSERT INTO tasks (
                   id, user_request, interpretation, status, plan_json, risk_level,
-                  created_at, updated_at, checkpoint_json, receipt_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  created_at, updated_at, checkpoint_json, receipt_json, session_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -202,6 +84,7 @@ class LocalStore:
                     timestamp,
                     json.dumps({}),
                     None,
+                    session_id,
                 ),
             )
 
@@ -227,9 +110,12 @@ class LocalStore:
             row = db.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return dict(row) if row else None
 
-    def list_tasks(self, limit: int = 20) -> list[dict[str, Any]]:
+    def list_tasks(self, limit: int = 20, *, session_id: str | None = None) -> list[dict[str, Any]]:
         with self.connect() as db:
-            rows = db.execute("SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+            if session_id:
+                rows = db.execute("SELECT * FROM tasks WHERE session_id = ? ORDER BY created_at DESC LIMIT ?", (session_id, limit)).fetchall()
+            else:
+                rows = db.execute("SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 
     def insert_memory(self, record: dict[str, Any]) -> None:
@@ -264,6 +150,20 @@ class LocalStore:
                 ),
             )
 
+    def upsert_memory_embedding(self, memory_id: str, *, embedding: dict[str, float], model: str) -> None:
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO memory_embeddings (memory_id, embedding_json, model, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(memory_id) DO UPDATE SET
+                  embedding_json = excluded.embedding_json,
+                  model = excluded.model,
+                  updated_at = excluded.updated_at
+                """,
+                (memory_id, json.dumps(embedding, sort_keys=True), model, now_utc()),
+            )
+
     def update_memory(self, memory_id: str, changes: dict[str, Any]) -> dict[str, Any]:
         existing = self.get_memory(memory_id)
         if not existing:
@@ -291,18 +191,87 @@ class LocalStore:
             row = db.execute("SELECT * FROM memories WHERE id = ?", (memory_id,)).fetchone()
         return dict(row) if row else None
 
-    def search_memories(self, query: str, *, limit: int = 10, include_deleted: bool = False) -> list[dict[str, Any]]:
-        like = f"%{query.lower()}%"
+    def mark_expired_memories_deleted(self) -> list[str]:
+        timestamp = now_utc()
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id FROM memories WHERE deleted = 0 AND expires_at IS NOT NULL AND expires_at <= ? ORDER BY expires_at ASC",
+                (timestamp,),
+            ).fetchall()
+            ids = [str(row["id"]) for row in rows]
+            if ids:
+                db.executemany("UPDATE memories SET deleted = 1, updated_at = ? WHERE id = ?", [(timestamp, memory_id) for memory_id in ids])
+        return ids
+
+    def search_memories(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        include_deleted: bool = False,
+        owner: str | None = None,
+        scope: str | None = None,
+    ) -> list[dict[str, Any]]:
+        terms = [term for term in query.lower().replace("%", " ").split() if term and term not in STOPWORDS and len(term) > 2]
+        if not terms:
+            terms = [""]
+        like_clauses = " OR ".join("lower(search_text) LIKE ?" for _ in terms)
         deleted_clause = "" if include_deleted else "AND deleted = 0"
+        expiry_clause = "" if include_deleted else "AND (expires_at IS NULL OR expires_at > ?)"
+        owner_clause = "AND owner = ?" if owner is not None else ""
+        scope_clause = "AND scope = ?" if scope is not None else ""
+        likes = [f"%{term}%" for term in terms]
+        filters: list[Any] = []
+        if not include_deleted:
+            filters.append(now_utc())
+        if owner is not None:
+            filters.append(owner)
+        if scope is not None:
+            filters.append(scope)
+        params: tuple[Any, ...] = (*likes, *filters, limit)
         with self.connect() as db:
             rows = db.execute(
                 f"""
                 SELECT * FROM memories
-                WHERE lower(search_text) LIKE ? {deleted_clause}
+                WHERE ({like_clauses}) {deleted_clause} {expiry_clause} {owner_clause} {scope_clause}
                 ORDER BY confidence DESC, updated_at DESC
                 LIMIT ?
                 """,
-                (like, limit),
+                params,
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def candidate_memories(
+        self,
+        *,
+        include_deleted: bool = False,
+        owner: str | None = None,
+        scope: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        deleted_clause = "" if include_deleted else "AND memories.deleted = 0"
+        expiry_clause = "" if include_deleted else "AND (memories.expires_at IS NULL OR memories.expires_at > ?)"
+        owner_clause = "AND memories.owner = ?" if owner is not None else ""
+        scope_clause = "AND memories.scope = ?" if scope is not None else ""
+        filters: list[Any] = []
+        if not include_deleted:
+            filters.append(now_utc())
+        if owner is not None:
+            filters.append(owner)
+        if scope is not None:
+            filters.append(scope)
+        filters.append(limit)
+        with self.connect() as db:
+            rows = db.execute(
+                f"""
+                SELECT memories.*, memory_embeddings.embedding_json, memory_embeddings.model AS embedding_model
+                FROM memories
+                LEFT JOIN memory_embeddings ON memory_embeddings.memory_id = memories.id
+                WHERE 1 = 1 {deleted_clause} {expiry_clause} {owner_clause} {scope_clause}
+                ORDER BY memories.updated_at DESC
+                LIMIT ?
+                """,
+                tuple(filters),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -350,21 +319,40 @@ class LocalStore:
                 ),
             )
 
-    def update_approval(self, approval_id: str, status: str) -> None:
+    def update_approval(self, approval_id: str, status: str, decision_metadata: dict[str, Any] | None = None) -> None:
         with self.connect() as db:
-            db.execute("UPDATE approvals SET status = ?, updated_at = ? WHERE id = ?", (status, now_utc(), approval_id))
+            existing_row = db.execute("SELECT status, payload_json FROM approvals WHERE id = ?", (approval_id,)).fetchone()
+            if not existing_row:
+                raise KeyError(approval_id)
+            if existing_row["status"] != "pending":
+                raise ValueError(f"approval is already {existing_row['status']}")
+            payload = json.loads(existing_row["payload_json"] or "{}")
+            if decision_metadata:
+                payload["_decision"] = decision_metadata
+            cursor = db.execute(
+                "UPDATE approvals SET status = ?, payload_json = ?, updated_at = ? WHERE id = ? AND status = 'pending'",
+                (status, json.dumps(payload), now_utc(), approval_id),
+            )
+            if cursor.rowcount == 0:
+                latest = db.execute("SELECT status FROM approvals WHERE id = ?", (approval_id,)).fetchone()
+                if not latest:
+                    raise KeyError(approval_id)
+                raise ValueError(f"approval is already {latest['status']}")
 
     def get_approval(self, approval_id: str) -> dict[str, Any] | None:
         with self.connect() as db:
             row = db.execute("SELECT * FROM approvals WHERE id = ?", (approval_id,)).fetchone()
         return dict(row) if row else None
 
-    def list_approvals(self, status: str | None = None) -> list[dict[str, Any]]:
+    def list_approvals(self, status: str | None = None, *, limit: int | None = None) -> list[dict[str, Any]]:
         with self.connect() as db:
+            limit_clause = " LIMIT ?" if limit is not None else ""
             if status:
-                rows = db.execute("SELECT * FROM approvals WHERE status = ? ORDER BY created_at DESC", (status,)).fetchall()
+                params: tuple[Any, ...] = (status, limit) if limit is not None else (status,)
+                rows = db.execute(f"SELECT * FROM approvals WHERE status = ? ORDER BY updated_at DESC, created_at DESC{limit_clause}", params).fetchall()
             else:
-                rows = db.execute("SELECT * FROM approvals ORDER BY created_at DESC").fetchall()
+                params = (limit,) if limit is not None else ()
+                rows = db.execute(f"SELECT * FROM approvals ORDER BY updated_at DESC, created_at DESC{limit_clause}", params).fetchall()
         return [dict(row) for row in rows]
 
     def insert_session(self, row: dict[str, Any]) -> None:
@@ -393,12 +381,36 @@ class LocalStore:
             rows = db.execute("SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 
+    def update_session(self, session_id: str, changes: dict[str, Any]) -> dict[str, Any]:
+        existing = self.get_session(session_id)
+        if not existing:
+            raise KeyError(session_id)
+        allowed = {"title", "status", "model", "personality", "metadata_json"}
+        assignments: list[str] = []
+        values: list[Any] = []
+        for key, value in changes.items():
+            if key not in allowed:
+                raise ValueError(f"unsupported session field: {key}")
+            assignments.append(f"{key} = ?")
+            values.append(value)
+        assignments.append("updated_at = ?")
+        values.append(now_utc())
+        values.append(session_id)
+        with self.connect() as db:
+            db.execute(f"UPDATE sessions SET {', '.join(assignments)} WHERE id = ?", tuple(values))
+        updated = self.get_session(session_id)
+        if not updated:
+            raise KeyError(session_id)
+        return updated
+
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         with self.connect() as db:
             row = db.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
         return dict(row) if row else None
 
     def insert_message(self, row: dict[str, Any]) -> None:
+        if not self.get_session(row["session_id"]):
+            raise KeyError(row["session_id"])
         with self.connect() as db:
             db.execute(
                 """
@@ -420,10 +432,10 @@ class LocalStore:
     def list_messages(self, session_id: str, limit: int = 100) -> list[dict[str, Any]]:
         with self.connect() as db:
             rows = db.execute(
-                "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at ASC LIMIT ?",
+                "SELECT * FROM messages WHERE session_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (session_id, limit),
             ).fetchall()
-        return [dict(row) for row in rows]
+        return [dict(row) for row in reversed(rows)]
 
     def insert_schedule(self, row: dict[str, Any]) -> None:
         timestamp = now_utc()
@@ -470,6 +482,18 @@ class LocalStore:
         values.append(schedule_id)
         with self.connect() as db:
             db.execute(f"UPDATE schedules SET {', '.join(assignments)} WHERE id = ?", tuple(values))
+
+    def claim_due_schedule(self, schedule_id: str, *, expected_next_run_at: str) -> bool:
+        with self.connect() as db:
+            cursor = db.execute(
+                """
+                UPDATE schedules
+                SET status = 'running', updated_at = ?
+                WHERE id = ? AND status = 'active' AND next_run_at = ?
+                """,
+                (now_utc(), schedule_id, expected_next_run_at),
+            )
+            return cursor.rowcount == 1
 
     def insert_channel_event(self, row: dict[str, Any]) -> None:
         with self.connect() as db:
@@ -523,6 +547,95 @@ class LocalStore:
             rows = db.execute("SELECT * FROM model_usage ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(row) for row in rows]
 
+    def set_model_route_setting(self, key: str, value: dict[str, Any]) -> None:
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO model_route_settings (key, value_json, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                  value_json = excluded.value_json,
+                  updated_at = excluded.updated_at
+                """,
+                (key, json.dumps(value, sort_keys=True), now_utc()),
+            )
+
+    def list_model_route_settings(self) -> dict[str, dict[str, Any]]:
+        with self.connect() as db:
+            rows = db.execute("SELECT key, value_json FROM model_route_settings").fetchall()
+        return {str(row["key"]): json.loads(row["value_json"]) for row in rows}
+
+    def insert_improvement_proposal(self, row: dict[str, Any]) -> None:
+        timestamp = now_utc()
+        with self.connect() as db:
+            db.execute(
+                """
+                INSERT INTO improvement_proposals (
+                  id, task_id, kind, summary, status, approval_required, default_state,
+                  evidence_json, created_at, updated_at, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["id"],
+                    row.get("task_id"),
+                    row["kind"],
+                    row["summary"],
+                    row.get("status", "proposed"),
+                    int(row.get("approval_required", True)),
+                    row.get("default_state", "disabled_until_review"),
+                    json.dumps(row.get("evidence", [])),
+                    row.get("created_at", timestamp),
+                    row.get("updated_at", timestamp),
+                    json.dumps(row.get("metadata", {})),
+                ),
+            )
+
+    def list_improvement_proposals(self, *, status: str | None = None, task_id: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            if status and task_id:
+                rows = db.execute(
+                    "SELECT * FROM improvement_proposals WHERE status = ? AND task_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (status, task_id, limit),
+                ).fetchall()
+            elif status:
+                rows = db.execute(
+                    "SELECT * FROM improvement_proposals WHERE status = ? ORDER BY created_at DESC LIMIT ?",
+                    (status, limit),
+                ).fetchall()
+            elif task_id:
+                rows = db.execute(
+                    "SELECT * FROM improvement_proposals WHERE task_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (task_id, limit),
+                ).fetchall()
+            else:
+                rows = db.execute("SELECT * FROM improvement_proposals ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_improvement_proposal(self, proposal_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM improvement_proposals WHERE id = ?", (proposal_id,)).fetchone()
+        return dict(row) if row else None
+
+    def update_improvement_proposal(self, proposal_id: str, *, status: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+        existing = self.get_improvement_proposal(proposal_id)
+        if not existing:
+            raise KeyError(proposal_id)
+        metadata_json = existing.get("metadata_json") or "{}"
+        merged_metadata = json.loads(metadata_json)
+        if metadata is not None:
+            merged_metadata.update(metadata)
+        with self.connect() as db:
+            cursor = db.execute(
+                "UPDATE improvement_proposals SET status = ?, metadata_json = ?, updated_at = ? WHERE id = ?",
+                (status, json.dumps(merged_metadata), now_utc(), proposal_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(proposal_id)
+        updated = self.get_improvement_proposal(proposal_id)
+        if not updated:
+            raise KeyError(proposal_id)
+        return updated
+
     def insert_kanban_board(self, row: dict[str, Any]) -> None:
         timestamp = now_utc()
         with self.connect() as db:
@@ -561,7 +674,19 @@ class LocalStore:
 
     def move_kanban_card(self, card_id: str, lane: str) -> None:
         with self.connect() as db:
-            db.execute("UPDATE kanban_cards SET lane = ?, updated_at = ? WHERE id = ?", (lane, now_utc(), card_id))
+            cursor = db.execute("UPDATE kanban_cards SET lane = ?, updated_at = ? WHERE id = ?", (lane, now_utc(), card_id))
+            if cursor.rowcount == 0:
+                raise KeyError(card_id)
+
+    def get_kanban_board(self, board_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM kanban_boards WHERE id = ?", (board_id,)).fetchone()
+        return dict(row) if row else None
+
+    def get_kanban_card(self, card_id: str) -> dict[str, Any] | None:
+        with self.connect() as db:
+            row = db.execute("SELECT * FROM kanban_cards WHERE id = ?", (card_id,)).fetchone()
+        return dict(row) if row else None
 
     def list_kanban_boards(self) -> list[dict[str, Any]]:
         with self.connect() as db:

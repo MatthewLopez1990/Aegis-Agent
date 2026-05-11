@@ -7,7 +7,7 @@ from typing import Any
 import shlex
 import subprocess
 
-from aegis.connectors.base import ConnectorRequest, ConnectorResult, ConnectorSpec
+from aegis.connectors.base import ConnectorRequest, ConnectorResult, ConnectorSpec, require_scope
 from aegis.security.taint import RiskLevel, Sensitivity
 
 
@@ -48,10 +48,12 @@ class ShellConnector:
         return self.execute(request)
 
     def dry_run(self, request: ConnectorRequest) -> ConnectorResult:
+        require_scope(request, "execute", connector=self.spec.name)
         argv = self._parse_allowed(request.params.get("command", ""))
         return ConnectorResult(self.spec.name, "dry_run", True, {"argv": argv, "cwd": str(self.cwd), "would_execute": True})
 
     def execute(self, request: ConnectorRequest) -> ConnectorResult:
+        require_scope(request, "execute", connector=self.spec.name)
         if not request.approved:
             return ConnectorResult(self.spec.name, "execute", False, {}, error="shell execution requires approval")
         argv = self._parse_allowed(request.params.get("command", ""))
@@ -78,7 +80,67 @@ class ShellConnector:
         argv = shlex.split(command)
         if not argv:
             raise ValueError("empty command")
-        executable = Path(argv[0]).name
-        if executable not in self.allowed_commands:
-            raise PermissionError(f"command {executable!r} is not allowlisted")
+        command_name = argv[0]
+        executable = Path(command_name).name
+        path_qualified = command_name != executable
+        path_allowlisted = path_qualified and command_name in self.allowed_commands
+        basename_allowlisted = not path_qualified and executable in self.allowed_commands
+        if not (path_allowlisted or basename_allowlisted):
+            raise PermissionError(f"command {command_name!r} is not allowlisted")
+        _validate_safe_arguments(executable, argv[1:])
         return argv
+
+
+def _validate_safe_arguments(executable: str, args: list[str]) -> None:
+    if executable == "pwd":
+        if args:
+            raise PermissionError("pwd does not accept arguments in the governed shell connector")
+        return
+    if executable == "ls":
+        _validate_ls_args(args)
+        return
+    if executable == "find":
+        _validate_find_args(args)
+        return
+    if executable in {"python", "python3"}:
+        _validate_python_args(args)
+
+
+def _validate_ls_args(args: list[str]) -> None:
+    allowed_flags = {"-1", "-a", "-l", "-h", "-la", "-al", "-lh", "-hl", "-lah", "-lha", "-alh", "-ahl", "-hal", "-hla"}
+    for arg in args:
+        if arg.startswith("-"):
+            if arg not in allowed_flags:
+                raise PermissionError(f"ls flag {arg!r} is not allowed")
+            continue
+        _validate_relative_read_path(arg, command="ls")
+
+
+def _validate_find_args(args: list[str]) -> None:
+    denied = {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fdelete"}
+    for arg in args:
+        if arg in denied:
+            raise PermissionError(f"find argument {arg!r} is not allowed")
+    for arg in args:
+        if arg.startswith("-"):
+            continue
+        if arg in {";", "{}", "+"}:
+            raise PermissionError(f"find argument {arg!r} is not allowed")
+        _validate_relative_read_path(arg, command="find")
+
+
+def _validate_python_args(args: list[str]) -> None:
+    if not args:
+        raise PermissionError("interactive python is not allowed in the governed shell connector")
+    denied_flags = {"-c", "-m"}
+    if any(arg in denied_flags for arg in args):
+        raise PermissionError("python -c and -m are not allowed in the governed shell connector")
+    if len(args) == 1 and args[0] in {"--version", "-V"}:
+        return
+    raise PermissionError("python execution requires a dedicated governed code tool or repair verification path")
+
+
+def _validate_relative_read_path(value: str, *, command: str) -> None:
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        raise PermissionError(f"{command} path {value!r} must stay within the workspace")

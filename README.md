@@ -66,31 +66,34 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 - CLI task submission, status, resume, evidence, approvals, memory, skills, connectors, and audit commands.
 - Dependency-free local API server for the product dashboard, health checks, connector listing, task submission, status, approvals, schedules, boards, and resume.
-- Dependency-free TUI command deck and browser GUI for runtime control, security posture, approvals, recent tasks, models, channels, tools, schedules, work boards, and audit evidence.
+- Dependency-free TUI command deck and browser GUI for runtime control, task resume/cancel, security posture, approvals, recent tasks, models, channels, tools, schedules, work boards, and audit evidence.
 - Durable SQLite task, memory, skill, and approval records in `.aegis/aegis.db`.
 - Append-only JSONL audit log with secret redaction and hash-chain verification.
 - Context firewall that labels trust classes and quarantines prompt-injection patterns in untrusted content.
 - Policy engine that can allow, deny, and require approval.
-- Read-only filesystem connector, shell connector with allowlist, HTTP allowlist stub, GitHub stub, generic REST stub, mock Microsoft Graph, mock ServiceNow, and mock messaging connectors.
-- Channel gateway registry with 50+ safe mock adapters.
+- TOML policy profiles for admin-controlled defaults, network allowlists, shell allowlists, and immutable secret-deny controls.
+- Read-only filesystem connector, shell connector with allowlist, HTTP allowlist connector with opt-in live reads, GitHub and GitLab stubs, generic REST stub, mock Microsoft Graph, mock ServiceNow, and mock messaging connectors with optional governed live writes where configured.
+- Channel gateway registry with 50+ safe mock adapters plus opt-in signed webhook, chat webhook, and SMTP email delivery slices.
 - Model provider abstraction for cloud, local, and custom providers with aliases, fallbacks, secret handles, and usage tracking.
-- OpenAI and OpenRouter model auth login through the local secrets broker.
-- Scheduler, session history, Kanban work boards, MCP registry, SOUL/context-file loader, and dry-run migration inspection.
+- Live OpenAI, Anthropic, Mistral, Cohere, OpenRouter, Ollama, LM Studio, and custom OpenAI-compatible model invocation through the local secrets broker, plus model auth login.
+- Scheduler with review activation and governed run-due execution, session history, Kanban work boards, governed stdio MCP calls, SOUL/context-file loader, and dry-run migration inspection.
 - Built-in governed tool catalog with 47+ tools covering browser, web, files, shell, memory, media, voice, subagent, research, and MCP capabilities.
-- Seven execution backend definitions: local, Docker, SSH, Singularity, Modal, Daytona, and Vercel Sandbox.
+- Seven execution backend definitions: local, Docker, SSH, Singularity, Modal, Daytona, and Vercel Sandbox. Docker and SSH are opt-in; approved runs emit activation, execution, and cleanup receipts, with Docker enforcing container limits and SSH requiring allowlisted hosts plus brokered private-key handles.
 - Virtual skill hub facade representing large external registries without auto-downloading untrusted code.
-- Governed skill manifests and runtime permission enforcement.
+- Governed skill manifests, signed external skill manifests, and runtime permission enforcement.
 - Built-in safe project summary skill and disabled workflow candidate builder.
 - Memory CRUD with provenance, confidence, sensitivity, deletion, and secret-like content refusal.
 - Action receipts for task execution.
 
 ## Important Limits
 
-- No real model provider invocation is connected yet.
-- Channel adapters are safe mock adapters until credentials and approval flows are configured.
-- HTTP is mock-mode by default.
+- OpenAI, Anthropic, Mistral, Cohere, OpenRouter, Ollama, LM Studio, and configured custom OpenAI-compatible invocation are connected; Google still needs a live adapter.
+- Model-provider egress, including local endpoints with a base URL, must pass the configured policy network allowlist.
+- Channel adapters are safe mock adapters until credentials and approval flows are configured; live webhook, chat webhook, and SMTP email slices are opt-in and store sanitized receipts when enabled.
+- HTTP is mock-mode by default and requires `live_http_reads = true` plus an allowlisted domain for live reads; redirects are not followed by the governed connector.
 - Connectors that need real credentials are mock or placeholder implementations.
 - Filesystem writes and shell execution are intentionally constrained.
-- Live third-party integrations still need per-provider credential flows, webhook verification, rate limiting, sandbox hardening, rollback logic, and tests before they should be enabled broadly.
+- Hosted remote execution backends remain disabled until provider-specific sandbox adapters and rollback receipts are implemented.
+- Live third-party integrations still need per-provider credential flows, rate limiting, sandbox hardening, rollback logic, and tests before they should be enabled broadly.
 
 See `docs/getting-started.md`, `docs/security.md`, and `docs/architecture.md` for details.

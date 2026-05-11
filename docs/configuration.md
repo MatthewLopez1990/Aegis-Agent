@@ -11,13 +11,82 @@ secrets = "secrets.json"
 
 [security]
 default_read_only = true
+live_http_reads = false
 allowed_shell_commands = ["pwd", "ls", "find", "python", "python3"]
 network_allowlist = ["example.com", "localhost", "127.0.0.1"]
+
+[models]
+# Optional OpenAI-compatible endpoint used by provider id `custom`.
+# custom_base_url = "https://models.example.com/v1"
+
+[execution]
+enabled_backends = ["local"]
+docker_executable = "docker"
+container_timeout_seconds = 30
+container_memory = "512m"
+container_cpus = "1"
+container_network = "none"
+ssh_executable = "ssh"
+ssh_allowed_hosts = []
+ssh_key_secret = "AEGIS_SSH_PRIVATE_KEY"
+ssh_timeout_seconds = 30
+
+[memory]
+# Omit TTL settings to remember indefinitely. Set a default or per-type TTL
+# when a workspace needs automatic retention limits.
+# default_ttl_days = 365
+# Confirmed memories are marked for review after this many days. Set 0 to
+# disable the default, then use per-type values below for selected memory kinds.
+# default_recertification_days = 90
+
+# [memory.ttl_days]
+# episodic_memory = 90
+# connector_memory = 30
+
+# [memory.recertification_days]
+# episodic_memory = 30
+# procedural_memory = 0
+
+[channels.webhook]
+enabled = false
+secret_name = "AEGIS_WEBHOOK_SHARED_SECRET"
+max_body_bytes = 65536
+timestamp_tolerance_seconds = 300
+allow_task_submission = false
+outbound_enabled = false
+# outbound_url = "https://example.com/aegis-webhook"
+
+[channels.email]
+outbound_enabled = false
+# smtp_host = "smtp.example.com"
+# smtp_port = 587
+# use_tls = true
+# username_secret = "AEGIS_EMAIL_USERNAME"
+# password_secret = "AEGIS_EMAIL_PASSWORD"
+# from_address = "aegis@example.com"
+# to_addresses = ["operator@example.com"]
+
+[channels.chat_webhook]
+outbound_enabled = false
+# url_secret = "AEGIS_CHAT_WEBHOOK_URL"
+# payload_format = "slack"  # generic, slack, discord, teams
+
+[policy]
+# Optional admin policy profile.
+# path = "../examples/policies/default-policy.toml"
 ```
 
 Secure defaults:
 
 - Filesystem connector is read-only.
-- HTTP connector is mock-mode unless changed in code.
-- Shell commands are parsed without a shell and must match the allowlist.
+- HTTP connector is mock-mode unless `live_http_reads = true` is configured.
+- Shell commands are parsed without a shell, must match the allowlist, and are additionally checked against conservative per-command argument rules. The shell connector blocks interactive Python, `python -c`, `python -m`, absolute or parent-directory listing paths, and mutating `find` actions such as `-exec` and `-delete`.
 - Data, audit logs, and brokered model auth secrets stay local.
+- Model-provider calls are policy-gated by the network allowlist, including local endpoints with a base URL.
+- Custom model URLs must use HTTPS unless they target a loopback host, and URL credentials are rejected before any API key is attached.
+- Only the local execution backend is enabled by default. Docker must be explicitly added to `[execution].enabled_backends`; approved container runs get CPU, memory, network, activation, execution, and cleanup receipts, and unsafe Docker flags such as host networking, mounts, and privileged mode are rejected. SSH must also be explicitly enabled, must target a configured `ssh_allowed_hosts` entry, uses a brokered private-key secret, rejects shell metacharacters, hashes the remote command instead of logging it raw, and removes temporary key material after execution.
+- Memory retention is indefinite by default, but `[memory]` can assign default or per-type TTLs. Expired memories are excluded from retrieval and removed by manual or background cleanup. `[memory.escalation_routes.<route>]` can define team-specific review escalation thresholds with `max_age_days`, `limit`, and `scope` for routes such as `memory_ops`.
+- Memory recertification marks old confirmed memories for review instead of rewriting them. The default threshold is 90 days, and `[memory.recertification_days]` can shorten, lengthen, or disable recertification for individual memory types.
+- The signed webhook endpoint is disabled by default and stores only sanitized inbound metadata after HMAC verification. Approved outbound webhooks require HTTPS, the network allowlist, and a brokered shared secret.
+- SMTP email delivery is disabled by default. When enabled, sends still require explicit approval, brokered credential names, a network-allowlisted SMTP host, and sanitized channel-event storage.
+- Chat webhook delivery is disabled by default. When enabled, the webhook URL must come from a brokered secret, sends require explicit approval, and the target host must be HTTPS, network-allowlisted, and non-local.

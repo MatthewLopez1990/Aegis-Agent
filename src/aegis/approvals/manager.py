@@ -8,6 +8,7 @@ from typing import Any
 from aegis.approvals.models import ApprovalRequest
 from aegis.audit.logger import AuditLogger
 from aegis.memory.store import LocalStore
+from aegis.security.taint import now_utc
 
 
 class ApprovalManager:
@@ -24,16 +25,18 @@ class ApprovalManager:
         )
         return request
 
-    def approve(self, approval_id: str) -> dict[str, Any]:
-        self.store.update_approval(approval_id, "approved")
+    def approve(self, approval_id: str, *, actor: str = "local-user", reason: str = "", admin: bool = False) -> dict[str, Any]:
+        decision = _decision_metadata("approved", actor=actor, reason=reason, admin=admin)
+        self.store.update_approval(approval_id, "approved", decision_metadata=decision)
         approval = self.get(approval_id)
-        self.audit_logger.append("approval.approved", {"approval_id": approval_id}, task_id=approval.get("task_id"))
+        self.audit_logger.append("approval.approved", {"approval_id": approval_id, "decision": decision}, task_id=approval.get("task_id"))
         return approval
 
-    def deny(self, approval_id: str) -> dict[str, Any]:
-        self.store.update_approval(approval_id, "denied")
+    def deny(self, approval_id: str, *, actor: str = "local-user", reason: str = "", admin: bool = False) -> dict[str, Any]:
+        decision = _decision_metadata("denied", actor=actor, reason=reason, admin=admin)
+        self.store.update_approval(approval_id, "denied", decision_metadata=decision)
         approval = self.get(approval_id)
-        self.audit_logger.append("approval.denied", {"approval_id": approval_id}, task_id=approval.get("task_id"))
+        self.audit_logger.append("approval.denied", {"approval_id": approval_id, "decision": decision}, task_id=approval.get("task_id"))
         return approval
 
     def get(self, approval_id: str) -> dict[str, Any]:
@@ -42,11 +45,24 @@ class ApprovalManager:
             raise KeyError(approval_id)
         return decode_approval(row)
 
-    def list(self, status: str | None = None) -> list[dict[str, Any]]:
-        return [decode_approval(row) for row in self.store.list_approvals(status=status)]
+    def list(self, status: str | None = None, *, limit: int | None = None) -> list[dict[str, Any]]:
+        return [decode_approval(row) for row in self.store.list_approvals(status=status, limit=limit)]
 
 
 def decode_approval(row: dict[str, Any]) -> dict[str, Any]:
     decoded = dict(row)
     decoded["payload"] = json.loads(decoded.pop("payload_json", "{}"))
+    decision = decoded["payload"].get("_decision")
+    if isinstance(decision, dict):
+        decoded["decision"] = dict(decision)
     return decoded
+
+
+def _decision_metadata(status: str, *, actor: str, reason: str, admin: bool) -> dict[str, Any]:
+    return {
+        "status": status,
+        "actor": actor or "local-user",
+        "reason": reason,
+        "admin": bool(admin),
+        "decided_at": now_utc(),
+    }

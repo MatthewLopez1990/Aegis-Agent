@@ -22,6 +22,6 @@ Possible decisions:
 - `require_admin_approval`
 - `quarantine`
 
-The current runtime actively uses allow, deny, and require approval. Other decisions are defined for policy-file growth.
+The current runtime actively uses allow, deny, require approval, and require admin approval. Other decisions are defined for policy-file growth. Built-in bundles (`strict-local`, `approval-first`, and `developer-local`) can be listed through the CLI/API/TUI/GUI, exported as TOML starting points, validated as imports, diffed against the active profile, applied only with explicit approval, scheduled as approved rollout receipts, activated when due by a local worker, and rolled back from the last apply or activation receipt. Applying or activating a bundle stores a normalized local TOML file under `.aegis/policies/` and updates `.aegis/config.toml`.
 
 See `examples/policies/default-policy.toml`.

@@ -21,6 +21,7 @@ class ConnectorSpec:
     data_sensitivity: Sensitivity
     default_mode: str
     approval_required: tuple[str, ...]
+    operation_scopes: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -65,3 +66,30 @@ class Connector(Protocol):
     def audit(self) -> dict[str, Any]: ...
 
     def disconnect(self) -> bool: ...
+
+
+def require_scope(request: ConnectorRequest, scope: str, *, connector: str) -> None:
+    if scope not in request.scopes:
+        raise PermissionError(f"connector {connector!r} operation {request.operation!r} requires {scope!r} scope")
+
+
+def required_scopes_for_operation(spec: ConnectorSpec, operation: str) -> tuple[str, ...]:
+    configured = spec.operation_scopes.get(operation)
+    if configured is not None:
+        return configured
+    if operation == "execute":
+        return ("execute",)
+    if operation.startswith("dry_run"):
+        return ("write",)
+    if operation in {"write", "create", "update", "send", "send_message", "send_email", "post_message", "create_issue", "comment_on_pull_request"}:
+        return ("write",)
+    return ("read",)
+
+
+def operation_kind(spec: ConnectorSpec, operation: str) -> str:
+    scopes = required_scopes_for_operation(spec, operation)
+    if operation.startswith("dry_run"):
+        return "dry_run"
+    if "execute" in scopes or "write" in scopes:
+        return "write"
+    return "read"

@@ -3,16 +3,43 @@
 from __future__ import annotations
 
 import ast
+import csv
+import hashlib
+import io
+import json
+import re
 import operator
+import os
+from pathlib import Path
+import shutil
+import shlex
+import struct
+import sqlite3
+import subprocess
+import sys
+import tarfile
+import tempfile
 from typing import Any
+import wave
+import zlib
+from xml.etree import ElementTree
+from uuid import uuid4
+import zipfile
 
 from aegis.audit.logger import AuditLogger
+from aegis.browser.controller import BrowserController
 from aegis.connectors.base import ConnectorRequest
 from aegis.connectors.registry import ConnectorRegistry
+from aegis.execution.backends import ExecutionBackendRegistry
+from aegis.kanban.manager import KanbanManager
 from aegis.memory.manager import MemoryManager
 from aegis.memory.models import MemoryType
+from aegis.mcp.registry import McpRegistry
+from aegis.research.harness import ResearchHarness
+from aegis.scheduler.manager import ScheduleManager
 from aegis.security.policy_engine import PolicyDecisionType, PolicyEngine, PolicyRequest
-from aegis.security.taint import RiskLevel, Sensitivity
+from aegis.security.secrets_broker import SecretsBroker
+from aegis.security.taint import RiskLevel, Sensitivity, now_utc
 from aegis.tools.catalog import ToolCatalog
 
 
@@ -21,33 +48,69 @@ class ToolExecutionError(RuntimeError):
 
 
 class BuiltinToolExecutor:
-    def __init__(self, connectors: ConnectorRegistry, memory: MemoryManager, audit_logger: AuditLogger, policy_engine: PolicyEngine | None = None) -> None:
+    def __init__(
+        self,
+        connectors: ConnectorRegistry,
+        memory: MemoryManager,
+        audit_logger: AuditLogger,
+        policy_engine: PolicyEngine | None = None,
+        *,
+        mcp_registry: McpRegistry | None = None,
+        allowed_executables: tuple[str, ...] = (),
+        browser_controller: BrowserController | None = None,
+        kanban_manager: KanbanManager | None = None,
+        execution_backends: ExecutionBackendRegistry | None = None,
+        schedule_manager: ScheduleManager | None = None,
+        data_dir: str | Path | None = None,
+        secrets_broker: SecretsBroker | None = None,
+    ) -> None:
         self.connectors = connectors
         self.memory = memory
         self.audit_logger = audit_logger
         self.policy_engine = policy_engine or PolicyEngine()
         self.catalog = ToolCatalog()
+        self.mcp_registry = mcp_registry
+        self.allowed_executables = allowed_executables
+        self.browser = browser_controller
+        self.kanban = kanban_manager
+        self.execution_backends = execution_backends
+        self.schedules = schedule_manager
+        self.research = ResearchHarness(data_dir=data_dir)
+        self.secrets_broker = secrets_broker or SecretsBroker()
 
-    def execute(self, name: str, params: dict[str, Any], *, approved: bool = False, task_id: str | None = None) -> dict[str, Any]:
+    def execute(self, name: str, params: dict[str, Any], *, approved: bool = False, admin_approved: bool = False, task_id: str | None = None) -> dict[str, Any]:
         spec = self.catalog.get(name)
+        operation = _operation_for_tool(name, spec.permission)
+        if spec.approval_required and not approved:
+            result = {"status": "approval_required", "tool": name, "reasons": ["tool catalog requires approval before execution"]}
+            self.audit_logger.append("tool.approval_required", result, task_id=task_id)
+            return result
+        approval_state = "admin_approved" if admin_approved else "approved" if approved else None
         decision = self.policy_engine.evaluate(
             PolicyRequest(
                 user_role="local-user",
                 workspace="local",
                 task_type=f"tool:{name}",
                 risk_level=spec.risk_level,
-                operation=_operation_for_tool(name),
-                requested_scopes=tuple(scope for scope in (spec.permission, "write" if approved else "") if scope and "/" not in scope),
-                approval_state="approved" if approved else None,
+                operation=operation,
+                requested_scopes=_scopes_for_tool(spec.permission, operation),
+                approval_state=approval_state,
                 data_sensitivity=Sensitivity.INTERNAL,
             )
         )
         if decision.decision == PolicyDecisionType.DENY:
             raise ToolExecutionError("; ".join(decision.reasons))
-        if decision.decision == PolicyDecisionType.REQUIRE_APPROVAL and not approved:
-            result = {"status": "approval_required", "tool": name, "reasons": list(decision.reasons)}
+        if decision.decision in {PolicyDecisionType.REQUIRE_APPROVAL, PolicyDecisionType.REQUIRE_ADMIN_APPROVAL}:
+            result = {
+                "status": "approval_required",
+                "tool": name,
+                "reasons": list(decision.reasons),
+                "admin_required": decision.decision == PolicyDecisionType.REQUIRE_ADMIN_APPROVAL,
+            }
             self.audit_logger.append("tool.approval_required", result, task_id=task_id)
             return result
+        if decision.decision != PolicyDecisionType.ALLOW:
+            raise ToolExecutionError("; ".join((*decision.reasons, *decision.requirements)))
 
         if name == "calculator":
             result = {"result": safe_eval(str(params["expression"]))}
@@ -57,8 +120,16 @@ class BuiltinToolExecutor:
                 read = connector.read(ConnectorRequest(operation="read", params={"path": params["path"]}, scopes=("read",)))
                 result = {"ok": read.ok, "path": read.data.get("path"), "content_length": len(read.data.get("content", "")), "error": read.error}
             else:
-                write = connector.dry_run(ConnectorRequest(operation="dry_run_write", params=params, scopes=("write",), approved=approved))
-                result = {"ok": write.ok, "dry_run": True, **write.data}
+                if approved:
+                    write = connector.write(ConnectorRequest(operation="write", params=params, scopes=("write",), approved=True))
+                    result = {"ok": write.ok, "dry_run": False, **write.data, "error": write.error}
+                else:
+                    write = connector.dry_run(ConnectorRequest(operation="dry_run_write", params=params, scopes=("write",)))
+                    result = {"ok": write.ok, "dry_run": True, **write.data, "error": write.error}
+        elif name == "shell":
+            connector = self.connectors.get("shell")
+            shell = connector.write(ConnectorRequest(operation="execute", params={"command": params["command"]}, scopes=("execute",), approved=approved))
+            result = {"ok": shell.ok, **shell.data, "error": shell.error}
         elif name == "memory_recall":
             result = {"memories": self.memory.retrieve_relevant(str(params["query"]), limit=int(params.get("limit", 5)))}
         elif name == "memory_store":
@@ -72,13 +143,1176 @@ class BuiltinToolExecutor:
             )
             result = {"memory_id": record.id}
         elif name == "web_search":
-            result = {"results": [{"title": "Mock search result", "url": "https://example.com", "snippet": str(params["query"])}], "mode": "mock"}
-        elif name == "browser":
-            result = {"status": "stubbed_pending_browser_backend", "action": params.get("action"), "safe_mode": True}
+            result = self._execute_web_search(params=params)
+        elif name in {"vision_analyze", "voice_transcribe", "video_analyze"}:
+            result = self._execute_media_read(name=name, params=params)
+        elif name in {"image_generate", "image_edit", "tts", "voice_record"}:
+            result = self._execute_media_artifact(name=name, params=params)
+        elif name == "http_request":
+            result = self._execute_http_request(params=params, approved=approved)
+        elif name == "webhook_call":
+            result = self._execute_webhook_call(params=params, approved=approved)
+        elif name == "rest_call":
+            result = self._execute_rest_call(params=params, approved=approved)
+        elif name == "web_extract":
+            result = self._execute_web_extract(params=params)
+        elif name == "rss_read":
+            result = self._execute_rss_read(params=params)
+        elif name == "price_monitor":
+            result = self._execute_price_monitor(params=params)
+        elif name == "weather":
+            result = self._execute_weather(params=params)
+        elif name == "maps_geocode":
+            result = self._execute_maps_geocode(params=params)
+        elif name in {"translation", "summarizer", "meeting_summary"}:
+            result = self._execute_language_utility(name=name, params=params)
+        elif name == "git_status":
+            result = self._execute_git_status(params=params)
+        elif name == "git_diff":
+            result = self._execute_git_diff(params=params)
+        elif name in {"code_execute", "python_repl"}:
+            result = self._execute_code(name=name, params=params)
+        elif name == "diff_apply":
+            result = self._execute_diff_apply(params=params)
+        elif name == "document_parse":
+            result = self._execute_document_parse(params=params)
+        elif name == "spreadsheet_read":
+            result = self._execute_spreadsheet_read(params=params)
+        elif name == "spreadsheet_write":
+            result = self._execute_spreadsheet_write(params=params, approved=approved)
+        elif name == "pdf_extract":
+            result = self._execute_pdf_extract(params=params)
+        elif name == "archive_extract":
+            result = self._execute_archive_extract(params=params)
+        elif name == "database_query":
+            result = self._execute_database_query(params=params)
+        elif name == "embeddings_search":
+            result = self._execute_embeddings_search(params=params)
+        elif name == "vector_upsert":
+            result = self._execute_vector_upsert(params=params, approved=approved)
+        elif name in {"email_draft", "email_send"}:
+            result = self._execute_email(name=name, params=params, approved=approved)
+        elif name == "calendar_read":
+            result = self._execute_graph_read(operation="read_calendar", output_key="events", params=params)
+        elif name == "calendar_write":
+            result = self._execute_calendar_write(params=params, approved=approved)
+        elif name == "contacts_search":
+            result = self._execute_graph_read(operation="search_contacts", output_key="contacts", params=params)
+        elif name == "contacts_write":
+            result = self._execute_contacts_write(params=params, approved=approved)
+        elif name in {"github_pr", "github_issue"}:
+            result = self._execute_github(name=name, params=params, approved=approved)
+        elif name in {"gitlab_merge_request", "gitlab_issue"}:
+            result = self._execute_gitlab(name=name, params=params, approved=approved)
+        elif name == "service_ticket_read":
+            result = self._execute_service_ticket_read(params=params)
+        elif name == "service_ticket_write":
+            result = self._execute_service_ticket_write(params=params, approved=approved)
+        elif name in {"browser", "browser_click", "browser_fill", "browser_screenshot", "browser_extract_table", "browser_close"}:
+            if self.browser is None:
+                raise ToolExecutionError("browser controller is not configured")
+            result = self._execute_browser(name, params, approved=approved)
+        elif name == "mcp_call":
+            if self.mcp_registry is None:
+                raise ToolExecutionError("MCP registry is not configured")
+            call = self.mcp_registry.call_tool(
+                server=str(params["server"]),
+                tool=str(params["tool"]),
+                arguments=dict(params.get("arguments", {})),
+                approved=approved,
+                task_id=task_id,
+                policy_engine=self.policy_engine,
+                allowed_executables=self.allowed_executables,
+            )
+            result = call.to_dict()
+        elif name == "subagent_delegate":
+            if self.kanban is None:
+                raise ToolExecutionError("kanban manager is not configured")
+            result = self._delegate_subagent(params=params, task_id=task_id)
+        elif name == "kanban_create":
+            if self.kanban is None:
+                raise ToolExecutionError("kanban manager is not configured")
+            result = self._execute_kanban_create(params=params, task_id=task_id)
+        elif name == "cron_schedule":
+            if self.schedules is None:
+                raise ToolExecutionError("schedule manager is not configured")
+            result = self._execute_cron_schedule(params=params)
+        elif name == "terminal_backend":
+            if self.execution_backends is None:
+                raise ToolExecutionError("execution backend registry is not configured")
+            result = self.execution_backends.select(str(params["backend"]))
+        elif name in {"package_install", "container_run", "docker_run", "ssh_exec"}:
+            result = self._execute_backend_gate(name=name, params=params)
+        elif name in {"trajectory_generate", "trajectory_compress"}:
+            result = self._execute_research_tool(name=name, params=params)
         else:
             result = {"status": "stubbed", "tool": name, "safe_mode": True, "params": sorted(params)}
         self.audit_logger.append("tool.executed", {"tool": name, "result": result}, task_id=task_id)
         return result
+
+    def _execute_research_tool(self, *, name: str, params: dict[str, Any]) -> dict[str, Any]:
+        if name == "trajectory_generate":
+            steps = tuple(str(step) for step in params.get("steps", ()))
+            if not steps:
+                steps = ("capture scenario", "run governed checks", "record human-reviewed result")
+            trajectory = self.research.generate_trajectory(str(params["scenario"]), steps)
+            result = {
+                "ok": True,
+                "trajectory_id": trajectory.id,
+                "scenario": trajectory.scenario,
+                "steps": list(trajectory.steps),
+                "compressed_summary": trajectory.compressed_summary,
+                "manifest": self.research.evaluation_manifest(),
+            }
+            if params.get("persist_report"):
+                result["evaluation_report"] = self.research.record_evaluation_run(
+                    trajectory=trajectory,
+                    status=str(params.get("status", "recorded")),
+                    reviewer=str(params.get("reviewer", "local")),
+                    notes=str(params.get("notes", "")),
+                )
+                result["evaluation_trends"] = self.research.evaluation_trends()
+            return result
+        if name == "trajectory_compress" and params.get("include_trends"):
+            source_steps = tuple(str(step) for step in params.get("steps", ()))
+            if not source_steps:
+                source_steps = (str(params.get("trajectory_id", "")) or str(params.get("text", "")) or "empty trajectory",)
+            return {
+                "ok": True,
+                "trajectory_id": str(params.get("trajectory_id", "ad-hoc")),
+                "summary": " | ".join(source_steps)[:500],
+                "training_use": "human_review_required",
+                "evaluation_trends": self.research.evaluation_trends(limit=int(params.get("trend_limit", 20))),
+            }
+        source_steps = tuple(str(step) for step in params.get("steps", ()))
+        if not source_steps:
+            source_steps = (str(params.get("trajectory_id", "")) or str(params.get("text", "")) or "empty trajectory",)
+        return {
+            "ok": True,
+            "trajectory_id": str(params.get("trajectory_id", "ad-hoc")),
+            "summary": " | ".join(source_steps)[:500],
+            "training_use": "human_review_required",
+        }
+
+    def _execute_media_read(self, *, name: str, params: dict[str, Any]) -> dict[str, Any]:
+        path_key = {"vision_analyze": "image_path", "voice_transcribe": "audio_path", "video_analyze": "video_path"}[name]
+        root = _workspace_root(self.connectors)
+        path = _resolve_under_root(root, params[path_key])
+        size = path.stat().st_size if path.exists() else 0
+        if name == "voice_transcribe":
+            text = path.read_text(encoding="utf-8", errors="replace")[:4000] if path.is_file() else ""
+            return {"ok": path.is_file(), "text": text, "path": str(path), "bytes": size, "taint": "FILE_CONTENT", "mode": "local_text_fallback"}
+        if name == "video_analyze":
+            metadata = _local_video_metadata(path)
+            details = [str(metadata.get("format", "unknown"))]
+            if metadata.get("duration_seconds") is not None:
+                details.append(f"{metadata['duration_seconds']}s")
+            summary = f"Local video metadata: {path.name}, {size} bytes, {', '.join(details)}."
+            return {"ok": path.is_file(), "summary": summary, "path": str(path), "bytes": size, "metadata": metadata, "taint": "FILE_CONTENT", "mode": "local_metadata"}
+        metadata = _local_image_metadata(path)
+        description = f"Local image metadata: {path.name}, {size} bytes."
+        if metadata.get("width") and metadata.get("height"):
+            description = f"{description} {metadata['format']} {metadata['width']}x{metadata['height']}."
+        return {
+            "ok": path.is_file(),
+            "description": description,
+            "path": str(path),
+            "bytes": size,
+            "metadata": metadata,
+            "taint": "FILE_CONTENT",
+            "mode": "local_metadata",
+        }
+
+    def _execute_media_artifact(self, *, name: str, params: dict[str, Any]) -> dict[str, Any]:
+        root = _workspace_root(self.connectors)
+        artifact_dir = root / ".aegis" / "tool-artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        if name == "tts":
+            text = str(params.get("text", ""))
+            path = artifact_dir / f"{name}-{uuid4()}.wav"
+            duration_seconds = _write_tts_tone(path, text=text)
+            artifact_receipt = _artifact_receipt(path)
+            sandbox_receipt = _media_sandbox_receipt(tool=name, mode="local_wav_tone")
+            metadata_path = _write_tool_artifact_metadata(
+                artifact_dir=artifact_dir,
+                tool=name,
+                artifact_path=path,
+                mode="local_wav_tone",
+                artifact_receipt=artifact_receipt,
+                sandbox_receipt=sandbox_receipt,
+                details={"duration_seconds": duration_seconds, "sample_rate": 8000, "text_length": len(text)},
+            )
+            return {
+                "ok": True,
+                "asset_path": str(path),
+                "artifact_path": str(path),
+                "metadata_path": str(metadata_path),
+                **artifact_receipt,
+                "sandbox_receipt": sandbox_receipt,
+                "mode": "local_wav_tone",
+                "duration_seconds": duration_seconds,
+                "sample_rate": 8000,
+                "text_length": len(text),
+            }
+        if name == "voice_record":
+            duration_seconds = _bounded_float(params.get("duration", 1), minimum=0.1, maximum=60.0, label="duration")
+            path = artifact_dir / f"{name}-{uuid4()}.wav"
+            _write_silence_wav(path, duration_seconds=duration_seconds)
+            artifact_receipt = _artifact_receipt(path)
+            sandbox_receipt = _media_sandbox_receipt(tool=name, mode="local_wav_silence")
+            metadata_path = _write_tool_artifact_metadata(
+                artifact_dir=artifact_dir,
+                tool=name,
+                artifact_path=path,
+                mode="local_wav_silence",
+                artifact_receipt=artifact_receipt,
+                sandbox_receipt=sandbox_receipt,
+                details={"duration_seconds": round(duration_seconds, 3), "sample_rate": 8000},
+            )
+            return {
+                "ok": True,
+                "asset_path": str(path),
+                "artifact_path": str(path),
+                "metadata_path": str(metadata_path),
+                **artifact_receipt,
+                "sandbox_receipt": sandbox_receipt,
+                "mode": "local_wav_silence",
+                "duration_seconds": round(duration_seconds, 3),
+                "sample_rate": 8000,
+            }
+        if name in {"image_generate", "image_edit"}:
+            prompt = str(params.get("prompt", ""))
+            source_path = str(params.get("source_path") or params.get("image_path") or "")
+            path = artifact_dir / f"{name}-{uuid4()}.png"
+            width, height = _write_prompt_png(path, prompt=prompt, source=source_path)
+            artifact_receipt = _artifact_receipt(path)
+            sandbox_receipt = _media_sandbox_receipt(tool=name, mode="local_png_preview")
+            metadata_path = _write_tool_artifact_metadata(
+                artifact_dir=artifact_dir,
+                tool=name,
+                artifact_path=path,
+                mode="local_png_preview",
+                artifact_receipt=artifact_receipt,
+                sandbox_receipt=sandbox_receipt,
+                details={"width": width, "height": height, "prompt_length": len(prompt), "source_present": bool(source_path)},
+            )
+            return {
+                "ok": True,
+                "asset_path": str(path),
+                "artifact_path": str(path),
+                "metadata_path": str(metadata_path),
+                **artifact_receipt,
+                "sandbox_receipt": sandbox_receipt,
+                "mode": "local_png_preview",
+                "width": width,
+                "height": height,
+                "prompt_length": len(prompt),
+                "source_path": source_path or None,
+            }
+        extension = {"image_generate": "txt", "image_edit": "txt", "tts": "txt", "voice_record": "txt"}[name]
+        path = artifact_dir / f"{name}-{uuid4()}.{extension}"
+        content = {
+            "tool": name,
+            "prompt": params.get("prompt"),
+            "text": params.get("text"),
+            "duration": params.get("duration"),
+            "source": params.get("source_path") or params.get("image_path"),
+            "mode": "local_placeholder_artifact",
+        }
+        path.write_text("\n".join(f"{key}: {value}" for key, value in content.items() if value is not None), encoding="utf-8")
+        key = "asset_path"
+        if name == "tts":
+            key = "asset_path"
+        if name == "voice_record":
+            key = "asset_path"
+        artifact_receipt = _artifact_receipt(path)
+        sandbox_receipt = _media_sandbox_receipt(tool=name, mode="local_placeholder_artifact")
+        metadata_path = _write_tool_artifact_metadata(
+            artifact_dir=artifact_dir,
+            tool=name,
+            artifact_path=path,
+            mode="local_placeholder_artifact",
+            artifact_receipt=artifact_receipt,
+            sandbox_receipt=sandbox_receipt,
+            details={"text_artifact": True},
+        )
+        return {"ok": True, key: str(path), "artifact_path": str(path), "metadata_path": str(metadata_path), **artifact_receipt, "sandbox_receipt": sandbox_receipt, "mode": "local_placeholder_artifact"}
+
+    def _delegate_subagent(self, *, params: dict[str, Any], task_id: str | None) -> dict[str, Any]:
+        assert self.kanban is not None
+        role = str(params["role"]).strip()
+        task = str(params["task"]).strip()
+        if not role or not task:
+            raise ToolExecutionError("subagent delegation requires non-empty role and task")
+        board = self._delegation_board()
+        card = self.kanban.add_card(
+            board["id"],
+            title=f"{role}: {task[:80]}",
+            description=task,
+            lane="ready",
+            owner=role,
+            risk_level=RiskLevel.HIGH,
+            task_id=task_id,
+            metadata={
+                "delegation_type": "subagent",
+                "role": role,
+                "source_tool": "subagent_delegate",
+                "isolation": "durable_card",
+                "instructions_tainted": True,
+                "parent_task_id": task_id,
+            },
+        )
+        return {"ok": True, "board_id": board["id"], "card_id": card["id"], "lane": card["lane"], "owner": role}
+
+    def _delegation_board(self) -> dict[str, Any]:
+        assert self.kanban is not None
+        for board in self.kanban.list_boards():
+            if board.get("metadata", {}).get("purpose") == "subagent_delegations":
+                return board
+        return self.kanban.create_board("Subagent Delegations", metadata={"purpose": "subagent_delegations", "isolation": "card_per_delegate"})
+
+    def _execute_kanban_create(self, *, params: dict[str, Any], task_id: str | None) -> dict[str, Any]:
+        assert self.kanban is not None
+        title = str(params["title"]).strip()
+        if not title:
+            raise ToolExecutionError("kanban_create requires a non-empty title")
+        board_id = str(params.get("board_id", "")).strip()
+        if board_id:
+            board = next((row for row in self.kanban.list_boards() if row["id"] == board_id), None)
+            if board is None:
+                raise ToolExecutionError(f"kanban board {board_id!r} was not found")
+        else:
+            board = self.kanban.create_board(str(params.get("board", "Aegis Work")), metadata={"purpose": "tool_created"})
+        card = self.kanban.add_card(
+            board["id"],
+            title=title,
+            description=str(params.get("description", "")),
+            lane=str(params.get("lane", "backlog")),
+            owner=str(params["owner"]) if params.get("owner") else None,
+            risk_level=RiskLevel.MEDIUM,
+            task_id=task_id,
+            metadata={"source_tool": "kanban_create"},
+        )
+        return {"ok": True, "board_id": board["id"], "card_id": card["id"], "lane": card["lane"], "title": card["title"]}
+
+    def _execute_cron_schedule(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        assert self.schedules is not None
+        schedule = self.schedules.create_schedule(
+            name=str(params.get("name", "Tool-created schedule")),
+            natural_language=str(params.get("natural_language", params["task"])),
+            cron=str(params["cron"]),
+            task_request=str(params["task"]),
+            channel=str(params.get("channel", "tool")),
+            metadata={"source_tool": "cron_schedule"},
+        )
+        return {"ok": True, "schedule_id": schedule["id"], "status": schedule["status"], "next_run_at": schedule["next_run_at"]}
+
+    def _execute_http_request(self, *, params: dict[str, Any], approved: bool) -> dict[str, Any]:
+        method = str(params.get("method", "GET")).upper()
+        url = str(params["url"])
+        connector = self.connectors.get("http")
+        if method in {"GET", "HEAD"}:
+            read = connector.read(ConnectorRequest(operation="read", params={"url": url}, scopes=("read",), approved=approved))
+            content = read.data.get("content", "")
+            return {
+                "ok": read.ok,
+                "method": method,
+                "url": read.data.get("url", url),
+                "domain": read.data.get("domain"),
+                "content_length": len(content),
+                "content_preview": str(content)[:500],
+                "taint": "WEB_CONTENT",
+                "error": read.error,
+            }
+        write = connector.write(ConnectorRequest(operation=method.lower(), params=params, scopes=("write",), approved=approved))
+        return {"ok": write.ok, "method": method, "url": url, **write.data, "error": write.error}
+
+    def _execute_web_search(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        query = str(params["query"])
+        limit = int(params.get("num_results", params.get("limit", 5)))
+        if params.get("provider_url"):
+            read = self.connectors.get("http").read(ConnectorRequest(operation="read", params={"url": str(params["provider_url"])}, scopes=("read",)))
+            if not read.ok:
+                return {"ok": False, "query": query, "results": [], "mode": "allowlisted_live_read", "error": read.error}
+            try:
+                decoded = json.loads(str(read.data.get("content", "")))
+            except json.JSONDecodeError:
+                return {"ok": False, "query": query, "results": [], "mode": "allowlisted_live_read", "error": "search provider response must be JSON"}
+            return {
+                "ok": True,
+                "query": query,
+                "url": read.data.get("url", params["provider_url"]),
+                "results": _extract_search_results(decoded, limit=limit),
+                "mode": "allowlisted_live_read",
+                "taint": "WEB_CONTENT",
+            }
+        return {
+            "ok": True,
+            "query": query,
+            "results": _local_workspace_search(_workspace_root(self.connectors), query=query, limit=limit),
+            "mode": "local_workspace_search",
+            "local_fallback": True,
+            "requires_live_connector": True,
+        }
+
+    def _execute_rest_call(self, *, params: dict[str, Any], approved: bool) -> dict[str, Any]:
+        connector_name = str(params.get("connector", "generic_rest"))
+        connector = self.connectors.get(connector_name)
+        method = str(params.get("method", "GET")).upper()
+        url = str(params["url"])
+        if method in {"GET", "HEAD"}:
+            read = connector.read(ConnectorRequest(operation="read", params={"url": url}, scopes=("read",), approved=approved))
+            return {"ok": read.ok, "connector": connector_name, "method": method, "url": read.data.get("url", url), "taint": "WEB_CONTENT", "data": _jsonish(read.data), "error": read.error}
+        write = connector.write(ConnectorRequest(operation=method.lower(), params=params, scopes=("write",), approved=approved))
+        return {"ok": write.ok, "connector": connector_name, "method": method, "url": url, "data": _jsonish(write.data), "error": write.error}
+
+    def _execute_webhook_call(self, *, params: dict[str, Any], approved: bool) -> dict[str, Any]:
+        result = self.connectors.get("generic_rest").write(
+            ConnectorRequest(
+                operation="webhook_call",
+                params={"url": str(params["url"]), "payload": dict(params.get("payload", {}))},
+                scopes=("write",),
+                approved=approved,
+            )
+        )
+        return {"ok": result.ok, "url": result.data.get("url", params["url"]), "status": result.data.get("status"), "mode": result.data.get("mode"), "accepted": result.data.get("accepted", {}), "rollback": result.rollback, "error": result.error}
+
+    def _execute_web_extract(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        read = self.connectors.get("http").read(ConnectorRequest(operation="read", params={"url": str(params["url"])}, scopes=("read",)))
+        content = str(read.data.get("content", ""))
+        text = _extract_text(content)
+        return {"ok": read.ok, "url": read.data.get("url", params["url"]), "text": text[:4000], "content_length": len(content), "taint": "WEB_CONTENT", "error": read.error}
+
+    def _execute_rss_read(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        read = self.connectors.get("http").read(ConnectorRequest(operation="read", params={"url": str(params["url"])}, scopes=("read",)))
+        content = str(read.data.get("content", ""))
+        return {"ok": read.ok, "url": read.data.get("url", params["url"]), "items": _parse_rss_items(content, limit=int(params.get("limit", 10))), "taint": "WEB_CONTENT", "error": read.error}
+
+    def _execute_price_monitor(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        read = self.connectors.get("http").read(ConnectorRequest(operation="read", params={"url": str(params["url"])}, scopes=("read",)))
+        content = str(read.data.get("content", ""))
+        match = re.search(r"[$€£]\s?\d+(?:[.,]\d{2})?", content)
+        return {"ok": read.ok, "url": read.data.get("url", params["url"]), "price": match.group(0) if match else "", "mode": "allowlisted_extract", "taint": "WEB_CONTENT", "error": read.error}
+
+    def _execute_weather(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        location = str(params["location"])
+        if "latitude" not in params or "longitude" not in params:
+            return {"ok": True, "location": location, "forecast": {"source": "mock_local", "summary": "Weather provider not configured", "requires_live_connector": True}}
+        latitude = _bounded_float(params["latitude"], minimum=-90.0, maximum=90.0, label="latitude")
+        longitude = _bounded_float(params["longitude"], minimum=-180.0, maximum=180.0, label="longitude")
+        connector = self.connectors.get("http")
+        points_url = f"https://api.weather.gov/points/{latitude:.4f},{longitude:.4f}"
+        points = connector.read(ConnectorRequest(operation="read", params={"url": points_url}, scopes=("read",)))
+        if not points.ok:
+            return {"ok": False, "location": location, "forecast": {"source": "nws", "mode": "allowlisted_live_read"}, "error": points.error}
+        try:
+            points_data = _json_object(str(points.data.get("content", "")))
+        except ValueError as exc:
+            return {"ok": False, "location": location, "forecast": {"source": "nws", "mode": "allowlisted_live_read"}, "error": str(exc)}
+        forecast_url = str(points_data.get("properties", {}).get("forecast", ""))
+        if not forecast_url:
+            return {"ok": False, "location": location, "forecast": {"source": "nws", "mode": "allowlisted_live_read"}, "error": "weather provider did not return a forecast URL"}
+        forecast = connector.read(ConnectorRequest(operation="read", params={"url": forecast_url}, scopes=("read",)))
+        if not forecast.ok:
+            return {"ok": False, "location": location, "forecast": {"source": "nws", "mode": "allowlisted_live_read"}, "error": forecast.error}
+        try:
+            forecast_data = _json_object(str(forecast.data.get("content", "")))
+        except ValueError as exc:
+            return {"ok": False, "location": location, "forecast": {"source": "nws", "mode": "allowlisted_live_read"}, "error": str(exc)}
+        periods = forecast_data.get("properties", {}).get("periods", [])
+        if not isinstance(periods, list):
+            periods = []
+        parsed_periods = [_weather_period(period) for period in periods[: int(params.get("limit", 5))] if isinstance(period, dict)]
+        return {
+            "ok": True,
+            "location": location,
+            "coordinates": {"latitude": latitude, "longitude": longitude},
+            "forecast": {
+                "source": "nws",
+                "mode": "allowlisted_live_read",
+                "url": forecast.data.get("url", forecast_url),
+                "periods": parsed_periods,
+            },
+            "taint": "WEB_CONTENT",
+        }
+
+    def _execute_maps_geocode(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        address = str(params["address"])
+        if params.get("provider_url"):
+            read = self.connectors.get("http").read(ConnectorRequest(operation="read", params={"url": str(params["provider_url"])}, scopes=("read",)))
+            if not read.ok:
+                return {"ok": False, "address": address, "coordinates": {"source": "live_geocode", "mode": "allowlisted_live_read"}, "error": read.error}
+            try:
+                decoded = json.loads(str(read.data.get("content", "")))
+            except json.JSONDecodeError as exc:
+                return {"ok": False, "address": address, "coordinates": {"source": "live_geocode", "mode": "allowlisted_live_read"}, "error": "geocode provider response must be JSON"}
+            coordinates = _extract_geocode_coordinates(decoded)
+            if coordinates is None:
+                return {"ok": False, "address": address, "coordinates": {"source": "live_geocode", "mode": "allowlisted_live_read"}, "error": "geocode provider response did not include coordinates"}
+            return {
+                "ok": True,
+                "address": address,
+                "coordinates": {
+                    "lat": coordinates[0],
+                    "lng": coordinates[1],
+                    "source": "live_geocode",
+                    "mode": "allowlisted_live_read",
+                    "url": read.data.get("url", params["provider_url"]),
+                },
+                "taint": "WEB_CONTENT",
+            }
+        seed = sum(ord(char) for char in address)
+        return {"ok": True, "address": address, "coordinates": {"lat": round((seed % 18000) / 100 - 90, 6), "lng": round((seed % 36000) / 100 - 180, 6), "source": "mock_local"}}
+
+    def _execute_language_utility(self, *, name: str, params: dict[str, Any]) -> dict[str, Any]:
+        source = str(params.get("text") or params.get("transcript") or "")
+        if name == "translation":
+            return _local_translate(source, target=str(params["target"]))
+        summary = _summarize_text(source)
+        key = "summary"
+        return {"ok": True, key: summary, "source_length": len(source), "mode": "local_extractive"}
+
+    def _execute_git_status(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        root = _workspace_root(self.connectors)
+        target = _resolve_under_root(root, params.get("path", "."))
+        completed = _run_git(root, "status", "--short", "--branch", "--", str(target.relative_to(root)))
+        return {"ok": completed.returncode == 0, "path": str(target), "status": completed.stdout[:5000], "stderr": completed.stderr[:1000], "returncode": completed.returncode}
+
+    def _execute_git_diff(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        root = _workspace_root(self.connectors)
+        target = _resolve_under_root(root, params.get("path", "."))
+        completed = _run_git(root, "diff", "--", str(target.relative_to(root)))
+        return {"ok": completed.returncode == 0, "path": str(target), "diff": completed.stdout[:10000], "stderr": completed.stderr[:1000], "returncode": completed.returncode, "taint": "REPO_CONTENT"}
+
+    def _execute_code(self, *, name: str, params: dict[str, Any]) -> dict[str, Any]:
+        language = str(params.get("language", "python")).lower()
+        if name == "python_repl":
+            language = "python"
+        if language not in {"python", "python3", "py"}:
+            return {"ok": False, "status": "unsupported_language", "language": language, "supported": ["python"], "mode": "local_sandbox"}
+        root = _workspace_root(self.connectors)
+        run_dir = root / ".aegis" / "tool-artifacts" / "code-runs" / str(uuid4())
+        run_dir.mkdir(parents=True, exist_ok=True)
+        script = run_dir / "snippet.py"
+        script.write_text(str(params["code"]), encoding="utf-8")
+        completed = subprocess.run(
+            (sys.executable, "-I", str(script)),
+            cwd=run_dir,
+            text=True,
+            capture_output=True,
+            timeout=float(params.get("timeout", 5)),
+            check=False,
+        )
+        return {
+            "ok": completed.returncode == 0,
+            "status": "completed" if completed.returncode == 0 else "failed",
+            "language": "python",
+            "stdout": completed.stdout[:5000],
+            "stderr": completed.stderr[:5000],
+            "returncode": completed.returncode,
+            "artifact_dir": str(run_dir),
+            "mode": "local_isolated_python",
+            "taint": "CODE_OUTPUT",
+        }
+
+    def _execute_diff_apply(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        patch = str(params["patch"])
+        changed_files = _changed_files_from_patch(patch)
+        root = _workspace_root(self.connectors)
+        check = subprocess.run(("git", "-C", str(root), "apply", "--check", "-"), input=patch, text=True, capture_output=True, timeout=10, check=False)
+        if check.returncode != 0:
+            return {"ok": False, "status": "check_failed", "changed_files": changed_files, "stderr": check.stderr[:2000], "returncode": check.returncode}
+        applied = subprocess.run(("git", "-C", str(root), "apply", "-"), input=patch, text=True, capture_output=True, timeout=10, check=False)
+        return {
+            "ok": applied.returncode == 0,
+            "status": "applied" if applied.returncode == 0 else "failed",
+            "changed_files": changed_files,
+            "stdout": applied.stdout[:1000],
+            "stderr": applied.stderr[:2000],
+            "returncode": applied.returncode,
+            "rollback": "review git diff and revert affected files if needed",
+        }
+
+    def _execute_backend_gate(self, *, name: str, params: dict[str, Any]) -> dict[str, Any]:
+        backend_name = {"container_run": "docker", "docker_run": "docker", "ssh_exec": "ssh"}.get(name, "local")
+        backend = self.execution_backends.get(backend_name) if self.execution_backends is not None else None
+        activation = _backend_activation_requirements(name=name, backend=backend_name)
+        if backend is not None and not backend["enabled"]:
+            return {
+                "ok": False,
+                "status": "disabled",
+                "tool": name,
+                "backend": backend_name,
+                "reason": "backend adapter is not enabled",
+                **activation,
+            }
+        if backend_name == "docker" and backend is not None:
+            return self._execute_docker_backend(name=name, params=params, backend=backend)
+        if backend_name == "ssh" and backend is not None:
+            return self._execute_ssh_backend(name=name, params=params, backend=backend)
+        return {
+            "ok": False,
+            "status": "not_configured",
+            "tool": name,
+            "backend": backend_name,
+            "params": sorted(params),
+            "reason": "live execution adapter requires explicit sandbox/provider configuration",
+            **activation,
+        }
+
+    def _execute_ssh_backend(self, *, name: str, params: dict[str, Any], backend: dict[str, Any]) -> dict[str, Any]:
+        config = dict(backend.get("adapter_config", {}))
+        executable = _resolve_executable(str(config.get("executable", "ssh")))
+        activation = _backend_activation_requirements(name=name, backend="ssh")
+        if executable is None:
+            return {"ok": False, "status": "not_configured", "tool": name, "backend": "ssh", "reason": "ssh executable is not available", **activation}
+        host = str(params.get("host", "")).strip()
+        user = str(params.get("user", config.get("user", ""))).strip()
+        allowed_hosts = tuple(str(item) for item in config.get("allowed_hosts", ()))
+        if not _host_allowed(host, allowed_hosts):
+            return {"ok": False, "status": "scope_rejected", "tool": name, "backend": "ssh", "reason": f"ssh host {host!r} is not allowlisted", "verification_gates": ["scope_escape_rejection"]}
+        try:
+            remote_args = _safe_remote_command_args(str(params.get("command", "")))
+        except ToolExecutionError as exc:
+            return {"ok": False, "status": "scope_rejected", "tool": name, "backend": "ssh", "reason": str(exc), "verification_gates": ["scope_escape_rejection"]}
+        key_secret = str(params.get("key_secret") or config.get("key_secret") or "AEGIS_SSH_PRIVATE_KEY")
+        handle = self.secrets_broker.request_handle(name=key_secret, requester="ssh_backend", reason="SSH backend execution", scopes=("ssh:execute",))
+        if not handle.present:
+            return {"ok": False, "status": "not_configured", "tool": name, "backend": "ssh", "reason": f"secret {key_secret!r} is not configured", **activation}
+        private_key = self.secrets_broker.resolve_for_authorized_tool(handle, requester="ssh_backend")
+        timeout = int(config.get("timeout_seconds", 30))
+        target = f"{user}@{host}" if user else host
+        started = now_utc()
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", prefix="aegis-ssh-key-", delete=False) as key_file:
+            key_file.write(private_key)
+            key_file.write("\n")
+            key_path = Path(key_file.name)
+        try:
+            os.chmod(key_path, 0o600)
+            args = [
+                "-i",
+                str(key_path),
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                f"ConnectTimeout={min(timeout, 30)}",
+                target,
+                "--",
+                *remote_args,
+            ]
+            command_hash = hashlib.sha256("\0".join([target, *remote_args]).encode("utf-8")).hexdigest()
+            completed = subprocess.run((executable, *args), cwd=_workspace_root(self.connectors), text=True, capture_output=True, timeout=timeout, check=False)
+        finally:
+            key_path.unlink(missing_ok=True)
+        return {
+            "ok": completed.returncode == 0,
+            "status": "completed" if completed.returncode == 0 else "failed",
+            "tool": name,
+            "backend": "ssh",
+            "host": host,
+            "stdout": completed.stdout[:4000],
+            "stderr": completed.stderr[:4000],
+            "returncode": completed.returncode,
+            "activation_receipt": {
+                "status": "approved_activation",
+                "backend": "ssh",
+                "required_controls": ["human_approval", "brokered_backend_auth", "scope_limits", "rollback_receipts"],
+                "allowed_host": host,
+                "secret_handle_present": handle.present,
+                "raw_secret_values_included": False,
+                "started_at": started,
+            },
+            "execution_receipt": {
+                "command_sha256": command_hash,
+                "argv_count": len(remote_args),
+                "timeout_seconds": timeout,
+                "raw_command_logged": False,
+            },
+            "cleanup_receipt": {
+                "status": "completed",
+                "temporary_key_removed": True,
+                "rollback": "remote command rollback is operator/provider specific",
+            },
+        }
+
+    def _execute_docker_backend(self, *, name: str, params: dict[str, Any], backend: dict[str, Any]) -> dict[str, Any]:
+        config = dict(backend.get("adapter_config", {}))
+        executable = _resolve_executable(str(config.get("executable", "docker")))
+        activation = _backend_activation_requirements(name=name, backend="docker")
+        if executable is None:
+            return {
+                "ok": False,
+                "status": "not_configured",
+                "tool": name,
+                "backend": "docker",
+                "reason": "docker executable is not available",
+                **activation,
+            }
+
+        try:
+            args = _docker_args_for_tool(name=name, params=params, config=config)
+        except ToolExecutionError as exc:
+            return {
+                "ok": False,
+                "status": "scope_rejected",
+                "tool": name,
+                "backend": "docker",
+                "reason": str(exc),
+                "verification_gates": ["scope_escape_rejection"],
+            }
+
+        timeout = int(config.get("timeout_seconds", 30))
+        started = now_utc()
+        command_hash = hashlib.sha256("\0".join(args).encode("utf-8")).hexdigest()
+        completed = subprocess.run((executable, *args), cwd=_workspace_root(self.connectors), text=True, capture_output=True, timeout=timeout, check=False)
+        cleanup_receipt = {
+            "status": "not_required" if name == "docker_run" and args[:1] != ["run"] else "requested",
+            "auto_remove": "--rm" in args,
+            "workspace_mounts_allowed": False,
+        }
+        return {
+            "ok": completed.returncode == 0,
+            "status": "completed" if completed.returncode == 0 else "failed",
+            "tool": name,
+            "backend": "docker",
+            "stdout": completed.stdout[:4000],
+            "stderr": completed.stderr[:4000],
+            "returncode": completed.returncode,
+            "activation_receipt": {
+                "status": "approved_activation",
+                "backend": "docker",
+                "required_controls": ["human_approval", "scope_limits", "resource_limits", "rollback_receipts"],
+                "limits": _docker_limit_receipt(config),
+                "started_at": started,
+            },
+            "execution_receipt": {
+                "command_sha256": command_hash,
+                "argv_count": len(args) + 1,
+                "timeout_seconds": timeout,
+                "raw_command_logged": False,
+            },
+            "cleanup_receipt": cleanup_receipt,
+        }
+
+    def _execute_document_parse(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        read = self.connectors.get("filesystem").read(ConnectorRequest(operation="read", params={"path": params["path"], "limit": int(params.get("limit", 20000))}, scopes=("read",)))
+        content = str(read.data.get("content", ""))
+        return {"ok": read.ok, "path": read.data.get("path"), "text": content[:10000], "content_length": len(content), "taint": "FILE_CONTENT", "error": read.error}
+
+    def _execute_spreadsheet_read(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        path = params.get("path") or params.get("range")
+        if not path:
+            raise ToolExecutionError("spreadsheet_read requires path or range")
+        read = self.connectors.get("filesystem").read(ConnectorRequest(operation="read", params={"path": path, "limit": int(params.get("limit", 20000))}, scopes=("read",)))
+        content = str(read.data.get("content", ""))
+        rows = list(csv.reader(io.StringIO(content)))[: int(params.get("rows", 100))]
+        return {"ok": read.ok, "path": read.data.get("path"), "values": rows, "rows": len(rows), "taint": "FILE_CONTENT", "error": read.error}
+
+    def _execute_spreadsheet_write(self, *, params: dict[str, Any], approved: bool) -> dict[str, Any]:
+        output = io.StringIO()
+        writer = csv.writer(output)
+        for row in params.get("values", ()):
+            writer.writerow(list(row))
+        write = self.connectors.get("filesystem").write(
+            ConnectorRequest(
+                operation="write",
+                params={"path": params["range"], "content": output.getvalue(), "overwrite": bool(params.get("overwrite", False))},
+                scopes=("write",),
+                approved=approved,
+            )
+        )
+        return {"ok": write.ok, "path": write.data.get("path"), "updated": len(tuple(params.get("values", ()))), "error": write.error}
+
+    def _execute_pdf_extract(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        root = _workspace_root(self.connectors)
+        path = _resolve_under_root(root, params["path"])
+        raw = path.read_bytes()[: int(params.get("limit", 20000))]
+        text = re.sub(r"\s+", " ", raw.decode("utf-8", errors="ignore")).strip()
+        return {"ok": path.is_file(), "path": str(path), "text": text[:10000], "content_length": len(raw), "taint": "FILE_CONTENT", "mode": "text_fallback"}
+
+    def _execute_archive_extract(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        root = _workspace_root(self.connectors)
+        path = _resolve_under_root(root, params["path"])
+        limit = int(params.get("limit", 200))
+        extract = bool(params.get("extract", False))
+        destination = _resolve_under_root(root, params.get("destination") or f"{path.stem}-extracted")
+        requested_members = {str(member) for member in params.get("members", ())}
+        max_files = int(params.get("max_files", limit))
+        max_bytes = int(params.get("max_bytes", 10 * 1024 * 1024))
+        files: list[dict[str, Any]] = []
+        extracted_files: list[str] = []
+        total_bytes = 0
+        if zipfile.is_zipfile(path):
+            with zipfile.ZipFile(path) as archive:
+                members = archive.infolist()
+                files = [{"name": info.filename, "size": info.file_size, "directory": info.is_dir()} for info in members[:limit]]
+                if extract:
+                    for info in members:
+                        if requested_members and info.filename not in requested_members:
+                            continue
+                        if len(extracted_files) >= max_files:
+                            raise ToolExecutionError("archive extraction exceeded max_files")
+                        target = _safe_archive_member_path(destination, info.filename)
+                        if info.is_dir():
+                            target.mkdir(parents=True, exist_ok=True)
+                            continue
+                        total_bytes += int(info.file_size)
+                        if total_bytes > max_bytes:
+                            raise ToolExecutionError("archive extraction exceeded max_bytes")
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with archive.open(info) as source, target.open("wb") as output:
+                            output.write(source.read())
+                        extracted_files.append(str(target.relative_to(root)))
+        elif tarfile.is_tarfile(path):
+            with tarfile.open(path) as archive:
+                members = archive.getmembers()
+                files = [{"name": item.name, "size": item.size, "directory": item.isdir()} for item in members[:limit]]
+                if extract:
+                    for item in members:
+                        if requested_members and item.name not in requested_members:
+                            continue
+                        if item.issym() or item.islnk() or item.isdev():
+                            raise ToolExecutionError(f"archive member {item.name!r} is not safe to extract")
+                        if len(extracted_files) >= max_files:
+                            raise ToolExecutionError("archive extraction exceeded max_files")
+                        target = _safe_archive_member_path(destination, item.name)
+                        if item.isdir():
+                            target.mkdir(parents=True, exist_ok=True)
+                            continue
+                        if not item.isfile():
+                            continue
+                        total_bytes += int(item.size)
+                        if total_bytes > max_bytes:
+                            raise ToolExecutionError("archive extraction exceeded max_bytes")
+                        source = archive.extractfile(item)
+                        if source is None:
+                            continue
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with source, target.open("wb") as output:
+                            output.write(source.read())
+                        extracted_files.append(str(target.relative_to(root)))
+        else:
+            return {"ok": False, "path": str(path), "files": [], "error": "unsupported archive format"}
+        return {
+            "ok": True,
+            "path": str(path),
+            "files": files,
+            "extracted": extract,
+            "destination": str(destination) if extract else None,
+            "extracted_files": extracted_files,
+            "extracted_count": len(extracted_files),
+            "extracted_bytes": total_bytes,
+            "taint": "FILE_CONTENT",
+        }
+
+    def _execute_database_query(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        query = str(params["query"]).strip()
+        if not _is_read_only_sql(query):
+            raise ToolExecutionError("database_query only allows read-only SELECT, WITH, PRAGMA, or EXPLAIN statements")
+        root = _workspace_root(self.connectors)
+        path = _resolve_under_root(root, params["path"])
+        uri = f"file:{path}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as db:
+            db.row_factory = sqlite3.Row
+            rows = [dict(row) for row in db.execute(query).fetchmany(int(params.get("limit", 100)))]
+        return {"ok": True, "path": str(path), "rows": rows, "row_count": len(rows), "taint": "DATABASE_CONTENT"}
+
+    def _execute_embeddings_search(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        query = str(params["query"])
+        matches = self.memory.retrieve_relevant(
+            query,
+            limit=int(params.get("limit", 10)),
+            owner=str(params.get("owner", "local-user")),
+            scope=str(params.get("scope", "workspace")) if params.get("scope", "workspace") is not None else None,
+        )
+        return {"ok": True, "query": query, "matches": matches, "mode": "governed_memory_search"}
+
+    def _execute_vector_upsert(self, *, params: dict[str, Any], approved: bool) -> dict[str, Any]:
+        record = dict(params.get("record", {}))
+        content = str(record.get("content") or params.get("content") or "")
+        if not content.strip():
+            raise ToolExecutionError("vector_upsert requires record.content or content")
+        memory = self.memory.create_memory(
+            memory_type=MemoryType.WORKFLOW,
+            content=content,
+            source="tool:vector_upsert",
+            provenance={"tool": "vector_upsert", "record": {key: value for key, value in record.items() if key != "content"}},
+            confidence=float(record.get("confidence", params.get("confidence", 0.8))),
+            owner=str(record.get("owner", params.get("owner", "local-user"))),
+            scope=str(record.get("scope", params.get("scope", "workspace"))),
+            tags=tuple(str(item) for item in record.get("tags", params.get("tags", ("vector",)))),
+            confirmed=approved,
+        )
+        return {"ok": True, "id": memory.id, "memory_id": memory.id, "mode": "governed_memory_vector_facade"}
+
+    def _execute_email(self, *, name: str, params: dict[str, Any], approved: bool) -> dict[str, Any]:
+        operation = "draft_email" if name == "email_draft" else "send_email"
+        request_params = {key: value for key, value in params.items() if key != "operation"}
+        request_params["message"] = dict(params.get("message", {}))
+        result = self.connectors.get("mock_graph").write(
+            ConnectorRequest(operation=operation, params=request_params, scopes=("write",), approved=approved)
+        )
+        key = "draft_id" if name == "email_draft" else "message_id"
+        return {
+            "ok": result.ok,
+            "status": "drafted" if name == "email_draft" and result.ok else "sent" if result.ok else "failed",
+            key: f"mock-{operation}",
+            "connector": result.connector,
+            "mode": result.data.get("mode", "mock"),
+            "accepted": result.data.get("accepted", {}),
+            "rollback": result.rollback,
+            "error": result.error,
+        }
+
+    def _execute_graph_read(self, *, operation: str, output_key: str, params: dict[str, Any]) -> dict[str, Any]:
+        if params.get("provider_url") or params.get("api_url"):
+            return self._execute_productivity_live_read(operation=operation, output_key=output_key, params=params)
+        result = self.connectors.get("mock_graph").read(ConnectorRequest(operation=operation, params=params, scopes=("read",)))
+        data = result.data.get("data", {}) if isinstance(result.data.get("data"), dict) else {}
+        return {"ok": result.ok, output_key: data.get(output_key, []), "connector": result.connector, "mode": "mock", "taint": "CONNECTOR_CONTENT", "error": result.error}
+
+    def _execute_productivity_live_read(self, *, operation: str, output_key: str, params: dict[str, Any]) -> dict[str, Any]:
+        url = str(params.get("provider_url") or params["api_url"])
+        read = self.connectors.get("http").read(ConnectorRequest(operation="read", params={"url": url}, scopes=("read",)))
+        if not read.ok:
+            return {"ok": False, output_key: [], "connector": "http", "mode": "allowlisted_live_read", "error": read.error}
+        try:
+            decoded = json.loads(str(read.data.get("content", "")))
+        except json.JSONDecodeError:
+            return {"ok": False, output_key: [], "connector": "http", "mode": "allowlisted_live_read", "error": "productivity provider response must be JSON"}
+        records = _extract_productivity_records(decoded, output_key=output_key)
+        normalizer = _normalize_calendar_event if output_key == "events" else _normalize_contact_record
+        return {
+            "ok": True,
+            output_key: [normalizer(record) for record in records],
+            "connector": "http",
+            "operation": operation,
+            "mode": "allowlisted_live_read",
+            "url": read.data.get("url", url),
+            "taint": "WEB_CONTENT",
+            "error": None,
+        }
+
+    def _execute_calendar_write(self, *, params: dict[str, Any], approved: bool) -> dict[str, Any]:
+        request_params = {key: value for key, value in params.items() if key != "operation"}
+        request_params["event"] = dict(params.get("event", {}))
+        result = self.connectors.get("mock_graph").write(
+            ConnectorRequest(operation="create_event", params=request_params, scopes=("write",), approved=approved)
+        )
+        return {
+            "ok": result.ok,
+            "status": "created" if result.ok else "failed",
+            "event_id": "mock-create_event",
+            "connector": result.connector,
+            "mode": result.data.get("mode", "mock"),
+            "accepted": result.data.get("accepted", {}),
+            "rollback": result.rollback,
+            "error": result.error,
+        }
+
+    def _execute_contacts_write(self, *, params: dict[str, Any], approved: bool) -> dict[str, Any]:
+        requested = str(params.get("operation", "create")).lower()
+        operation = "update_contact" if requested in {"update", "update_contact"} else "create_contact"
+        contact = dict(params.get("contact", {}))
+        for key, value in params.items():
+            if key not in {"operation", "contact"} and key not in contact:
+                contact[key] = value
+        request_params = {key: value for key, value in params.items() if key != "operation"}
+        request_params["contact"] = contact
+        result = self.connectors.get("mock_graph").write(
+            ConnectorRequest(operation=operation, params=request_params, scopes=("write",), approved=approved)
+        )
+        return {
+            "ok": result.ok,
+            "operation": operation,
+            "status": "accepted" if result.ok else "failed",
+            "contact_id": str(contact.get("id") or contact.get("contact_id") or contact.get("email") or f"mock-{operation}"),
+            "connector": result.connector,
+            "mode": result.data.get("mode", "mock"),
+            "accepted": result.data.get("accepted", {}),
+            "rollback": result.rollback,
+            "error": result.error,
+        }
+
+    def _execute_github(self, *, name: str, params: dict[str, Any], approved: bool) -> dict[str, Any]:
+        requested = str(params.get("operation", "read")).lower()
+        connector = self.connectors.get("github")
+        if name == "github_pr":
+            if requested in {"comment", "comment_on_pull_request", "write"}:
+                result = connector.write(ConnectorRequest(operation="comment_on_pull_request", params=params, scopes=("write",), approved=approved))
+                return {"ok": result.ok, "operation": "comment_on_pull_request", "connector": result.connector, "accepted": result.data.get("accepted", {}), "rollback": result.rollback, "error": result.error}
+            if params.get("provider_url") or params.get("api_url"):
+                return self._execute_github_live_read(kind="pull_request", operation="read_pull_request", params=params)
+            result = connector.read(ConnectorRequest(operation="read_pull_request", params=params, scopes=("read",)))
+            return {"ok": result.ok, "operation": "read_pull_request", "connector": result.connector, "data": result.data.get("data", {}), "taint": "CONNECTOR_CONTENT", "error": result.error}
+        if requested in {"create", "create_issue", "write"}:
+            result = connector.write(ConnectorRequest(operation="create_issue", params=params, scopes=("write",), approved=approved))
+            return {"ok": result.ok, "operation": "create_issue", "connector": result.connector, "accepted": result.data.get("accepted", {}), "rollback": result.rollback, "error": result.error}
+        if params.get("provider_url") or params.get("api_url"):
+            return self._execute_github_live_read(kind="issue", operation="read_issue", params=params)
+        result = connector.read(ConnectorRequest(operation="read_issue", params=params, scopes=("read",)))
+        return {"ok": result.ok, "operation": "read_issue", "connector": result.connector, "data": result.data.get("data", {}), "taint": "CONNECTOR_CONTENT", "error": result.error}
+
+    def _execute_github_live_read(self, *, kind: str, operation: str, params: dict[str, Any]) -> dict[str, Any]:
+        url = str(params.get("provider_url") or params["api_url"])
+        read = self.connectors.get("http").read(ConnectorRequest(operation="read", params={"url": url}, scopes=("read",)))
+        if not read.ok:
+            return {"ok": False, "operation": operation, "connector": "http", "mode": "allowlisted_live_read", "data": {}, "error": read.error}
+        try:
+            decoded = json.loads(str(read.data.get("content", "")))
+        except json.JSONDecodeError:
+            return {"ok": False, "operation": operation, "connector": "http", "mode": "allowlisted_live_read", "data": {}, "error": "GitHub provider response must be JSON"}
+        if not isinstance(decoded, dict):
+            return {"ok": False, "operation": operation, "connector": "http", "mode": "allowlisted_live_read", "data": {}, "error": "GitHub provider response must be a JSON object"}
+        return {
+            "ok": True,
+            "operation": operation,
+            "connector": "http",
+            "mode": "allowlisted_live_read",
+            "url": read.data.get("url", url),
+            "data": _normalize_github_record(decoded, kind=kind),
+            "taint": "WEB_CONTENT",
+            "error": None,
+        }
+
+    def _execute_gitlab(self, *, name: str, params: dict[str, Any], approved: bool) -> dict[str, Any]:
+        requested = str(params.get("operation", "read")).lower()
+        connector = self.connectors.get("gitlab")
+        if name == "gitlab_merge_request":
+            if requested in {"comment", "note", "comment_on_merge_request", "write"}:
+                result = connector.write(ConnectorRequest(operation="comment_on_merge_request", params=params, scopes=("write",), approved=approved))
+                return {"ok": result.ok, "operation": "comment_on_merge_request", "connector": result.connector, "accepted": result.data.get("accepted", {}), "rollback": result.rollback, "error": result.error}
+            if params.get("provider_url") or params.get("api_url"):
+                return self._execute_gitlab_live_read(kind="merge_request", operation="read_merge_request", params=params)
+            result = connector.read(ConnectorRequest(operation="read_merge_request", params=params, scopes=("read",)))
+            return {"ok": result.ok, "operation": "read_merge_request", "connector": result.connector, "data": result.data.get("data", {}), "taint": "CONNECTOR_CONTENT", "error": result.error}
+        if requested in {"create", "create_issue", "write"}:
+            result = connector.write(ConnectorRequest(operation="create_issue", params=params, scopes=("write",), approved=approved))
+            return {"ok": result.ok, "operation": "create_issue", "connector": result.connector, "accepted": result.data.get("accepted", {}), "rollback": result.rollback, "error": result.error}
+        if params.get("provider_url") or params.get("api_url"):
+            return self._execute_gitlab_live_read(kind="issue", operation="read_issue", params=params)
+        result = connector.read(ConnectorRequest(operation="read_issue", params=params, scopes=("read",)))
+        return {"ok": result.ok, "operation": "read_issue", "connector": result.connector, "data": result.data.get("data", {}), "taint": "CONNECTOR_CONTENT", "error": result.error}
+
+    def _execute_gitlab_live_read(self, *, kind: str, operation: str, params: dict[str, Any]) -> dict[str, Any]:
+        url = str(params.get("provider_url") or params["api_url"])
+        read = self.connectors.get("http").read(ConnectorRequest(operation="read", params={"url": url}, scopes=("read",)))
+        if not read.ok:
+            return {"ok": False, "operation": operation, "connector": "http", "mode": "allowlisted_live_read", "data": {}, "error": read.error}
+        try:
+            decoded = json.loads(str(read.data.get("content", "")))
+        except json.JSONDecodeError:
+            return {"ok": False, "operation": operation, "connector": "http", "mode": "allowlisted_live_read", "data": {}, "error": "GitLab provider response must be JSON"}
+        if not isinstance(decoded, dict):
+            return {"ok": False, "operation": operation, "connector": "http", "mode": "allowlisted_live_read", "data": {}, "error": "GitLab provider response must be a JSON object"}
+        return {
+            "ok": True,
+            "operation": operation,
+            "connector": "http",
+            "mode": "allowlisted_live_read",
+            "url": read.data.get("url", url),
+            "data": _normalize_gitlab_record(decoded, kind=kind),
+            "taint": "WEB_CONTENT",
+            "error": None,
+        }
+
+    def _execute_service_ticket_read(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        requested = str(params.get("operation", "search")).lower()
+        operation = "read_ticket" if requested in {"read", "get", "read_ticket"} else "search_tickets"
+        if params.get("provider_url") or params.get("api_url"):
+            url = str(params.get("provider_url") or params["api_url"])
+            read = self.connectors.get("http").read(ConnectorRequest(operation="read", params={"url": url}, scopes=("read",)))
+            if not read.ok:
+                return {"ok": False, "operation": operation, "connector": "http", "mode": "allowlisted_live_read", "tickets": [], "error": read.error}
+            try:
+                decoded = json.loads(str(read.data.get("content", "")))
+            except json.JSONDecodeError:
+                return {"ok": False, "operation": operation, "connector": "http", "mode": "allowlisted_live_read", "tickets": [], "error": "service-desk provider response must be JSON"}
+            return {
+                "ok": True,
+                "operation": operation,
+                "connector": "http",
+                "mode": "allowlisted_live_read",
+                "url": read.data.get("url", url),
+                "tickets": [_normalize_service_ticket(ticket) for ticket in _extract_service_tickets(decoded)],
+                "taint": "WEB_CONTENT",
+                "error": None,
+            }
+        result = self.connectors.get("mock_servicenow").read(ConnectorRequest(operation=operation, params=params, scopes=("read",)))
+        data = result.data.get("data", {}) if isinstance(result.data.get("data"), dict) else {}
+        return {"ok": result.ok, "operation": operation, "connector": result.connector, "mode": "mock", "tickets": data.get("tickets", []), "taint": "CONNECTOR_CONTENT", "error": result.error}
+
+    def _execute_service_ticket_write(self, *, params: dict[str, Any], approved: bool) -> dict[str, Any]:
+        requested = str(params.get("operation", "create")).lower()
+        if requested in {"update", "update_ticket"}:
+            operation = "update_ticket"
+        elif requested in {"close", "close_ticket", "resolve"}:
+            operation = "close_ticket"
+        else:
+            operation = "create_ticket"
+        payload = dict(params.get("ticket", {}))
+        for key, value in params.items():
+            if key not in {"operation", "ticket"} and key not in payload:
+                payload[key] = value
+        request_params = {key: value for key, value in params.items() if key != "operation"}
+        request_params["ticket"] = payload
+        result = self.connectors.get("mock_servicenow").write(
+            ConnectorRequest(operation=operation, params=request_params, scopes=("write",), approved=approved)
+        )
+        return {
+            "ok": result.ok,
+            "operation": operation,
+            "connector": result.connector,
+            "status": "accepted" if result.ok else "failed",
+            "ticket_id": str(payload.get("id") or payload.get("number") or f"mock-{operation}"),
+            "mode": result.data.get("mode", "mock"),
+            "accepted": result.data.get("accepted", {}),
+            "rollback": result.rollback,
+            "error": result.error,
+        }
+
+    def _execute_browser(self, name: str, params: dict[str, Any], *, approved: bool) -> dict[str, Any]:
+        default_action = {
+            "browser": "navigate",
+            "browser_click": "click",
+            "browser_fill": "fill",
+            "browser_screenshot": "screenshot",
+            "browser_extract_table": "extract_table",
+            "browser_close": "close",
+        }[name]
+        action = str(params.get("action", default_action))
+        session_id = str(params["session_id"]) if params.get("session_id") else None
+        if action == "session":
+            return self.browser.create_session(label=str(params.get("label", "Browser session")))
+        if action == "navigate":
+            return self.browser.navigate(session_id=session_id, url=str(params["url"]))
+        if action == "extract":
+            if session_id is None:
+                raise ToolExecutionError("browser extract requires session_id")
+            return self.browser.extract_text(session_id=session_id)
+        if action == "screenshot":
+            if session_id is None:
+                raise ToolExecutionError("browser screenshot requires session_id")
+            return self.browser.screenshot(session_id=session_id)
+        if action == "extract_table":
+            if session_id is None:
+                raise ToolExecutionError("browser table extraction requires session_id")
+            return self.browser.extract_table(session_id=session_id, selector=str(params["selector"]) if params.get("selector") else None)
+        if action == "click":
+            if session_id is None:
+                raise ToolExecutionError("browser click requires session_id")
+            return self.browser.click(session_id=session_id, selector=str(params["selector"]), approved=approved)
+        if action == "fill":
+            if session_id is None:
+                raise ToolExecutionError("browser fill requires session_id")
+            return self.browser.fill(session_id=session_id, fields=dict(params.get("fields", {})), approved=approved)
+        if action == "close":
+            if session_id is None:
+                raise ToolExecutionError("browser close requires session_id")
+            return self.browser.close_session(session_id=session_id)
+        raise ToolExecutionError(f"unsupported browser action: {action}")
 
 
 ALLOWED_BINOPS = {
@@ -107,9 +1341,880 @@ def safe_eval(expression: str) -> float:
     return visit(ast.parse(expression, mode="eval"))
 
 
-def _operation_for_tool(name: str) -> str:
+def _jsonish(data: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in data.items() if key != "content"}
+
+
+def _json_object(content: str) -> dict[str, Any]:
+    try:
+        decoded = json.loads(content)
+    except json.JSONDecodeError as exc:
+        raise ValueError("weather provider response must be a JSON object") from exc
+    if not isinstance(decoded, dict):
+        raise ValueError("weather provider response must be a JSON object")
+    return decoded
+
+
+def _bounded_float(value: Any, *, minimum: float, maximum: float, label: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ToolExecutionError(f"{label} must be numeric") from exc
+    if parsed < minimum or parsed > maximum:
+        raise ToolExecutionError(f"{label} must be between {minimum:g} and {maximum:g}")
+    return parsed
+
+
+def _weather_period(period: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": str(period.get("name", "")),
+        "start_time": str(period.get("startTime", "")),
+        "end_time": str(period.get("endTime", "")),
+        "temperature": period.get("temperature"),
+        "temperature_unit": str(period.get("temperatureUnit", "")),
+        "wind_speed": str(period.get("windSpeed", "")),
+        "short_forecast": str(period.get("shortForecast", "")),
+        "detailed_forecast": str(period.get("detailedForecast", ""))[:500],
+    }
+
+
+def _extract_geocode_coordinates(decoded: Any) -> tuple[float, float] | None:
+    candidate: Any = decoded
+    if isinstance(decoded, list):
+        candidate = decoded[0] if decoded else None
+    if not isinstance(candidate, dict):
+        return None
+    lat_value = candidate.get("lat", candidate.get("latitude"))
+    lng_value = candidate.get("lon", candidate.get("lng", candidate.get("longitude")))
+    if lat_value is None or lng_value is None:
+        point = candidate.get("point")
+        if isinstance(point, dict):
+            lat_value = point.get("lat", point.get("latitude"))
+            lng_value = point.get("lon", point.get("lng", point.get("longitude")))
+    if lat_value is None or lng_value is None:
+        return None
+    try:
+        latitude = _bounded_float(lat_value, minimum=-90.0, maximum=90.0, label="latitude")
+        longitude = _bounded_float(lng_value, minimum=-180.0, maximum=180.0, label="longitude")
+    except ToolExecutionError:
+        return None
+    return latitude, longitude
+
+
+def _local_image_metadata(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {"format": "missing"}
+    header = path.read_bytes()[:4096]
+    if header.startswith(b"\x89PNG\r\n\x1a\n") and len(header) >= 24:
+        return {
+            "format": "png",
+            "width": int.from_bytes(header[16:20], "big"),
+            "height": int.from_bytes(header[20:24], "big"),
+        }
+    if header.startswith(b"GIF87a") or header.startswith(b"GIF89a"):
+        if len(header) >= 10:
+            return {
+                "format": "gif",
+                "width": int.from_bytes(header[6:8], "little"),
+                "height": int.from_bytes(header[8:10], "little"),
+            }
+        return {"format": "gif"}
+    if header.startswith(b"\xff\xd8"):
+        dimensions = _jpeg_dimensions(header)
+        metadata: dict[str, Any] = {"format": "jpeg"}
+        if dimensions is not None:
+            metadata.update({"width": dimensions[0], "height": dimensions[1]})
+        return metadata
+    return {"format": "unknown"}
+
+
+def _local_video_metadata(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {"format": "missing"}
+    header = path.read_bytes()[:1024 * 1024]
+    if len(header) >= 12 and header[4:8] == b"ftyp":
+        metadata = {"format": "mp4", "brand": header[8:12].decode("ascii", errors="replace").strip()}
+        duration = _mp4_duration_seconds(header)
+        if duration is not None:
+            metadata["duration_seconds"] = duration
+        return metadata
+    if header.startswith(b"\x1a\x45\xdf\xa3"):
+        return {"format": "matroska_or_webm"}
+    if header.startswith(b"RIFF") and len(header) >= 12 and header[8:12] == b"AVI ":
+        return {"format": "avi"}
+    if header.startswith(b"OggS"):
+        return {"format": "ogg"}
+    if header.startswith(b"FLV"):
+        return {"format": "flv"}
+    if header.startswith(b"\x00\x00\x01\xba") or header.startswith(b"\x00\x00\x01\xb3"):
+        return {"format": "mpeg"}
+    return {"format": "unknown"}
+
+
+def _mp4_duration_seconds(data: bytes) -> float | None:
+    mvhd = _find_mp4_box(data, b"mvhd")
+    if mvhd is None or len(mvhd) < 20:
+        return None
+    version = mvhd[0]
+    try:
+        if version == 1 and len(mvhd) >= 32:
+            timescale = int.from_bytes(mvhd[20:24], "big")
+            duration = int.from_bytes(mvhd[24:32], "big")
+        else:
+            timescale = int.from_bytes(mvhd[12:16], "big")
+            duration = int.from_bytes(mvhd[16:20], "big")
+    except ValueError:
+        return None
+    if timescale <= 0:
+        return None
+    return round(duration / timescale, 3)
+
+
+def _find_mp4_box(data: bytes, target: bytes, *, depth: int = 0) -> bytes | None:
+    if depth > 6:
+        return None
+    index = 0
+    while index + 8 <= len(data):
+        size = int.from_bytes(data[index : index + 4], "big")
+        box_type = data[index + 4 : index + 8]
+        header_size = 8
+        if size == 1:
+            if index + 16 > len(data):
+                return None
+            size = int.from_bytes(data[index + 8 : index + 16], "big")
+            header_size = 16
+        elif size == 0:
+            size = len(data) - index
+        if size < header_size or index + size > len(data):
+            return None
+        payload = data[index + header_size : index + size]
+        if box_type == target:
+            return payload
+        if box_type in {b"moov", b"trak", b"mdia", b"minf", b"stbl", b"edts"}:
+            nested = _find_mp4_box(payload, target, depth=depth + 1)
+            if nested is not None:
+                return nested
+        index += size
+    return None
+
+
+def _jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
+    index = 2
+    while index + 9 <= len(data):
+        if data[index] != 0xFF:
+            index += 1
+            continue
+        marker = data[index + 1]
+        index += 2
+        while marker == 0xFF and index < len(data):
+            marker = data[index]
+            index += 1
+        if marker in {0xD8, 0xD9} or 0xD0 <= marker <= 0xD7:
+            continue
+        if index + 2 > len(data):
+            return None
+        segment_length = int.from_bytes(data[index : index + 2], "big")
+        if segment_length < 2 or index + segment_length > len(data):
+            return None
+        if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF} and segment_length >= 7:
+            height = int.from_bytes(data[index + 3 : index + 5], "big")
+            width = int.from_bytes(data[index + 5 : index + 7], "big")
+            return width, height
+        index += segment_length
+    return None
+
+
+def _write_tts_tone(path: Path, *, text: str) -> float:
+    sample_rate = 8000
+    duration_seconds = min(3.0, max(0.35, 0.08 * max(len(text.split()), 1)))
+    frame_count = int(sample_rate * duration_seconds)
+    amplitude = 9000
+    frequency = 440
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        frames = bytearray()
+        for index in range(frame_count):
+            phase = (index * frequency) % sample_rate
+            value = amplitude if phase < sample_rate // 2 else -amplitude
+            frames.extend(struct.pack("<h", value))
+        handle.writeframes(bytes(frames))
+    return round(duration_seconds, 3)
+
+
+def _write_silence_wav(path: Path, *, duration_seconds: float) -> None:
+    sample_rate = 8000
+    frame_count = int(sample_rate * duration_seconds)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(b"\x00\x00" * frame_count)
+
+
+def _write_prompt_png(path: Path, *, prompt: str, source: str = "") -> tuple[int, int]:
+    width = 128
+    height = 80
+    seed = hashlib.sha256(f"{prompt}\0{source}".encode("utf-8", errors="replace")).digest()
+    base_r, base_g, base_b = seed[0], seed[1], seed[2]
+    accent_r, accent_g, accent_b = seed[3], seed[4], seed[5]
+    rows = bytearray()
+    for y in range(height):
+        rows.append(0)
+        for x in range(width):
+            band = (x // 16 + y // 10) % 2
+            blend = (x * 3 + y * 5 + seed[(x + y) % len(seed)]) % 64
+            if band:
+                rows.extend(((accent_r + blend) % 256, (accent_g + blend // 2) % 256, (accent_b + blend * 2) % 256))
+            else:
+                rows.extend(((base_r + blend * 2) % 256, (base_g + blend) % 256, (base_b + blend // 2) % 256))
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + _png_chunk(b"IDAT", zlib.compress(bytes(rows), level=9))
+        + _png_chunk(b"IEND", b"")
+    )
+    return width, height
+
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+
+
+_TARGET_LANGUAGE_ALIASES = {
+    "es": "es",
+    "spa": "es",
+    "spanish": "es",
+    "fr": "fr",
+    "fre": "fr",
+    "fra": "fr",
+    "french": "fr",
+    "de": "de",
+    "ger": "de",
+    "deu": "de",
+    "german": "de",
+}
+
+_LOCAL_TRANSLATION_GLOSSARY = {
+    "es": {
+        "aegis": "Aegis",
+        "agent": "agente",
+        "approval": "aprobacion",
+        "approvals": "aprobaciones",
+        "audit": "auditoria",
+        "browser": "navegador",
+        "cancel": "cancelar",
+        "close": "cerrar",
+        "closed": "cerrado",
+        "hello": "hola",
+        "memory": "memoria",
+        "policy": "politica",
+        "repair": "reparacion",
+        "resume": "reanudar",
+        "safe": "seguro",
+        "secure": "seguro",
+        "session": "sesion",
+        "sessions": "sesiones",
+        "task": "tarea",
+        "tasks": "tareas",
+        "tool": "herramienta",
+        "tools": "herramientas",
+        "web": "web",
+    },
+    "fr": {
+        "aegis": "Aegis",
+        "agent": "agent",
+        "approval": "approbation",
+        "approvals": "approbations",
+        "audit": "audit",
+        "browser": "navigateur",
+        "cancel": "annuler",
+        "close": "fermer",
+        "closed": "ferme",
+        "hello": "bonjour",
+        "memory": "memoire",
+        "policy": "politique",
+        "repair": "reparation",
+        "resume": "reprendre",
+        "safe": "sur",
+        "secure": "securise",
+        "session": "session",
+        "sessions": "sessions",
+        "task": "tache",
+        "tasks": "taches",
+        "tool": "outil",
+        "tools": "outils",
+        "web": "web",
+    },
+    "de": {
+        "aegis": "Aegis",
+        "agent": "Agent",
+        "approval": "Freigabe",
+        "approvals": "Freigaben",
+        "audit": "Audit",
+        "browser": "Browser",
+        "cancel": "abbrechen",
+        "close": "schliessen",
+        "closed": "geschlossen",
+        "hello": "hallo",
+        "memory": "Gedachtnis",
+        "policy": "Richtlinie",
+        "repair": "Reparatur",
+        "resume": "fortsetzen",
+        "safe": "sicher",
+        "secure": "sicher",
+        "session": "Sitzung",
+        "sessions": "Sitzungen",
+        "task": "Aufgabe",
+        "tasks": "Aufgaben",
+        "tool": "Werkzeug",
+        "tools": "Werkzeuge",
+        "web": "Web",
+    },
+}
+
+
+def _local_translate(source: str, *, target: str) -> dict[str, Any]:
+    normalized_target = _TARGET_LANGUAGE_ALIASES.get(target.strip().lower(), target.strip().lower())
+    glossary = _LOCAL_TRANSLATION_GLOSSARY.get(normalized_target)
+    if glossary is None:
+        return {
+            "ok": False,
+            "target": target,
+            "translation": source[:1000],
+            "mode": "local_glossary",
+            "coverage": 0.0,
+            "error": "unsupported local translation target",
+            "supported_targets": sorted(_LOCAL_TRANSLATION_GLOSSARY),
+        }
+    translated_tokens: list[str] = []
+    matched = 0
+    words = 0
+    for token in re.findall(r"\w+|[^\w]+", source[:1000], flags=re.UNICODE):
+        if re.fullmatch(r"\w+", token, flags=re.UNICODE):
+            words += 1
+            replacement = glossary.get(token.lower())
+            if replacement is not None:
+                matched += 1
+                translated_tokens.append(_match_case(token, replacement))
+            else:
+                translated_tokens.append(token)
+        else:
+            translated_tokens.append(token)
+    coverage = round(matched / words, 3) if words else 1.0
+    return {
+        "ok": True,
+        "target": normalized_target,
+        "translation": "".join(translated_tokens),
+        "mode": "local_glossary",
+        "coverage": coverage,
+        "quality": "glossary" if coverage == 1.0 else "partial_glossary",
+        "untranslated_terms": max(words - matched, 0),
+    }
+
+
+def _match_case(source: str, translated: str) -> str:
+    if source.isupper():
+        return translated.upper()
+    if source[:1].isupper():
+        return translated[:1].upper() + translated[1:]
+    return translated
+
+
+def _extract_search_results(decoded: Any, *, limit: int) -> list[dict[str, str]]:
+    candidates: Any = decoded
+    if isinstance(decoded, dict):
+        for key_path in (
+            ("results",),
+            ("items",),
+            ("organic_results",),
+            ("webPages", "value"),
+        ):
+            candidates = decoded
+            for key in key_path:
+                candidates = candidates.get(key) if isinstance(candidates, dict) else None
+            if isinstance(candidates, list):
+                break
+    if not isinstance(candidates, list):
+        return []
+    results: list[dict[str, str]] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or item.get("name") or "")
+        url = str(item.get("url") or item.get("link") or item.get("href") or "")
+        snippet = str(item.get("snippet") or item.get("description") or item.get("content") or item.get("summary") or "")
+        if not title and not url and not snippet:
+            continue
+        results.append({"title": title[:300], "url": url[:1000], "snippet": snippet[:1000]})
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _local_workspace_search(root: Path, *, query: str, limit: int) -> list[dict[str, str]]:
+    terms = [term.casefold() for term in re.findall(r"[A-Za-z0-9_./-]+", query) if len(term) >= 2]
+    if not terms:
+        return []
+    results: list[dict[str, str]] = []
+    for path in _iter_searchable_workspace_files(root):
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        haystack = text.casefold()
+        if not all(term in haystack for term in terms[:4]):
+            continue
+        rel = path.relative_to(root).as_posix()
+        line_no, snippet = _search_snippet(text, terms)
+        results.append(
+            {
+                "title": rel,
+                "url": f"workspace://{rel}",
+                "snippet": snippet,
+                "line": str(line_no),
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
+def _iter_searchable_workspace_files(root: Path) -> list[Path]:
+    excluded_dirs = {".aegis", ".git", "__pycache__", ".pytest_cache", ".mypy_cache", "node_modules", "dist", "build"}
+    allowed_suffixes = {".md", ".txt", ".py", ".toml", ".json", ".yaml", ".yml", ".html", ".css", ".js"}
+    files: list[Path] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        if any(part in excluded_dirs for part in path.relative_to(root).parts):
+            continue
+        if path.suffix.lower() not in allowed_suffixes:
+            continue
+        try:
+            if path.stat().st_size > 256_000:
+                continue
+        except OSError:
+            continue
+        files.append(path)
+        if len(files) >= 500:
+            break
+    return files
+
+
+def _search_snippet(text: str, terms: list[str]) -> tuple[int, str]:
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        folded = line.casefold()
+        if any(term in folded for term in terms):
+            return line_no, " ".join(line.strip().split())[:1000]
+    return 1, " ".join(text[:1000].split())
+
+
+def _normalize_github_record(decoded: dict[str, Any], *, kind: str) -> dict[str, Any]:
+    user = decoded.get("user")
+    if not isinstance(user, dict):
+        user = {}
+    normalized: dict[str, Any] = {
+        "kind": kind,
+        "number": decoded.get("number"),
+        "id": decoded.get("id"),
+        "title": str(decoded.get("title", ""))[:500],
+        "state": str(decoded.get("state", ""))[:100],
+        "url": str(decoded.get("url", ""))[:1000],
+        "html_url": str(decoded.get("html_url", ""))[:1000],
+        "user": str(user.get("login", ""))[:200],
+        "created_at": str(decoded.get("created_at", ""))[:100],
+        "updated_at": str(decoded.get("updated_at", ""))[:100],
+        "body_preview": str(decoded.get("body", ""))[:1000],
+    }
+    if kind == "pull_request":
+        base = decoded.get("base") if isinstance(decoded.get("base"), dict) else {}
+        head = decoded.get("head") if isinstance(decoded.get("head"), dict) else {}
+        normalized.update(
+            {
+                "merged": bool(decoded.get("merged", False)),
+                "draft": bool(decoded.get("draft", False)),
+                "base_ref": str(base.get("ref", ""))[:200],
+                "head_ref": str(head.get("ref", ""))[:200],
+            }
+        )
+    return normalized
+
+
+def _normalize_gitlab_record(decoded: dict[str, Any], *, kind: str) -> dict[str, Any]:
+    author = decoded.get("author")
+    if not isinstance(author, dict):
+        author = {}
+    normalized: dict[str, Any] = {
+        "kind": kind,
+        "iid": decoded.get("iid"),
+        "id": decoded.get("id"),
+        "title": str(decoded.get("title", ""))[:500],
+        "state": str(decoded.get("state", ""))[:100],
+        "web_url": str(decoded.get("web_url", ""))[:1000],
+        "author": str(author.get("username") or author.get("name") or "")[:200],
+        "created_at": str(decoded.get("created_at", ""))[:100],
+        "updated_at": str(decoded.get("updated_at", ""))[:100],
+        "description_preview": str(decoded.get("description", ""))[:1000],
+    }
+    if kind == "merge_request":
+        normalized.update(
+            {
+                "merged": str(decoded.get("state", "")).lower() == "merged" or bool(decoded.get("merged", False)),
+                "draft": bool(decoded.get("draft", False)) or str(decoded.get("work_in_progress", "")).lower() == "true",
+                "source_branch": str(decoded.get("source_branch", ""))[:200],
+                "target_branch": str(decoded.get("target_branch", ""))[:200],
+            }
+        )
+    return normalized
+
+
+def _extract_productivity_records(decoded: Any, *, output_key: str) -> list[dict[str, Any]]:
+    candidates = decoded
+    if isinstance(decoded, dict):
+        candidates = decoded.get(output_key, decoded.get("value", decoded.get("items", decoded.get("data", []))))
+    if isinstance(candidates, dict):
+        candidates = candidates.get("value", candidates.get("items", []))
+    if not isinstance(candidates, list):
+        return []
+    return [item for item in candidates if isinstance(item, dict)]
+
+
+def _normalize_calendar_event(record: dict[str, Any]) -> dict[str, str]:
+    start = record.get("start")
+    end = record.get("end")
+    if isinstance(start, dict):
+        start_value = start.get("dateTime") or start.get("date") or ""
+    else:
+        start_value = start or record.get("start_time") or record.get("startTime") or ""
+    if isinstance(end, dict):
+        end_value = end.get("dateTime") or end.get("date") or ""
+    else:
+        end_value = end or record.get("end_time") or record.get("endTime") or ""
+    return {
+        "id": str(record.get("id", ""))[:300],
+        "subject": str(record.get("subject") or record.get("summary") or record.get("title") or "")[:500],
+        "start": str(start_value)[:200],
+        "end": str(end_value)[:200],
+        "location": str(record.get("location", ""))[:500],
+        "web_link": str(record.get("webLink") or record.get("htmlLink") or record.get("url") or "")[:1000],
+    }
+
+
+def _normalize_contact_record(record: dict[str, Any]) -> dict[str, str]:
+    emails = record.get("emailAddresses")
+    email = record.get("email") or record.get("mail") or record.get("userPrincipalName") or ""
+    if not email and isinstance(emails, list) and emails:
+        first = emails[0]
+        if isinstance(first, dict):
+            email = first.get("address", "")
+        else:
+            email = first
+    return {
+        "id": str(record.get("id", ""))[:300],
+        "displayName": str(record.get("displayName") or record.get("name") or record.get("fullName") or "")[:500],
+        "email": str(email)[:500],
+        "company": str(record.get("companyName") or record.get("organization") or "")[:500],
+    }
+
+
+def _extract_service_tickets(decoded: Any) -> list[dict[str, Any]]:
+    candidates = decoded
+    if isinstance(decoded, dict):
+        candidates = decoded.get("tickets", decoded.get("result", decoded.get("value", decoded.get("items", decoded))))
+    if isinstance(candidates, dict):
+        candidates = [candidates]
+    if not isinstance(candidates, list):
+        return []
+    return [item for item in candidates if isinstance(item, dict)]
+
+
+def _normalize_service_ticket(record: dict[str, Any]) -> dict[str, str]:
+    return {
+        "id": str(record.get("id") or record.get("sys_id") or record.get("key") or "")[:300],
+        "number": str(record.get("number") or record.get("ticket") or record.get("key") or "")[:300],
+        "state": str(record.get("state") or record.get("status") or "")[:200],
+        "summary": str(record.get("summary") or record.get("short_description") or record.get("title") or "")[:500],
+        "description_preview": str(record.get("description") or record.get("body") or "")[:1000],
+        "priority": str(record.get("priority") or record.get("severity") or "")[:100],
+        "assignee": str(record.get("assignee") or record.get("assigned_to") or "")[:300],
+        "url": str(record.get("url") or record.get("html_url") or record.get("web_url") or "")[:1000],
+    }
+
+
+def _extract_text(content: str) -> str:
+    without_scripts = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", content)
+    without_tags = re.sub(r"(?s)<[^>]+>", " ", without_scripts)
+    return re.sub(r"\s+", " ", without_tags).strip() or content[:4000]
+
+
+def _parse_rss_items(content: str, *, limit: int) -> list[dict[str, str]]:
+    try:
+        root = ElementTree.fromstring(content)
+    except ElementTree.ParseError:
+        return []
+    items: list[dict[str, str]] = []
+    for item in root.findall(".//item"):
+        items.append(
+            {
+                "title": _xml_text(item, "title"),
+                "link": _xml_text(item, "link"),
+                "summary": _xml_text(item, "description")[:500],
+                "published": _xml_text(item, "pubDate"),
+            }
+        )
+        if len(items) >= limit:
+            break
+    if items:
+        return items
+    for entry in root.findall(".//{http://www.w3.org/2005/Atom}entry"):
+        link = entry.find("{http://www.w3.org/2005/Atom}link")
+        items.append(
+            {
+                "title": _xml_text(entry, "{http://www.w3.org/2005/Atom}title"),
+                "link": str(link.attrib.get("href", "")) if link is not None else "",
+                "summary": _xml_text(entry, "{http://www.w3.org/2005/Atom}summary")[:500],
+                "published": _xml_text(entry, "{http://www.w3.org/2005/Atom}updated"),
+            }
+        )
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _xml_text(parent: ElementTree.Element, tag: str) -> str:
+    node = parent.find(tag)
+    return "".join(node.itertext()).strip() if node is not None else ""
+
+
+def _summarize_text(value: str) -> str:
+    sentences = [segment.strip() for segment in re.split(r"(?<=[.!?])\s+", value) if segment.strip()]
+    if not sentences:
+        return value[:500]
+    return " ".join(sentences[:3])[:500]
+
+
+def _is_read_only_sql(query: str) -> bool:
+    normalized = re.sub(r"\s+", " ", query.strip().lower())
+    if ";" in normalized.rstrip(";"):
+        return False
+    if not normalized.startswith(("select ", "with ", "pragma ", "explain ")):
+        return False
+    blocked = (" insert ", " update ", " delete ", " drop ", " alter ", " create ", " replace ", " attach ", " detach ", " vacuum ", " reindex ")
+    padded = f" {normalized.rstrip(';')} "
+    return not any(token in padded for token in blocked)
+
+
+def _workspace_root(connectors: ConnectorRegistry) -> Path:
+    filesystem = connectors.get("filesystem")
+    root = getattr(filesystem, "root", None)
+    if root is None:
+        raise ToolExecutionError("filesystem connector does not expose a workspace root")
+    return Path(root).expanduser().resolve()
+
+
+def _artifact_receipt(path: Path) -> dict[str, Any]:
+    content = path.read_bytes()
+    return {
+        "artifact_sha256": hashlib.sha256(content).hexdigest(),
+        "artifact_bytes": len(content),
+    }
+
+
+def _write_tool_artifact_metadata(
+    *,
+    artifact_dir: Path,
+    tool: str,
+    artifact_path: Path,
+    mode: str,
+    artifact_receipt: dict[str, Any],
+    sandbox_receipt: dict[str, Any],
+    details: dict[str, Any],
+) -> Path:
+    metadata_path = artifact_dir / f"{artifact_path.stem}.metadata.json"
+    metadata = {
+        "version": 1,
+        "tool": tool,
+        "mode": mode,
+        "artifact_name": artifact_path.name,
+        "artifact_receipt": dict(artifact_receipt),
+        "sandbox_receipt": dict(sandbox_receipt),
+        "details": details,
+        "limitations": [
+            "Local artifact generated without a live media provider.",
+            "Receipt metadata avoids storing raw prompt or text content.",
+        ],
+    }
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+    return metadata_path
+
+
+def _media_sandbox_receipt(*, tool: str, mode: str) -> dict[str, Any]:
+    return {
+        "sandbox_profile": "local_artifact_worker_no_provider",
+        "tool": tool,
+        "mode": mode,
+        "ambient_workspace_read": False,
+        "ambient_network": False,
+        "raw_prompt_or_text_persisted": False,
+        "writes_confined_to": ".aegis/tool-artifacts",
+        "live_provider_used": False,
+        "limitations": [
+            "Deterministic local artifact worker only.",
+            "No external media provider, microphone, speaker, camera, or browser capture device is invoked.",
+        ],
+    }
+
+
+def _backend_activation_requirements(*, name: str, backend: str) -> dict[str, Any]:
+    return {
+        "activation_status": "backend_adapter_required",
+        "required_controls": ["brokered_backend_auth", "scope_limits", "resource_limits", "rollback_receipts"],
+        "verification_gates": ["disabled_backend_denial", "approved_activation", "cleanup_receipt", "scope_escape_rejection"],
+        "next_steps": [
+            f"Configure the {backend} adapter for {name} with brokered credentials.",
+            "Define workspace, network, CPU/memory/time, and artifact boundaries before enabling.",
+            "Add cleanup and rollback receipts before any remote or container command can run.",
+        ],
+    }
+
+
+def _resolve_executable(executable: str) -> str | None:
+    path = Path(executable).expanduser()
+    if path.is_absolute():
+        return str(path) if path.exists() and path.is_file() else None
+    return shutil.which(executable)
+
+
+def _host_allowed(host: str, allowed_hosts: tuple[str, ...]) -> bool:
+    if not host or not allowed_hosts:
+        return False
+    return any(host == allowed or host.endswith(f".{allowed}") for allowed in allowed_hosts)
+
+
+def _safe_remote_command_args(command: str) -> list[str]:
+    if not command.strip():
+        raise ToolExecutionError("ssh_exec requires command")
+    if re.search(r"[;&|`$<>\\\n\r]", command):
+        raise ToolExecutionError("ssh command contains shell metacharacters that are not allowed")
+    args = shlex.split(command)
+    if not args:
+        raise ToolExecutionError("ssh_exec requires command")
+    for arg in args:
+        if arg.startswith("-") or not re.fullmatch(r"[A-Za-z0-9_./:=,@+-]+", arg):
+            raise ToolExecutionError("ssh command arguments must be simple non-option tokens")
+    return args
+
+
+def _docker_args_for_tool(*, name: str, params: dict[str, Any], config: dict[str, Any]) -> list[str]:
+    if name == "container_run":
+        image = str(params.get("image", "")).strip()
+        if not image or not re.fullmatch(r"[A-Za-z0-9._:/@-]+", image):
+            raise ToolExecutionError("container image must be a simple registry reference")
+        command = str(params.get("command", "")).strip()
+        command_args = shlex.split(command) if command else []
+        _reject_unsafe_docker_args(command_args)
+        args = [
+            "run",
+            "--rm",
+            "--network",
+            str(config.get("network", "none")),
+            "--cpus",
+            str(config.get("cpus", "1")),
+            "--memory",
+            str(config.get("memory", "512m")),
+            image,
+            *command_args,
+        ]
+        _reject_unsafe_docker_args(args)
+        return args
+    raw_command = str(params.get("command", "")).strip()
+    if not raw_command:
+        raise ToolExecutionError("docker_run requires command")
+    args = shlex.split(raw_command)
+    if args and args[0] == "docker":
+        args = args[1:]
+    _reject_unsafe_docker_args(args)
+    return args
+
+
+def _reject_unsafe_docker_args(args: list[str]) -> None:
+    denied_exact = {"--privileged", "--pid=host", "--ipc=host", "--network=host", "--net=host", "-v", "--volume", "--mount"}
+    denied_prefixes = ("--volume=", "--mount=", "-v=", "--network=host", "--net=host")
+    for index, arg in enumerate(args):
+        if arg in denied_exact or any(arg.startswith(prefix) for prefix in denied_prefixes):
+            raise ToolExecutionError(f"docker argument {arg!r} is not allowed")
+        if arg in {"--network", "--net"} and index + 1 < len(args) and args[index + 1] == "host":
+            raise ToolExecutionError("docker host networking is not allowed")
+
+
+def _docker_limit_receipt(config: dict[str, Any]) -> dict[str, str | int]:
+    return {
+        "timeout_seconds": int(config.get("timeout_seconds", 30)),
+        "memory": str(config.get("memory", "512m")),
+        "cpus": str(config.get("cpus", "1")),
+        "network": str(config.get("network", "none")),
+    }
+
+
+def _resolve_under_root(root: Path, value: Any) -> Path:
+    path = (root / str(value or ".")).expanduser().resolve() if not Path(str(value or ".")).is_absolute() else Path(str(value)).expanduser().resolve()
+    if root not in (path, *path.parents):
+        raise ToolExecutionError(f"path {path} escapes workspace root")
+    return path
+
+
+def _safe_archive_member_path(destination: Path, member_name: str) -> Path:
+    member = Path(member_name)
+    if member.is_absolute() or ".." in member.parts:
+        raise ToolExecutionError(f"archive member {member_name!r} escapes destination")
+    target = (destination / member).resolve()
+    if destination not in (target, *target.parents):
+        raise ToolExecutionError(f"archive member {member_name!r} escapes destination")
+    return target
+
+
+def _changed_files_from_patch(patch: str) -> list[str]:
+    changed: list[str] = []
+    for line in patch.splitlines():
+        if not line.startswith(("+++ ", "--- ")):
+            continue
+        raw = line[4:].strip()
+        if raw == "/dev/null":
+            continue
+        if raw.startswith(("a/", "b/")):
+            raw = raw[2:]
+        path = Path(raw)
+        if path.is_absolute() or ".." in path.parts:
+            raise ToolExecutionError(f"patch path {raw!r} escapes workspace root")
+        if raw not in changed:
+            changed.append(raw)
+    if not changed:
+        raise ToolExecutionError("diff_apply requires a unified diff with changed files")
+    return changed
+
+
+def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(("git", "-C", str(root), *args), text=True, capture_output=True, timeout=10, check=False)
+
+
+def _operation_for_tool(name: str, permission: str) -> str:
     if name in {"file_write", "memory_store", "image_generate", "tts", "subagent_delegate", "mcp_call"}:
         return "write"
     if name == "shell":
         return "execute"
+    if "execute" in permission:
+        return "execute"
+    if "write" in permission:
+        return "write"
     return "read"
+
+
+def _scopes_for_tool(permission: str, operation: str) -> tuple[str, ...]:
+    scopes = {scope for scope in permission.split("/") if scope and scope != "none"}
+    if operation == "write":
+        scopes.add("write")
+    if operation == "execute":
+        scopes.add("execute")
+    return tuple(sorted(scopes))

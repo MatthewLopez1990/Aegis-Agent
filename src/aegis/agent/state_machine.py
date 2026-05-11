@@ -10,19 +10,23 @@ class TaskStatus(str, Enum):
     PLANNED = "planned"
     RUNNING = "running"
     WAITING_APPROVAL = "waiting_approval"
+    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     BLOCKED = "blocked"
+    CANCELLED = "cancelled"
 
 
 ALLOWED_TRANSITIONS = {
-    TaskStatus.PENDING: {TaskStatus.PLANNED, TaskStatus.BLOCKED, TaskStatus.FAILED},
-    TaskStatus.PLANNED: {TaskStatus.RUNNING, TaskStatus.WAITING_APPROVAL, TaskStatus.BLOCKED, TaskStatus.FAILED},
-    TaskStatus.WAITING_APPROVAL: {TaskStatus.RUNNING, TaskStatus.BLOCKED, TaskStatus.FAILED},
-    TaskStatus.RUNNING: {TaskStatus.COMPLETED, TaskStatus.WAITING_APPROVAL, TaskStatus.BLOCKED, TaskStatus.FAILED},
+    TaskStatus.PENDING: {TaskStatus.PLANNED, TaskStatus.PAUSED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.CANCELLED},
+    TaskStatus.PLANNED: {TaskStatus.RUNNING, TaskStatus.WAITING_APPROVAL, TaskStatus.PAUSED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.CANCELLED},
+    TaskStatus.WAITING_APPROVAL: {TaskStatus.RUNNING, TaskStatus.PAUSED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.CANCELLED},
+    TaskStatus.RUNNING: {TaskStatus.COMPLETED, TaskStatus.WAITING_APPROVAL, TaskStatus.PAUSED, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.CANCELLED},
+    TaskStatus.PAUSED: {TaskStatus.RUNNING, TaskStatus.WAITING_APPROVAL, TaskStatus.BLOCKED, TaskStatus.FAILED, TaskStatus.CANCELLED},
     TaskStatus.COMPLETED: set(),
     TaskStatus.FAILED: set(),
     TaskStatus.BLOCKED: set(),
+    TaskStatus.CANCELLED: set(),
 }
 
 

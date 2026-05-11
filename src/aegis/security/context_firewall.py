@@ -25,9 +25,26 @@ SUSPICIOUS_PATTERNS = (
 )
 
 SECRET_VALUE_PATTERNS = (
+    re.compile(r"\b(Authorization\s*:\s*(?:Bearer|Basic)\s+)[^\r\n,;]+", re.I),
+    re.compile(r"\b((?:Cookie|Set-Cookie)\s*:\s*)[^\r\n]+", re.I),
     re.compile(r"([\"']?(?:api[_ -]?key|password|secret|token|refresh[_ -]?token)[\"']?\s*[:=]\s*)[\"']?([^\"'\s,;}]+)", re.I),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.I | re.S),
+    re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b"),
+    re.compile(r"\bghp_[A-Za-z0-9_]{8,}\b"),
+    re.compile(r"\bgithub_pat_[A-Za-z0-9_]{8,}\b"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
+    re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
 )
+
+
+def redact_secret_values(content: str) -> str:
+    redacted = SECRET_VALUE_PATTERNS[0].sub(lambda match: f"{match.group(1)}[REDACTED_VALUE]", content)
+    redacted = SECRET_VALUE_PATTERNS[1].sub(lambda match: f"{match.group(1)}[REDACTED_VALUE]", redacted)
+    redacted = SECRET_VALUE_PATTERNS[2].sub(lambda match: f"{match.group(1)}[REDACTED_VALUE]", redacted)
+    redacted = SECRET_VALUE_PATTERNS[3].sub("[REDACTED_PRIVATE_KEY]", redacted)
+    for pattern in SECRET_VALUE_PATTERNS[4:]:
+        redacted = pattern.sub("[REDACTED_VALUE]", redacted)
+    return redacted
 
 
 @dataclass(frozen=True)
@@ -60,9 +77,12 @@ class ContextFirewall:
         return ContextItem(content=content, taint=taint)
 
     def sanitize_item(self, item: ContextItem) -> ContextItem:
-        if not item.taint.is_untrusted:
-            return item
         content = self._redact_secret_values(item.content)
+        if not item.taint.is_untrusted:
+            if content != item.content:
+                taint = item.taint.with_status(SanitizationStatus.SANITIZED)
+                return ContextItem(content=content, taint=taint, item_id=item.item_id)
+            return item
         matched = False
         for pattern in SUSPICIOUS_PATTERNS:
             content, count = pattern.subn("[QUARANTINED_INSTRUCTION]", content)
@@ -118,7 +138,4 @@ class ContextFirewall:
         return normalized[: limit - 3] + "..."
 
     def _redact_secret_values(self, content: str) -> str:
-        redacted = content
-        redacted = SECRET_VALUE_PATTERNS[0].sub(lambda match: f"{match.group(1)}[REDACTED_VALUE]", redacted)
-        redacted = SECRET_VALUE_PATTERNS[1].sub("[REDACTED_PRIVATE_KEY]", redacted)
-        return redacted
+        return redact_secret_values(content)

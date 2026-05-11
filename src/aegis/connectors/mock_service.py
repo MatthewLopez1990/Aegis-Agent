@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
-from aegis.connectors.base import ConnectorRequest, ConnectorResult, ConnectorSpec
+from aegis.audit.logger import redact
+from aegis.connectors.base import ConnectorRequest, ConnectorResult, ConnectorSpec, require_scope
 from aegis.security.taint import RiskLevel, Sensitivity
 
 
@@ -24,6 +27,11 @@ class MockServiceConnector:
             data_sensitivity=Sensitivity.INTERNAL,
             default_mode="mock_read_only",
             approval_required=write_operations,
+            operation_scopes={
+                **{operation: ("read",) for operation in operations},
+                **{operation: ("write",) for operation in write_operations},
+                "dry_run": ("write",),
+            },
         )
 
     def connect(self) -> bool:
@@ -39,21 +47,56 @@ class MockServiceConnector:
         return scope in self.list_scopes()
 
     def read(self, request: ConnectorRequest) -> ConnectorResult:
+        require_scope(request, "read", connector=self.spec.name)
+        if request.operation not in self.spec.supported_operations or request.operation in self.write_operations:
+            return ConnectorResult(self.spec.name, request.operation, False, {}, error=f"unsupported mock service read operation: {request.operation}")
         return ConnectorResult(self.spec.name, request.operation, True, {"mock": True, "data": self.sample_data})
 
     def write(self, request: ConnectorRequest) -> ConnectorResult:
+        require_scope(request, "write", connector=self.spec.name)
+        if request.operation not in self.write_operations:
+            return ConnectorResult(self.spec.name, request.operation, False, {}, error=f"unsupported mock service write operation: {request.operation}")
         if request.operation in self.write_operations and not request.approved:
             return ConnectorResult(self.spec.name, request.operation, False, {}, error="mock service write requires approval")
-        return ConnectorResult(self.spec.name, request.operation, True, {"mock": True, "accepted": request.params}, rollback="mock rollback available")
+        return ConnectorResult(self.spec.name, request.operation, True, {"mock": True, "accepted": _summarize_params(request.params)}, rollback="mock rollback available")
 
     def dry_run(self, request: ConnectorRequest) -> ConnectorResult:
-        return ConnectorResult(self.spec.name, "dry_run", True, {"would_call": request.operation, "params": request.params}, rollback="no action performed")
+        if request.operation != "dry_run" and request.operation not in self.spec.supported_operations:
+            return ConnectorResult(self.spec.name, "dry_run", False, {}, error=f"unsupported mock service operation: {request.operation}")
+        required_scope = "write" if request.operation in self.write_operations or request.operation == "dry_run" else "read"
+        require_scope(request, required_scope, connector=self.spec.name)
+        return ConnectorResult(self.spec.name, "dry_run", True, {"would_call": request.operation, "params": _summarize_params(request.params), "action_performed": False}, rollback="no action performed")
 
     def rollback(self, request: ConnectorRequest) -> ConnectorResult:
-        return ConnectorResult(self.spec.name, "rollback", True, {"mock": True, "rolled_back": request.params})
+        return ConnectorResult(self.spec.name, "rollback", True, {"mock": True, "rolled_back": _summarize_params(request.params)})
 
     def audit(self) -> dict[str, Any]:
         return self.health_check()
 
     def disconnect(self) -> bool:
         return True
+
+
+def _summarize_params(params: dict[str, Any]) -> dict[str, Any]:
+    encoded = json.dumps(params, sort_keys=True, default=str, separators=(",", ":")).encode("utf-8")
+    return {
+        "receipt_schema": "redacted_param_summary_v1",
+        "param_sha256": hashlib.sha256(encoded).hexdigest(),
+        "param_bytes": len(encoded),
+        "param_keys": sorted(str(key) for key in params.keys()),
+        "raw_secret_values_included": False,
+        "raw_response_body_included": False,
+        "redacted_preview": _preview(redact(params)),
+    }
+
+
+def _preview(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _preview(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return {"type": "list", "items": len(value), "preview": [_preview(item) for item in value[:10]]}
+    if isinstance(value, tuple):
+        return {"type": "tuple", "items": len(value), "preview": [_preview(item) for item in value[:10]]}
+    if isinstance(value, str):
+        return {"type": "string", "chars": len(value), "redacted": value == "[REDACTED]" or "[REDACTED_VALUE]" in value}
+    return value

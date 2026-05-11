@@ -23,6 +23,60 @@ class AuditTests(unittest.TestCase):
             self.assertIn("[REDACTED]", text)
             self.assertTrue(audit.verify_chain())
 
+    def test_audit_redacts_secret_like_values_in_string_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "audit.jsonl"
+            audit = AuditLogger(path)
+
+            audit.append("task.created", {"user_request": "summarize token: abc123 and sk-1234567890abcdef"})
+
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("abc123", text)
+            self.assertNotIn("sk-1234567890abcdef", text)
+            self.assertIn("[REDACTED_VALUE]", text)
+            self.assertTrue(audit.verify_chain())
+
+    def test_audit_can_query_full_task_history_beyond_recent_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "audit.jsonl"
+            audit = AuditLogger(path)
+
+            audit.append("task.created", {"step": 1}, task_id="task-1")
+            for index in range(75):
+                audit.append("runtime.noise", {"index": index})
+            audit.append("task.completed", {"step": 2}, task_id="task-1")
+
+            task_events = audit.for_task("task-1")
+
+            self.assertEqual([event["event_type"] for event in task_events], ["task.created", "task.completed"])
+            self.assertFalse(any(event.get("task_id") == "task-1" for event in audit.tail(50)[:-1]))
+
+    def test_audit_exports_redacted_siem_jsonl_with_chain_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "audit.jsonl"
+            audit = AuditLogger(path)
+
+            audit.append("task.created", {"api_key": "real-secret", "note": "summarize token: abc123"}, task_id="task-1")
+            audit.append("policy.decision", {"decision": "allow"}, task_id="task-1")
+            audit.append("runtime.noise", {"ok": True}, task_id="task-2")
+
+            exported = audit.export_siem(limit=10, task_id="task-1")
+            jsonl = exported["jsonl"]
+
+            self.assertEqual(exported["format"], "jsonl")
+            self.assertEqual(exported["schema"], "aegis.audit.siem.v1")
+            self.assertTrue(exported["chain_ok"])
+            self.assertEqual(exported["count"], 2)
+            self.assertNotIn("real-secret", jsonl)
+            self.assertNotIn("abc123", jsonl)
+            self.assertIn("[REDACTED]", jsonl)
+            self.assertIn("[REDACTED_VALUE]", jsonl)
+            self.assertEqual(exported["events"][0]["event"]["action"], "task.created")
+            self.assertEqual(exported["events"][0]["event"]["category"], "process")
+            self.assertEqual(exported["events"][0]["aegis"]["task_id"], "task-1")
+            self.assertIn("prev_hash", exported["events"][0]["aegis"])
+            self.assertIn("event_hash", path.read_text(encoding="utf-8"))
+
     def test_audit_events_cover_major_subsystems(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

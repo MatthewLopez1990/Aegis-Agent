@@ -3,11 +3,14 @@ read_only = true
 raw_secret_exposure = "deny"
 destructive_action = "require_approval"
 message_send = "require_approval"
+shell_execution = "require_approval"
 unknown_shell_command = "deny"
 unapproved_network_egress = "require_approval"
 skill_without_valid_manifest = "deny"
 connector_write_without_scope = "deny"
+high_risk_action = "require_approval"
 high_risk_memory_without_confirmation = "deny"
+secret_data = "deny"
 
 [network]
 allowlist = ["example.com", "localhost", "127.0.0.1"]

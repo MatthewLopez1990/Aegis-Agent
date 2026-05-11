@@ -35,17 +35,37 @@
           <div class="panel-header">
             <div>
               <p class="eyebrow">Command</p>
-              <h3>Submit Task</h3>
+              <h3>Agent Session</h3>
             </div>
+            <span id="active-session" class="status-pill">No session</span>
           </div>
+          <div id="session-transcript" class="transcript" aria-live="polite"></div>
           <form id="task-form" class="task-form">
-            <textarea id="task-request" rows="5" placeholder="Summarize this project safely"></textarea>
+            <textarea id="task-request" rows="5" placeholder="Ask Aegis to inspect, plan, or act"></textarea>
             <div class="input-row">
               <input id="task-path" placeholder="Optional scoped path">
-              <button type="submit">Submit</button>
+              <button type="submit">Send</button>
             </div>
           </form>
-          <pre id="task-output" aria-live="polite"></pre>
+          <form id="session-message-form" class="session-message-form">
+            <textarea id="session-message-content" rows="3" placeholder="Append context without running a task"></textarea>
+            <div class="input-row">
+              <select id="session-message-role">
+                <option value="user">User</option>
+                <option value="assistant">Assistant</option>
+              </select>
+              <select id="session-message-trust">
+                <option value="USER_DIRECTIVE">User directive</option>
+                <option value="CHAT_CONTENT">Chat content</option>
+                <option value="WEB_CONTENT">Web content</option>
+                <option value="DOCUMENT_CONTENT">Document content</option>
+                <option value="TOOL_OUTPUT">Tool output</option>
+                <option value="UNKNOWN_UNTRUSTED">Unknown untrusted</option>
+              </select>
+              <button type="submit" class="secondary">Append Context</button>
+            </div>
+          </form>
+          <div id="task-output" class="task-result" aria-live="polite"></div>
         </div>
 
         <aside class="side-stack">
@@ -57,6 +77,9 @@
               </div>
             </div>
             <div id="approvals" class="list"></div>
+            <div id="approval-detail" class="approval-detail"></div>
+            <p class="section-label">Recent Decisions</p>
+            <div id="approval-decisions" class="list compact-list"></div>
           </section>
 
           <section class="panel">
@@ -65,14 +88,29 @@
                 <p class="eyebrow">Recent</p>
                 <h3>Tasks</h3>
               </div>
+              <div class="item-actions">
+                <span id="tasks-session-label" class="status-pill">Active session</span>
+                <button id="tasks-scope-session" type="button" class="secondary active" data-task-scope="session">Session</button>
+                <button id="tasks-scope-all" type="button" class="secondary" data-task-scope="all">All</button>
+              </div>
             </div>
             <div id="tasks" class="list compact-list"></div>
           </section>
         </aside>
       </section>
 
+      <nav class="section-switcher" aria-label="Dashboard sections">
+        <button type="button" data-section-tab="security" class="active">Security</button>
+        <button type="button" data-section-tab="models">Models</button>
+        <button type="button" data-section-tab="tools">Tools</button>
+        <button type="button" data-section-tab="automation">Automation</button>
+        <button type="button" data-section-tab="memory">Memory</button>
+        <button type="button" data-section-tab="activity">Activity</button>
+        <button type="button" data-section-tab="evidence">Evidence</button>
+      </nav>
+
       <section class="dashboard-grid">
-        <section class="panel span-2">
+        <section class="panel span-2" data-section="security">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Controls</p>
@@ -80,9 +118,49 @@
             </div>
           </div>
           <div id="security-controls" class="feature-grid"></div>
+          <form id="policy-evaluate-form" class="inline-form two-col">
+            <input id="policy-operation" placeholder="operation">
+            <select id="policy-risk">
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+              <option value="critical">Critical</option>
+            </select>
+            <input id="policy-scopes" placeholder="read,write">
+            <input id="policy-domain" placeholder="target domain">
+            <button type="submit">Evaluate Policy</button>
+          </form>
+          <button id="policy-rollback" type="button" class="secondary">Rollback Policy</button>
+          <form id="policy-schedule-form" class="inline-form two-col">
+            <input id="policy-schedule-source" placeholder="bundle" value="strict-local">
+            <input id="policy-schedule-activate-at" placeholder="activate at">
+            <input id="policy-schedule-environment" placeholder="environment" value="local">
+            <label class="checkline"><input id="policy-schedule-approved" type="checkbox"> Approved</label>
+            <button type="submit">Schedule Policy</button>
+          </form>
+          <form id="policy-promote-form" class="inline-form two-col">
+            <input id="policy-promote-source" placeholder="bundle" value="strict-local">
+            <input id="policy-promote-from" placeholder="from environment" value="staging">
+            <input id="policy-promote-to" placeholder="to environment" value="production">
+            <input id="policy-promote-baseline" placeholder="baseline report id">
+            <input id="policy-promote-candidate" placeholder="candidate report id">
+            <input id="policy-promote-defer-live-gap" placeholder="defer live gap areas, comma separated">
+            <input id="policy-promote-deferral-reason" placeholder="live gap deferral reason">
+            <label class="checkline"><input id="policy-promote-approved" type="checkbox"> Approved</label>
+            <label class="checkline"><input id="policy-promote-clean-evaluation" type="checkbox"> Clean Evaluation</label>
+            <label class="checkline"><input id="policy-promote-live-parity" type="checkbox"> Live Parity</label>
+            <button type="submit">Promote Policy</button>
+          </form>
+          <div class="inline-actions">
+            <button id="policy-rollouts" type="button" class="secondary">Policy Rollouts</button>
+            <button id="policy-promotions" type="button" class="secondary">Policy Promotions</button>
+            <button id="policy-activate-due" type="button" class="secondary">Activate Due</button>
+          </div>
+          <div id="policy-output" class="evidence-box compact"></div>
+          <div id="policy-bundles" class="list"></div>
         </section>
 
-        <section class="panel">
+        <section class="panel" data-section="security">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Parity</p>
@@ -92,7 +170,7 @@
           <div id="competitor-targets" class="list"></div>
         </section>
 
-        <section class="panel span-3">
+        <section class="panel span-3" data-section="security">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Coverage</p>
@@ -102,7 +180,19 @@
           <div id="capability-groups" class="feature-grid"></div>
         </section>
 
-        <section class="panel">
+        <section class="panel span-3" data-section="security">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Readiness</p>
+              <h3>Implementation Readiness</h3>
+            </div>
+          </div>
+          <div id="implementation-readiness" class="feature-grid"></div>
+          <p class="section-label">Live Gap Backlog</p>
+          <div id="live-gap-backlog" class="list compact-list"></div>
+        </section>
+
+        <section class="panel" data-section="tools">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Runtime</p>
@@ -112,7 +202,7 @@
           <div id="connectors" class="list compact-list"></div>
         </section>
 
-        <section class="panel span-2">
+        <section class="panel span-2" data-section="tools">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Gateway</p>
@@ -122,7 +212,43 @@
           <div id="channels" class="list card-grid"></div>
         </section>
 
-        <section class="panel span-2">
+        <section class="panel span-2" data-section="tools">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Gateway</p>
+              <h3>Channel Control</h3>
+            </div>
+          </div>
+          <form id="channel-render-form" class="inline-form two-col">
+            <input id="channel-render-name" placeholder="slack">
+            <textarea id="channel-render-text" rows="4" placeholder="Message text"></textarea>
+            <button type="submit">Render</button>
+          </form>
+          <form id="channel-receive-form" class="inline-form two-col">
+            <input id="channel-receive-name" placeholder="slack">
+            <textarea id="channel-receive-text" rows="4" placeholder="Inbound text"></textarea>
+            <button type="submit" class="secondary">Receive</button>
+          </form>
+          <form id="channel-webhook-send-form" class="inline-form channel-send-form">
+            <textarea id="channel-webhook-send-text" rows="4" placeholder="Signed webhook message"></textarea>
+            <label class="checkline"><input id="channel-webhook-send-approved" type="checkbox"> Approved</label>
+            <button type="submit" class="secondary">Send Webhook</button>
+          </form>
+          <form id="channel-chat-webhook-form" class="inline-form channel-send-form">
+            <textarea id="channel-chat-webhook-text" rows="4" placeholder="Chat webhook message"></textarea>
+            <label class="checkline"><input id="channel-chat-webhook-approved" type="checkbox"> Approved</label>
+            <button type="submit" class="secondary">Send Chat Webhook</button>
+          </form>
+          <form id="channel-email-send-form" class="inline-form channel-email-form">
+            <input id="channel-email-send-subject" placeholder="Email subject">
+            <textarea id="channel-email-send-text" rows="4" placeholder="Email body"></textarea>
+            <label class="checkline"><input id="channel-email-send-approved" type="checkbox"> Approved</label>
+            <button type="submit" class="secondary">Send Email</button>
+          </form>
+          <div id="channel-render-output" class="evidence-block"></div>
+        </section>
+
+        <section class="panel span-2" data-section="models">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Models</p>
@@ -132,6 +258,11 @@
           <form id="model-auth-form" class="inline-form auth-form">
             <select id="model-provider">
               <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="google">Google</option>
+              <option value="mistral">Mistral</option>
+              <option value="cohere">Cohere</option>
+              <option value="custom">Custom</option>
               <option value="openrouter">OpenRouter</option>
             </select>
             <input id="model-api-key" type="password" autocomplete="off" placeholder="API key">
@@ -141,17 +272,36 @@
           <div id="model-providers" class="list card-grid"></div>
         </section>
 
-        <section class="panel">
+        <section class="panel" data-section="models">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Routes</p>
               <h3>Models</h3>
             </div>
           </div>
+          <form id="model-route-form" class="inline-form two-col">
+            <input id="model-route-id" placeholder="alias/smart">
+            <button type="submit" class="secondary">Route</button>
+          </form>
+          <form id="model-alias-form" class="inline-form two-col">
+            <input id="model-alias-name" placeholder="alias">
+            <input id="model-alias-target" placeholder="provider/model">
+            <button type="submit" class="secondary">Set Alias</button>
+          </form>
+          <form id="model-fallbacks-form" class="inline-form two-col">
+            <input id="model-fallbacks-id" placeholder="provider/model">
+            <input id="model-fallbacks-list" placeholder="fallback/model,fallback/model">
+            <button type="submit" class="secondary">Set Fallbacks</button>
+          </form>
+          <button id="model-usage-refresh" type="button" class="secondary">Usage</button>
+          <div id="model-route-output" class="evidence-block"></div>
+          <div id="model-usage-providers" class="list compact-list"></div>
+          <div id="model-usage-models" class="list compact-list"></div>
+          <div id="model-usage-events" class="list compact-list"></div>
           <div id="models" class="list compact-list"></div>
         </section>
 
-        <section class="panel span-2">
+        <section class="panel span-2" data-section="tools">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Tooling</p>
@@ -161,7 +311,23 @@
           <div id="tools" class="list card-grid"></div>
         </section>
 
-        <section class="panel">
+        <section class="panel span-2" data-section="tools">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Tooling</p>
+              <h3>Tool Runner</h3>
+            </div>
+          </div>
+          <div id="tool-run-presets" class="button-row"></div>
+          <form id="tool-run-form" class="inline-form two-col">
+            <input id="tool-run-name" placeholder="calculator">
+            <textarea id="tool-run-params" rows="4" placeholder='{"expression":"2+2"}'></textarea>
+            <button type="submit">Run</button>
+          </form>
+          <div id="tool-run-output" class="evidence-block"></div>
+        </section>
+
+        <section class="panel" data-section="tools">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Execution</p>
@@ -171,17 +337,81 @@
           <div id="backends" class="list compact-list"></div>
         </section>
 
-        <section class="panel">
+        <section class="panel span-2" data-section="tools">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Web Control</p>
+              <h3>Browser Sandbox</h3>
+            </div>
+          </div>
+          <form id="browser-form" class="inline-form two-col">
+            <input id="browser-url" placeholder="https://example.com">
+            <button type="submit">Navigate</button>
+          </form>
+          <div class="item-actions browser-actions">
+            <button id="browser-new-session" type="button" class="secondary">New Session</button>
+            <button id="browser-extract" type="button" class="secondary">Extract</button>
+            <button id="browser-table" type="button" class="secondary">Table</button>
+            <button id="browser-screenshot" type="button" class="secondary">Snapshot Note</button>
+          </div>
+          <form id="browser-action-form" class="inline-form two-col">
+            <input id="browser-selector" placeholder="#selector">
+            <button id="browser-click" type="button" class="secondary">Record Click</button>
+            <input id="browser-fill-fields" placeholder='{"#email":"local@example.test"}'>
+            <button id="browser-fill" type="button" class="secondary">Record Fill</button>
+          </form>
+          <div id="browser-sessions" class="list compact-list"></div>
+          <div id="browser-output" class="evidence-block"></div>
+        </section>
+
+        <section class="panel" data-section="tools">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Skills</p>
               <h3>Skill Hub</h3>
             </div>
           </div>
+          <form id="skill-hub-form" class="inline-form two-col">
+            <input id="skill-hub-query" placeholder="Search skills">
+            <button type="submit" class="secondary">Search</button>
+          </form>
           <div id="skill-hub" class="list compact-list"></div>
         </section>
 
-        <section class="panel span-2">
+        <section class="panel" data-section="tools">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Skills</p>
+              <h3>Installed Skills</h3>
+            </div>
+          </div>
+          <div id="installed-skills" class="list compact-list"></div>
+        </section>
+
+        <section class="panel span-2" data-section="tools">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">MCP</p>
+              <h3>Servers</h3>
+            </div>
+          </div>
+          <form id="mcp-server-form" class="inline-form two-col">
+            <input id="mcp-server-name" placeholder="local-search">
+            <input id="mcp-server-command" placeholder="python3 /path/to/server.py">
+            <input id="mcp-server-tools" placeholder="search,echo">
+            <button type="submit">Register</button>
+          </form>
+          <form id="mcp-call-form" class="inline-form two-col">
+            <input id="mcp-call-server" placeholder="server name or id">
+            <input id="mcp-call-tool" placeholder="tool name">
+            <input id="mcp-call-arguments" placeholder='{"query":"aegis"}'>
+            <button type="submit" class="secondary">Call Tool</button>
+          </form>
+          <div id="mcp-servers" class="list compact-list"></div>
+          <div id="mcp-call-output" class="evidence-block"></div>
+        </section>
+
+        <section class="panel span-2" data-section="automation">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Automation</p>
@@ -194,10 +424,50 @@
             <input id="schedule-task" placeholder="Summarize my project">
             <button type="submit">Create</button>
           </form>
+          <button id="schedule-memory-digest" type="button" class="secondary">Schedule Memory Digest</button>
+          <button id="schedule-memory-escalation" type="button" class="secondary">Schedule Memory Escalation</button>
+          <form id="schedule-evaluation-form" class="inline-form two-col">
+            <input id="schedule-evaluation-scenario" placeholder="policy regression">
+            <input id="schedule-evaluation-steps" placeholder="seed, run gates, review digest">
+            <button type="submit" class="secondary">Schedule Evaluation</button>
+          </form>
+          <form id="schedule-evaluation-suite-form" class="inline-form two-col">
+            <input id="schedule-evaluation-suite" placeholder="security">
+            <input id="schedule-evaluation-reviewer" placeholder="security-reviewer">
+            <button type="submit" class="secondary">Schedule Suite</button>
+          </form>
+          <button id="run-due-schedules" type="button" class="secondary">Run Due</button>
+          <div id="schedule-output" class="evidence-block"></div>
           <div id="schedules" class="list"></div>
         </section>
 
-        <section class="panel span-2">
+        <section class="panel span-2" data-section="automation">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Evaluation</p>
+              <h3>Review Queue</h3>
+            </div>
+          </div>
+          <form id="evaluation-review-form" class="inline-form two-col">
+            <input id="evaluation-report-id" placeholder="report id">
+            <select id="evaluation-review-status">
+              <option value="reviewed_passed">reviewed_passed</option>
+              <option value="reviewed_failed">reviewed_failed</option>
+              <option value="needs_followup">needs_followup</option>
+              <option value="dismissed">dismissed</option>
+            </select>
+            <input id="evaluation-reviewer" placeholder="security-reviewer">
+            <input id="evaluation-review-notes" placeholder="review notes">
+            <button type="submit" class="secondary">Record Review</button>
+          </form>
+          <div id="evaluation-output" class="evidence-block"></div>
+          <div id="evaluation-readiness" class="list compact-list"></div>
+          <div id="evaluation-delta" class="list compact-list"></div>
+          <div id="evaluation-trends" class="list compact-list"></div>
+          <div id="evaluation-queue" class="list"></div>
+        </section>
+
+        <section class="panel span-2" data-section="automation">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Orchestration</p>
@@ -218,7 +488,7 @@
           <div id="cards" class="kanban-lanes"></div>
         </section>
 
-        <section class="panel">
+        <section class="panel" data-section="automation">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Sessions</p>
@@ -229,17 +499,214 @@
             <input id="session-title" placeholder="Research session">
             <button type="submit">New Session</button>
           </form>
+          <form id="session-update-form" class="inline-form two-col">
+            <input id="session-update-title" placeholder="Active session title">
+            <input id="session-update-model" placeholder="alias/smart">
+            <input id="session-update-personality" placeholder="Personality">
+            <select id="session-update-status">
+              <option value="active">Active</option>
+              <option value="paused">Paused</option>
+              <option value="archived">Archived</option>
+            </select>
+            <button type="submit">Update Session</button>
+          </form>
+          <div id="session-output" class="evidence-box compact"></div>
+          <form id="session-compact-form" class="inline-form two-col">
+            <input id="session-compact-keep" type="number" min="0" max="100" value="20" placeholder="20">
+            <button type="submit" class="secondary">Compact History</button>
+          </form>
           <div id="sessions" class="list compact-list"></div>
         </section>
 
-        <section class="panel span-3">
+        <section class="panel span-2" data-section="memory">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Memory</p>
+              <h3>Governed Recall</h3>
+            </div>
+          </div>
+          <form id="memory-form" class="inline-form two-col">
+            <input id="memory-query" placeholder="Search governed memory">
+            <button type="submit">Search</button>
+          </form>
+          <form id="memory-create-form" class="inline-form two-col">
+            <select id="memory-type">
+              <option value="project_memory">Project</option>
+              <option value="profile_memory">Profile</option>
+              <option value="preference_memory">Preference</option>
+              <option value="workflow_memory">Workflow</option>
+              <option value="procedural_memory">Procedural</option>
+              <option value="episodic_memory">Episodic</option>
+              <option value="connector_memory">Connector</option>
+              <option value="policy_memory">Policy</option>
+              <option value="skill_memory">Skill</option>
+            </select>
+            <input id="memory-content" placeholder="Memory content">
+            <input id="memory-tags" placeholder="tags,comma,separated">
+            <input id="memory-confidence" placeholder="0.8">
+            <input id="memory-ttl-days" type="number" min="1" placeholder="TTL days">
+            <label class="checkline"><input id="memory-confirmed" type="checkbox"> Confirmed</label>
+            <button type="submit" class="secondary">Create</button>
+          </form>
+          <form id="memory-update-form" class="inline-form two-col">
+            <input id="memory-update-id" placeholder="Memory id">
+            <input id="memory-update-content" placeholder="Updated content">
+            <input id="memory-update-confidence" placeholder="confidence">
+            <label class="checkline"><input id="memory-update-confirmed" type="checkbox"> Confirm</label>
+            <button type="submit" class="secondary">Update</button>
+          </form>
+          <form id="memory-merge-form" class="inline-form two-col">
+            <input id="memory-merge-primary" placeholder="Primary memory id">
+            <input id="memory-merge-duplicate" placeholder="Duplicate memory id">
+            <button type="submit" class="secondary">Merge</button>
+          </form>
+          <form id="memory-resolve-form" class="inline-form two-col">
+            <input id="memory-resolve-primary" placeholder="Primary memory id">
+            <input id="memory-resolve-conflicting" placeholder="Conflicting memory id">
+            <select id="memory-resolve-strategy">
+              <option value="keep_primary">Keep primary</option>
+              <option value="keep_conflicting">Keep conflicting</option>
+              <option value="synthesize">Synthesize</option>
+              <option value="keep_both">Keep both</option>
+            </select>
+            <input id="memory-resolve-rationale" placeholder="Resolution rationale">
+            <button type="submit" class="secondary">Resolve Conflict</button>
+          </form>
+          <button id="memory-review-queue" type="button" class="secondary">Review Queue</button>
+          <button id="memory-review-digest" type="button" class="secondary">Review Digest</button>
+          <button id="memory-review-escalation" type="button" class="secondary">Review Escalation</button>
+          <button id="memory-session-preview" type="button" class="secondary">Preview Session Memory</button>
+          <button id="memory-session-commit" type="button" class="secondary">Commit Session Memory</button>
+          <form id="migration-memory-form" class="inline-form two-col">
+            <select id="migration-memory-platform">
+              <option value="openclaw">OpenClaw</option>
+              <option value="hermes">Hermes</option>
+            </select>
+            <input id="migration-memory-path" placeholder="Migration home path">
+            <input id="migration-memory-owner" placeholder="owner" value="local-user">
+            <input id="migration-memory-scope" placeholder="scope" value="workspace">
+            <label class="checkline"><input id="migration-memory-confirmed" type="checkbox"> Confirmed</label>
+            <button type="submit" class="secondary" data-migration-memory-action="preview">Preview Import</button>
+            <button type="submit" class="secondary" data-migration-memory-action="commit">Commit Import</button>
+          </form>
+          <button id="memory-recertify-preview" type="button" class="secondary">Preview Recertification</button>
+          <button id="memory-recertify-mark" type="button" class="secondary">Mark Recertification Due</button>
+          <button id="memory-export" type="button" class="secondary">Export Results</button>
+          <button id="memory-cleanup-expired" type="button" class="secondary">Cleanup Expired</button>
+          <div id="memory-output" class="evidence-block"></div>
+          <div id="memories" class="list"></div>
+        </section>
+
+        <section class="panel span-2" data-section="activity">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Gateway</p>
+              <h3>Channel Activity</h3>
+            </div>
+          </div>
+          <div id="channel-events" class="list"></div>
+        </section>
+
+        <section class="panel span-3" data-section="evidence">
           <div class="panel-header">
             <div>
               <p class="eyebrow">Evidence</p>
-              <h3>Audit Tail</h3>
+              <h3>Task Evidence</h3>
+            </div>
+          </div>
+          <div id="task-evidence" class="evidence-detail"></div>
+        </section>
+
+        <section class="panel span-3" data-section="evidence">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Live Run</p>
+              <h3>Run Events</h3>
+            </div>
+          </div>
+          <div id="task-events" class="run-events"></div>
+        </section>
+
+        <section class="panel span-3" data-section="evidence">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Timeline</p>
+              <h3>Task Run</h3>
+            </div>
+          </div>
+          <div id="task-timeline" class="timeline-list"></div>
+        </section>
+
+        <section class="panel span-3" data-section="evidence">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Audit</p>
+              <h3>Runtime Tail</h3>
             </div>
           </div>
           <div id="audit" class="list audit-list"></div>
+          <pre id="audit-siem-output" class="json-output"></pre>
+        </section>
+
+        <section class="panel span-3" data-section="evidence">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Repair</p>
+              <h3>Improvement Proposals</h3>
+            </div>
+          </div>
+          <div id="repair-readiness" class="list compact-list"></div>
+          <div id="improvements" class="list"></div>
+        </section>
+
+        <section class="panel span-3" data-section="evidence">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Repair</p>
+              <h3>Candidate and Attempt</h3>
+            </div>
+          </div>
+          <form id="repair-candidate-form" class="inline-form two-col">
+            <input id="repair-candidate-proposal-id" placeholder="proposal id">
+            <input id="repair-candidate-summary" placeholder="candidate summary">
+            <input id="repair-synthesis-prompt-id" placeholder="prompt id">
+            <textarea id="repair-candidate-files" rows="3" placeholder="planned files, one per line"></textarea>
+            <textarea id="repair-candidate-plan" rows="3" placeholder="patch plan"></textarea>
+            <textarea id="repair-candidate-diff" rows="6" placeholder="unified diff"></textarea>
+            <button id="repair-generate-candidate" type="button" class="secondary">Generate Candidate</button>
+            <button id="repair-synthesis-prompt" type="button" class="secondary">Prompt Packet</button>
+            <button id="repair-synthesize-candidate" type="button" class="secondary">Synthesize Patch Candidate</button>
+            <button type="submit" class="secondary">Create Candidate</button>
+          </form>
+          <form id="repair-apply-form" class="inline-form two-col">
+            <input id="repair-apply-proposal-id" placeholder="proposal id">
+            <input id="repair-apply-candidate-id" placeholder="candidate id">
+            <button type="submit" class="secondary">Apply Candidate</button>
+          </form>
+          <form id="repair-candidate-review-form" class="inline-form two-col">
+            <input id="repair-review-proposal-id" placeholder="proposal id">
+            <input id="repair-review-candidate-id" placeholder="candidate id">
+            <select id="repair-review-status">
+              <option value="approved">approved</option>
+              <option value="rejected">rejected</option>
+            </select>
+            <button type="submit" class="secondary">Review Candidate</button>
+          </form>
+          <form id="repair-rollback-form" class="inline-form two-col">
+            <input id="repair-rollback-proposal-id" placeholder="proposal id">
+            <input id="repair-rollback-candidate-id" placeholder="candidate id">
+            <button type="submit" class="secondary">Rollback Candidate</button>
+          </form>
+          <form id="repair-attempt-form" class="inline-form two-col">
+            <input id="repair-proposal-id" placeholder="proposal id">
+            <input id="repair-candidate-id" placeholder="candidate id">
+            <textarea id="repair-outcome" rows="3" placeholder="outcome"></textarea>
+            <textarea id="repair-changed-files" rows="3" placeholder="changed files, one per line"></textarea>
+            <input id="repair-test-command" placeholder="python3 -c 'print(&quot;verified&quot;)'">
+            <input id="repair-test-result" placeholder="passed">
+            <button type="submit">Record</button>
+          </form>
+          <div id="repair-attempt-output" class="evidence-block"></div>
         </section>
       </section>
     </main>

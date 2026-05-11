@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from aegis.security.taint import RiskLevel, now_utc
+from aegis.skills.sandbox import get_sandbox_profile
 
 
 REQUIRED_MANIFEST_FIELDS = {
@@ -52,6 +53,7 @@ class SkillManifest:
     filesystem: dict[str, Any] = field(default_factory=dict)
     commands: list[str] = field(default_factory=list)
     changelog: list[str] = field(default_factory=list)
+    signature: dict[str, Any] | None = None
     validated: bool = False
 
     @classmethod
@@ -83,10 +85,12 @@ class SkillManifest:
             filesystem=dict(raw.get("filesystem", {})),
             commands=list(raw.get("commands", [])),
             changelog=list(raw.get("changelog", [])),
+            signature=dict(raw["signature"]) if isinstance(raw.get("signature"), dict) else None,
             validated=bool(raw.get("validated", False)),
         )
 
     def validate(self) -> "SkillManifest":
+        get_sandbox_profile(self.sandbox_profile)
         if self.secrets and self.risk_level not in {RiskLevel.HIGH, RiskLevel.CRITICAL}:
             raise ValueError("skills requesting secrets must be high risk")
         if self.commands and self.risk_level != RiskLevel.HIGH:
@@ -122,5 +126,6 @@ class SkillManifest:
             "evals": self.evals,
             "rollback": self.rollback,
             "changelog": self.changelog,
+            "signature": self.signature,
             "validated": self.validated,
         }
