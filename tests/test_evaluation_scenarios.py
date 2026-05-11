@@ -145,18 +145,24 @@ class EvaluationScenarioTests(unittest.TestCase):
                     {
                         "url": "https://example.com",
                         "domain": "example.com",
-                        "content": "<html><title>Receipt Test</title><button id='submit'>Submit</button><table><tr><td>ok</td></tr></table></html>",
+                        "content": "<html><title>Receipt Test token=abc123</title><button id='submit'>Submit</button><table><tr><td>ok token=abc123</td></tr></table></html>",
                     },
                 ),
             ):
-                browser_nav = orchestrator.tools.execute("browser", {"action": "navigate", "url": "https://example.com"}, approved=True)
+                browser_nav = orchestrator.tools.execute("browser", {"action": "navigate", "url": "https://example.com?token=abc123"}, approved=True)
             browser_shot = orchestrator.tools.execute("browser_screenshot", {"session_id": browser_nav["session"]["id"]})
             browser_evidence = json.loads(Path(browser_shot["evidence_path"]).read_text(encoding="utf-8"))
+            browser_metadata = Path(browser_shot["metadata_path"]).read_text(encoding="utf-8")
+            browser_session_store = (root / ".aegis" / "browser" / "sessions.json").read_text(encoding="utf-8")
+            rendered_browser_payload = json.dumps({"navigation": browser_nav, "shot": browser_shot, "evidence": browser_evidence}, sort_keys=True)
             self.assertRegex(browser_shot["artifact_hashes"]["snapshot_png_sha256"], r"^[0-9a-f]{64}$")
             self.assertEqual(browser_evidence["artifact_hashes"]["snapshot_png_sha256"], browser_shot["artifact_hashes"]["snapshot_png_sha256"])
             self.assertEqual(browser_evidence["rendering_status"], "not_rendered")
             self.assertEqual(browser_evidence["sandbox_receipt"]["sandbox_profile"], "http_content_session_state_no_js")
             self.assertFalse(browser_evidence["sandbox_receipt"]["javascript_executed"])
+            self.assertNotIn("abc123", rendered_browser_payload)
+            self.assertNotIn("abc123", browser_metadata)
+            self.assertNotIn("abc123", browser_session_store)
 
             backend_selection = orchestrator.tools.execute("terminal_backend", {"backend": "ssh"}, approved=True)
             self.assertFalse(backend_selection["ok"])

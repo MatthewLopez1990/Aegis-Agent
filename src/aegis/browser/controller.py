@@ -80,16 +80,16 @@ class BrowserController:
         session = self._session_or_create(session_id)
         result = self.connectors.get("http").read(ConnectorRequest(operation="read", params={"url": url}, scopes=("read",)))
         if not result.ok:
-            response = {"ok": False, "session": dict(session), "url": url, "error": result.error}
+            response = {"ok": False, "session": _public_session(session), "url": _redacted_string(url, limit=2000), "error": result.error}
             self.audit_logger.append("browser.navigate_failed", response)
             return response
         content = str(result.data.get("content", ""))
         title = _title_from_text(content, fallback=url)
-        interactive_elements = _extract_interactive_elements(content)
+        interactive_elements = _normalize_interactive_elements(_extract_interactive_elements(content))
         session.update(
             {
-                "current_url": url,
-                "title": title,
+                "current_url": _redacted_string(url, limit=2000),
+                "title": _redacted_string(title, limit=200),
                 "updated_at": now_utc(),
                 "last_text_length": len(content),
                 "last_content": _bounded_redacted_content(content),
@@ -102,9 +102,9 @@ class BrowserController:
         response = {
             "ok": True,
             "session": _public_session(session),
-            "url": url,
+            "url": _redacted_string(url, limit=2000),
             "domain": result.data.get("domain"),
-            "title": title,
+            "title": _redacted_string(title, limit=200),
             "content_length": len(content),
             "interactive_elements": interactive_elements,
             "interactive_element_count": len(interactive_elements),
@@ -124,13 +124,13 @@ class BrowserController:
         response = {
             "ok": True,
             "session_id": session_id,
-            "url": session.get("current_url"),
+            "url": _session_url(session),
             "text": str(redact(text[:5000])),
             "content_length": len(content),
             "mode": "http_content_no_js",
             "taint": "WEB_CONTENT",
         }
-        self.audit_logger.append("browser.text_extracted", {"session_id": session_id, "url": session.get("current_url"), "content_length": len(content)})
+        self.audit_logger.append("browser.text_extracted", {"session_id": session_id, "url": _session_url(session), "content_length": len(content)})
         return response
 
     def extract_table(self, *, session_id: str, selector: str | None = None) -> dict[str, Any]:
@@ -142,7 +142,7 @@ class BrowserController:
         response = {
             "ok": True,
             "session_id": session_id,
-            "url": session.get("current_url"),
+            "url": _session_url(session),
             "selector": selector,
             "selector_status": table_result["selector_status"],
             "selector_note": table_result["selector_note"],
@@ -154,7 +154,7 @@ class BrowserController:
         }
         self.audit_logger.append(
             "browser.table_extracted",
-            {"session_id": session_id, "url": session.get("current_url"), "table_count": len(tables), "selector": selector},
+            {"session_id": session_id, "url": _session_url(session), "table_count": len(tables), "selector": _redacted_string(selector, limit=500)},
         )
         return response
 
@@ -170,10 +170,10 @@ class BrowserController:
             "\n".join(
                 [
                     "Aegis governed browser PNG session snapshot",
-                    f"url: {session.get('current_url') or ''}",
-                    f"title: {session.get('title') or ''}",
+                    f"url: {_session_url(session) or ''}",
+                    f"title: {_redacted_string(session.get('title'), limit=200)}",
                     f"captured_at: {now_utc()}",
-                    f"clicks: {', '.join(str(item.get('selector', '')) for item in session.get('clicks', []))}",
+                    f"clicks: {', '.join(str(item.get('selector', '')) for item in _normalize_clicks(session.get('clicks')))}",
                     f"form_state: {_redacted_form_state(session)}",
                 ]
             ),
@@ -211,7 +211,7 @@ class BrowserController:
             "evidence_artifact_type": "json_browser_snapshot_evidence",
             "artifact_hashes": artifact_hashes,
             "sandbox_receipt": sandbox_receipt,
-            "url": session.get("current_url"),
+            "url": _session_url(session),
             "evidence": evidence,
         }
         self.audit_logger.append("browser.screenshot_captured", response)
@@ -276,7 +276,7 @@ class BrowserController:
             "evidence_artifact_type": "json_browser_render_evidence",
             "artifact_hashes": artifact_hashes,
             "sandbox_receipt": sandbox_receipt,
-            "url": session.get("current_url"),
+            "url": _session_url(session),
             "evidence": evidence,
             "error": result.get("error"),
         }
@@ -287,9 +287,9 @@ class BrowserController:
         session = self._require_session(session_id)
         if not approved:
             return {"status": "approval_required", "session_id": session_id, "selector": selector, "reason": "browser click requires approval"}
-        url_before = session.get("current_url")
+        url_before = _session_url(session)
         content_hash_before = _content_hash(session)
-        click = {"selector": selector, "clicked_at": now_utc()}
+        click = {"selector": _redacted_string(selector, limit=500), "clicked_at": now_utc()}
         clicks = list(session.get("clicks", []))
         clicks.append(click)
         session["clicks"] = clicks[-25:]
@@ -299,8 +299,8 @@ class BrowserController:
         response = {
             "ok": True,
             "session_id": session_id,
-            "selector": selector,
-            "url": session.get("current_url"),
+            "selector": _redacted_string(selector, limit=500),
+            "url": _session_url(session),
             "effect": "virtual_click_recorded",
             "mode": "virtual_state_no_dom",
             "dom_mutated": False,
@@ -314,11 +314,11 @@ class BrowserController:
         session = self._require_session(session_id)
         if not approved:
             return {"status": "approval_required", "session_id": session_id, "fields": sorted(fields), "reason": "browser form fill requires approval"}
-        url_before = session.get("current_url")
+        url_before = _session_url(session)
         content_hash_before = _content_hash(session)
         form_state = dict(session.get("form_state", {}))
         for selector, value in fields.items():
-            form_state[str(selector)] = str(redact(str(value)))[:500]
+            form_state[_redacted_string(selector, limit=500)] = _redacted_string(value, limit=500)
         session["form_state"] = form_state
         session["updated_at"] = now_utc()
         self._persist_sessions()
@@ -327,7 +327,7 @@ class BrowserController:
             "ok": True,
             "session_id": session_id,
             "fields": sorted(form_state),
-            "url": session.get("current_url"),
+            "url": _session_url(session),
             "effect": "virtual_form_state_updated",
             "mode": "virtual_state_no_dom",
             "dom_mutated": False,
@@ -377,7 +377,8 @@ class BrowserController:
 
 
 def _public_session(session: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in session.items() if key != "last_content"}
+    visible = {key: value for key, value in session.items() if key != "last_content"}
+    return redact(visible)
 
 
 def _persistable_session(session: dict[str, Any]) -> dict[str, Any]:
@@ -385,7 +386,7 @@ def _persistable_session(session: dict[str, Any]) -> dict[str, Any]:
     if "last_content" in persisted:
         persisted["last_content"] = _bounded_redacted_content(str(persisted["last_content"]))
         persisted["last_content_redacted"] = True
-    return persisted
+    return redact(persisted)
 
 
 def _normalize_persisted_session(item: Any) -> dict[str, Any] | None:
@@ -397,10 +398,10 @@ def _normalize_persisted_session(item: Any) -> dict[str, Any] | None:
     now = now_utc()
     session = {
         "id": session_id,
-        "label": str(item.get("label") or "Browser session")[:200],
+        "label": _redacted_string(item.get("label") or "Browser session", limit=200),
         "status": str(item.get("status") or "active")[:50],
-        "current_url": str(item["current_url"])[:2000] if item.get("current_url") is not None else None,
-        "title": str(item.get("title") or item.get("label") or "Browser session")[:200],
+        "current_url": _redacted_string(item["current_url"], limit=2000) if item.get("current_url") is not None else None,
+        "title": _redacted_string(item.get("title") or item.get("label") or "Browser session", limit=200),
         "created_at": str(item.get("created_at") or now),
         "updated_at": str(item.get("updated_at") or now),
         "last_text_length": _safe_int(item.get("last_text_length")),
@@ -417,6 +418,16 @@ def _normalize_persisted_session(item: Any) -> dict[str, Any] | None:
 
 def _bounded_redacted_content(content: str) -> str:
     return str(redact(content[:_MAX_PERSISTED_CONTENT_CHARS]))
+
+
+def _redacted_string(value: Any, *, limit: int) -> str:
+    return str(redact(str(value or "")))[:limit]
+
+
+def _session_url(session: dict[str, Any]) -> str | None:
+    if session.get("current_url") is None:
+        return None
+    return _redacted_string(session.get("current_url"), limit=2000)
 
 
 def _string_list(value: Any, *, limit: int, item_limit: int) -> list[str]:
@@ -438,14 +449,14 @@ def _normalize_clicks(value: Any) -> list[dict[str, str]]:
     clicks: list[dict[str, str]] = []
     for item in value[-25:]:
         if isinstance(item, dict):
-            clicks.append({"selector": str(item.get("selector") or "")[:500], "clicked_at": str(item.get("clicked_at") or now_utc())})
+            clicks.append({"selector": _redacted_string(item.get("selector"), limit=500), "clicked_at": str(item.get("clicked_at") or now_utc())})
     return clicks
 
 
 def _normalize_form_state(value: Any) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
-    return {str(key)[:500]: str(redact(str(val)))[:500] for key, val in value.items()}
+    return {_redacted_string(key, limit=500): _redacted_string(val, limit=500) for key, val in value.items()}
 
 
 def _normalize_interactive_elements(value: Any) -> list[dict[str, str]]:
@@ -563,12 +574,12 @@ class _InteractiveElementParser(HTMLParser):
             "id": str(redact(attrs.get("id", "")))[:120],
             "name": str(redact(attrs.get("name", "")))[:120],
             "type": str(redact(attrs.get("type", "")))[:80],
-            "selector_hint": selector,
+            "selector_hint": _redacted_string(selector, limit=500),
         }
         if tag == "a":
             element["href"] = str(redact(attrs.get("href", "")))[:300]
         if tag in {"button", "input", "textarea", "select"}:
-            element["form_hint"] = selector
+            element["form_hint"] = _redacted_string(selector, limit=500)
         self.elements.append(element)
 
 
@@ -584,8 +595,8 @@ def _selector_hint(tag: str, attrs: dict[str, str]) -> str:
 
 def _state_text(session: dict[str, Any]) -> str:
     lines: list[str] = []
-    clicks = list(session.get("clicks", []))
-    form_state = dict(session.get("form_state", {}))
+    clicks = _normalize_clicks(session.get("clicks"))
+    form_state = _normalize_form_state(session.get("form_state"))
     if clicks:
         lines.append("Browser interaction state:")
         lines.extend(f"clicked {item.get('selector', '')}" for item in clicks[-10:])
@@ -597,7 +608,7 @@ def _state_text(session: dict[str, Any]) -> str:
 
 
 def _redacted_form_state(session: dict[str, Any]) -> str:
-    form_state = dict(session.get("form_state", {}))
+    form_state = _normalize_form_state(session.get("form_state"))
     return ", ".join(f"{selector}={value}" for selector, value in sorted(form_state.items()))
 
 
@@ -611,10 +622,10 @@ def _write_session_snapshot_png(path: Path, *, session: dict[str, Any]) -> tuple
     height = 180
     seed_text = json.dumps(
         {
-            "url": session.get("current_url"),
-            "title": session.get("title"),
+            "url": _session_url(session),
+            "title": _redacted_string(session.get("title"), limit=200),
             "content_hash": _content_hash(session),
-            "clicks": [item.get("selector") for item in session.get("clicks", [])[-10:]],
+            "clicks": [item.get("selector") for item in _normalize_clicks(session.get("clicks"))[-10:]],
             "form_state": _redacted_form_state(session),
         },
         sort_keys=True,
@@ -658,11 +669,11 @@ def _browser_evidence(
     url_before: Any | None = None,
     content_hash_before: str | None = None,
 ) -> dict[str, Any]:
-    url_after = session.get("current_url")
+    url_after = _session_url(session)
     content_hash_after = _content_hash(session)
     return {
         "action": action,
-        "url_before": url_before if url_before is not None else url_after,
+        "url_before": _redacted_string(url_before, limit=2000) if url_before is not None else url_after,
         "url_after": url_after,
         "content_sha256_before": content_hash_before or content_hash_after,
         "content_sha256_after": content_hash_after,
@@ -688,8 +699,8 @@ def _browser_snapshot_evidence_document(
         "version": 1,
         "captured_at": now_utc(),
         "session_id": session.get("id"),
-        "url": session.get("current_url"),
-        "title": session.get("title"),
+        "url": _session_url(session),
+        "title": _redacted_string(session.get("title"), limit=200),
         "capture_surface": "http_content_session_state",
         "rendering_status": "not_rendered",
         "mode": "local_png_session_snapshot_no_dom_render",
@@ -727,8 +738,8 @@ def _browser_render_evidence_document(
         "version": 1,
         "captured_at": now_utc(),
         "session_id": session.get("id"),
-        "url": session.get("current_url"),
-        "title": session.get("title"),
+        "url": _session_url(session),
+        "title": _redacted_string(session.get("title"), limit=200),
         "capture_surface": "sanitized_http_content_dom",
         "rendering_status": "rendered" if render_result.get("ok") else "render_failed",
         "mode": "sanitized_dom_render_no_page_js",
@@ -811,7 +822,7 @@ def _renderable_sanitized_html(session: dict[str, Any]) -> str:
 <head>
   <meta charset="utf-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:;">
-  <title>{html.escape(str(session.get("title") or "Aegis render"))}</title>
+  <title>{html.escape(_redacted_string(session.get("title") or "Aegis render", limit=200))}</title>
   <style>
     body {{ margin: 0; font-family: Arial, sans-serif; color: #1f2933; background: #f7f9fb; }}
     header {{ padding: 18px 24px; background: #17202a; color: white; }}
@@ -827,8 +838,8 @@ def _renderable_sanitized_html(session: dict[str, Any]) -> str:
 </head>
 <body>
   <header>
-    <h1>{html.escape(str(session.get("title") or "Browser session"))}</h1>
-    <div class="muted">{html.escape(str(session.get("current_url") or ""))}</div>
+    <h1>{html.escape(_redacted_string(session.get("title") or "Browser session", limit=200))}</h1>
+    <div class="muted">{html.escape(_session_url(session) or "")}</div>
   </header>
   <main>
     <section><h2>Sanitized Text</h2><p>{html.escape(str(redact(text)))}</p></section>
