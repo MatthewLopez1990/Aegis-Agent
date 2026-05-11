@@ -1689,6 +1689,16 @@ class AegisTui(cmd.Cmd):
                     (("control", "control", 28), ("state", "state", 24), ("detail", "detail", 84)),
                 )
             )
+        browser_gap = next((item for item in dashboard.get("live_gap_backlog", []) if item.get("area") == "browser_and_media_depth"), None)
+        if browser_gap:
+            print()
+            print("Browser And Media Readiness")
+            print(
+                _table(
+                    browser_gap.get("operator_checklist", []),
+                    (("control", "control", 32), ("state", "state", 20), ("detail", "detail", 82)),
+                )
+            )
         backend_gap = next((item for item in dashboard.get("live_gap_backlog", []) if item.get("area") == "remote_backend_activation"), None)
         if backend_gap:
             print()

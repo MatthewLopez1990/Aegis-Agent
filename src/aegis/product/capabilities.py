@@ -317,6 +317,23 @@ def _live_gap_backlog(
                 "provider_specific_media_adapter_expansion",
             ],
             "evaluation_scenarios": ["artifact_integrity.browser_media_receipts"],
+            "operator_checklist": _browser_media_operator_checklist(
+                implemented_controls=[
+                    "unsupported_selector_truthfulness",
+                    "artifact_hash_stability",
+                    "approval_required_mutation",
+                    "no_raw_secret_capture",
+                    "sandboxed_media_worker_process",
+                    "os_level_media_worker_limits",
+                    "provider_backed_media_artifacts",
+                    "browser_automation_boundary_receipts",
+                ],
+                remaining_depth_work=[
+                    "live_browser_automation_adapter",
+                    "stricter_platform_media_sandbox_profiles",
+                    "provider_specific_media_adapter_expansion",
+                ],
+            ),
             "configured_provider_count": len(configured_providers),
         },
         {
@@ -374,6 +391,58 @@ def _live_connector_adapters(connectors: list[dict[str, Any]], config: Any) -> l
     if getattr(config.chat_webhook, "outbound_enabled", False):
         adapters.append({"kind": "channel", "name": "chat_webhook", "status": "live_outbound_enabled", "raw_secret_values_included": False})
     return adapters
+
+
+def _browser_media_operator_checklist(implemented_controls: list[str], remaining_depth_work: list[str]) -> list[dict[str, str]]:
+    implemented = set(implemented_controls)
+    remaining = set(remaining_depth_work)
+    return [
+        {
+            "control": "browser_boundary_receipts",
+            "state": "available" if "browser_automation_boundary_receipts" in implemented else "pending",
+            "detail": "Snapshot and render evidence records cookie, storage, script, subresource, network, and mutation boundaries.",
+        },
+        {
+            "control": "taint_preservation",
+            "state": "enforced",
+            "detail": "Browser, media, file, and connector outputs remain untrusted data before model use.",
+        },
+        {
+            "control": "artifact_hashing",
+            "state": "available" if "artifact_hash_stability" in implemented else "pending",
+            "detail": "Browser and media artifacts emit SHA-256 hashes in structured receipts.",
+        },
+        {
+            "control": "human_approval",
+            "state": "enforced" if "approval_required_mutation" in implemented else "pending",
+            "detail": "Browser click/fill actions and generated media writes remain approval-gated.",
+        },
+        {
+            "control": "secret_capture_boundary",
+            "state": "enforced" if "no_raw_secret_capture" in implemented else "pending",
+            "detail": "Browser/media metadata redacts secret-shaped fields and avoids raw prompt persistence.",
+        },
+        {
+            "control": "media_worker_sandbox",
+            "state": "available" if {"sandboxed_media_worker_process", "os_level_media_worker_limits"}.issubset(implemented) else "partial",
+            "detail": "Local media artifacts run in an isolated subprocess with OS limits where supported.",
+        },
+        {
+            "control": "live_browser_automation",
+            "state": "not_started" if "live_browser_automation_adapter" in remaining else "ready_for_review",
+            "detail": "Real page automation stays blocked until network, cookie, JavaScript, and mutation boundaries are enforceable.",
+        },
+        {
+            "control": "provider_media_depth",
+            "state": "partial" if "provider_backed_media_artifacts" in implemented else "not_started",
+            "detail": "Provider-backed image and TTS artifacts exist; provider-specific image, audio, and video adapters still need expansion.",
+        },
+        {
+            "control": "platform_media_sandbox_profiles",
+            "state": "pending" if "stricter_platform_media_sandbox_profiles" in remaining else "ready_for_review",
+            "detail": "Stricter per-platform profiles are still required before broad media execution rollout.",
+        },
+    ]
 
 
 def _available_live_connector_adapters(connectors: list[dict[str, Any]], config: Any) -> list[dict[str, Any]]:
