@@ -2125,6 +2125,8 @@ def _run_media_artifact_worker(*, artifact_dir: Path, artifact_name: str, tool: 
         text=True,
         timeout=10,
         check=False,
+        preexec_fn=_media_worker_preexec if os.name == "posix" else None,
+        start_new_session=os.name == "posix",
     )
     if completed.returncode != 0:
         error = str(redact((completed.stderr or completed.stdout or "media artifact worker failed")[:500]))
@@ -2137,7 +2139,18 @@ def _run_media_artifact_worker(*, artifact_dir: Path, artifact_name: str, tool: 
         raise ToolExecutionError(str(redact(str(result.get("error", "media artifact worker failed"))[:500])) if isinstance(result, dict) else "media artifact worker failed")
     if not (artifact_dir / artifact_name).is_file():
         raise ToolExecutionError("media artifact worker did not create artifact")
-    return {**result, "worker_process": "subprocess"}
+    return {**result, "worker_process": "subprocess", "os_resource_limits": os.name == "posix", "process_session_isolated": os.name == "posix"}
+
+
+def _media_worker_preexec() -> None:
+    try:
+        import resource
+    except ImportError:  # pragma: no cover - platform fallback
+        return
+    resource.setrlimit(resource.RLIMIT_CPU, (5, 5))
+    resource.setrlimit(resource.RLIMIT_FSIZE, (10 * 1024 * 1024, 10 * 1024 * 1024))
+    resource.setrlimit(resource.RLIMIT_NOFILE, (16, 16))
+    resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
 
 
 def _write_tool_artifact_metadata(
@@ -2179,6 +2192,8 @@ def _media_sandbox_receipt(*, tool: str, mode: str, worker_result: dict[str, Any
         "worker_pid": worker_result.get("worker_pid"),
         "stdin_payload_only": True,
         "minimal_environment": True,
+        "os_resource_limits": bool(worker_result.get("os_resource_limits")),
+        "process_session_isolated": bool(worker_result.get("process_session_isolated")),
         "ambient_workspace_read": False,
         "ambient_network": False,
         "raw_prompt_or_text_persisted": False,

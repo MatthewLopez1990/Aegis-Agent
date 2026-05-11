@@ -133,6 +133,7 @@ class EvaluationScenarioTests(unittest.TestCase):
             self.assertEqual(json.loads(media_metadata)["artifact_receipt"]["artifact_sha256"], media["artifact_sha256"])
             self.assertEqual(json.loads(media_metadata)["sandbox_receipt"]["sandbox_profile"], "local_artifact_worker_subprocess_no_provider")
             self.assertEqual(json.loads(media_metadata)["sandbox_receipt"]["worker_process"], "subprocess")
+            self.assertTrue(json.loads(media_metadata)["sandbox_receipt"]["os_resource_limits"])
             self.assertFalse(json.loads(media_metadata)["sandbox_receipt"]["raw_prompt_or_text_persisted"])
             self.assertNotIn(scenarios["artifact_integrity.browser_media_receipts"].adversarial_input, media_metadata)
 

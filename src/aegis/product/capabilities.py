@@ -293,10 +293,14 @@ def _live_gap_backlog(
                     "control": "sandboxed_media_worker_process",
                     "evidence": "deterministic local media artifacts are written by a subprocess with stdin-only payloads and a minimal environment",
                 },
+                {
+                    "control": "os_level_media_worker_limits",
+                    "evidence": "the local media worker runs in a separate process session with POSIX CPU, file-size, file-descriptor, and memory limits where supported",
+                },
             ],
             "remaining_depth_work": [
                 "real_browser_automation_boundaries",
-                "os_level_media_worker_sandbox",
+                "stricter_platform_media_sandbox_profiles",
                 "provider_backed_media_execution",
             ],
             "evaluation_scenarios": ["artifact_integrity.browser_media_receipts"],
