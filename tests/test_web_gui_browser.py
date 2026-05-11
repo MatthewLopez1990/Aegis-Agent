@@ -472,6 +472,8 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn("Open Metadata", script)
         self.assertIn("payload.evidence_url", script)
         self.assertIn("Open Evidence", script)
+        self.assertIn("/browser/inspect", script)
+        self.assertIn("browser-inspect", markup)
         self.assertIn("/browser/render-screenshot", script)
         self.assertIn("browser-render-screenshot", markup)
         self.assertIn("data-browser-selector", script)

@@ -537,6 +537,10 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     )
                 )
                 return
+            if path == "/browser/inspect":
+                payload = self._read_json()
+                self._json(orchestrator.browser.inspect(session_id=str(_required(payload, "session_id"))))
+                return
             if path == "/browser/screenshot":
                 payload = self._read_json()
                 self._json(_with_browser_artifact_urls(orchestrator, orchestrator.browser.screenshot(session_id=str(_required(payload, "session_id")))))

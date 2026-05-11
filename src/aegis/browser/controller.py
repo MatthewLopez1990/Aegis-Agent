@@ -158,6 +158,37 @@ class BrowserController:
         )
         return response
 
+    def inspect(self, *, session_id: str) -> dict[str, Any]:
+        session = self._require_session(session_id)
+        interactive_elements = _normalize_interactive_elements(session.get("interactive_elements"))
+        selector_inventory = _selector_inventory(interactive_elements)
+        response = {
+            "ok": True,
+            "session_id": session_id,
+            "url": _session_url(session),
+            "title": _redacted_string(session.get("title"), limit=200),
+            "interactive_elements": interactive_elements,
+            "interactive_element_count": len(interactive_elements),
+            "selector_inventory": selector_inventory,
+            "unsupported_live_actions": _unsupported_live_browser_actions(),
+            "readiness": {
+                "live_browser_adapter": "blocked_pending_boundaries",
+                "approval_required_for_mutation": True,
+                "javascript_executed": False,
+                "cookie_persistence": False,
+                "real_selector_events_dispatched": False,
+                "dom_mutation_supported": False,
+            },
+            "automation_boundaries": _browser_automation_boundaries(rendered=False),
+            "mode": "http_content_no_js_selector_inventory",
+            "taint": "WEB_CONTENT",
+        }
+        self.audit_logger.append(
+            "browser.selector_inventory_inspected",
+            {"session_id": session_id, "url": _session_url(session), "interactive_element_count": len(interactive_elements)},
+        )
+        return response
+
     def screenshot(self, *, session_id: str) -> dict[str, Any]:
         session = self._require_session(session_id)
         evidence = _browser_evidence(session, action="screenshot")
@@ -474,6 +505,50 @@ def _normalize_interactive_elements(value: Any) -> list[dict[str, str]]:
         if element:
             elements.append(element)
     return elements
+
+
+def _selector_inventory(elements: list[dict[str, str]]) -> list[dict[str, Any]]:
+    inventory: list[dict[str, Any]] = []
+    for element in elements[:50]:
+        tag = _redacted_string(element.get("tag"), limit=80)
+        selector = _redacted_string(element.get("selector_hint") or element.get("form_hint") or tag, limit=500)
+        action = _selector_action(tag, element.get("type", ""))
+        supported_actions = ["fill"] if action == "fill" else ["click"]
+        inventory.append(
+            {
+                "selector": selector,
+                "tag": tag,
+                "label": _redacted_string(element.get("label"), limit=120),
+                "action": action,
+                "supported_virtual_actions": supported_actions,
+                "requires_approval": True,
+                "dom_mutation_supported": False,
+            }
+        )
+    return inventory
+
+
+def _selector_action(tag: str, input_type: str) -> str:
+    if tag in {"textarea", "select"}:
+        return "fill"
+    if tag == "input":
+        normalized_type = str(input_type or "").lower()
+        if normalized_type in {"button", "submit", "reset", "checkbox", "radio"}:
+            return "click"
+        return "fill"
+    if tag == "a":
+        return "navigate"
+    return "click"
+
+
+def _unsupported_live_browser_actions() -> list[str]:
+    return [
+        "javascript_execution",
+        "cookie_persistence",
+        "network_subresource_loading",
+        "dom_event_dispatch",
+        "real_page_mutation",
+    ]
 
 
 def _title_from_text(content: str, *, fallback: str) -> str:

@@ -1487,6 +1487,10 @@ class BuiltinToolExecutor:
             if session_id is None:
                 raise ToolExecutionError("browser table extraction requires session_id")
             return self.browser.extract_table(session_id=session_id, selector=str(params["selector"]) if params.get("selector") else None)
+        if action == "inspect":
+            if session_id is None:
+                raise ToolExecutionError("browser inspect requires session_id")
+            return self.browser.inspect(session_id=session_id)
         if action == "click":
             if session_id is None:
                 raise ToolExecutionError("browser click requires session_id")

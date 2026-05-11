@@ -2318,6 +2318,14 @@ document.getElementById("browser-extract").addEventListener("click", async () =>
   renderBrowserOutput(await api("/browser/extract", { method: "POST", body: JSON.stringify({ session_id: state.browserSessionId }) }));
 });
 
+document.getElementById("browser-inspect").addEventListener("click", async () => {
+  if (!state.browserSessionId) {
+    renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
+    return;
+  }
+  renderBrowserOutput(await api("/browser/inspect", { method: "POST", body: JSON.stringify({ session_id: state.browserSessionId }) }));
+});
+
 document.getElementById("browser-table").addEventListener("click", async () => {
   if (!state.browserSessionId) {
     renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
