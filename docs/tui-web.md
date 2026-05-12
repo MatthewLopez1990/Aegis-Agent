@@ -20,7 +20,7 @@ Commands:
 - `add-dir <path>`
 - `history [session_id] [--limit N]`, `title [name]`, `topic [off|help|session_id]`, `compress|compact [keep_last]`
 - `background <request>` / `bg <request>`
-- `fast [request]`, `goal`, `batch`, `queue` / `q`, `loop`, `plan`, `branch`, `fork`, `context`, `copy`, `export`, `rename [title]`, `save`, `prompt`, `steer [instruction]`, `stop [task_id]`, `continue [task_id]`, `checkpoint`, `rewind`, `retry`, `undo`, `snapshot`, `snap`
+- `fast [request]`, `goal`, `batch`, `queue [request]` / `q [request]`, `loop`, `plan`, `branch`, `fork`, `context`, `copy`, `export`, `rename [title]`, `save`, `prompt`, `steer [instruction]`, `stop [task_id]`, `continue [task_id]`, `checkpoint`, `rewind`, `retry`, `undo`, `snapshot`, `snap`
 - `remote-control [name|pair|directory|revoke|relay|relay-pull|relay-action]` / `rc [name|pair|directory|revoke|relay|relay-pull|relay-action]`, including `directory --pairing-id <id>` for a sanitized scoped task/session snapshot, `revoke <pairing-id> [--relay-auth-secret name --approved]` for approved relay revocation propagation, and `relay-pull --pairing-id <id> --relay-auth-secret <name> --approved [--dry-run]` for approved relay action polling; `handoff [platform]`, `remote-env`, `teleport`, `tp`, `mobile`, `desktop`, `app`, `web-setup`
 - `agents [status|delegate <role> <task> [--approved]]`
 - CLI `task list [--session-id <session_id>] [--limit N]`
@@ -76,7 +76,7 @@ Commands:
 - Enabled installed skills are also exposed as dynamic slash commands such as `/aegis-project-summary`; pass a JSON object for structured inputs.
 - Configured `[quick_commands.<name>]` entries expose local slash shortcuts. `type = "alias"` forwards to another slash command, while `type = "exec"` runs the configured command through the governed shell tool and still requires `--approved`.
 - `curator [status|run [--dry-run]|pin <skill_id>|unpin <skill_id>|archive <skill_id>|restore <skill_id>|pause|resume]`
-- `plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-bundle|install-marketplace|update-marketplace`, `plugin`, `reload`, `reload-plugins`, `reload-skills`
+- `plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-bundle|install-marketplace|update-marketplace`, `plugin`, `reload`, `reload-plugins`, `reload-skills`, `reload_skills`
 - `memory search <query>`
 - `memory health [--limit N] [--owner owner] [--scope scope]`
 - `memory session-preview <session_id> [--owner name] [--scope scope]`

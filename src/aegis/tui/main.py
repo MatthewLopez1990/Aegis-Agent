@@ -131,6 +131,7 @@ TOP_LEVEL_COMMANDS = (
     "reload-plugins",
     "reload-mcp",
     "reload-skills",
+    "reload_skills",
     "remote-control",
     "remote-env",
     "repair",
@@ -236,6 +237,7 @@ SLASH_COMMAND_ALIASES = {
     "reload_mcp": "reload_mcp",
     "reload-plugins": "reload_plugins",
     "reload-skills": "reload_skills",
+    "reload_skills": "reload_skills",
     "settings": "config",
     "snap": "rollback",
     "snapshot": "rollback",
@@ -3149,7 +3151,22 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_queue(self, arg: str) -> None:
-        """queue -- show active work queue metadata."""
+        """queue [request] -- submit a queued governed task or show active work queue metadata."""
+        request = arg.strip()
+        if request:
+            result = self.orchestrator.submit_task(request, session_id=self.session["id"])
+            self.last_task_id = result["id"]
+            _print_json(
+                {
+                    "status": "queued_task_submitted",
+                    "task_id": result["id"],
+                    "active_session_id": self.session.get("id"),
+                    "raw_task_request_included": False,
+                    "next_actions": [f"status {result['id']}", f"events {result['id']}", "queue"],
+                }
+            )
+            _print_task_result(result)
+            return
         rows = self.orchestrator.store.list_tasks(limit=12, session_id=self.session["id"])
         status_counts: dict[str, int] = {}
         for row in rows:
@@ -4979,7 +4996,7 @@ def _command_reference() -> str:
             "skills [hub query]     Governed skills and virtual Skill Hub",
             "curator status|run|pin|archive  Local authored skill maintenance",
             "plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-bundle|install-marketplace|update-marketplace",
-            "plugin|reload|reload-plugins|reload-skills  Extension inventory aliases",
+            "plugin|reload|reload-plugins|reload-skills|reload_skills  Extension inventory aliases",
             "memory health|search|session-preview|create|update|merge|expire",
             "mcp list|register|call Governed MCP registry",
             "reload-mcp             Refresh governed one-shot MCP registry status",
@@ -5100,6 +5117,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("skills [hub query]", "governed skill hub"),
             ("curator status|run|pin|archive", "local authored skill maintenance"),
             ("plugin|plugins|reload|reload-plugins|reload-skills", "extension inventory and reload readiness"),
+            ("reload_skills", "extension inventory and reload readiness"),
             ("memory search|create|review", "durable memory"),
             ("mcp|reload-mcp|repair|schedules|cron", "extensions, schedules, and self-repair"),
         ),

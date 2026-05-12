@@ -251,6 +251,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("commands|keybindings", help_rendered)
             self.assertIn("allowed-tools|bashes", help_rendered)
             self.assertIn("extension inventory and reload readiness", help_rendered)
+            self.assertIn("reload_skills", help_rendered)
             self.assertIn("[Explore]", help_rendered)
             self.assertIn("remote-control|rc", help_rendered)
             self.assertIn("remote-env|teleport|tp", help_rendered)
@@ -358,6 +359,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn("/submit <request>", fuzzy_rendered)
             self.assertIn("/resume", fuzzy_rendered)
             self.assertNotIn("/connectors", fuzzy_rendered)
+            reload_rendered = tui._render_slash_palette("reload_s")
+            self.assertIn("/reload_skills", reload_rendered)
             alias_rendered = tui._render_slash_palette("mod")
             self.assertIn("/model", alias_rendered)
             self.assertIn("provider routes, auth, and usage", alias_rendered)
@@ -422,6 +425,7 @@ class TuiTests(unittest.TestCase):
                 tui.onecmd("/queue")
                 tui.onecmd("/reload")
                 tui.onecmd("/reload-skills")
+                tui.onecmd("/reload_skills")
                 tui.onecmd("/curator")
                 tui.onecmd("/curator run --dry-run")
                 tui.onecmd('/aegis-project-summary {"path":"."}')
@@ -796,10 +800,20 @@ class TuiTests(unittest.TestCase):
             self.assertEqual([message["role"] for message in undo_history], ["user", "assistant"])
             self.assertEqual(tui.last_task_id, first_task_id)
 
+            with redirect_stdout(output):
+                tui.onecmd("/q Queue a safe follow-up task.")
+            queued_task_id = tui.last_task_id
+            self.assertIsNotNone(queued_task_id)
+            self.assertNotEqual(queued_task_id, first_task_id)
+            queued_history = tui.orchestrator.sessions.history(tui.session["id"])
+            self.assertEqual([message["role"] for message in queued_history], ["user", "assistant", "user", "assistant"])
+
             rendered = output.getvalue()
             self.assertIn('"status": "retry_submitted"', rendered)
+            self.assertIn('"status": "queued_task_submitted"', rendered)
             self.assertIn('"status": "undone"', rendered)
             self.assertIn('"raw_message_content_included": false', rendered)
+            self.assertIn('"raw_task_request_included": false', rendered)
             self.assertIn('"active_session_id"', rendered)
 
     def test_channel_render_records_pending_redacted_outbound_event(self) -> None:
