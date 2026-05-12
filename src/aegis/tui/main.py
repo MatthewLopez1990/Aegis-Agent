@@ -43,6 +43,7 @@ TOP_LEVEL_COMMANDS = (
     "batch",
     "background",
     "bg",
+    "btw",
     "boards",
     "branch",
     "browser",
@@ -209,6 +210,7 @@ SLASH_COMMAND_ALIASES = {
     "allowed-tools": "allowed_tools",
     "app": "desktop",
     "bg": "background",
+    "btw": "background",
     "feedback": "bug",
     "pr-comments": "pr_comments",
     "rc": "remote_control",
@@ -2131,11 +2133,12 @@ class AegisTui(cmd.Cmd):
             print(f"task not found: {task_id}")
 
     def do_clear(self, arg: str) -> None:
-        """clear -- clear the terminal screen."""
+        """clear [title] -- clear the terminal screen and start a fresh session."""
         if sys.stdout.isatty():
             print("\033[2J\033[H", end="")
         else:
             print("screen cleared")
+        self.do_new(arg)
 
     def do_new(self, arg: str) -> None:
         """new [title] -- start a fresh local session."""
@@ -4271,7 +4274,7 @@ def _command_reference() -> str:
             "new|reset|clear        Session reset and screen controls",
             "add-dir <path>         Record extra working directory context",
             "history|title|compress Active session transcript helpers",
-            "background|bg <req>    Submit a governed task from the deck",
+            "background|bg|btw <req>  Submit a governed task from the deck",
             "fast [request]         Inspect fast route or submit a quick governed task",
             "goal|batch|queue|loop  Goal, queue, and self-improvement readiness",
             "remote-control|rc      Local-first remote-control readiness",
@@ -4392,7 +4395,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("new|reset|clear", "session reset and screen controls"),
             ("add-dir <path>", "record extra working directory context"),
             ("submit <request>", "start a governed task"),
-            ("background|bg <request>", "start a governed task without leaving the deck"),
+            ("background|bg|btw <request>", "start a governed task without leaving the deck"),
             ("dashboard", "runtime command deck"),
             ("tasks [all|session <id>]", "recent task lanes"),
             ("session|history|title|compress", "active transcript context"),

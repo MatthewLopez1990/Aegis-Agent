@@ -150,6 +150,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("settings", tui.completenames("set"))
             self.assertIn("sethome", tui.completenames("set"))
             self.assertIn("branch", tui.completenames("bra"))
+            self.assertIn("btw", tui.completenames("bt"))
             self.assertIn("context", tui.completenames("con"))
             self.assertIn("export", tui.completenames("exp"))
             self.assertIn("keybindings", tui.completenames("key"))
@@ -170,6 +171,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("/tp", tui.completedefault("tp", "/tp", 1, 3))
             self.assertIn("/commands", tui.completedefault("com", "/com", 1, 4))
             self.assertIn("/copy", tui.completedefault("cop", "/cop", 1, 4))
+            self.assertIn("/btw", tui.completedefault("bt", "/bt", 1, 3))
             self.assertIn("/allowed-tools", tui.completedefault("allow", "/allow", 1, 6))
             self.assertIn("/add-dir", tui.completedefault("add", "/add", 1, 4))
             self.assertIn("/terminal-setup", tui.completedefault("term", "/term", 1, 5))
@@ -197,7 +199,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("[APPROVALS:CLEAR]", help_rendered)
             self.assertIn("[Operate]", help_rendered)
             self.assertIn("open nested menu: menu operate", help_rendered)
-            self.assertIn("/new|/reset|/clear /add-dir /submit /background|/bg", help_rendered)
+            self.assertIn("/new|/reset|/clear /add-dir /submit /background|/bg|/btw", help_rendered)
             self.assertIn("submit <request>", help_rendered)
             self.assertIn("add-dir <path>", help_rendered)
             self.assertIn("fast [request]", help_rendered)
@@ -419,6 +421,33 @@ class TuiTests(unittest.TestCase):
             self.assertIn("\n", wrapped)
             slash_hint, _ = _live_input_block("aegis> ", "/su", 80)
             self.assertIn("suggest /submit /resume", slash_hint)
+
+    def test_clear_starts_fresh_session_and_btw_alias_submits_background_task(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tui = AegisTui(data_dir=root / ".aegis", workspace=root)
+            original_session_id = tui.session["id"]
+            task = tui.orchestrator.submit_task("send message hello", session_id=original_session_id)
+            tui.last_task_id = task["id"]
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                tui.onecmd("/clear Fresh thread")
+
+            rendered = output.getvalue()
+            self.assertIn("screen cleared", rendered)
+            self.assertIn("Fresh thread", rendered)
+            self.assertNotEqual(tui.session["id"], original_session_id)
+            self.assertEqual(tui.session["title"], "Fresh thread")
+            self.assertIsNone(tui.last_task_id)
+
+            with redirect_stdout(output):
+                tui.onecmd("/btw summarize this workspace")
+
+            self.assertIsNotNone(tui.last_task_id)
+            background_task = tui.orchestrator.store.get_task(tui.last_task_id or "")
+            self.assertEqual(background_task["user_request"], "summarize this workspace")
+            self.assertEqual(background_task["session_id"], tui.session["id"])
 
     def test_context_debug_prompt_and_save_do_not_dump_raw_session_content(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
