@@ -20,14 +20,14 @@ Commands:
 - `add-dir <path>`
 - `history [session_id] [--limit N]`, `title [name]`, `compress|compact [keep_last]`
 - `background <request>` / `bg <request>`
-- `fast [request]`, `goal`, `batch`, `loop`, `plan`, `branch`, `fork`, `context`, `save`, `prompt`, `stop [task_id]`, `continue [task_id]`, `checkpoint`, `rewind`, `retry`, `undo`, `snapshot`, `snap`
+- `fast [request]`, `goal`, `batch`, `queue`, `loop`, `plan`, `branch`, `fork`, `context`, `copy`, `export`, `rename [title]`, `save`, `prompt`, `steer [instruction]`, `stop [task_id]`, `continue [task_id]`, `checkpoint`, `rewind`, `retry`, `undo`, `snapshot`, `snap`
 - `remote-control [name|pair]` / `rc [name|pair]`, `remote-env`, `teleport`, `tp`, `mobile`, `desktop`, `app`, `web-setup`
 - `agents`
 - CLI `task list [--session-id <session_id>] [--limit N]`
 - `approvals`
 - `approve <approval_id> [--actor name] [--reason text] [--admin]`
 - `deny <approval_id> [--actor name] [--reason text] [--admin]`
-- `doctor`, `debug`, `config`, `settings`, `init`
+- `commands [prefix]`, `doctor`, `debug`, `details`, `config`, `settings`, `profile`, `init`
 - `permissions`, `security-review`, `bug|feedback <summary>`, `hooks list|add|enable|disable|remove|run`
 - `connectors`, `gateway`, `platforms`
 - `pr_comments`
@@ -44,7 +44,7 @@ Commands:
 - `model [identifier|args]`
 - `login [provider [subscription]]`
 - `logout <provider>`
-- `effort|reasoning [level]`, `cost`, `stats`, `statusbar|sb`, `theme`, `skin`, `color`, `verbose`
+- `effort|reasoning [level]`, `cost`, `stats`, `statusbar|statusline|sb`, `footer`, `busy`, `indicator`, `theme`, `skin`, `color`, `verbose`
 - `models list`
 - `models route <identifier>`
 - `models alias <alias> <identifier>`
@@ -65,10 +65,10 @@ Commands:
 - `models auth targets`
 - `models auth logout <provider>`
 - `provider`, `usage`
-- `tools`
+- `tools`, `allowed-tools`, `bashes`
 - `toolsets`
 - `skills [hub query|disable skill_id|enable skill_id]`
-- `plugins list|install|enable|disable|remove|reload`, `plugin`, `reload-plugins`
+- `plugins list|install|enable|disable|remove|reload`, `plugin`, `reload`, `reload-plugins`, `reload-skills`
 - `memory search <query>`
 - `memory health [--limit N] [--owner owner] [--scope scope]`
 - `memory session-preview <session_id> [--owner name] [--scope scope]`
@@ -117,13 +117,13 @@ Commands:
 - `platforms`
 - `security [profile|evaluate <operation> <risk> <scopes> [target_domain]]`
 - `capabilities` shows capability groups plus implementation-readiness buckets.
-- `sethome|set-home`
+- `keybindings`, `mouse`, `redraw`, `sethome|set-home`
 - `audit [export-siem [limit]]`
 - `exit`
 
 The TUI uses the same orchestrator, policy gate, approval queue, audit logger, and context firewall as the CLI/API.
 Policies can require admin approval; use `approve <approval_id> --admin` for those gates.
-It starts with a compact control surface that shows the animated Aegis shield, active audit/approval/session/model/workspace flags, and only the next useful navigation prompts. The full posture still lives behind `dashboard`. Plain text submits a task, `/` opens a Codex-style command palette, slash aliases such as `/tasks`, `/bg`, `/model`, `/settings`, `/debug`, `/tp`, and `/rc` dispatch directly, `/mem`-style prefixes render filtered options, and fuzzy prefix matching means entries like `/su` suggest both `/submit` and `/resume`. `menu operate|govern|build|explore` opens nested command groups, tab completion covers top-level commands plus common subcommands and selected flags, and local readline history persists in `.aegis/tui_history` with private file permissions. The identity banner rotates through deterministic ASCII shield frames so tests and CI remain stable while interactive operators get a stronger command-deck signal. Claude/Hermes-style convenience aliases such as `/add-dir`, `/bug`, `/feedback`, `/cost`, `/login`, `/logout`, `/permissions`, `/pr_comments`, `/security-review`, `/terminal-setup`, `/vim`, `/remote-env`, `/web-setup`, `/plugin`, `/sandbox`, `/loop`, `/hooks`, `/branch`, `/fork`, `/context`, `/save`, `/prompt`, `/statusbar`, `/theme`, `/snapshot`, and `/sethome` route to the existing governed Aegis surfaces or metadata-only readiness reports instead of bypassing policy, audit, approval gates, or prompt-boundary controls. `hooks` now manages local lifecycle hooks for `task.created`, `task.completed`, `task.failed`, `approval.requested`, `model.routed`, and manual runs. Hook commands are argv-only, executable-allowlisted, timeout/output-limited, approval-gated by default, run from the configured workspace without inherited secret env, and emit redacted audit receipts. `plugins` now manages local plugin manifests that own skills, MCP servers, and hooks while still registering each owned resource through the same governed registry and audit path; unsigned skill manifests require the explicit `--unsigned-local` development flag, duplicate resources and path traversal fail closed, and failed installs roll back registered resources. `remote-control`/`rc` now reports the local control plane plus the short-lived scoped pairing-token API; `remote-control pair` shows the exact local endpoints. Pairing tokens are returned once, are bounded to `/remote-control/...` task-control endpoints such as status/events/pause/cancel, and still require host/origin checks. Off-device outbound relay, mobile push delivery, remote plugin marketplaces, and a cloud session directory remain blocked gaps. `models auth targets`, `capabilities`, and the web model panel now expose the Hermes/Claude provider-login parity ledger, including API-key-ready providers, local providers, optional official-CLI subscription login handoff, verified Codex/Claude Code subscription CLI invocation, and provider-native OAuth/cloud-identity bridges that still need governed implementation.
+It starts with a compact control surface that shows the animated Aegis shield, active audit/approval/session/model/workspace flags, and only the next useful navigation prompts. The full posture still lives behind `dashboard`. Plain text submits a task, `/` opens a Codex-style command palette, slash aliases such as `/tasks`, `/bg`, `/model`, `/settings`, `/debug`, `/commands`, `/copy`, `/allowed-tools`, `/tp`, and `/rc` dispatch directly, `/mem`-style prefixes render filtered options, and fuzzy prefix matching means entries like `/su` suggest both `/submit` and `/resume`. `menu operate|govern|build|explore` opens nested command groups, tab completion covers top-level commands plus common subcommands and selected flags, and local readline history persists in `.aegis/tui_history` with private file permissions. The identity banner rotates through deterministic ASCII shield frames so tests and CI remain stable while interactive operators get a stronger command-deck signal. Claude/Hermes-style convenience aliases such as `/add-dir`, `/bug`, `/feedback`, `/cost`, `/login`, `/logout`, `/permissions`, `/profile`, `/pr_comments`, `/security-review`, `/terminal-setup`, `/keybindings`, `/mouse`, `/vim`, `/remote-env`, `/web-setup`, `/plugin`, `/sandbox`, `/loop`, `/queue`, `/hooks`, `/branch`, `/fork`, `/context`, `/copy`, `/export`, `/rename`, `/save`, `/prompt`, `/steer`, `/statusbar`, `/statusline`, `/footer`, `/busy`, `/indicator`, `/details`, `/theme`, `/snapshot`, and `/sethome` route to the existing governed Aegis surfaces or metadata-only readiness reports instead of bypassing policy, audit, approval gates, or prompt-boundary controls. `hooks` now manages local lifecycle hooks for `task.created`, `task.completed`, `task.failed`, `approval.requested`, `model.routed`, and manual runs. Hook commands are argv-only, executable-allowlisted, timeout/output-limited, approval-gated by default, run from the configured workspace without inherited secret env, and emit redacted audit receipts. `plugins` now manages local plugin manifests that own skills, MCP servers, and hooks while still registering each owned resource through the same governed registry and audit path; unsigned skill manifests require the explicit `--unsigned-local` development flag, duplicate resources and path traversal fail closed, and failed installs roll back registered resources. `remote-control`/`rc` now reports the local control plane plus the short-lived scoped pairing-token API; `remote-control pair` shows the exact local endpoints. Pairing tokens are returned once, are bounded to `/remote-control/...` task-control endpoints such as status/events/pause/cancel, and still require host/origin checks. Off-device outbound relay, mobile push delivery, remote plugin marketplaces, and a cloud session directory remain blocked gaps. `models auth targets`, `capabilities`, and the web model panel now expose the Hermes/Claude provider-login parity ledger, including API-key-ready providers, local providers, optional official-CLI subscription login handoff, verified Codex/Claude Code subscription CLI invocation, and provider-native OAuth/cloud-identity bridges that still need governed implementation.
 Task lists, task cards, evidence, and timeline views show the linked session when a task belongs to a conversation.
 Resume attempts write explicit audit events with redacted session ids plus readable context refs, so evidence and timeline views can show which original context was used after approval without weakening audit redaction. Distinct resume outcomes, including intermediate `waiting_approval`, approved, and denied states, are appended back to the original session transcript. When a TUI resume command targets a task from another active conversation, the TUI switches its active session back to that originating transcript after the resume result is recorded.
 Approval queues and approval details also show linked session context for task-bound approvals and direct runtime session ids for browser approvals. In the TUI, approval rows and detail views include copyable next steps plus chat-style phrases such as `approve`, `yes proceed`, `deny`, `no do not do that`, and `let's revert` when those intents are safe for the current approval state. The web approval detail card collects actor, reason, and admin-decision metadata before approving or denying, the same decision payload is used by inline transcript approval actions, and the approval panel keeps a bounded recent decision history for approved and denied gates.

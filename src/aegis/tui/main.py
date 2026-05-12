@@ -36,6 +36,7 @@ TOP_LEVEL_COMMANDS = (
     "audit",
     "add-dir",
     "agents",
+    "allowed-tools",
     "backends",
     "batch",
     "background",
@@ -43,7 +44,9 @@ TOP_LEVEL_COMMANDS = (
     "boards",
     "branch",
     "browser",
+    "bashes",
     "bug",
+    "busy",
     "cancel",
     "capabilities",
     "channel",
@@ -55,6 +58,8 @@ TOP_LEVEL_COMMANDS = (
     "config",
     "connectors",
     "continue",
+    "commands",
+    "copy",
     "cost",
     "color",
     "context",
@@ -62,6 +67,7 @@ TOP_LEVEL_COMMANDS = (
     "debug",
     "deny",
     "desktop",
+    "details",
     "diff",
     "doctor",
     "evidence",
@@ -69,15 +75,19 @@ TOP_LEVEL_COMMANDS = (
     "evaluation",
     "exit",
     "effort",
+    "export",
     "fast",
     "feedback",
+    "footer",
     "fork",
     "gateway",
     "goal",
     "help",
     "hooks",
+    "indicator",
     "init",
     "kanban",
+    "keybindings",
     "login",
     "logout",
     "loop",
@@ -89,20 +99,26 @@ TOP_LEVEL_COMMANDS = (
     "mobile",
     "model",
     "models",
+    "mouse",
     "new",
     "pause",
     "plan",
     "platforms",
     "permissions",
     "personality",
+    "profile",
     "plugin",
     "plugins",
     "pr_comments",
     "provider",
     "prompt",
+    "queue",
     "rc",
+    "redraw",
+    "reload",
     "reload-plugins",
     "reload-mcp",
+    "reload-skills",
     "remote-control",
     "remote-env",
     "repair",
@@ -112,8 +128,10 @@ TOP_LEVEL_COMMANDS = (
     "restart",
     "resume",
     "review",
+    "rename",
     "rewind",
     "rollback",
+    "routines",
     "save",
     "schedule",
     "schedules",
@@ -129,8 +147,10 @@ TOP_LEVEL_COMMANDS = (
     "snapshot",
     "sb",
     "status",
+    "statusline",
     "statusbar",
     "stats",
+    "steer",
     "stop",
     "submit",
     "tasks",
@@ -182,6 +202,7 @@ CHANNEL_COMMANDS = ("render", "receive", "resolve-approval", "send-webhook", "se
 EVALUATION_COMMANDS = ("queue", "review", "trends", "delta", "readiness")
 SLASH_COMMAND_ALIASES = {
     "add-dir": "add_dir",
+    "allowed-tools": "allowed_tools",
     "app": "desktop",
     "bg": "background",
     "feedback": "bug",
@@ -193,6 +214,7 @@ SLASH_COMMAND_ALIASES = {
     "reload-mcp": "reload_mcp",
     "reload_mcp": "reload_mcp",
     "reload-plugins": "reload_plugins",
+    "reload-skills": "reload_skills",
     "settings": "config",
     "snap": "rollback",
     "snapshot": "rollback",
@@ -2363,8 +2385,75 @@ class AegisTui(cmd.Cmd):
             }
         )
 
+    def do_commands(self, arg: str) -> None:
+        """commands [prefix] -- show the slash command palette."""
+        prefix = arg.strip()
+        if prefix == "all":
+            print(_command_reference())
+            return
+        print(self._render_slash_palette(prefix))
+
+    def do_copy(self, arg: str) -> None:
+        """copy -- show explicit copy surfaces without mutating the clipboard."""
+        try:
+            task = self.orchestrator.status(self.last_task_id) if self.last_task_id else None
+        except KeyError:
+            task = None
+        model_content = _model_content(task) if task is not None else None
+        _print_json(
+            {
+                "status": "operator_action_required",
+                "mode": "metadata_only",
+                "clipboard_mutated": False,
+                "last_task_id": self.last_task_id,
+                "model_response_available": model_content is not None,
+                "model_response_character_count": len(model_content) if model_content is not None else 0,
+                "raw_message_content_included": False,
+                "next_actions": ["session history", "task evidence <task_id>", "copy from terminal selection"],
+            }
+        )
+
+    def do_export(self, arg: str) -> None:
+        """export -- show explicit export surfaces and redaction boundaries."""
+        _print_json(
+            {
+                "status": "operator_action_required",
+                "mode": "metadata_only",
+                "automatic_workspace_write": False,
+                "raw_message_content_included": False,
+                "raw_secret_values_included": False,
+                "available_exports": [
+                    "memory export",
+                    "audit export-siem",
+                    "session history <session_id>",
+                    "task evidence <task_id>",
+                ],
+                "next_actions": ["memory export", "audit export-siem", "session history", "evidence <task_id>"],
+            }
+        )
+
+    def do_rename(self, arg: str) -> None:
+        """rename [title] -- rename the active session through the governed session store."""
+        title = arg.strip()
+        if not title:
+            _print_json(
+                {
+                    "status": "operator_action_required",
+                    "active_session_id": self.session.get("id"),
+                    "current_title": self.session.get("title"),
+                    "next_actions": ["rename <title>", "title <title>", "session rename <title>"],
+                    "raw_message_content_included": False,
+                }
+            )
+            return
+        self.do_session(f"rename {shlex.quote(title)}")
+
     def do_permissions(self, arg: str) -> None:
         """permissions -- Claude-style alias for policy posture."""
+        self.do_security("profile")
+
+    def do_profile(self, arg: str) -> None:
+        """profile -- show active policy profile."""
         self.do_security("profile")
 
     def do_sandbox(self, arg: str) -> None:
@@ -2424,6 +2513,36 @@ class AegisTui(cmd.Cmd):
             {
                 "repair_readiness": self.orchestrator.repair_readiness_summary(limit=20),
                 "evaluation_readiness": ResearchHarness(data_dir=self.orchestrator.config.data_dir).release_readiness_summary(limit=20),
+            }
+        )
+
+    def do_queue(self, arg: str) -> None:
+        """queue -- show active work queue metadata."""
+        rows = self.orchestrator.store.list_tasks(limit=12, session_id=self.session["id"])
+        status_counts: dict[str, int] = {}
+        for row in rows:
+            status = str(row.get("status") or "unknown")
+            status_counts[status] = status_counts.get(status, 0) + 1
+        _print_json(
+            {
+                "status": "metadata_only",
+                "active_session_id": self.session.get("id"),
+                "recent_task_count": len(rows),
+                "status_counts": status_counts,
+                "latest_task_ids": [_short_id(row.get("id", "")) for row in rows[:8]],
+                "raw_task_requests_included": False,
+                "next_actions": ["tasks", "events <task_id>", "evaluation queue", "batch"],
+            }
+        )
+
+    def do_routines(self, arg: str) -> None:
+        """routines -- show scheduled automation surfaces."""
+        _print_json(
+            {
+                "status": "metadata_only",
+                "routines": self.orchestrator.schedules.list_schedules(),
+                "next_actions": ["schedule create <name> <cron> <task>", "schedule due", "cron"],
+                "raw_secret_values_included": False,
             }
         )
 
@@ -2564,6 +2683,23 @@ class AegisTui(cmd.Cmd):
             }
         )
 
+    def do_keybindings(self, arg: str) -> None:
+        """keybindings -- show terminal keybinding readiness."""
+        self.do_terminal_setup(arg)
+
+    def do_mouse(self, arg: str) -> None:
+        """mouse -- show mouse interaction readiness."""
+        _print_json(
+            {
+                "status": "metadata_only",
+                "mouse_support": "not_enabled",
+                "terminal_backend_required": True,
+                "selection_mode": "terminal_native",
+                "raw_message_content_included": False,
+                "detail": "Mouse-aware selection and click targets need terminal backend support before Aegis can safely bind them.",
+            }
+        )
+
     def do_desktop(self, arg: str) -> None:
         """desktop -- show desktop wrapper readiness."""
         self.do_remote_control(arg)
@@ -2585,6 +2721,56 @@ class AegisTui(cmd.Cmd):
         """sb -- alias for statusbar."""
         self.do_statusbar(arg)
 
+    def do_statusline(self, arg: str) -> None:
+        """statusline -- alias for statusbar."""
+        self.do_statusbar(arg)
+
+    def do_footer(self, arg: str) -> None:
+        """footer -- show footer/status metadata."""
+        self._print_ui_surface("footer")
+
+    def do_indicator(self, arg: str) -> None:
+        """indicator -- show active indicator metadata."""
+        self._print_ui_surface("indicator")
+
+    def do_details(self, arg: str) -> None:
+        """details -- show safe runtime detail metadata."""
+        dashboard = build_product_dashboard(self.orchestrator)
+        _print_json(
+            {
+                "status": "metadata_only",
+                "runtime": {
+                    "audit_chain_ok": dashboard["runtime"]["audit_chain_ok"],
+                    "pending_approvals": dashboard["runtime"]["pending_approvals"],
+                    "sessions": dashboard["runtime"]["sessions"],
+                    "recent_tasks": dashboard["runtime"]["recent_tasks"],
+                    "model_providers": dashboard["runtime"]["model_providers"],
+                },
+                "auth_parity_status": dashboard["model_provider_auth_parity"]["status"],
+                "live_gap_areas": [item["area"] for item in dashboard.get("live_gap_backlog", [])],
+                "raw_audit_log_included": False,
+                "raw_message_content_included": False,
+                "raw_secret_values_included": False,
+                "next_actions": ["dashboard", "capabilities", "debug"],
+            }
+        )
+
+    def do_busy(self, arg: str) -> None:
+        """busy -- show active/busy task indicators without raw requests."""
+        rows = self.orchestrator.store.list_tasks(limit=25, session_id=self.session["id"])
+        active_statuses = {"created", "running", "waiting_approval", "paused"}
+        active_rows = [row for row in rows if str(row.get("status") or "") in active_statuses]
+        _print_json(
+            {
+                "status": "metadata_only",
+                "busy": bool(active_rows),
+                "active_task_count": len(active_rows),
+                "active_task_ids": [_short_id(row.get("id", "")) for row in active_rows[:8]],
+                "raw_task_requests_included": False,
+                "next_actions": ["tasks", "approvals", "events <task_id>"],
+            }
+        )
+
     def do_theme(self, arg: str) -> None:
         """theme -- show UI theme metadata."""
         self._print_ui_preference("theme", arg)
@@ -2601,6 +2787,21 @@ class AegisTui(cmd.Cmd):
         """verbose -- show verbosity metadata."""
         self._print_ui_preference("verbose", arg)
 
+    def do_steer(self, arg: str) -> None:
+        """steer [instruction] -- show steering readiness without mutating prompts."""
+        requested = arg.strip()
+        _print_json(
+            {
+                "status": "metadata_only",
+                "steer_mutation": "disabled_by_command",
+                "requested_instruction_character_count": len(requested),
+                "instruction_captured": False,
+                "raw_instruction_included": False,
+                "active_session_id": self.session.get("id"),
+                "next_actions": ["prompt", "personality", "session set-personality <name>", "context"],
+            }
+        )
+
     def do_sethome(self, arg: str) -> None:
         """sethome -- show guarded home-channel readiness."""
         _print_json(
@@ -2613,6 +2814,18 @@ class AegisTui(cmd.Cmd):
                 "mutation": "disabled_by_command",
                 "next_actions": ["session rename <title>", "web-setup", "remote-control pair"],
                 "detail": "Home workspace/channel mutation needs explicit profile storage, rollback receipts, and channel identity checks before it can change defaults.",
+            }
+        )
+
+    def _print_ui_surface(self, name: str) -> None:
+        dashboard = build_product_dashboard(self.orchestrator)
+        _print_json(
+            {
+                "status": "metadata_only",
+                "surface": name,
+                "active_flags": _dashboard_status_flags(dashboard["runtime"], self.session, workspace=self.workspace),
+                "raw_message_content_included": False,
+                "raw_secret_values_included": False,
             }
         )
 
@@ -2635,6 +2848,38 @@ class AegisTui(cmd.Cmd):
         """plugin -- alias for plugins."""
         self.do_plugins(arg)
 
+    def do_allowed_tools(self, arg: str) -> None:
+        """allowed_tools -- show policy-visible tool inventory."""
+        _print_json(
+            {
+                "status": "metadata_only",
+                "tools": [
+                    {
+                        "name": tool.get("name"),
+                        "permission": tool.get("permission"),
+                        "risk_level": tool.get("risk_level"),
+                        "approval_required": tool.get("approval_required"),
+                    }
+                    for tool in self.orchestrator.tool_catalog.list()
+                ],
+                "raw_secret_values_included": False,
+            }
+        )
+
+    def do_bashes(self, arg: str) -> None:
+        """bashes -- show governed shell command posture."""
+        shell = next((row for row in self.orchestrator.connectors.status() if row.get("name") == "shell"), None)
+        _print_json(
+            {
+                "status": "metadata_only",
+                "shell_connector": shell,
+                "allowed_commands": list(self.orchestrator.config.allowed_shell_commands),
+                "raw_shell_history_included": False,
+                "raw_secret_values_included": False,
+                "next_actions": ["tools run shell '{\"command\":\"pwd\"}'", "permissions", "sandbox"],
+            }
+        )
+
     def do_pr_comments(self, arg: str) -> None:
         """pr_comments -- show pull request comment integration readiness."""
         github = next((row for row in self.orchestrator.connectors.status() if row.get("name") == "github"), None)
@@ -2651,6 +2896,30 @@ class AegisTui(cmd.Cmd):
     def do_reload_plugins(self, arg: str) -> None:
         """reload_plugins -- reload private local plugin inventory."""
         self.do_plugins("reload")
+
+    def do_reload_skills(self, arg: str) -> None:
+        """reload_skills -- show governed skill inventory refresh readiness."""
+        _print_json(
+            {
+                "ok": True,
+                "mode": "skill_inventory_metadata",
+                "skills": self.orchestrator.skills.list_public(),
+                "raw_secret_values_included": False,
+            }
+        )
+
+    def do_reload(self, arg: str) -> None:
+        """reload -- show combined local extension refresh metadata."""
+        _print_json(
+            {
+                "ok": True,
+                "mode": "metadata_only",
+                "plugins": _plugin_inventory_payload(self.orchestrator),
+                "mcp_servers": self.orchestrator.mcp.list_servers(),
+                "skills": self.orchestrator.skills.list_public(),
+                "raw_secret_values_included": False,
+            }
+        )
 
     def do_hooks(self, arg: str) -> None:
         """hooks list|add|enable|disable|remove|run -- manage governed local lifecycle hooks."""
@@ -2693,6 +2962,11 @@ class AegisTui(cmd.Cmd):
     def do_restart(self, arg: str) -> None:
         """restart -- show guarded restart readiness."""
         _print_json({"status": "operator_action_required", "detail": "No daemon restart is running from the TUI; restart your local service manager or dev server explicitly."})
+
+    def do_redraw(self, arg: str) -> None:
+        """redraw -- refresh prompt metadata and render the compact home surface."""
+        self._refresh_prompt()
+        print(self._render_home())
 
     def do_stop(self, arg: str) -> None:
         """stop [task_id] -- alias for cancel."""
@@ -3724,13 +3998,14 @@ def _command_reference() -> str:
             "session new|open       Create or switch conversation sessions",
             "session history|tasks  Show active session transcript or tasks",
             "branch|fork|context    Branch readiness and context metadata",
-            "save|prompt            Explicit save and prompt readiness",
+            "copy|export|rename     Explicit copy/export and session rename surfaces",
+            "save|prompt|steer      Explicit save, prompt, and steering readiness",
             "new|reset|clear        Session reset and screen controls",
             "add-dir <path>         Record extra working directory context",
             "history|title|compress Active session transcript helpers",
             "background|bg <req>    Submit a governed task from the deck",
             "fast [request]         Inspect fast route or submit a quick governed task",
-            "goal|batch|loop        Goal, queue, and self-improvement readiness",
+            "goal|batch|queue|loop  Goal, queue, and self-improvement readiness",
             "remote-control|rc      Local-first remote-control readiness",
             "remote-env|teleport|tp Guarded remote environment handoff readiness",
             "mobile|desktop|app     Mobile/desktop control-plane readiness",
@@ -3762,15 +4037,18 @@ def _command_reference() -> str:
             "login|logout <provider> Model auth aliases",
             "effort [level]         Guarded reasoning-effort status",
             "cost                   Model usage and estimated cost",
-            "statusbar|theme|color  UI status and preference metadata",
+            "statusbar|statusline   UI status metadata",
+            "theme|skin|color       UI preference metadata",
+            "commands|keybindings   Slash command and terminal keybinding surfaces",
             "provider|usage         Model provider and usage aliases",
             "models auth methods|targets|login|logout <provider>",
             "tools                  Governed tool catalog",
             "toolsets               Group tools by permission and risk",
+            "allowed-tools|bashes   Policy-visible tools and shell posture",
             "tools run <name> <json> Run a governed tool",
             "skills [hub query]     Governed skills and virtual Skill Hub",
             "plugins list|install|enable|disable|remove|reload",
-            "plugin|reload-plugins  Plugin inventory aliases",
+            "plugin|reload|reload-plugins|reload-skills  Extension inventory aliases",
             "memory health|search|session-preview|create|update|merge|expire",
             "mcp list|register|call Governed MCP registry",
             "reload-mcp             Refresh governed one-shot MCP registry status",
@@ -3796,7 +4074,9 @@ def _command_reference() -> str:
             "browser extract|inspect|screenshot|render|click <selector>|fill <json>",
             "boards                 Work boards and cards",
             "backends|sandbox       Execution backend sandbox posture",
-            "terminal-setup|vim     Terminal keybinding and vim-mode readiness",
+            "terminal-setup|vim|mouse Terminal keybinding, vim, and mouse readiness",
+            "footer|busy|indicator|details Runtime UI indicators and safe details",
+            "redraw                 Refresh compact home surface",
             "snapshot|snap|rollback Guarded snapshot and rollback status",
             "sethome|set-home       Home workspace/channel readiness",
             "diff|review            Guarded diff and review workflow surfaces",
@@ -3849,10 +4129,11 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("tasks [all|session <id>]", "recent task lanes"),
             ("session|history|title|compress", "active transcript context"),
             ("branch|fork|context", "conversation branch and context metadata"),
-            ("save|prompt", "explicit save and prompt readiness"),
+            ("copy|export|rename", "explicit copy/export and session rename surfaces"),
+            ("save|prompt|steer", "explicit save, prompt, and steering readiness"),
             ("status|resume|pause|cancel", "task controls"),
             ("fast [request]", "quick route alias or governed task submission"),
-            ("goal|batch|loop", "goal state, evaluation queue, and self-improvement readiness"),
+            ("goal|batch|queue|loop", "goal state, evaluation queue, and self-improvement readiness"),
             ("stop|retry|undo", "cancel alias plus guarded replay and rollback status"),
         ),
     ),
@@ -3876,11 +4157,13 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("model|models|provider|usage", "provider routes, auth, and usage"),
             ("login|logout <provider>", "model auth login/logout aliases"),
             ("effort|cost", "guarded reasoning-effort metadata and usage cost"),
-            ("statusbar|sb|theme|skin|color|verbose", "UI preference and status metadata"),
+            ("statusbar|statusline|sb|theme|skin|color|verbose", "UI preference and status metadata"),
+            ("commands|keybindings", "slash command and terminal keybinding surfaces"),
+            ("allowed-tools|bashes", "policy-visible tools and shell posture"),
             ("tools run <name> <json>", "safe tool execution"),
             ("toolsets", "tool catalog grouped by permission and risk"),
             ("skills [hub query]", "governed skill hub"),
-            ("plugin|plugins|reload-plugins", "extension inventory and reload readiness"),
+            ("plugin|plugins|reload|reload-plugins|reload-skills", "extension inventory and reload readiness"),
             ("memory search|create|review", "durable memory"),
             ("mcp|reload-mcp|repair|schedules|cron", "extensions, schedules, and self-repair"),
         ),
@@ -3896,7 +4179,8 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("pr_comments", "pull request comment integration readiness"),
             ("browser session|render", "sandboxed browser work"),
             ("boards|backends|sandbox", "work and execution planes"),
-            ("voice|terminal-setup|vim", "optional interaction and terminal readiness"),
+            ("voice|terminal-setup|vim|mouse", "optional interaction and terminal readiness"),
+            ("footer|busy|indicator|details|redraw", "runtime UI indicators and safe details"),
             ("rollback|snapshot|snap|diff|review", "guarded rollback, snapshot, diff, and review status"),
             ("sethome|set-home", "home workspace/channel readiness"),
             ("update|restart", "operator-controlled update and restart readiness"),
@@ -4123,7 +4407,11 @@ def _next_command_hint(command: str) -> str:
         "tasks": "/events <id>",
         "session": "/session history",
         "branch": "/session new <title>",
+        "copy": "/session history",
+        "export": "/audit export-siem",
+        "rename": "/session rename <title>",
         "save": "/session history",
+        "steer": "/prompt",
         "add-dir": "/session history",
         "status": "/timeline <id>",
         "approvals": "/approval <id>",
@@ -4138,14 +4426,23 @@ def _next_command_hint(command: str) -> str:
         "logout": "/models auth methods",
         "effort": "/model",
         "cost": "/models usage",
+        "commands": "/commands all",
+        "keybindings": "/terminal-setup",
+        "allowed-tools": "/toolsets",
+        "bashes": "/sandbox",
         "tools": "/tools run <name> <json>",
         "skills": "/skills hub <query>",
         "plugin": "/plugins",
+        "reload": "/plugins",
         "hooks": "/hooks list",
         "memory": "/memory review-queue",
         "mcp": "/repair readiness",
         "doctor": "/capabilities",
         "statusbar": "/dashboard",
+        "footer": "/statusbar",
+        "busy": "/tasks",
+        "indicator": "/statusbar",
+        "details": "/dashboard",
         "permissions": "/security profile",
         "agents": "/boards",
         "remote-control": "/web-setup",
@@ -4156,6 +4453,8 @@ def _next_command_hint(command: str) -> str:
         "browser": "/browser sessions",
         "boards": "/backends",
         "terminal-setup": "/vim",
+        "mouse": "/terminal-setup",
+        "redraw": "/dashboard",
         "rollback": "/repair readiness",
         "sethome": "/web-setup",
     }
