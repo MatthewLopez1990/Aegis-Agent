@@ -1837,6 +1837,18 @@ class CliTests(unittest.TestCase):
                 patch("aegis.models.registry.subprocess.run", side_effect=(aws_login_completed, aws_status_completed)) as aws_run,
             ):
                 aws_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "aws-bedrock", "--method", "cloud-identity", "--run-external"]))
+            google_login_completed = subprocess.CompletedProcess(("gcloud", "auth", "login", "--update-adc"), 0)
+            google_status_completed = subprocess.CompletedProcess(
+                ("gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"),
+                0,
+                stdout="operator@example.com\n",
+                stderr="",
+            )
+            with (
+                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/gcloud"),
+                patch("aegis.models.registry.subprocess.run", side_effect=(google_login_completed, google_status_completed)) as google_run,
+            ):
+                google_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "google", "--method", "cloud-identity", "--run-external"]))
             targets_after = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "targets"]))
             github_status = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "status", "github-copilot"]))
             github_logout = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "logout", "github-copilot"]))
@@ -1871,6 +1883,12 @@ class CliTests(unittest.TestCase):
             self.assertEqual(aws_login["auth"]["method"], "cloud_identity")
             self.assertEqual(aws_login["auth"]["status"], "external_login_verified")
             self.assertFalse(aws_login["auth"]["token_captured"])
+            self.assertEqual(google_run.call_args_list[0].args[0], ("gcloud", "auth", "login", "--update-adc"))
+            self.assertEqual(google_run.call_args_list[1].args[0], ("gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"))
+            self.assertEqual(google_login["auth"]["target"], "Google Vertex AI / Gemini cloud identity")
+            self.assertEqual(google_login["auth"]["method"], "cloud_identity")
+            self.assertEqual(google_login["auth"]["status"], "external_login_verified")
+            self.assertFalse(google_login["auth"]["token_captured"])
             self.assertEqual(github_status["auth"]["status"], "external_login_verified")
             self.assertTrue(github_status["auth"]["external_auth_configured"])
             self.assertEqual(github_logout["auth"]["removed_external_auth_links"], 1)
@@ -1884,8 +1902,11 @@ class CliTests(unittest.TestCase):
             self.assertEqual(target_rows_after["GitHub Copilot"]["bridge_status"], "official_cli_link_verified")
             self.assertEqual(target_rows_after["AWS Bedrock"]["status"], "external_login_verified")
             self.assertEqual(target_rows_after["AWS Bedrock"]["bridge_status"], "official_cli_link_verified")
+            self.assertEqual(target_rows_after["Google Vertex AI / Gemini cloud identity"]["status"], "external_login_verified")
+            self.assertEqual(target_rows_after["Google Vertex AI / Gemini cloud identity"]["bridge_status"], "official_cli_link_verified")
             self.assertIn("GitHub Copilot", targets_after["auth_targets"]["verified_external_auth_targets"])
             self.assertIn("AWS Bedrock", targets_after["auth_targets"]["verified_external_auth_targets"])
+            self.assertIn("Google Vertex AI / Gemini cloud identity", targets_after["auth_targets"]["verified_external_auth_targets"])
             self.assertEqual(target_rows_after_logout["GitHub Copilot"]["status"], "official_cli_handoff_only")
             self.assertEqual(target_rows["Claude Code subscription"]["status"], "official_cli_handoff_only")
             self.assertEqual(target_rows["GitHub Copilot"]["status"], "official_cli_handoff_only")

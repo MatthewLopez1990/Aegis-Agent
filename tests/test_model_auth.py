@@ -396,6 +396,44 @@ class ModelAuthTests(unittest.TestCase):
             self.assertTrue(target_rows["AWS Bedrock"]["external_auth_configured"])
             self.assertNotIn("123456789012", audit_path.read_text(encoding="utf-8"))
 
+    def test_google_cloud_identity_handoff_verifies_official_cli_without_token_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            secret_path = root / ".aegis" / "secrets.json"
+            audit_path = root / ".aegis" / "audit.jsonl"
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(audit_path), SecretsBroker(secret_path))
+
+            login_completed = subprocess.CompletedProcess(("gcloud", "auth", "login", "--update-adc"), 0)
+            status_completed = subprocess.CompletedProcess(
+                ("gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"),
+                0,
+                stdout="operator@example.com\n",
+                stderr="",
+            )
+            with (
+                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/gcloud"),
+                patch("aegis.models.registry.subprocess.run", side_effect=(login_completed, status_completed)) as run,
+            ):
+                status = registry.login_provider_external("google", method="cloud-identity", run_external=True)
+
+            self.assertEqual(run.call_args_list[0].args[0], ("gcloud", "auth", "login", "--update-adc"))
+            self.assertEqual(run.call_args_list[1].args[0], ("gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"))
+            self.assertEqual(status["provider"], "google")
+            self.assertEqual(status["target"], "Google Vertex AI / Gemini cloud identity")
+            self.assertEqual(status["method"], "cloud_identity")
+            self.assertEqual(status["status"], "external_login_verified")
+            self.assertTrue(status["external_status_verified"])
+            self.assertEqual(status["external_status_command_argv"], ["gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"])
+            self.assertTrue(status["auth_configured"])
+            self.assertFalse(status["token_captured"])
+            self.assertFalse(secret_path.exists())
+
+            target_rows = {row["target"]: row for row in registry.auth_targets()["targets"]}
+            self.assertEqual(target_rows["Google Vertex AI / Gemini cloud identity"]["status"], "external_login_verified")
+            self.assertEqual(target_rows["Google Vertex AI / Gemini cloud identity"]["bridge_status"], "official_cli_link_verified")
+            self.assertTrue(target_rows["Google Vertex AI / Gemini cloud identity"]["external_auth_configured"])
+            self.assertNotIn("operator@example.com", audit_path.read_text(encoding="utf-8"))
+
     def test_manual_provider_native_auth_handoff_never_captures_tokens(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
             root = Path(temp)
@@ -467,7 +505,7 @@ class ModelAuthTests(unittest.TestCase):
             by_target = {row["target"]: row for row in targets["targets"]}
 
             self.assertEqual(targets["status"], "auth_parity_gap_tracked")
-            self.assertGreaterEqual(targets["target_provider_count"], 20)
+            self.assertGreaterEqual(targets["target_provider_count"], 25)
             self.assertIn("api_key", targets["implemented_auth_methods"])
             self.assertIn("subscription", targets["implemented_auth_methods"])
             self.assertIn("oauth", targets["implemented_auth_methods"])
@@ -483,6 +521,10 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(by_target["Nous Portal OAuth subscription"]["status"], "manual_provider_handoff_only")
             self.assertEqual(by_target["GitHub Copilot"]["status"], "official_cli_handoff_only")
             self.assertEqual(by_target["GitHub Copilot"]["external_command"], "gh auth login")
+            self.assertEqual(by_target["Google Gemini"]["status"], "api_key_ready")
+            self.assertEqual(by_target["Google Vertex AI / Gemini cloud identity"]["status"], "official_cli_handoff_only")
+            self.assertEqual(by_target["Google Vertex AI / Gemini cloud identity"]["external_command"], "gcloud auth login --update-adc")
+            self.assertEqual(by_target["Google Vertex AI / Gemini cloud identity"]["external_status_command"], "gcloud auth list --filter=status:ACTIVE --format=value(account)")
             self.assertEqual(by_target["DeepSeek"]["status"], "api_key_ready")
             self.assertEqual(by_target["MiniMax"]["status"], "api_key_ready")
             self.assertEqual(by_target["MiniMax OAuth"]["status"], "manual_provider_handoff_only")
