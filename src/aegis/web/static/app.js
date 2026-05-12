@@ -1799,6 +1799,19 @@ const renderRemoteControlRelay = (payload = {}) => {
   }), "Relay preflight has no blockers");
 };
 
+const renderRemoteControlRelayPull = (payload = {}) => {
+  const summary = document.getElementById("remote-control-relay-summary");
+  const mode = payload.dry_run ? "preview" : "apply";
+  summary.textContent = `${mode} · actions ${payload.action_count || 0} · executable ${payload.executable_action_count || 0} · executed ${payload.executed_action_count || 0} · target ${payload.relay_target || "not configured"}`;
+  setList("remote-control-relay", payload.actions || [], (x) => ({
+    title: `${x.action || "action"} · ${x.task_id || "no task"}`,
+    detail: x.accepted ? "Accepted by local pairing scope" : x.rejection_reason || "Rejected by local pairing scope",
+    meta: `${x.request_id || "no request id"} · ${payload.dry_run ? "preview only" : "apply requested"}`,
+    tone: x.accepted ? "ready" : "attention",
+  }), "Relay returned no queued actions");
+  renderRemoteControlOutput(payload);
+};
+
 const renderRemoteControlOutbox = (payload = {}) => {
   const counts = payload.status_counts || {};
   const summary = Object.entries(counts)
@@ -2726,17 +2739,26 @@ document.getElementById("remote-control-relay-retry").addEventListener("click", 
   await refresh();
 });
 
-document.getElementById("remote-control-relay-pull").addEventListener("click", async () => {
+const pullRemoteControlRelayActions = async ({ dryRun }) => {
   const result = await api("/remote-control/relay/pull", {
     method: "POST",
     body: JSON.stringify({
       ...remoteControlRelayBody(),
-      dry_run: document.getElementById("remote-control-relay-dry-run").checked,
+      dry_run: dryRun,
       limit: 10,
     }),
   });
-  renderRemoteControlOutput(result);
+  document.getElementById("remote-control-relay-dry-run").checked = dryRun;
   await refresh();
+  renderRemoteControlRelayPull(result);
+};
+
+document.getElementById("remote-control-relay-preview").addEventListener("click", async () => {
+  await pullRemoteControlRelayActions({ dryRun: true });
+});
+
+document.getElementById("remote-control-relay-apply").addEventListener("click", async () => {
+  await pullRemoteControlRelayActions({ dryRun: false });
 });
 
 document.getElementById("remote-control-directory").addEventListener("click", async () => {

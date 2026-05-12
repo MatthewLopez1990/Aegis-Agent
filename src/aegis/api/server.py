@@ -742,7 +742,15 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                         "source": "api",
                     },
                 )
-                self._json({**pulled, "dry_run": dry_run, "executed_action_count": len(executed_actions), "executed_actions": executed_actions})
+                self._json(
+                    {
+                        **pulled,
+                        "mode": "relay_action_preview" if dry_run else "relay_action_apply",
+                        "dry_run": dry_run,
+                        "executed_action_count": len(executed_actions),
+                        "executed_actions": executed_actions,
+                    }
+                )
                 return
             if path == "/remote-control/relay/directory":
                 payload = self._read_json()
