@@ -87,6 +87,7 @@ TOP_LEVEL_COMMANDS = (
     "goal",
     "help",
     "hooks",
+    "image",
     "indicator",
     "init",
     "kanban",
@@ -105,6 +106,7 @@ TOP_LEVEL_COMMANDS = (
     "mouse",
     "new",
     "pause",
+    "paste",
     "plan",
     "platforms",
     "permissions",
@@ -172,6 +174,8 @@ TOP_LEVEL_COMMANDS = (
     "verbose",
     "voice",
     "web-setup",
+    "whoami",
+    "yolo",
 )
 MEMORY_COMMANDS = ("search", "health", "session-preview", "session-commit", "create", "review-queue", "review-digest", "review-action", "review-batch", "recertify", "update", "merge", "resolve-conflict", "expire", "cleanup-expired", "explain", "export", "delete")
 MIGRATE_COMMANDS = ("openclaw", "hermes", "openclaw-memory-preview", "hermes-memory-preview", "openclaw-memory-commit", "hermes-memory-commit")
@@ -2593,6 +2597,51 @@ class AegisTui(cmd.Cmd):
             }
         )
 
+    def do_paste(self, arg: str) -> None:
+        """paste -- show safe paste/clipboard boundaries without reading the clipboard."""
+        _print_json(
+            {
+                "status": "operator_action_required",
+                "mode": "metadata_only",
+                "clipboard_read": False,
+                "clipboard_mutated": False,
+                "raw_clipboard_content_included": False,
+                "detail": "Aegis does not read clipboard content implicitly; paste text into the prompt or append explicit session context.",
+                "next_actions": ["session append <content> --trust-class USER_DIRECTIVE", "submit <request>", "copy from terminal selection"],
+            }
+        )
+
+    def do_image(self, arg: str) -> None:
+        """image <path> -- stage explicit image path metadata for future media sandboxing."""
+        image_arg = arg.strip()
+        if image_arg:
+            image_path = Path(image_arg).expanduser()
+            if not image_path.is_absolute():
+                image_path = self.workspace / image_path
+            resolved = image_path.resolve()
+            try:
+                workspace_scoped = resolved.is_relative_to(self.workspace)
+            except ValueError:
+                workspace_scoped = False
+            exists = resolved.exists()
+        else:
+            resolved = None
+            workspace_scoped = False
+            exists = False
+        _print_json(
+            {
+                "status": "media_attachment_pending_sandbox" if resolved else "operator_action_required",
+                "mode": "metadata_only",
+                "image_path": str(resolved) if resolved else None,
+                "exists": exists,
+                "workspace_scoped": workspace_scoped,
+                "raw_image_bytes_included": False,
+                "raw_ocr_content_included": False,
+                "detail": "Explicit image paths are accepted as metadata only until the media worker sandbox is active.",
+                "next_actions": ["browser screenshot", "provider_media_depth", "submit describe explicit image path"],
+            }
+        )
+
     def do_export(self, arg: str) -> None:
         """export -- show explicit export surfaces and redaction boundaries."""
         _print_json(
@@ -2631,6 +2680,43 @@ class AegisTui(cmd.Cmd):
     def do_permissions(self, arg: str) -> None:
         """permissions -- Claude-style alias for policy posture."""
         self.do_security("profile")
+
+    def do_whoami(self, arg: str) -> None:
+        """whoami -- show local actor, session, and policy posture metadata."""
+        profile = policy_profile_to_dict(self.orchestrator.config.policy_profile)
+        _print_json(
+            {
+                "status": "metadata_only",
+                "actor": getpass.getuser(),
+                "workspace": str(self.workspace),
+                "active_session_id": self.session.get("id"),
+                "active_session_title": self.session.get("title"),
+                "session_status": self.session.get("status"),
+                "model": self.session.get("model") or "alias/smart",
+                "personality": self.session.get("personality") or "default",
+                "admin_mode_enabled": False,
+                "approval_bypass_enabled": False,
+                "policy": {
+                    "read_only": profile.get("read_only"),
+                    "network_allowlist": profile.get("network_allowlist", []),
+                    "shell_allowlist": profile.get("shell_allowlist", []),
+                },
+                "raw_secret_values_included": False,
+                "next_actions": ["permissions", "security profile", "session", "models auth targets"],
+            }
+        )
+
+    def do_yolo(self, arg: str) -> None:
+        """yolo -- report that approval bypass is intentionally not enabled."""
+        _print_json(
+            {
+                "status": "not_enabled",
+                "approval_bypass_enabled": False,
+                "dangerous_command_auto_approval": False,
+                "detail": "Aegis keeps high-impact actions behind policy and approval gates; yolo mode is not implemented as an approval bypass.",
+                "next_actions": ["permissions", "security profile", "allowed-tools", "toolsets"],
+            }
+        )
 
     def do_profile(self, arg: str) -> None:
         """profile -- show active policy profile."""
@@ -4274,6 +4360,7 @@ def _command_reference() -> str:
             "session history|tasks  Show active session transcript or tasks",
             "branch|fork|context    Branch readiness and context metadata",
             "copy|export|rename     Explicit copy/export and session rename surfaces",
+            "paste|image <path>     Safe clipboard and image attachment boundaries",
             "save|prompt|steer      Explicit save, prompt, and steering readiness",
             "new|reset|clear        Session reset and screen controls",
             "add-dir <path>         Record extra working directory context",
@@ -4292,6 +4379,7 @@ def _command_reference() -> str:
             "approve <id> [--admin] Approve a gated action",
             "deny <id> [--admin]    Deny a gated action",
             "permissions            Claude-style policy posture alias",
+            "whoami|yolo            Identity posture and approval-bypass refusal",
             "security-review        Security review posture alias",
             "doctor|debug|config|settings Runtime diagnosis, safe debug, and config paths",
             "bug|feedback <summary> Capture a local-only bug report",
@@ -4405,6 +4493,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("session|history|title|compress", "active transcript context"),
             ("branch|fork|context", "conversation branch and context metadata"),
             ("copy|export|rename", "explicit copy/export and session rename surfaces"),
+            ("paste|image <path>", "safe clipboard and image attachment boundaries"),
             ("save|prompt|steer", "explicit save, prompt, and steering readiness"),
             ("status|resume|pause|cancel", "task controls"),
             ("fast [request]", "quick route alias or governed task submission"),
@@ -4420,6 +4509,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("approve|deny <id>", "decide gated work"),
             ("security", "policy posture"),
             ("permissions|security-review", "Claude-style policy and security review aliases"),
+            ("whoami|yolo", "identity posture and approval-bypass refusal"),
             ("doctor|debug|config|settings|init", "runtime diagnostics, local paths, and initialization status"),
             ("bug|feedback <summary>", "local-only bug report capture"),
             ("hooks", "governed local lifecycle hooks"),
@@ -4722,6 +4812,10 @@ def _next_command_hint(command: str) -> str:
         "indicator": "/statusbar",
         "details": "/dashboard",
         "permissions": "/security profile",
+        "whoami": "/permissions",
+        "yolo": "/permissions",
+        "paste": "/session append <content>",
+        "image": "/browser screenshot",
         "agents": "/agents delegate",
         "remote-control": "/web-setup",
         "web-setup": "/remote-control",
