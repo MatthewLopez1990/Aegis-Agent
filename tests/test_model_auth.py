@@ -123,18 +123,22 @@ class ModelAuthTests(unittest.TestCase):
             openai = providers["openai"]
             anthropic = providers["anthropic"]
             openrouter = providers["openrouter"]
+            qwen = providers["qwen"]
             aws_bedrock = providers["aws-bedrock"]
 
             self.assertEqual(openai["auth_methods"], ["api_key", "subscription"])
             self.assertTrue(openai["subscription_auth_supported"])
             self.assertFalse(openai["subscription_auth_configured"])
             self.assertEqual(openai["subscription_auth"]["external_command"], "codex login")
-            self.assertEqual(openai["subscription_auth"]["aegis_bridge_status"], "official_cli_handoff_only")
+            self.assertEqual(openai["subscription_auth"]["aegis_bridge_status"], "official_cli_bridge_available")
             self.assertEqual(anthropic["auth_methods"], ["api_key", "subscription"])
             self.assertEqual(anthropic["subscription_auth"]["external_command"], "claude auth login")
             self.assertEqual(anthropic["subscription_auth"]["external_login_instruction"], "/login")
             self.assertFalse(openrouter["subscription_auth_supported"])
             self.assertIsNone(openrouter["subscription_auth"])
+            self.assertEqual(qwen["auth_methods"], ["api_key", "subscription", "oauth"])
+            self.assertEqual(qwen["subscription_auth"]["external_command"], "qwen auth coding-plan")
+            self.assertEqual(qwen["subscription_auth"]["external_status_command"], "qwen auth status")
             self.assertIn("cloud_identity", providers["google"]["auth_methods"])
             self.assertTrue(aws_bedrock["auth_required"])
             self.assertEqual(aws_bedrock["auth_methods"], ["cloud_identity"])
@@ -312,6 +316,67 @@ class ModelAuthTests(unittest.TestCase):
             self.assertIn("model.auth_subscription_login_requested", audit_text)
             self.assertNotIn("ANTHROPIC_AUTH_TOKEN", audit_text)
             self.assertNotIn("session_cookie", audit_text)
+
+    def test_verified_qwen_coding_plan_subscription_can_invoke_without_token_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            secret_path = root / ".aegis" / "secrets.json"
+            audit_path = root / ".aegis" / "audit.jsonl"
+            broker = SecretsBroker(secret_path)
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(audit_path), broker)
+
+            login_completed = subprocess.CompletedProcess(("qwen", "auth", "coding-plan"), 0)
+            status_completed = subprocess.CompletedProcess(("qwen", "auth", "status"), 0, stdout="Authenticated with Alibaba Cloud Coding Plan\n", stderr="")
+            with (
+                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/qwen"),
+                patch("aegis.models.registry.subprocess.run", side_effect=(login_completed, status_completed)),
+            ):
+                login = registry.login_provider_subscription("qwen", run_external=True)
+
+            self.assertEqual(login["status"], "external_login_verified")
+            self.assertEqual(login["invocation_bridge"], "qwen_headless_json")
+            self.assertFalse(secret_path.exists())
+            self.assertTrue(registry.auth_status("qwen")["auth_configured"])
+            self.assertTrue(registry.auth_status("qwen")["subscription_auth_configured"])
+            self.assertEqual(registry.auth_status("qwen")["auth_source"], "subscription_cli")
+            target_rows = {row["target"]: row for row in registry.auth_targets()["targets"]}
+            self.assertEqual(target_rows["Qwen Code Coding Plan subscription"]["status"], "subscription_cli_ready")
+
+            route = registry.route("qwen/qwen3-coder-plus")
+            self.assertEqual(route.auth_method, "subscription_cli")
+            self.assertIsNone(route.secret_handle_id)
+
+            def fake_qwen_headless(command, **kwargs):
+                self.assertEqual(command[0], "/usr/bin/qwen")
+                self.assertIn("--output-format", command)
+                self.assertEqual(command[command.index("--output-format") + 1], "json")
+                self.assertIn("--approval-mode", command)
+                self.assertEqual(command[command.index("--approval-mode") + 1], "plan")
+                self.assertEqual(command[command.index("--model") + 1], "qwen3-coder-plus")
+                self.assertIn("[USER]\nhello from aegis", kwargs["input"])
+                self.assertTrue(kwargs["cwd"].name.startswith("aegis-qwen-model-"))
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout='[{"type":"assistant","message":{"content":[{"type":"text","text":"ignored assistant event"}]}},{"type":"result","subtype":"success","result":"qwen coding plan response","usage":{"input_tokens":9,"output_tokens":5}}]\n',
+                    stderr="",
+                )
+
+            with (
+                patch("aegis.models.client.shutil.which", return_value="/usr/bin/qwen"),
+                patch("aegis.models.client.subprocess.run", side_effect=fake_qwen_headless) as run,
+            ):
+                result = LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello from aegis"}])
+
+            self.assertEqual(result.content, "qwen coding plan response")
+            self.assertEqual(result.raw_usage["source"], "subscription_cli")
+            self.assertEqual(result.raw_usage["bridge"], "qwen_headless_json")
+            run.assert_called_once()
+
+            audit_text = audit_path.read_text(encoding="utf-8")
+            self.assertIn("model.auth_subscription_login_requested", audit_text)
+            self.assertNotIn("sk-sp-", audit_text)
+            self.assertNotIn("qwen_refresh_token", audit_text)
 
     def test_subscription_auth_reports_missing_official_cli_without_token_capture(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
@@ -663,7 +728,9 @@ class ModelAuthTests(unittest.TestCase):
             self.assertTrue(status["external_auth_configured"])
             self.assertEqual(status["bridge_status"], "official_cli_link_verified")
             self.assertIn("oauth", qwen_status["auth_methods"])
-            self.assertEqual(qwen_status["provider_native_auth"][0]["status"], "official_cli_handoff_only")
+            self.assertIn("subscription", qwen_status["auth_methods"])
+            self.assertEqual(qwen_status["subscription_auth"]["aegis_bridge_status"], "official_cli_bridge_available")
+            self.assertEqual(qwen_status["provider_native_auth"][0]["status"], "provider_discontinued")
             self.assertEqual(by_target["GitHub Copilot"]["status"], "external_login_verified")
             self.assertEqual(by_target["GitHub Copilot"]["bridge_status"], "official_cli_link_verified")
             self.assertTrue(by_target["GitHub Copilot"]["external_auth_configured"])
@@ -696,9 +763,9 @@ class ModelAuthTests(unittest.TestCase):
             self.assertIn("oauth_device", targets["implemented_auth_methods"])
             self.assertIn("cloud_identity", targets["implemented_auth_methods"])
             self.assertEqual(by_target["OpenAI API"]["status"], "api_key_ready")
-            self.assertEqual(by_target["OpenAI Codex / ChatGPT subscription"]["status"], "official_cli_handoff_only")
+            self.assertEqual(by_target["OpenAI Codex / ChatGPT subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(by_target["OpenAI Codex / ChatGPT subscription"]["external_command"], "codex login")
-            self.assertEqual(by_target["Claude Code subscription"]["status"], "official_cli_handoff_only")
+            self.assertEqual(by_target["Claude Code subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(by_target["Claude Code subscription"]["external_command"], "claude auth login")
             self.assertEqual(by_target["Claude Code subscription"]["external_login_instruction"], "/login")
             self.assertEqual(by_target["Nous Portal API key"]["status"], "api_key_ready")
@@ -716,9 +783,10 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(by_target["Azure Foundry API key"]["status"], "api_key_ready")
             self.assertEqual(by_target["Azure Foundry"]["status"], "official_cli_bridge_available")
             self.assertEqual(by_target["Qwen DashScope API"]["status"], "api_key_ready")
-            self.assertEqual(by_target["Qwen OAuth"]["required_auth"], ["oauth"])
-            self.assertEqual(by_target["Qwen OAuth"]["status"], "official_cli_handoff_only")
-            self.assertEqual(by_target["Qwen OAuth"]["external_command"], "qwen auth")
+            self.assertEqual(by_target["Qwen Code Coding Plan subscription"]["required_auth"], ["subscription"])
+            self.assertEqual(by_target["Qwen Code Coding Plan subscription"]["status"], "official_cli_bridge_available")
+            self.assertEqual(by_target["Qwen Code Coding Plan subscription"]["external_command"], "qwen auth coding-plan")
+            self.assertEqual(by_target["Qwen Code Coding Plan subscription"]["external_login_instruction"], "/auth")
             self.assertEqual(by_target["Ollama"]["status"], "local_ready")
             self.assertFalse(any(row["raw_tokens_captured"] for row in targets["targets"]))
             self.assertIn("raw_token_capture_rejection", targets["verification_gates"])

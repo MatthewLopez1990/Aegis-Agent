@@ -200,7 +200,7 @@ class ModelRegistry:
                 target_row["subscription_auth_supported"] = bool(provider.get("subscription_auth_supported"))
                 target_row["subscription_auth_configured"] = bool(provider.get("subscription_auth_configured"))
                 subscription_profile = provider.get("subscription_auth") if isinstance(provider.get("subscription_auth"), dict) else {}
-                if subscription_profile:
+                if subscription_profile and "subscription" in required_auth:
                     target_row["external_command"] = subscription_profile.get("external_command", target_row.get("external_command"))
                     target_row["bridge_status"] = subscription_profile.get("aegis_bridge_status", "not_implemented")
                     target_row["account_surface"] = subscription_profile.get("account_surface", target_row.get("account_surface"))
@@ -336,10 +336,9 @@ class ModelRegistry:
                         "token_capture_supported": False,
                     }
                 )
-                if provider.provider == "openai":
-                    status["invocation_bridge"] = "codex_exec"
-                if provider.provider == "anthropic":
-                    status["invocation_bridge"] = "claude_print"
+                invocation_bridge = profile.get("invocation_bridge")
+                if isinstance(invocation_bridge, str) and invocation_bridge:
+                    status["invocation_bridge"] = invocation_bridge
                 self._remember_external_auth_link(provider.provider, "subscription", status)
         self.audit_logger.append(
             "model.auth_subscription_login_requested",
@@ -542,7 +541,7 @@ class ModelRegistry:
         provider_name, model = identifier.split("/", 1)
         if provider_name not in self.providers:
             raise KeyError(f"unknown model provider {provider_name!r}")
-        if model not in self.providers[provider_name].models and provider_name not in {"custom", "lmstudio", "azure-foundry", "aws-bedrock", "google"}:
+        if model not in self.providers[provider_name].models and provider_name not in {"custom", "lmstudio", "azure-foundry", "aws-bedrock", "google", "qwen"}:
             raise KeyError(f"unknown model {model!r} for provider {provider_name!r}")
         return provider_name, model
 
@@ -735,10 +734,9 @@ class ModelRegistry:
             "token_captured": False,
             "token_capture_supported": False,
         }
-        if provider_name == "openai" and method == "subscription":
-            link["invocation_bridge"] = "codex_exec"
-        if provider_name == "anthropic" and method == "subscription":
-            link["invocation_bridge"] = "claude_print"
+        invocation_bridge = status.get("invocation_bridge")
+        if isinstance(invocation_bridge, str) and invocation_bridge:
+            link["invocation_bridge"] = invocation_bridge
         self.external_auth_links[_external_auth_link_key(provider_name, method)] = link
         self._persist_external_auth_links()
 
@@ -877,19 +875,18 @@ EXTERNAL_AUTH_HANDOFF_PROFILES: dict[str, dict[str, Any]] = {
         ],
     },
     "qwen-oauth": {
-        "target": "Qwen OAuth",
-        "aliases": ("qwen", "qwen-oauth", "dashscope-oauth"),
+        "target": "Qwen OAuth (discontinued)",
+        "aliases": ("qwen-oauth", "dashscope-oauth"),
         "provider": "qwen",
         "method": "oauth",
         "account_surface": "Qwen Code / Alibaba Cloud Coding Plan",
-        "external_command": "qwen auth",
-        "external_command_argv": ("qwen", "auth"),
+        "external_command": None,
         "provider_token_source": "official Qwen Code auth store",
-        "aegis_bridge_status": "official_cli_handoff_only",
+        "aegis_bridge_status": "provider_discontinued",
         "interactive": True,
         "next_steps": [
-            "Run model auth login qwen --method oauth --run-external or use /auth inside Qwen Code.",
-            "Use DASHSCOPE_API_KEY for Aegis live Qwen calls until a governed OAuth bridge exists.",
+            "Qwen Code OAuth free-tier access was discontinued on 2026-04-15; use model auth login qwen --subscription for Alibaba Cloud Coding Plan instead.",
+            "Use DASHSCOPE_API_KEY for direct Aegis live Qwen calls, or verify the official Qwen Code Coding Plan subscription bridge.",
         ],
     },
     "nous-oauth": {
@@ -932,7 +929,8 @@ SUBSCRIPTION_AUTH_PROFILES: dict[str, dict[str, Any]] = {
         "external_status_command_argv": ("codex", "login", "status"),
         "requires": "ChatGPT account with Codex access",
         "provider_token_source": "official Codex CLI auth store",
-        "aegis_bridge_status": "official_cli_handoff_only",
+        "aegis_bridge_status": "official_cli_bridge_available",
+        "invocation_bridge": "codex_exec",
         "interactive": True,
         "next_steps": [
             "Run model auth login openai --subscription --run-external or sign in with the official Codex CLI directly, then use --verify-external to record the non-secret bridge link.",
@@ -949,12 +947,31 @@ SUBSCRIPTION_AUTH_PROFILES: dict[str, dict[str, Any]] = {
         "external_login_instruction": "/login",
         "requires": "claude.ai account with Claude Code access; Remote Control requires full-scope claude.ai login, not API key auth",
         "provider_token_source": "official Claude Code auth store",
-        "aegis_bridge_status": "official_cli_handoff_only",
+        "aegis_bridge_status": "official_cli_bridge_available",
+        "invocation_bridge": "claude_print",
         "interactive": True,
         "next_steps": [
             "Run model auth login anthropic --subscription --run-external or sign in with Claude Code directly, then use --verify-external to record the non-secret bridge link.",
             "Use model auth login anthropic --api-key-stdin for direct Anthropic HTTP calls, or use the verified subscription bridge for isolated claude -p invocation.",
             "Do not paste claude.ai browser session tokens into Aegis.",
+        ],
+    },
+    "qwen": {
+        "account_surface": "Alibaba Cloud Coding Plan / Qwen Code",
+        "external_command": "qwen auth coding-plan",
+        "external_command_argv": ("qwen", "auth", "coding-plan"),
+        "external_status_command": "qwen auth status",
+        "external_status_command_argv": ("qwen", "auth", "status"),
+        "external_login_instruction": "/auth",
+        "requires": "Alibaba Cloud Coding Plan subscription configured in the official Qwen Code CLI",
+        "provider_token_source": "official Qwen Code auth store",
+        "aegis_bridge_status": "official_cli_bridge_available",
+        "invocation_bridge": "qwen_headless_json",
+        "interactive": True,
+        "next_steps": [
+            "Run model auth login qwen --subscription --run-external or sign in with qwen auth coding-plan directly, then use --verify-external to record the non-secret bridge link.",
+            "Use model auth login qwen --api-key-stdin for direct DashScope HTTP calls, or use the verified subscription bridge for isolated qwen headless invocation.",
+            "Do not paste Qwen OAuth tokens, Coding Plan API keys, or Qwen settings.json contents into Aegis.",
         ],
     },
 }
@@ -1119,11 +1136,13 @@ MODEL_PROVIDER_AUTH_TARGETS: tuple[dict[str, Any], ...] = (
         "account_surface": "Alibaba Cloud Model Studio / DashScope",
     },
     {
-        "target": "Qwen OAuth",
+        "target": "Qwen Code Coding Plan subscription",
         "platforms": ("Hermes Agent",),
         "aegis_provider": "qwen",
-        "required_auth": ("oauth",),
-        "account_surface": "Qwen",
+        "required_auth": ("subscription",),
+        "external_command": "qwen auth coding-plan",
+        "external_login_instruction": "/auth",
+        "account_surface": "Alibaba Cloud Coding Plan / Qwen Code",
     },
     {
         "target": "Ollama",

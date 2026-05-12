@@ -962,11 +962,12 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(auth_parity["status"], "auth_parity_gap_tracked")
             auth_targets = {row["target"]: row for row in auth_parity["targets"]}
             self.assertEqual(auth_targets["OpenAI API"]["status"], "api_key_ready")
-            self.assertEqual(auth_targets["Claude Code subscription"]["status"], "official_cli_handoff_only")
+            self.assertEqual(auth_targets["Claude Code subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(auth_targets["GitHub Copilot"]["status"], "official_cli_handoff_only")
             self.assertEqual(auth_targets["DeepSeek"]["status"], "api_key_ready")
             self.assertEqual(auth_targets["MiniMax OAuth"]["status"], "manual_provider_handoff_only")
-            self.assertEqual(auth_targets["Qwen OAuth"]["required_auth"], ["oauth"])
+            self.assertEqual(auth_targets["Qwen Code Coding Plan subscription"]["required_auth"], ["subscription"])
+            self.assertEqual(auth_targets["Qwen Code Coding Plan subscription"]["status"], "official_cli_bridge_available")
             self.assertFalse(any(row["raw_tokens_captured"] for row in auth_parity["targets"]))
             backlog = {item["area"]: item for item in dashboard["live_gap_backlog"]}
             self.assertIn("model_provider_auth_login_parity", backlog)
@@ -975,6 +976,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("remote_backend_activation", backlog)
             self.assertEqual(backlog["model_provider_auth_login_parity"]["status"], "auth_parity_gap_tracked")
             self.assertIn("Claude Code subscription", backlog["model_provider_auth_login_parity"]["subscription_bridge_targets"])
+            self.assertIn("Qwen Code Coding Plan subscription", backlog["model_provider_auth_login_parity"]["subscription_bridge_targets"])
             self.assertIn("GitHub Copilot", backlog["model_provider_auth_login_parity"]["subscription_bridge_targets"])
             auth_checklist = {item["control"]: item for item in backlog["model_provider_auth_login_parity"]["operator_checklist"]}
             self.assertEqual(auth_checklist["api_key_secret_broker"]["state"], "enforced")

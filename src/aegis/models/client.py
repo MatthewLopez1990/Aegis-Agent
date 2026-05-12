@@ -81,6 +81,8 @@ class LiveModelClient:
             return self._chat_codex_subscription_cli(route, messages, temperature=temperature)
         if route.provider.provider == "anthropic":
             return self._chat_claude_subscription_cli(route, messages, temperature=temperature)
+        if route.provider.provider == "qwen":
+            return self._chat_qwen_subscription_cli(route, messages, temperature=temperature)
         raise ValueError(f"subscription CLI invocation is not implemented for provider {route.provider.provider!r}")
 
     def _chat_codex_subscription_cli(
@@ -192,6 +194,56 @@ class LiveModelClient:
             input_tokens=max(1, len(prompt) // 4),
             output_tokens=max(1, len(content) // 4),
             raw_usage={"source": "subscription_cli", "bridge": "claude_print", "token_counts": "estimated"},
+        )
+
+    def _chat_qwen_subscription_cli(
+        self,
+        route: ModelRoute,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+    ) -> ModelInvocationResult:
+        executable_path = shutil.which("qwen")
+        if executable_path is None:
+            raise RuntimeError("official Qwen Code CLI is not installed")
+        prompt = _subscription_cli_prompt(messages, provider="qwen", temperature=temperature)
+        with tempfile.TemporaryDirectory(prefix="aegis-qwen-model-") as temp:
+            temp_dir = Path(temp)
+            command = (
+                executable_path,
+                "--output-format",
+                "json",
+                "--approval-mode",
+                "plan",
+                "--model",
+                route.model,
+            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    input=prompt,
+                    text=True,
+                    capture_output=True,
+                    timeout=self.timeout_seconds,
+                    check=False,
+                    cwd=temp_dir,
+                )  # noqa: S603 - argv is a fixed official provider CLI bridge.
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("official Qwen Code CLI model invocation timed out") from exc
+            except OSError as exc:
+                raise RuntimeError(f"official Qwen Code CLI model invocation failed: {exc}") from exc
+            if completed.returncode != 0:
+                raise RuntimeError(f"official Qwen Code CLI model invocation exited with {completed.returncode}")
+            content = _qwen_json_result_text(completed.stdout)
+        if not content:
+            raise RuntimeError("official Qwen Code CLI model invocation returned no final message")
+        return ModelInvocationResult(
+            provider=route.provider.provider,
+            model=route.model,
+            content=content,
+            input_tokens=max(1, len(prompt) // 4),
+            output_tokens=max(1, len(content) // 4),
+            raw_usage={"source": "subscription_cli", "bridge": "qwen_headless_json", "token_counts": "estimated"},
         )
 
     def _chat_aws_bedrock_cli(
@@ -721,6 +773,52 @@ def _subscription_cli_prompt(messages: list[dict[str, str]], *, provider: str, t
         lines.append(content)
         lines.append("")
     return "\n".join(lines).strip() + "\n"
+
+
+def _qwen_json_result_text(raw: str) -> str:
+    if not raw.strip():
+        return ""
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("official Qwen Code CLI model invocation returned invalid JSON") from exc
+    if isinstance(payload, dict):
+        result = payload.get("result")
+        if isinstance(result, str) and result.strip():
+            return result.strip()
+        return _qwen_message_text(payload.get("message", {}))
+    if not isinstance(payload, list):
+        raise RuntimeError("official Qwen Code CLI model invocation returned invalid JSON")
+    for item in reversed(payload):
+        if isinstance(item, dict) and item.get("type") == "result":
+            result = item.get("result")
+            if isinstance(result, str) and result.strip():
+                return result.strip()
+    for item in reversed(payload):
+        if isinstance(item, dict) and item.get("type") == "assistant":
+            content = _qwen_message_text(item.get("message", {}))
+            if content:
+                return content
+    return ""
+
+
+def _qwen_message_text(message: Any) -> str:
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for part in content:
+        if isinstance(part, dict):
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+        elif isinstance(part, str) and part.strip():
+            parts.append(part.strip())
+    return "\n".join(parts).strip()
 
 
 def _claude_cli_model(model: str) -> str:
