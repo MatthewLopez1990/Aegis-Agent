@@ -575,8 +575,101 @@ class ConnectorTests(unittest.TestCase):
         self.assertNotIn("abc123", rendered)
         self.assertIn("param_sha256", live.data["accepted"])
         self.assertEqual(live.data["accepted"]["receipt_schema"], "redacted_param_summary_v1")
+        self.assertEqual(live.data["rate_limit"]["limit"], 60)
+        self.assertTrue(live.data["rollback_receipt"]["rollback_available"])
+        self.assertEqual(live.data["rollback_receipt"]["rollback_operation"], "rollback_close_ticket")
         self.assertFalse(live.data["accepted"]["raw_secret_values_included"])
         self.assertFalse(live.data["accepted"]["raw_response_body_included"])
+        self.assertFalse(live.data["rollback_receipt"]["raw_secret_values_included"])
+        self.assertFalse(live.data["rollback_receipt"]["raw_response_body_included"])
+
+    def test_service_desk_live_write_rate_limit_and_close_rollback_receipt(self) -> None:
+        broker = SecretsBroker()
+        connector = MockServiceNowConnector(allowlist=("example.com",), live_writes=True, secrets_broker=broker, rate_limits={"per_minute": 1})
+        broker.store_secret(name="SERVICE_DESK_TOKEN", value="svc_raw_secret")
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self, limit: int) -> bytes:
+                return b'{"result":{"number":"INC000001"}}'
+
+        captured: dict[str, list[dict[str, object]]] = {"requests": []}
+
+        def fake_open(request, timeout):
+            captured["requests"].append(
+                {
+                    "url": request.full_url,
+                    "method": request.get_method(),
+                    "authorization": request.headers.get("Authorization"),
+                    "body": request.data.decode("utf-8"),
+                }
+            )
+            return FakeResponse()
+
+        close_request = ConnectorRequest(
+            operation="close_ticket",
+            params={"api_url": "https://example.com/api/now/table/incident/INC000001", "ticket": {"id": "INC000001", "work_notes": "rotated token=abc123"}},
+            scopes=("write",),
+            approved=True,
+        )
+
+        with patch("aegis.connectors.mock_servicenow._open_without_redirects", side_effect=fake_open):
+            first_close = connector.write(close_request)
+            limited_close = connector.write(close_request)
+            unapproved_rollback = connector.rollback(
+                ConnectorRequest(
+                    operation="rollback_close_ticket",
+                    params={"api_url": "https://example.com/api/now/table/incident/INC000001", "ticket": {"id": "INC000001"}, "target_state": "open"},
+                    scopes=("write",),
+                )
+            )
+            rollback = connector.rollback(
+                ConnectorRequest(
+                    operation="rollback_close_ticket",
+                    params={
+                        "api_url": "https://example.com/api/now/table/incident/INC000001",
+                        "ticket": {"id": "INC000001"},
+                        "target_state": "open",
+                        "reason": "operator rollback token=abc123",
+                    },
+                    scopes=("write",),
+                    approved=True,
+                )
+            )
+
+        rendered_limited = json.dumps(limited_close.data, sort_keys=True)
+        rendered_rollback = json.dumps(rollback.data, sort_keys=True)
+        self.assertTrue(first_close.ok)
+        self.assertFalse(limited_close.ok)
+        self.assertIn("rate limit", limited_close.error or "")
+        self.assertFalse(limited_close.data["rate_limit"]["allowed"])
+        self.assertGreaterEqual(limited_close.data["rate_limit"]["retry_after_seconds"], 1)
+        self.assertFalse(unapproved_rollback.ok)
+        self.assertIn("approval", unapproved_rollback.error or "")
+        self.assertTrue(rollback.ok)
+        self.assertEqual(rollback.operation, "rollback_close_ticket")
+        self.assertEqual(rollback.data["mode"], "live_rollback")
+        self.assertEqual(rollback.data["rollback_receipt"]["receipt_schema"], "service_desk_rollback_receipt_v1")
+        self.assertEqual(rollback.data["rollback_receipt"]["target_state"], "open")
+        self.assertFalse(rollback.data["rollback_receipt"]["raw_secret_values_included"])
+        self.assertFalse(rollback.data["rollback_receipt"]["raw_response_body_included"])
+        self.assertEqual(len(captured["requests"]), 2)
+        self.assertEqual(captured["requests"][0]["method"], "PATCH")
+        self.assertEqual(captured["requests"][0]["authorization"], "Bearer svc_raw_secret")
+        self.assertEqual(captured["requests"][1]["method"], "PATCH")
+        self.assertEqual(captured["requests"][1]["authorization"], "Bearer svc_raw_secret")
+        self.assertIn('"state": "open"', str(captured["requests"][1]["body"]))
+        self.assertNotIn("svc_raw_secret", rendered_limited)
+        self.assertNotIn("abc123", rendered_limited)
+        self.assertNotIn("svc_raw_secret", rendered_rollback)
+        self.assertNotIn("abc123", rendered_rollback)
 
     def test_calendar_live_write_requires_approval_secret_and_summarizes_payload(self) -> None:
         broker = SecretsBroker()

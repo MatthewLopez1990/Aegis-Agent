@@ -475,12 +475,17 @@ def _live_gap_backlog(
             ),
             "next_steps": [
                 "Add per-provider credential handles and domain allowlists.",
-                "Keep live writes approval-gated with redacted receipts.",
+                "Keep live writes approval-gated with runtime rate limits and redacted receipts.",
                 "Promote each adapter only after mock, denied, approved, and audit-path tests pass.",
             ],
-            "required_controls": ["human_approval", "secret_broker", "network_allowlist", "audit_receipts"],
-            "verification_gates": ["mock_fallback", "denied_write", "approved_write", "receipt_redaction"],
-            "evaluation_scenarios": ["connector_abuse.write_without_scope", "live_connector_receipts.redacted_write_summary"],
+            "required_controls": ["human_approval", "secret_broker", "network_allowlist", "rate_limits", "rollback_receipts", "audit_receipts"],
+            "verification_gates": ["mock_fallback", "denied_write", "approved_write", "rate_limit_denial", "rollback_receipt", "receipt_redaction"],
+            "evaluation_scenarios": [
+                "connector_abuse.write_without_scope",
+                "live_connector_receipts.redacted_write_summary",
+                "live_connector_rate_limit.exceeded",
+                "service_desk.rollback_close_ticket_receipt",
+            ],
             "configured_provider_count": len(configured_providers),
         },
         {
@@ -786,7 +791,7 @@ def _available_live_connector_adapters(connectors: list[dict[str, Any]], config:
                     "name": name,
                     "status": "available_opt_in",
                     "capabilities": list(_LIVE_CONNECTOR_CAPABILITIES[name]),
-                    "required_controls": ["enable_live_writes", "network_allowlist", "human_approval", "redacted_receipts"],
+                    "required_controls": ["enable_live_writes", "network_allowlist", "human_approval", "rate_limits", "rollback_receipts", "redacted_receipts"],
                     "activation": live_connector_activation(
                         connector=name,
                         operation="live_write",
@@ -862,6 +867,16 @@ def _live_connector_operator_checklist(
             "control": "receipt_redaction",
             "state": "enforced",
             "detail": "Live connector receipts expose operation summaries and hashes, not raw secret values.",
+        },
+        {
+            "control": "runtime_rate_limits",
+            "state": "partial",
+            "detail": "Service-desk live writes enforce an in-memory per-operation rate limit; remaining live adapters must add provider-specific limits before promotion.",
+        },
+        {
+            "control": "rollback_receipts",
+            "state": "partial",
+            "detail": "Service-desk close-ticket live writes expose an approved rollback_close_ticket receipt/action; remaining live adapters still require provider-specific rollback paths.",
         },
         {
             "control": "mock_fallback",

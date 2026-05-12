@@ -1586,6 +1586,8 @@ class BuiltinToolExecutor:
             operation = "update_ticket"
         elif requested in {"close", "close_ticket", "resolve"}:
             operation = "close_ticket"
+        elif requested in {"rollback", "rollback_close", "rollback_close_ticket", "reopen"}:
+            operation = "rollback_close_ticket"
         else:
             operation = "create_ticket"
         payload = dict(params.get("ticket", {}))
@@ -1594,9 +1596,9 @@ class BuiltinToolExecutor:
                 payload[key] = value
         request_params = {key: value for key, value in params.items() if key != "operation"}
         request_params["ticket"] = payload
-        result = self.connectors.get("mock_servicenow").write(
-            ConnectorRequest(operation=operation, params=request_params, scopes=("write",), approved=approved)
-        )
+        connector = self.connectors.get("mock_servicenow")
+        request = ConnectorRequest(operation=operation, params=request_params, scopes=("write",), approved=approved)
+        result = connector.rollback(request) if operation == "rollback_close_ticket" else connector.write(request)
         return {
             "ok": result.ok,
             "operation": operation,
@@ -1605,6 +1607,8 @@ class BuiltinToolExecutor:
             "ticket_id": str(payload.get("id") or payload.get("number") or f"mock-{operation}"),
             "mode": result.data.get("mode", "mock"),
             "accepted": result.data.get("accepted", {}),
+            "rate_limit": result.data.get("rate_limit"),
+            "rollback_receipt": result.data.get("rollback_receipt"),
             **_connector_activation_fields(result),
             "rollback": result.rollback,
             "error": result.error,

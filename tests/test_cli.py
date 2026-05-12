@@ -120,6 +120,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(checklist["network_allowlist"]["state"], "required_per_domain")
             self.assertEqual(checklist["human_approval"]["state"], "enforced")
             self.assertEqual(checklist["receipt_redaction"]["state"], "enforced")
+            self.assertEqual(checklist["runtime_rate_limits"]["state"], "partial")
+            self.assertEqual(checklist["rollback_receipts"]["state"], "partial")
 
             self.assertEqual(checklist["promotion_scope"]["state"], "not_started")
             browser_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "browser_and_media_depth")
