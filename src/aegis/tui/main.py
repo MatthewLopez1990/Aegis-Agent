@@ -217,7 +217,7 @@ BROWSER_COMMANDS = ("status", "connect", "disconnect", "session", "sessions", "c
 MCP_COMMANDS = ("list", "register", "auth", "call")
 HOOK_COMMANDS = ("list", "add", "enable", "disable", "remove", "run")
 AGENTS_COMMANDS = ("status", "profiles", "profile-create", "profile-disable", "delegate", "handoff", "run", "run-batch")
-REMOTE_CONTROL_COMMANDS = ("pair", "directory", "revoke", "relay", "relay-directory", "relay-notify", "relay-outbox", "relay-retry", "relay-pull", "relay-action")
+REMOTE_CONTROL_COMMANDS = ("pair", "directory", "revoke", "relay", "relay-directory", "relay-notify", "push", "relay-outbox", "relay-retry", "relay-pull", "relay-action")
 SESSION_COMMANDS = ("new", "open", "rename", "set-model", "set-personality", "activate", "archive", "pause", "append", "history", "tasks", "compact")
 TASK_COMMANDS = ("status", "resume", "pause", "cancel", "events", "timeline", "submit", "list", "all", "session")
 TASKS_COMMANDS = ("all", "session")
@@ -2529,7 +2529,7 @@ class AegisTui(cmd.Cmd):
         self.do_rollback(arg)
 
     def do_remote_control(self, arg: str) -> None:
-        """remote_control [name|pair|directory|revoke|relay|relay-directory|relay-notify|relay-pull|relay-action] -- manage guarded remote-control readiness."""
+        """remote_control [name|pair|directory|revoke|relay|relay-directory|relay-notify|push|relay-pull|relay-action] -- manage guarded remote-control readiness."""
         parts = shlex.split(arg) if arg else []
         if parts and parts[0] == "directory":
             pairing_id = _option_value(parts, "--pairing-id")
@@ -2661,6 +2661,73 @@ class AegisTui(cmd.Cmd):
                     "task_id": result["notification"].get("task_id"),
                     "pairing_token_relayed": False,
                     "relay_auth_token_captured": False,
+                    "raw_secret_values_included": False,
+                    "source": "tui",
+                },
+            )
+            _print_json(result)
+            return
+        if parts and parts[0] == "push":
+            pairing_id = _option_value(parts, "--pairing-id")
+            provider = _option_value(parts, "--provider") or ""
+            push_auth_secret = _option_value(parts, "--push-auth-secret")
+            device_token_secret = _option_value(parts, "--device-token-secret")
+            event = _option_value(parts, "--event") or "directory-updated"
+            task_id = _option_value(parts, "--task-id")
+            approved = "--approved" in parts
+            if not pairing_id or provider not in {"apns", "fcm"} or not push_auth_secret or not device_token_secret:
+                print("usage: remote-control push --pairing-id <id> --provider apns|fcm --push-auth-secret <secret_name> --device-token-secret <secret_name> --approved [--apns-topic topic] [--fcm-project-id project] [--event event] [--task-id id]")
+                return
+            registry = RemoteControlPairingRegistry(
+                self.orchestrator.config.data_dir / "remote_control_pairings.json"
+            )
+            try:
+                auth_handle = self.orchestrator.secrets_broker.request_handle(
+                    name=push_auth_secret,
+                    requester="remote_control_push",
+                    reason=f"publish scoped remote-control {provider} notification",
+                    scopes=("remote_control:push",),
+                )
+                device_handle = self.orchestrator.secrets_broker.request_handle(
+                    name=device_token_secret,
+                    requester="remote_control_push",
+                    reason=f"resolve brokered remote-control {provider} device token",
+                    scopes=("remote_control:push",),
+                )
+                push_auth_token = self.orchestrator.secrets_broker.resolve_for_authorized_tool(auth_handle, requester="remote_control_push")
+                device_token = self.orchestrator.secrets_broker.resolve_for_authorized_tool(device_handle, requester="remote_control_push")
+                pairing = registry.public_pairing(pairing_id)
+                notification = build_remote_control_notification(
+                    pairing,
+                    store=self.orchestrator.store,
+                    event=event,
+                    task_id=task_id,
+                )
+                result = registry.publish_native_push_notification(
+                    pairing_id,
+                    notification=notification,
+                    provider=provider,
+                    push_auth_token=push_auth_token,
+                    device_token=device_token,
+                    allowlist=self.orchestrator.config.network_allowlist,
+                    approved=approved,
+                    apns_topic=_option_value(parts, "--apns-topic"),
+                    fcm_project_id=_option_value(parts, "--fcm-project-id"),
+                )
+            except (KeyError, PermissionError, ValueError) as exc:
+                print(f"remote-control push error: {exc}")
+                return
+            self.orchestrator.audit_logger.append(
+                "remote_control.native_push_published",
+                {
+                    "pairing_id": result["pairing"]["id"],
+                    "provider": result["provider"],
+                    "push_target": result["push_target"],
+                    "event": result["notification_event"],
+                    "task_id": result["notification"].get("task_id"),
+                    "pairing_token_relayed": False,
+                    "push_auth_token_captured": False,
+                    "raw_device_token_captured": False,
                     "raw_secret_values_included": False,
                     "source": "tui",
                 },
@@ -3010,9 +3077,9 @@ class AegisTui(cmd.Cmd):
                     "Status: local control plane available with short-lived pairing tokens.",
                     "Current secure surface: aegis serve --host 127.0.0.1 --port 8765",
                     "Pairing endpoint: POST /remote-control/pair returns one token for X-Aegis-Remote-Token.",
-                    "Relay: remote-control relay can register an approved pairing; relay-directory publishes one sanitized scoped directory snapshot; relay-notify publishes one metadata-only mobile/gateway notification; relay-pull polls queued relay actions; relay-action proxies one scoped task action through the registered bearer.",
+                    "Relay: remote-control relay can register an approved pairing; relay-directory publishes one sanitized scoped directory snapshot; relay-notify publishes one metadata-only mobile/gateway notification; push publishes one approved brokered APNS/FCM notification; relay-pull polls queued relay actions; relay-action proxies one scoped task action through the registered bearer.",
                     "Security posture: host/origin checks still apply; no subscription token capture; pairing creation needs the local API token.",
-                    "Remaining live gap: mobile push delivery and broad cloud relay delivery.",
+                    "Remaining live gap: native push provider lifecycle management and broad cloud relay delivery.",
                 ],
                 width,
             )
@@ -6500,6 +6567,7 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("remote-control", "relay"): ("--relay-url", "--pairing-id", "--relay-auth-secret", "--approved"),
     ("remote-control", "relay-directory"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit"),
     ("remote-control", "relay-notify"): ("--pairing-id", "--relay-auth-secret", "--approved", "--event", "--task-id"),
+    ("remote-control", "push"): ("--pairing-id", "--provider", "--push-auth-secret", "--device-token-secret", "--approved", "--apns-topic", "--fcm-project-id", "--event", "--task-id"),
     ("remote-control", "relay-outbox"): ("--status", "--limit"),
     ("remote-control", "relay-retry"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit"),
     ("remote-control", "relay-pull"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit", "--dry-run"),
@@ -6510,6 +6578,7 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("remote_control", "relay"): ("--relay-url", "--pairing-id", "--relay-auth-secret", "--approved"),
     ("remote_control", "relay-directory"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit"),
     ("remote_control", "relay-notify"): ("--pairing-id", "--relay-auth-secret", "--approved", "--event", "--task-id"),
+    ("remote_control", "push"): ("--pairing-id", "--provider", "--push-auth-secret", "--device-token-secret", "--approved", "--apns-topic", "--fcm-project-id", "--event", "--task-id"),
     ("remote_control", "relay-outbox"): ("--status", "--limit"),
     ("remote_control", "relay-retry"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit"),
     ("remote_control", "relay-pull"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit", "--dry-run"),
@@ -6520,6 +6589,7 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("rc", "relay"): ("--relay-url", "--pairing-id", "--relay-auth-secret", "--approved"),
     ("rc", "relay-directory"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit"),
     ("rc", "relay-notify"): ("--pairing-id", "--relay-auth-secret", "--approved", "--event", "--task-id"),
+    ("rc", "push"): ("--pairing-id", "--provider", "--push-auth-secret", "--device-token-secret", "--approved", "--apns-topic", "--fcm-project-id", "--event", "--task-id"),
     ("rc", "relay-outbox"): ("--status", "--limit"),
     ("rc", "relay-retry"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit"),
     ("rc", "relay-pull"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit", "--dry-run"),

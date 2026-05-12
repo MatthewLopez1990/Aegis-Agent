@@ -185,6 +185,19 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             parser = build_parser()
             data_dir = Path(temp) / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        'network_allowlist = ["example.com", "fcm.googleapis.com"]',
+                    ]
+                ),
+                encoding="utf-8",
+            )
             relay_task = build_orchestrator(data_dir=data_dir, workspace=Path(temp)).submit_task("send message relay controlled")
 
             status = dispatch(parser.parse_args(["--data-dir", str(data_dir), "remote-control", "status"]))
@@ -219,7 +232,10 @@ class CliTests(unittest.TestCase):
                     ]
                 )
             )
-            SecretsBroker(data_dir / "secrets.json").store_secret(name="AEGIS_REMOTE_RELAY_TOKEN", value="relay-raw-secret")
+            broker = SecretsBroker(data_dir / "secrets.json")
+            broker.store_secret(name="AEGIS_REMOTE_RELAY_TOKEN", value="relay-raw-secret")
+            broker.store_secret(name="AEGIS_REMOTE_PUSH_TOKEN", value="push-raw-secret")
+            broker.store_secret(name="AEGIS_REMOTE_DEVICE_TOKEN", value="device-raw-secret")
 
             class FakeRelayResponse:
                 def __init__(self, payload: dict[str, object] | None = None) -> None:
@@ -237,10 +253,21 @@ class CliTests(unittest.TestCase):
                 def read(self, limit: int) -> bytes:
                     return json.dumps(self.payload).encode("utf-8")
 
+            captured_requests: list[dict[str, object]] = []
+
             def fake_relay_open(request, timeout: int):
                 body = json.loads(request.data.decode("utf-8"))
+                captured_requests.append(
+                    {
+                        "url": request.full_url,
+                        "authorization": request.get_header("Authorization"),
+                        "body": body,
+                    }
+                )
                 if body.get("type") == "aegis.remote_control.pull":
                     return FakeRelayResponse({"actions": [{"request_id": "pull-1", "action": "status", "task_id": relay_task["id"]}]})
+                if "fcm.googleapis.com" in request.full_url:
+                    return FakeRelayResponse({"name": "projects/aegis-project/messages/native-1", "token": "device-raw-secret"})
                 return FakeRelayResponse()
 
             with patch("aegis.remote_control._private_network_error", return_value=None):
@@ -288,6 +315,31 @@ class CliTests(unittest.TestCase):
                                 pair["pairing"]["id"],
                                 "--relay-auth-secret",
                                 "AEGIS_REMOTE_RELAY_TOKEN",
+                                "--event",
+                                "task-updated",
+                                "--task-id",
+                                relay_task["id"],
+                                "--approved",
+                            ]
+                        )
+                    )
+                    native_push = dispatch(
+                        parser.parse_args(
+                            [
+                                "--data-dir",
+                                str(data_dir),
+                                "remote-control",
+                                "push",
+                                "--pairing-id",
+                                pair["pairing"]["id"],
+                                "--provider",
+                                "fcm",
+                                "--push-auth-secret",
+                                "AEGIS_REMOTE_PUSH_TOKEN",
+                                "--device-token-secret",
+                                "AEGIS_REMOTE_DEVICE_TOKEN",
+                                "--fcm-project-id",
+                                "aegis-project",
                                 "--event",
                                 "task-updated",
                                 "--task-id",
@@ -403,6 +455,18 @@ class CliTests(unittest.TestCase):
             self.assertFalse(relay_notify["relay_auth_token_captured"])
             self.assertNotIn("send message relay controlled", json.dumps(relay_notify, sort_keys=True))
             self.assertNotIn("relay-raw-secret", json.dumps(relay_notify, sort_keys=True))
+            self.assertEqual(native_push["status"], "native_push_published")
+            self.assertEqual(native_push["provider"], "fcm")
+            self.assertEqual(native_push["push_target"], "https://fcm.googleapis.com/v1/projects/aegis-project/messages:send")
+            self.assertEqual(native_push["native_push_receipt"]["delivery_state"], "accepted")
+            self.assertFalse(native_push["pairing_token_relayed"])
+            self.assertFalse(native_push["push_auth_token_captured"])
+            self.assertFalse(native_push["raw_device_token_captured"])
+            fcm_request = next(item for item in captured_requests if "fcm.googleapis.com" in str(item["url"]))
+            self.assertEqual(fcm_request["authorization"], "Bearer push-raw-secret")
+            self.assertEqual(fcm_request["body"]["message"]["token"], "device-raw-secret")
+            self.assertNotIn("push-raw-secret", json.dumps(native_push, sort_keys=True))
+            self.assertNotIn("device-raw-secret", json.dumps(native_push, sort_keys=True))
             self.assertEqual(relay_outbox["status"], "relay_notification_outbox")
             self.assertEqual(relay_outbox["item_count"], 1)
             self.assertEqual(relay_outbox["items"][0]["status"], "acknowledged")
@@ -428,8 +492,12 @@ class CliTests(unittest.TestCase):
             self.assertEqual(revoked["pairing"]["status"], "revoked")
             self.assertNotIn(pair["token"], (data_dir / "remote_control_pairings.json").read_text(encoding="utf-8"))
             self.assertNotIn("relay-raw-secret", (data_dir / "remote_control_pairings.json").read_text(encoding="utf-8"))
+            self.assertNotIn("push-raw-secret", (data_dir / "remote_control_pairings.json").read_text(encoding="utf-8"))
+            self.assertNotIn("device-raw-secret", (data_dir / "remote_control_pairings.json").read_text(encoding="utf-8"))
             self.assertNotIn(pair["token"], (data_dir / "audit.jsonl").read_text(encoding="utf-8"))
             self.assertNotIn("relay-raw-secret", (data_dir / "audit.jsonl").read_text(encoding="utf-8"))
+            self.assertNotIn("push-raw-secret", (data_dir / "audit.jsonl").read_text(encoding="utf-8"))
+            self.assertNotIn("device-raw-secret", (data_dir / "audit.jsonl").read_text(encoding="utf-8"))
 
     def test_agents_cli_status_and_delegate_use_governed_queue(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

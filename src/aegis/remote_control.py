@@ -10,7 +10,7 @@ import json
 import os
 from pathlib import Path
 import secrets
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import Request
 
 from aegis.connectors.http import _open_without_redirects, _private_network_error, _validate_url
@@ -33,6 +33,7 @@ REMOTE_CONTROL_RELAY_NOTIFICATION_EVENTS = (
     "task_completed",
     "task_failed",
 )
+REMOTE_CONTROL_NATIVE_PUSH_PROVIDERS = ("apns", "fcm")
 REMOTE_CONTROL_RELAY_REQUIRED_CONTROLS = (
     "explicit_operator_enablement",
     "brokered_relay_auth",
@@ -57,7 +58,9 @@ REMOTE_CONTROL_MOBILE_GATEWAY_CONTRACT = {
     "payload_type": "aegis.remote_control.notification",
     "receipt_schema": "relay_delivery_receipt",
     "accepted_states": list(RELAY_RECEIPT_ACCEPTED_STATES),
-    "native_push_provider": "gateway_managed_external",
+    "native_push_provider": "brokered_apns_fcm_adapter",
+    "native_push_providers": list(REMOTE_CONTROL_NATIVE_PUSH_PROVIDERS),
+    "brokered_device_tokens_supported": True,
     "device_token_capture_supported": False,
     "raw_device_tokens_supported": False,
     "pairing_token_relayed": False,
@@ -168,9 +171,11 @@ class RemoteControlPairingRegistry:
                 "registered relay directory publish",
                 "registered relay notification publish",
                 "durable relay notification outbox",
+                "approved native APNS/FCM notification publish",
             ],
-            "blocked_until_relay": [
-                "mobile_gateway_registration" if mobile_gateway_count == 0 else "native_push_provider_adapter",
+            "blocked_until_relay": ["mobile_gateway_registration"] if mobile_gateway_count == 0 else [],
+            "remaining_live_delivery_gaps": [
+                "native_push_provider_lifecycle",
                 "broad_cloud_relay_service",
             ],
             "relay_preflight": self.relay_preflight(),
@@ -182,7 +187,7 @@ class RemoteControlPairingRegistry:
             {"control": "explicit_operator_enablement", "detail": "approved relay registration is required before outbound relay transport is used"},
             {"control": "brokered_relay_auth", "detail": "relay credentials must use brokered handles and must not expose raw tokens"},
             {"control": "relay_origin_allowlist", "detail": "remote origins must be allowlisted before off-device access"},
-            {"control": "push_delivery_approval", "detail": "mobile push delivery requires an approved channel adapter"},
+            {"control": "push_delivery_approval", "detail": "native push delivery requires an approved brokered provider/device-token adapter"},
         ]
         if relay_target is None and relay_url:
             blockers.insert(0, {"control": "relay_url_validation", "detail": "relay URL must use https"})
@@ -193,7 +198,7 @@ class RemoteControlPairingRegistry:
             "relay_configured": relay_target is not None,
             "relay_target": relay_target,
             "relay_url_redacted": bool(relay_url),
-            "mobile_push_delivery": "gateway_contract_available_native_provider_external" if relay_target else "blocked_until_relay_registration",
+            "mobile_push_delivery": "brokered_apns_fcm_push_available_with_active_pairing_and_approval",
             "mobile_gateway_contract": _mobile_gateway_contract(configured=relay_target is not None),
             "cloud_session_directory": "scoped_local_directory_available",
             "token_capture_supported": False,
@@ -214,6 +219,7 @@ class RemoteControlPairingRegistry:
                 "approved_relay_directory_publish",
                 "scoped_remote_directory",
                 "mobile_gateway_delivery_contract",
+                "approved_brokered_native_apns_fcm_push",
             ],
             "blockers": blockers,
             "verification_gates": list(REMOTE_CONTROL_RELAY_VERIFICATION_GATES),
@@ -229,7 +235,7 @@ class RemoteControlPairingRegistry:
             "next_steps": [
                 "Register an active pairing with an allowlisted relay using a brokered credential handle.",
                 "Preserve local pairing scope, expiry, revocation, host checks, and audit receipts through relayed actions.",
-                "Use the gateway contract for mobile/gateway notification tests before adding native APNS/FCM adapters.",
+                "Use remote-control push with brokered provider and device-token secrets for one approved APNS/FCM notification.",
             ],
         }
 
@@ -337,9 +343,10 @@ class RemoteControlPairingRegistry:
                 "approved_relay_directory_publish",
                 "approved_relay_notification_publish",
                 "mobile_gateway_delivery_contract",
+                "approved_brokered_native_apns_fcm_push",
             ],
             "remaining_controls": [
-                "native_push_provider_adapter",
+                "native_push_provider_lifecycle",
                 "broad_cloud_relay_service",
             ],
         }
@@ -563,6 +570,100 @@ class RemoteControlPairingRegistry:
             "pairing_token_relayed": False,
             "relay_auth_secret_used": True,
             "relay_auth_token_captured": False,
+            "user_request_included": False,
+            "plan_receipt_included": False,
+            "raw_secret_values_included": False,
+        }
+
+    def publish_native_push_notification(
+        self,
+        pairing_id: str,
+        *,
+        notification: dict[str, Any],
+        provider: str,
+        push_auth_token: str,
+        device_token: str,
+        allowlist: tuple[str, ...],
+        approved: bool = False,
+        apns_topic: str | None = None,
+        fcm_project_id: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if not approved:
+            raise PermissionError("remote-control native push requires explicit approval")
+        self._load()
+        checked_at = _utc_now(now)
+        pairing = self._pairings.get(pairing_id)
+        if pairing is None:
+            raise KeyError(pairing_id)
+        public_pairing = self._public_pairing(pairing, now=checked_at)
+        if public_pairing["status"] != "active":
+            raise ValueError("remote-control native push requires an active pairing")
+        normalized_provider = _normalize_native_push_provider(provider)
+        if not push_auth_token.strip():
+            raise ValueError("remote-control native push requires a brokered provider auth token")
+        if not device_token.strip():
+            raise ValueError("remote-control native push requires a brokered device token")
+        if not isinstance(notification, dict) or notification.get("status") != "remote_notification_available":
+            raise ValueError("remote-control native push requires a sanitized notification payload")
+        if notification.get("pairing_token_relayed") or notification.get("raw_secret_values_included") or notification.get("user_request_included") or notification.get("plan_receipt_included"):
+            raise ValueError("remote-control native push requires redacted metadata-only notification state")
+        notification_pairing = notification.get("pairing")
+        if isinstance(notification_pairing, dict) and str(notification_pairing.get("id") or "") != pairing["id"]:
+            raise ValueError("remote-control native push notification pairing does not match target pairing")
+        sanitized_notification = _sanitize_remote_notification_for_relay(notification, pairing=public_pairing)
+        target_url = _native_push_target_url(normalized_provider, device_token=device_token, fcm_project_id=fcm_project_id)
+        parsed = urlparse(target_url)
+        validation_error = _validate_url(parsed)
+        if validation_error:
+            raise ValueError(validation_error)
+        if parsed.scheme != "https":
+            raise ValueError("remote-control native push requires https")
+        domain = parsed.hostname or ""
+        if not _allowed_domain(domain, allowlist):
+            raise ValueError(f"domain {domain!r} is not allowlisted")
+        private_error = _private_network_error(domain)
+        if private_error:
+            raise ValueError(private_error)
+        push_payload = _native_push_payload(
+            normalized_provider,
+            notification=sanitized_notification,
+            pairing=public_pairing,
+            device_token=device_token,
+        )
+        response_status, response_body = _post_native_push_payload(
+            normalized_provider,
+            target_url=target_url,
+            payload=push_payload,
+            push_auth_token=push_auth_token,
+            apns_topic=apns_topic,
+        )
+        receipt = _native_push_receipt(
+            provider=normalized_provider,
+            response_status=response_status,
+            response_body=response_body,
+            device_token=device_token,
+            target_url=target_url,
+        )
+        return {
+            "status": "native_push_published",
+            "mode": "approved_native_push_notification",
+            "provider": normalized_provider,
+            "pairing": public_pairing,
+            "push_target": receipt["push_target"],
+            "push_response_status": response_status,
+            "push_response_bytes": len(response_body),
+            "provider_accepted": receipt["delivery_state"] == "accepted",
+            "native_push_receipt": receipt,
+            "mobile_gateway_contract": _mobile_gateway_contract(configured=True),
+            "notification_event": sanitized_notification["event"],
+            "notification": sanitized_notification,
+            "pairing_token_relayed": False,
+            "push_auth_secret_used": True,
+            "push_auth_token_captured": False,
+            "device_token_secret_used": True,
+            "raw_device_token_captured": False,
+            "raw_device_tokens_included": False,
             "user_request_included": False,
             "plan_receipt_included": False,
             "raw_secret_values_included": False,
@@ -1616,9 +1717,165 @@ def _mobile_gateway_contract(*, configured: bool) -> dict[str, Any]:
     return {
         **REMOTE_CONTROL_MOBILE_GATEWAY_CONTRACT,
         "status": "configured" if configured else "available_after_relay_registration",
-        "native_push_delivery": "external_gateway_managed" if configured else "blocked_until_gateway_registration",
+        "native_push_delivery": "brokered_apns_fcm_adapter_available" if configured else "available_with_brokered_push_tokens",
         "broad_cloud_relay_delivery": "not_a_cloud_relay_service",
     }
+
+
+def _normalize_native_push_provider(provider: str) -> str:
+    normalized = str(provider or "").strip().lower().replace("-", "_")
+    if normalized in {"apple", "apn", "apns"}:
+        return "apns"
+    if normalized in {"firebase", "google_fcm", "fcm"}:
+        return "fcm"
+    raise ValueError("remote-control native push provider must be apns or fcm")
+
+
+def _native_push_target_url(provider: str, *, device_token: str, fcm_project_id: str | None) -> str:
+    if provider == "apns":
+        return f"https://api.push.apple.com/3/device/{quote(device_token.strip(), safe='')}"
+    project_id = _clean_fcm_project_id(fcm_project_id)
+    return f"https://fcm.googleapis.com/v1/projects/{project_id}/messages:send"
+
+
+def _clean_fcm_project_id(value: str | None) -> str:
+    project_id = str(value or "").strip()
+    if not project_id:
+        raise ValueError("remote-control FCM push requires --fcm-project-id")
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_:")
+    if any(char not in allowed for char in project_id) or len(project_id) > 160:
+        raise ValueError("remote-control FCM project id contains unsupported characters")
+    return project_id
+
+
+def _native_push_payload(provider: str, *, notification: dict[str, Any], pairing: dict[str, Any], device_token: str) -> dict[str, Any]:
+    title, body = _native_push_alert_text(notification)
+    data = {
+        "payload_type": "aegis.remote_control.notification",
+        "event": str(notification.get("event") or ""),
+        "pairing_id": str(pairing.get("id") or ""),
+        "task_id": str(notification.get("task_id") or ""),
+        "session_id": str(notification.get("session_id") or ""),
+    }
+    if provider == "apns":
+        return {
+            "aps": {
+                "alert": {
+                    "title": title,
+                    "body": body,
+                },
+                "sound": "default",
+            },
+            "aegis": data,
+        }
+    return {
+        "message": {
+            "token": device_token,
+            "notification": {
+                "title": title,
+                "body": body,
+            },
+            "data": {key: value for key, value in data.items() if value},
+        }
+    }
+
+
+def _native_push_alert_text(notification: dict[str, Any]) -> tuple[str, str]:
+    event = str(notification.get("event") or "task_updated").replace("_", " ").strip()[:80]
+    task_id = str(notification.get("task_id") or "").strip()
+    task = notification.get("task") if isinstance(notification.get("task"), dict) else {}
+    task_status = str(task.get("status") or "").strip()
+    title = "Aegis remote control"
+    if task_id:
+        body = f"{event}: {task_id}"
+    else:
+        body = event or "remote control update"
+    if task_status:
+        body = f"{body} ({task_status[:40]})"
+    return title, body[:180]
+
+
+def _post_native_push_payload(
+    provider: str,
+    *,
+    target_url: str,
+    payload: dict[str, Any],
+    push_auth_token: str,
+    apns_topic: str | None,
+) -> tuple[int | None, bytes]:
+    headers = {
+        "Authorization": f"Bearer {push_auth_token}",
+        "Content-Type": "application/json",
+        "User-Agent": "Aegis-Agent/0.1",
+    }
+    if provider == "apns":
+        topic = str(apns_topic or "").strip()
+        if not topic:
+            raise ValueError("remote-control APNS push requires --apns-topic")
+        headers.update(
+            {
+                "apns-topic": topic,
+                "apns-push-type": "alert",
+                "apns-priority": "10",
+            }
+        )
+    request = Request(
+        target_url,
+        data=json.dumps(payload, sort_keys=True).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        response_context = _open_without_redirects(request, timeout=10)
+    except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise ValueError("HTTP redirects are not followed for remote-control native push") from exc
+        raise ValueError(f"remote-control native push failed with status {exc.code}") from exc
+    except URLError as exc:
+        raise ValueError(f"remote-control native push failed: {exc.reason}") from exc
+    with response_context as response:
+        response_status = response.getcode() if hasattr(response, "getcode") else None
+        response_body = response.read(2048)
+    return response_status, response_body
+
+
+def _native_push_receipt(*, provider: str, response_status: int | None, response_body: bytes, device_token: str, target_url: str) -> dict[str, Any]:
+    delivery_state = "accepted" if response_status is not None and 200 <= int(response_status) < 300 else "rejected"
+    receipt_id = _native_push_receipt_id(response_body)
+    return {
+        "receipt_schema": "aegis.remote_control.native_push_receipt_v1",
+        "provider": provider,
+        "delivery_state": delivery_state,
+        "response_status": response_status,
+        "response_bytes": len(response_body),
+        "receipt_id": receipt_id,
+        "device_ref_hash": _token_hash(device_token),
+        "push_target": _redacted_native_push_target(provider, target_url),
+        "raw_response_body_included": False,
+        "raw_device_token_included": False,
+        "raw_secret_values_included": False,
+    }
+
+
+def _native_push_receipt_id(response_body: bytes) -> str | None:
+    if not response_body:
+        return None
+    try:
+        decoded = json.loads(response_body.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    value = decoded.get("name") or decoded.get("apns-id") or decoded.get("id")
+    cleaned = _optional_clean_string(value)
+    return cleaned[:160] if cleaned else None
+
+
+def _redacted_native_push_target(provider: str, target_url: str) -> str:
+    parsed = urlparse(target_url)
+    if provider == "apns":
+        return f"{parsed.scheme}://{parsed.netloc}/3/device/[REDACTED_DEVICE_TOKEN]"
+    return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
 
 
 def _utc_now(now: datetime | None) -> datetime:

@@ -97,7 +97,7 @@ class RemoteControlPairingTests(unittest.TestCase):
         self.assertEqual(result["relay_target"], "https://relay.example/aegis")
         self.assertTrue(result["relay_url_redacted"])
         self.assertFalse(result["outbound_relay_enabled"])
-        self.assertEqual(result["mobile_push_delivery"], "gateway_contract_available_native_provider_external")
+        self.assertEqual(result["mobile_push_delivery"], "brokered_apns_fcm_push_available_with_active_pairing_and_approval")
         self.assertEqual(result["mobile_gateway_contract"]["payload_type"], "aegis.remote_control.notification")
         self.assertFalse(result["mobile_gateway_contract"]["raw_device_tokens_supported"])
         self.assertFalse(result["raw_secret_values_included"])
@@ -169,7 +169,7 @@ class RemoteControlPairingTests(unittest.TestCase):
         self.assertFalse(result["pairing_token_relayed"])
         self.assertEqual(result["relay_response_status"], 202)
         self.assertEqual(result["mobile_gateway_contract"]["status"], "configured")
-        self.assertEqual(result["remaining_controls"], ["native_push_provider_adapter", "broad_cloud_relay_service"])
+        self.assertEqual(result["remaining_controls"], ["native_push_provider_lifecycle", "broad_cloud_relay_service"])
         self.assertEqual(captured["request"].get_header("Authorization"), "Bearer relay-raw-secret")
         self.assertEqual(body["pairing"]["id"], created["pairing"]["id"])
         self.assertFalse(body["pairing_token_included"])
@@ -534,6 +534,122 @@ class RemoteControlPairingTests(unittest.TestCase):
             self.assertFalse(outbox["items"][0]["relay_receipt"]["raw_response_body_included"])
             self.assertNotIn(created["token"], rendered)
             self.assertNotIn("relay-raw-secret", rendered)
+
+    def test_native_push_requires_approval_brokered_tokens_and_redacts_receipt(self) -> None:
+        registry = RemoteControlPairingRegistry()
+        now = datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
+        created = registry.create_pairing(label="phone", task_id="task-1", allowed_actions=("status",), now=now)
+        notification = {
+            "status": "remote_notification_available",
+            "mode": "scoped_remote_notification",
+            "event": "task-updated",
+            "task_id": "task-1",
+            "task": {
+                "id": "task-1",
+                "status": "paused",
+                "metadata_only": True,
+                "allowed_actions": ["status"],
+                "links": {"status": "/remote-control/tasks/task-1?token=secret"},
+                "user_request": "hidden prompt",
+            },
+            "pairing_token_relayed": False,
+            "raw_secret_values_included": False,
+            "user_request_included": False,
+            "plan_receipt_included": False,
+        }
+
+        class FakeResponse:
+            def __init__(self, payload: dict[str, object]) -> None:
+                self.payload = payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def getcode(self) -> int:
+                return 200
+
+            def read(self, limit: int) -> bytes:
+                return json.dumps(self.payload).encode("utf-8")
+
+        cases = (
+            {
+                "provider": "apns",
+                "allowlist": ("api.push.apple.com",),
+                "device_token": "apns-device-token",
+                "kwargs": {"apns_topic": "com.example.aegis"},
+                "expected_url": "https://api.push.apple.com/3/device/apns-device-token",
+                "expected_auth": "Bearer apns-auth-secret",
+            },
+            {
+                "provider": "fcm",
+                "allowlist": ("fcm.googleapis.com",),
+                "device_token": "fcm-device-token",
+                "kwargs": {"fcm_project_id": "aegis-project"},
+                "expected_url": "https://fcm.googleapis.com/v1/projects/aegis-project/messages:send",
+                "expected_auth": "Bearer fcm-auth-secret",
+            },
+        )
+        for case in cases:
+            with self.subTest(provider=case["provider"]):
+                captured: dict[str, object] = {}
+
+                def fake_open(request, timeout: int):
+                    captured["url"] = request.full_url
+                    captured["authorization"] = request.get_header("Authorization")
+                    captured["apns_topic"] = request.get_header("Apns-topic")
+                    captured["body"] = request.data.decode("utf-8")
+                    return FakeResponse({"name": "provider-message-id", "token": str(case["device_token"])})
+
+                with self.assertRaises(PermissionError):
+                    registry.publish_native_push_notification(
+                        created["pairing"]["id"],
+                        notification=notification,
+                        provider=str(case["provider"]),
+                        push_auth_token=f"{case['provider']}-auth-secret",
+                        device_token=str(case["device_token"]),
+                        allowlist=case["allowlist"],
+                        approved=False,
+                        now=now,
+                        **case["kwargs"],
+                    )
+                with patch("aegis.remote_control._private_network_error", return_value=None):
+                    with patch("aegis.remote_control._open_without_redirects", side_effect=fake_open):
+                        published = registry.publish_native_push_notification(
+                            created["pairing"]["id"],
+                            notification=notification,
+                            provider=str(case["provider"]),
+                            push_auth_token=f"{case['provider']}-auth-secret",
+                            device_token=str(case["device_token"]),
+                            allowlist=case["allowlist"],
+                            approved=True,
+                            now=now + timedelta(seconds=1),
+                            **case["kwargs"],
+                        )
+
+                rendered = json.dumps(published, sort_keys=True)
+                rendered_body = str(captured["body"])
+                self.assertEqual(published["status"], "native_push_published")
+                self.assertEqual(published["provider"], case["provider"])
+                self.assertTrue(published["provider_accepted"])
+                self.assertEqual(published["native_push_receipt"]["receipt_schema"], "aegis.remote_control.native_push_receipt_v1")
+                self.assertEqual(published["native_push_receipt"]["delivery_state"], "accepted")
+                self.assertFalse(published["native_push_receipt"]["raw_device_token_included"])
+                self.assertFalse(published["native_push_receipt"]["raw_response_body_included"])
+                self.assertFalse(published["push_auth_token_captured"])
+                self.assertFalse(published["raw_device_token_captured"])
+                self.assertEqual(captured["url"], case["expected_url"])
+                self.assertEqual(captured["authorization"], case["expected_auth"])
+                if case["provider"] == "apns":
+                    self.assertEqual(captured["apns_topic"], "com.example.aegis")
+                else:
+                    self.assertIn(str(case["device_token"]), rendered_body)
+                self.assertNotIn(str(case["device_token"]), rendered)
+                self.assertNotIn(f"{case['provider']}-auth-secret", rendered)
+                self.assertNotIn("hidden prompt", rendered)
+                self.assertNotIn("token=secret", rendered)
 
     def test_relay_preflight_rejects_non_https_targets(self) -> None:
         registry = RemoteControlPairingRegistry()
