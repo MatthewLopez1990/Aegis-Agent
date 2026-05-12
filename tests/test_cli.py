@@ -14,8 +14,9 @@ from unittest.mock import patch
 import aegis.channels.chat_webhook as chat_webhook_module
 import aegis.channels.email as email_module
 import aegis.channels.webhook as webhook_module
-from aegis.cli.main import create_skill_template, dispatch, build_parser
+from aegis.cli.main import _model_auth_provider_choices, create_skill_template, dispatch, build_parser
 from aegis.agent.orchestrator import build_orchestrator
+from aegis.models.registry import default_providers
 from aegis.skills.runtime import builtin_project_summary_manifest
 from aegis.config.loader import load_config
 from aegis.memory.store import LocalStore
@@ -2197,6 +2198,9 @@ class CliTests(unittest.TestCase):
             targets = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "targets"]))
             doctor = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "doctor"]))
             deepseek_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "deepseek", "--api-key", "sk-deepseek-test"]))
+            huggingface_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "huggingface", "--api-key", "hf-secret-test"]))
+            minimax_token_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "minimax-token-plan", "--api-key", "mm-token-plan-secret"]))
+            huggingface_logout = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "logout", "huggingface"]))
             login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "openai", "--subscription"]))
             codex_login_completed = subprocess.CompletedProcess(("codex", "login"), 0)
             codex_status_completed = subprocess.CompletedProcess(("codex", "login", "status"), 0, stdout="Logged in using ChatGPT\n", stderr="")
@@ -2299,6 +2303,12 @@ class CliTests(unittest.TestCase):
             self.assertTrue(deepseek_login["ok"])
             self.assertTrue(deepseek_login["auth"]["auth_configured"])
             self.assertEqual(deepseek_login["auth"]["auth_secret"], "DEEPSEEK_API_KEY")
+            self.assertTrue(huggingface_login["ok"])
+            self.assertTrue(huggingface_login["auth"]["auth_configured"])
+            self.assertEqual(huggingface_login["auth"]["auth_secret"], "HF_TOKEN")
+            self.assertTrue(minimax_token_login["ok"])
+            self.assertEqual(minimax_token_login["auth"]["auth_secret"], "MINIMAX_TOKEN_PLAN_API_KEY")
+            self.assertEqual(huggingface_logout["auth"]["removed_local_secret"], True)
             self.assertEqual(login["auth"]["status"], "external_login_required")
             self.assertEqual(login["auth"]["external_command"], "codex login")
             self.assertFalse(login["auth"]["token_captured"])
@@ -2374,9 +2384,27 @@ class CliTests(unittest.TestCase):
             self.assertEqual(target_rows["GitHub Copilot"]["status"], "oauth_device_flow_available")
             self.assertEqual(target_rows["DeepSeek"]["status"], "api_key_ready")
             self.assertNotIn("sk-deepseek-test", json.dumps(deepseek_login, sort_keys=True))
+            self.assertNotIn("hf-secret-test", json.dumps(huggingface_login, sort_keys=True))
+            self.assertNotIn("mm-token-plan-secret", json.dumps(minimax_token_login, sort_keys=True))
             self.assertNotIn("gho_copilot_secret", json.dumps(github_login, sort_keys=True))
             self.assertNotIn("google-access-secret", json.dumps(google_oauth_login, sort_keys=True))
             self.assertNotIn("google-refresh-secret", json.dumps(google_oauth_login, sort_keys=True))
+
+    def test_model_auth_cli_provider_choices_cover_registry_auth_targets(self) -> None:
+        choices = set(_model_auth_provider_choices())
+        registry_auth_providers = {
+            name
+            for name, provider in default_providers().items()
+            if provider.auth_secret is not None or provider.external_auth_method is not None
+        }
+
+        self.assertLessEqual(registry_auth_providers, choices)
+        self.assertIn("huggingface", choices)
+        self.assertIn("minimax-token-plan", choices)
+        self.assertIn("nous-oauth", choices)
+        self.assertIn("qwen-oauth", choices)
+        self.assertNotIn("ollama", choices)
+        self.assertNotIn("lmstudio", choices)
 
     def test_hooks_cli_registers_lists_and_runs_governed_hook(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

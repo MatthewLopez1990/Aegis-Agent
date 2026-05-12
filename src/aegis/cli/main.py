@@ -25,7 +25,7 @@ from aegis.memory.models import MemoryType
 from aegis.memory.store import LocalStore
 from aegis.mcp.registry import McpRegistry
 from aegis.migration.openclaw import inspect_hermes_home, inspect_openclaw_home, preview_hermes_memory_import, preview_openclaw_memory_import
-from aegis.models.registry import ModelRegistry
+from aegis.models.registry import ModelRegistry, default_providers
 from aegis.personality.context import ContextFileLoader, PERSONALITY_NAMES
 from aegis.plugins.manager import PluginManager
 from aegis.product.capabilities import build_product_dashboard
@@ -55,6 +55,19 @@ def main(argv: list[str] | None = None) -> int:
     if result is not None:
         print(json.dumps(result, indent=2, sort_keys=True))
     return 0
+
+
+EXTERNAL_AUTH_LOGIN_ALIASES = ("nous-oauth", "qwen-oauth")
+
+
+def _model_auth_provider_choices() -> tuple[str, ...]:
+    providers = default_providers()
+    auth_provider_names = {
+        name
+        for name, provider in providers.items()
+        if provider.auth_secret is not None or provider.external_auth_method is not None
+    }
+    return tuple(sorted({*auth_provider_names, *EXTERNAL_AUTH_LOGIN_ALIASES}))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -511,32 +524,11 @@ def build_parser() -> argparse.ArgumentParser:
     model_auth_methods.add_argument("provider", nargs="?")
     model_auth_sub.add_parser("targets", help="Show Hermes/Claude provider auth parity targets")
     model_auth_sub.add_parser("doctor", help="Show local provider-login readiness and next commands")
+    model_auth_provider_choices = _model_auth_provider_choices()
     model_auth_login = model_auth_sub.add_parser("login", help="Store an API key or start a guarded provider-native login handoff")
     model_auth_login.add_argument(
         "provider",
-        choices=(
-            "openai",
-            "openrouter",
-            "anthropic",
-            "google",
-            "google-gemini-oauth",
-            "mistral",
-            "cohere",
-            "nous",
-            "deepseek",
-            "xai",
-            "kimi",
-            "minimax",
-            "minimax-oauth",
-            "zai",
-            "qwen",
-            "qwen-oauth",
-            "github-copilot",
-            "aws-bedrock",
-            "azure-foundry",
-            "nous-oauth",
-            "custom",
-        ),
+        choices=model_auth_provider_choices,
     )
     model_auth_login.add_argument("--method", choices=("api-key", "subscription", "oauth", "oauth-device", "cloud-identity"), default="api-key")
     model_auth_login.add_argument("--subscription", action="store_true", help="Alias for --method subscription")
@@ -547,29 +539,7 @@ def build_parser() -> argparse.ArgumentParser:
     model_auth_logout = model_auth_sub.add_parser("logout", help="Remove a model provider API key or verified external auth link")
     model_auth_logout.add_argument(
         "provider",
-        choices=(
-            "openai",
-            "openrouter",
-            "anthropic",
-            "google",
-            "google-gemini-oauth",
-            "mistral",
-            "cohere",
-            "nous",
-            "deepseek",
-            "xai",
-            "kimi",
-            "minimax",
-            "minimax-oauth",
-            "zai",
-            "qwen",
-            "qwen-oauth",
-            "github-copilot",
-            "aws-bedrock",
-            "azure-foundry",
-            "nous-oauth",
-            "custom",
-        ),
+        choices=model_auth_provider_choices,
     )
     model_sub.add_parser("usage", help="Show usage summary")
 
