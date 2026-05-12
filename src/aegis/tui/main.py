@@ -32,7 +32,9 @@ TOP_LEVEL_COMMANDS = (
     "approval",
     "approvals",
     "audit",
+    "agents",
     "backends",
+    "batch",
     "background",
     "bg",
     "boards",
@@ -43,49 +45,75 @@ TOP_LEVEL_COMMANDS = (
     "channels",
     "clear",
     "compress",
+    "config",
     "connectors",
     "dashboard",
     "deny",
+    "desktop",
+    "diff",
+    "doctor",
     "evidence",
     "events",
     "evaluation",
     "exit",
+    "effort",
+    "fast",
+    "goal",
     "help",
+    "hooks",
+    "init",
+    "login",
+    "logout",
+    "loop",
     "mcp",
     "memory",
     "menu",
     "menus",
     "migrate",
     "mobile",
+    "model",
     "models",
     "new",
     "pause",
     "platforms",
+    "permissions",
+    "personality",
+    "plugin",
     "plugins",
     "provider",
     "rc",
+    "reload-plugins",
     "reload-mcp",
     "remote-control",
+    "remote-env",
     "repair",
     "repairs",
     "reset",
+    "restart",
     "resume",
+    "review",
     "rollback",
     "schedule",
     "schedules",
     "security",
+    "security-review",
     "session",
     "sessions",
     "skills",
     "status",
+    "stop",
     "submit",
     "tasks",
+    "teleport",
     "timeline",
     "title",
     "toolsets",
     "tools",
+    "undo",
+    "update",
     "usage",
     "voice",
+    "web-setup",
 )
 MEMORY_COMMANDS = ("search", "health", "session-preview", "session-commit", "create", "review-queue", "review-digest", "review-action", "review-batch", "recertify", "update", "merge", "resolve-conflict", "expire", "cleanup-expired", "explain", "export", "delete")
 MIGRATE_COMMANDS = ("openclaw", "hermes", "openclaw-memory-preview", "hermes-memory-preview", "openclaw-memory-commit", "hermes-memory-commit")
@@ -119,8 +147,12 @@ SLASH_COMMAND_ALIASES = {
     "bg": "background",
     "rc": "remote_control",
     "remote-control": "remote_control",
+    "remote-env": "remote_env",
+    "security-review": "security_review",
     "reload-mcp": "reload_mcp",
     "reload_mcp": "reload_mcp",
+    "reload-plugins": "reload_plugins",
+    "web-setup": "web_setup",
     "set-home": "sethome",
 }
 TUI_HISTORY_LIMIT = 1000
@@ -2074,6 +2106,209 @@ class AegisTui(cmd.Cmd):
         """usage -- show model usage summary."""
         self.do_models("usage")
 
+    def do_model(self, arg: str) -> None:
+        """model [args] -- Claude/Hermes-style alias for models."""
+        self.do_models(arg or "providers")
+
+    def do_login(self, arg: str) -> None:
+        """login [provider [subscription]] -- model auth login alias."""
+        parts = shlex.split(arg)
+        if not parts:
+            self.do_models("auth targets")
+            return
+        self.do_models(f"auth login {' '.join(shlex.quote(part) for part in parts)}")
+
+    def do_logout(self, arg: str) -> None:
+        """logout <provider> -- model auth logout alias."""
+        provider = arg.strip()
+        if not provider:
+            print("usage: logout <provider>")
+            return
+        self.do_models(f"auth logout {shlex.quote(provider)}")
+
+    def do_doctor(self, arg: str) -> None:
+        """doctor -- diagnose local runtime posture."""
+        dashboard = build_product_dashboard(self.orchestrator)
+        _print_json(
+            {
+                "ok": True,
+                "audit_chain_ok": dashboard["runtime"]["audit_chain_ok"],
+                "pending_approvals": dashboard["runtime"]["pending_approvals"],
+                "model_providers": dashboard["runtime"]["model_providers"],
+                "live_gap_areas": [item["area"] for item in dashboard.get("live_gap_backlog", [])],
+                "security_controls": dashboard["security_controls"],
+            }
+        )
+
+    def do_config(self, arg: str) -> None:
+        """config -- show local config paths and runtime flags."""
+        config = self.orchestrator.config
+        _print_json(
+            {
+                "data_dir": str(config.data_dir),
+                "database": str(config.database_path),
+                "audit_log": str(config.audit_log_path),
+                "secrets": str(config.secrets_path),
+                "workspace": str(self.workspace),
+                "default_read_only": config.security.default_read_only,
+                "network_allowlist": list(config.security.network_allowlist),
+            }
+        )
+
+    def do_permissions(self, arg: str) -> None:
+        """permissions -- Claude-style alias for policy posture."""
+        self.do_security("profile")
+
+    def do_sandbox(self, arg: str) -> None:
+        """sandbox -- show execution backend sandbox posture."""
+        self.do_backends(arg)
+
+    def do_effort(self, arg: str) -> None:
+        """effort [level] -- show guarded model-effort status."""
+        level = arg.strip()
+        _print_json(
+            {
+                "status": "metadata_only",
+                "requested_effort": level or None,
+                "current_model": self.session.get("model"),
+                "detail": "Aegis routes model identifiers and context budgets today; provider-specific reasoning effort controls need per-provider request adapters before mutation.",
+            }
+        )
+
+    def do_fast(self, arg: str) -> None:
+        """fast [request] -- use or inspect the fast model alias."""
+        if arg.strip():
+            self.do_submit(arg)
+            return
+        self.do_models("route alias/fast")
+
+    def do_agents(self, arg: str) -> None:
+        """agents -- show multi-agent and delegation surfaces."""
+        dashboard = build_product_dashboard(self.orchestrator)
+        _print_json(
+            {
+                "status": "coordination_surfaces_ready",
+                "boards": dashboard["runtime"]["boards"],
+                "schedules": dashboard["runtime"]["schedules"],
+                "skills": len(self.orchestrator.skills.list_public()),
+                "subagent_tool": next((tool for tool in self.orchestrator.tool_catalog.list() if tool["name"] == "subagent"), None),
+                "remaining_depth_work": ["isolated_parallel_runtime", "agent_profile_lifecycle", "handoff_receipts"],
+            }
+        )
+
+    def do_batch(self, arg: str) -> None:
+        """batch -- show batch/evaluation work queues."""
+        self.do_evaluation("queue")
+
+    def do_goal(self, arg: str) -> None:
+        """goal -- show current task and scheduling goal surfaces."""
+        _print_json(
+            {
+                "last_task_id": self.last_task_id,
+                "active_session_id": self.session.get("id"),
+                "schedules": self.orchestrator.schedules.list_schedules(),
+            }
+        )
+
+    def do_loop(self, arg: str) -> None:
+        """loop -- show self-improvement and evaluation readiness."""
+        _print_json(
+            {
+                "repair_readiness": self.orchestrator.repair_readiness_summary(limit=20),
+                "evaluation_readiness": ResearchHarness(data_dir=self.orchestrator.config.data_dir).release_readiness_summary(limit=20),
+            }
+        )
+
+    def do_remote_env(self, arg: str) -> None:
+        """remote_env -- show remote environment readiness."""
+        self.do_remote_control(arg)
+
+    def do_teleport(self, arg: str) -> None:
+        """teleport -- show guarded remote handoff readiness."""
+        self.do_remote_control(arg)
+
+    def do_web_setup(self, arg: str) -> None:
+        """web_setup -- show local web control-plane setup."""
+        _print_json(
+            {
+                "status": "local_web_available",
+                "command": "PYTHONPATH=src python3 -m aegis.cli.main serve --workspace . --host 127.0.0.1 --port 8765",
+                "remote_control": "blocked_until_pairing_relay_and_audit_receipts",
+            }
+        )
+
+    def do_desktop(self, arg: str) -> None:
+        """desktop -- show desktop wrapper readiness."""
+        self.do_remote_control(arg)
+
+    def do_plugin(self, arg: str) -> None:
+        """plugin -- alias for plugins."""
+        self.do_plugins(arg)
+
+    def do_reload_plugins(self, arg: str) -> None:
+        """reload_plugins -- show plugin reload readiness."""
+        _print_json({"ok": True, "mode": "static_plugin_inventory", "plugins": self.orchestrator.skills.list_public(), "mcp_servers": self.orchestrator.mcp.list_servers()})
+
+    def do_hooks(self, arg: str) -> None:
+        """hooks -- show guarded hooks readiness."""
+        _print_json(
+            {
+                "status": "not_enabled",
+                "detail": "Lifecycle hooks need signed manifests, scope declarations, approval gates, and audit receipts before execution.",
+                "required_controls": ["signed_hook_manifest", "scope_limited_execution", "approval_for_mutation", "receipt_redaction"],
+            }
+        )
+
+    def do_update(self, arg: str) -> None:
+        """update -- show guarded update readiness."""
+        _print_json({"status": "operator_action_required", "detail": "Package self-update is not automatic; review git changes and run the installer/update command explicitly."})
+
+    def do_restart(self, arg: str) -> None:
+        """restart -- show guarded restart readiness."""
+        _print_json({"status": "operator_action_required", "detail": "No daemon restart is running from the TUI; restart your local service manager or dev server explicitly."})
+
+    def do_stop(self, arg: str) -> None:
+        """stop [task_id] -- alias for cancel."""
+        self.do_cancel(arg)
+
+    def do_retry(self, arg: str) -> None:
+        """retry -- show guarded retry status."""
+        _print_json({"status": "not_enabled", "last_task_id": self.last_task_id, "detail": "Task retry needs checkpoint replay and approval matching before it can resubmit safely."})
+
+    def do_undo(self, arg: str) -> None:
+        """undo -- show guarded undo status."""
+        self.do_rollback(arg)
+
+    def do_init(self, arg: str) -> None:
+        """init -- show project initialization status."""
+        _print_json(
+            {
+                "workspace": str(self.workspace),
+                "agents_md": (self.workspace / "AGENTS.md").exists(),
+                "data_dir": str(self.orchestrator.config.data_dir),
+                "status": "initialized" if self.orchestrator.config.data_dir.exists() else "data_dir_missing",
+            }
+        )
+
+    def do_personality(self, arg: str) -> None:
+        """personality [name] -- show or set active session personality."""
+        if arg.strip():
+            self.do_session(f"set-personality {arg.strip()}")
+            return
+        _print_json({"session_id": self.session.get("id"), "personality": self.session.get("personality")})
+
+    def do_diff(self, arg: str) -> None:
+        """diff -- show guarded diff workflow status."""
+        _print_json({"status": "operator_action_required", "detail": "Use git diff or an approved shell tool run; Aegis does not read arbitrary workspace diffs from this command without an explicit operator action."})
+
+    def do_review(self, arg: str) -> None:
+        """review -- show review workflow surfaces."""
+        self.do_repair("readiness")
+
+    def do_security_review(self, arg: str) -> None:
+        """security_review -- show security review surfaces."""
+        self.do_security("profile")
+
     def do_platforms(self, arg: str) -> None:
         """platforms -- show connector and channel platform status."""
         _print_json(
@@ -2914,8 +3149,11 @@ def _command_reference() -> str:
             "new|reset|clear        Session reset and screen controls",
             "history|title|compress Active session transcript helpers",
             "background|bg <req>    Submit a governed task from the deck",
+            "fast [request]         Inspect fast route or submit a quick governed task",
+            "goal|batch|loop        Goal, queue, and self-improvement readiness",
             "remote-control|rc      Local-first remote-control readiness",
-            "mobile                 Mobile/remote-control readiness",
+            "remote-env|teleport    Guarded remote environment handoff readiness",
+            "mobile|desktop         Mobile/desktop control-plane readiness",
             "evidence [task_id]     Show receipt and audit evidence",
             "timeline [task_id]     Show plan, receipt, and audit sequence",
             "events [task_id]       Show grouped run-event progress",
@@ -2923,6 +3161,10 @@ def _command_reference() -> str:
             "approval <id>          Inspect approval payload before action",
             "approve <id> [--admin] Approve a gated action",
             "deny <id> [--admin]    Deny a gated action",
+            "permissions            Claude-style policy posture alias",
+            "security-review        Security review posture alias",
+            "doctor|config|init     Runtime diagnosis, config paths, and init status",
+            "hooks                  Guarded lifecycle hook readiness",
             "dashboard              Runtime command deck",
             "menu                   Grouped command menu",
             "security               Security controls",
@@ -2934,7 +3176,9 @@ def _command_reference() -> str:
             "channel resolve-approval <event> <approval>",
             "channel send-chat-webhook <text> --approved",
             "channel events [limit]  Recent channel activity",
-            "models                 Model providers",
+            "models|model           Model providers",
+            "login|logout <provider> Model auth aliases",
+            "effort [level]         Guarded reasoning-effort status",
             "provider|usage         Model provider and usage aliases",
             "models auth methods|targets|login|logout <provider>",
             "tools                  Governed tool catalog",
@@ -2942,6 +3186,7 @@ def _command_reference() -> str:
             "tools run <name> <json> Run a governed tool",
             "skills [hub query]     Governed skills and virtual Skill Hub",
             "plugins                Skills and MCP extension surfaces",
+            "plugin|reload-plugins  Plugin inventory aliases",
             "memory health|search|session-preview|create|update|merge|expire",
             "mcp list|register|call Governed MCP registry",
             "reload-mcp             Refresh governed one-shot MCP registry status",
@@ -2966,11 +3211,13 @@ def _command_reference() -> str:
             "browser session|sessions|close|navigate <url>",
             "browser extract|inspect|screenshot|render|click <selector>|fill <json>",
             "boards                 Work boards and cards",
-            "backends               Execution backends",
+            "backends|sandbox       Execution backend sandbox posture",
+            "diff|review            Guarded diff and review workflow surfaces",
+            "update|restart         Operator-controlled update/restart readiness",
             "audit                  Audit tail",
             "exit                   Quit",
             "",
-            "Plain text submits a task. Slash aliases such as /tasks, /rc, and /bg also work.",
+            "Plain text submits a task. Slash aliases such as /tasks, /model, /doctor, /rc, and /bg also work.",
         )
     )
 
@@ -3014,6 +3261,9 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("tasks [all|session <id>]", "recent task lanes"),
             ("session|history|title|compress", "active transcript context"),
             ("status|resume|pause|cancel", "task controls"),
+            ("fast [request]", "quick route alias or governed task submission"),
+            ("goal|batch|loop", "goal state, evaluation queue, and self-improvement readiness"),
+            ("stop|retry|undo", "cancel alias plus guarded replay and rollback status"),
         ),
     ),
     (
@@ -3023,16 +3273,22 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("approval <id>", "inspect before action"),
             ("approve|deny <id>", "decide gated work"),
             ("security", "policy posture"),
+            ("permissions|security-review", "Claude-style policy and security review aliases"),
+            ("doctor|config|init", "runtime diagnostics, local paths, and initialization status"),
+            ("hooks", "guarded lifecycle hook readiness"),
             ("audit|evidence|timeline|events", "receipts and replay"),
         ),
     ),
     (
         "Build",
         (
-            ("models|provider|usage", "provider routes, auth, and usage"),
+            ("model|models|provider|usage", "provider routes, auth, and usage"),
+            ("login|logout <provider>", "model auth login/logout aliases"),
+            ("effort [level]", "guarded reasoning-effort metadata"),
             ("tools run <name> <json>", "safe tool execution"),
             ("toolsets", "tool catalog grouped by permission and risk"),
             ("skills [hub query]", "governed skill hub"),
+            ("plugin|plugins|reload-plugins", "extension inventory and reload readiness"),
             ("memory search|create|review", "durable memory"),
             ("mcp|reload-mcp|repair|schedules|cron", "extensions, schedules, and self-repair"),
         ),
@@ -3041,12 +3297,15 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         "Explore",
         (
             ("capabilities", "parity and readiness"),
-            ("remote-control|rc|mobile", "local-first remote-control readiness"),
+            ("agents", "multi-agent coordination and delegation surfaces"),
+            ("remote-control|rc|remote-env|teleport|mobile|desktop", "local-first remote-control readiness"),
+            ("web-setup", "local web control-plane setup"),
             ("connectors|channels|platforms", "integration surfaces"),
-            ("voice|plugins", "optional interaction and plugin surfaces"),
             ("browser session|render", "sandboxed browser work"),
-            ("boards|backends", "work and execution planes"),
-            ("rollback", "guarded rollback status"),
+            ("boards|backends|sandbox", "work and execution planes"),
+            ("voice", "optional interaction readiness"),
+            ("rollback|diff|review", "guarded rollback, diff, and review status"),
+            ("update|restart", "operator-controlled update and restart readiness"),
         ),
     ),
 )
@@ -3275,15 +3534,26 @@ def _next_command_hint(command: str) -> str:
         "approve": "/resume <id>",
         "security": "/audit",
         "audit": "/evidence <id>",
+        "model": "/models auth targets",
         "models": "/models route <id>",
+        "login": "/models auth targets",
+        "logout": "/models auth methods",
+        "effort": "/model",
         "tools": "/tools run <name> <json>",
         "skills": "/skills hub <query>",
+        "plugin": "/plugins",
         "memory": "/memory review-queue",
         "mcp": "/repair readiness",
+        "doctor": "/capabilities",
+        "permissions": "/security profile",
+        "agents": "/boards",
+        "remote-control": "/web-setup",
+        "web-setup": "/remote-control",
         "capabilities": "/connectors",
         "connectors": "/channels",
         "browser": "/browser sessions",
         "boards": "/backends",
+        "rollback": "/repair readiness",
     }
     return hints.get(root, "/help")
 
@@ -3291,6 +3561,7 @@ def _next_command_hint(command: str) -> str:
 SLASH_SUBCOMMANDS: dict[str, tuple[str, ...]] = {
     "memory": MEMORY_COMMANDS,
     "migrate": MIGRATE_COMMANDS,
+    "model": MODEL_COMMANDS,
     "models": MODEL_COMMANDS,
     "repair": REPAIR_COMMANDS,
     "schedule": SCHEDULE_COMMANDS,
