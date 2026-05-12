@@ -87,6 +87,8 @@ class LiveModelClient:
             return self._chat_azure_foundry(route, messages, temperature=temperature)
         if route.provider.provider == "github-copilot":
             return self._chat_github_copilot_cli(route, messages, temperature=temperature)
+        if route.provider.provider == "minimax-token-plan":
+            return self._chat_minimax_token_plan(route, messages, temperature=temperature)
         if route.provider.provider in OPENAI_COMPATIBLE_PROVIDERS:
             return self._chat_openai_compatible(route, messages, temperature=temperature)
         if route.provider.provider == "anthropic":
@@ -626,6 +628,49 @@ class LiveModelClient:
             input_tokens=int(usage.get("input_tokens", 0) or 0),
             output_tokens=int(usage.get("output_tokens", 0) or 0),
             raw_usage=dict(usage),
+        )
+
+    def _chat_minimax_token_plan(
+        self,
+        route: ModelRoute,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+    ) -> ModelInvocationResult:
+        if route.provider.base_url is None:
+            raise ValueError("minimax-token-plan provider has no base URL")
+        api_key = self._resolve_api_key(route)
+        if api_key is None:
+            raise ValueError("minimax-token-plan provider requires a Token Plan API key")
+        system, anthropic_messages = _anthropic_messages(messages)
+        payload: dict[str, Any] = {
+            "model": route.model,
+            "messages": anthropic_messages,
+            "max_tokens": 4096,
+            "temperature": temperature,
+        }
+        if system:
+            payload["system"] = system
+        response = self._post_json(
+            f"{route.provider.base_url}/messages",
+            payload=payload,
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            },
+        )
+        content = _anthropic_text(response.get("content", []))
+        usage = response.get("usage", {}) if isinstance(response.get("usage", {}), dict) else {}
+        raw_usage = dict(usage)
+        raw_usage.update({"source": "token_plan_api_key", "bridge": "minimax_anthropic_compatible"})
+        return ModelInvocationResult(
+            provider=route.provider.provider,
+            model=route.model,
+            content=content,
+            input_tokens=int(usage.get("input_tokens", 0) or 0),
+            output_tokens=int(usage.get("output_tokens", 0) or 0),
+            raw_usage=raw_usage,
         )
 
     def _chat_cohere(

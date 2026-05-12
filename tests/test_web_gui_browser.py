@@ -552,6 +552,7 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn('id="model-usage-providers"', markup)
         self.assertIn('id="model-usage-models"', markup)
         self.assertIn('id="model-usage-events"', markup)
+        self.assertIn('value="minimax-token-plan"', markup)
         self.assertIn('api("/model-usage")', script)
         self.assertIn("const renderModelUsage = (payload) => {", script)
         self.assertIn('setList("model-usage-providers", payload.by_provider', script)

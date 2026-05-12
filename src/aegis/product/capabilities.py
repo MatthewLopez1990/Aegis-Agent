@@ -286,7 +286,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "approved remote-control relay action proxy",
             ],
             "security_delta": "Aegis treats all external outputs as tainted data and requires approval for high-impact actions by default.",
-            "live_gap": "API-key-ready Hermes providers plus verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, Google Vertex AI, AWS Bedrock, and Azure Foundry cloud-identity bridges are routable; remaining provider-native gaps are OAuth/manual account bridges such as Nous Portal OAuth.",
+            "live_gap": "API-key-ready Hermes providers, MiniMax Token Plan, verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, Google Vertex AI, AWS Bedrock, and Azure Foundry cloud-identity bridges are routable; remaining provider-native gaps are OAuth/manual account bridges such as Nous Portal OAuth.",
             "target_requirements": [
                 "provider_native_oauth_and_device_flows",
                 "subscription_login_bridge",
@@ -413,7 +413,7 @@ def _live_gap_backlog(
             "operator_checklist": _model_auth_operator_checklist(model_auth_parity),
             "next_steps": [
                 "Implement provider-native OAuth/device/cloud-identity bridges one provider at a time with token refresh receipts.",
-                "Use the verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, Google Vertex AI, AWS Bedrock, and Azure Foundry official CLI bridges where available; keep other subscription and provider-native flows as official handoffs until scoped bridges exist.",
+                "Use the verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, MiniMax Token Plan, Google Vertex AI, AWS Bedrock, and Azure Foundry bridges where available; keep other subscription and provider-native flows as official handoffs until scoped bridges exist.",
                 "Add denied, approved, refresh, logout, and receipt-redaction tests for every bridge before enabling live model calls through it.",
             ],
             "required_controls": model_auth_parity["required_controls"],
@@ -621,7 +621,7 @@ def _model_auth_operator_checklist(model_auth_parity: dict[str, Any]) -> list[di
         {
             "control": "subscription_token_bridge",
             "state": "partial_official_cli_bridge" if model_auth_parity["subscription_bridge_targets"] else "ready_for_review",
-            "detail": "Verified Codex/ChatGPT, Claude Code, Qwen Code, Gemini CLI, and Copilot CLI subscription login can invoke through isolated official CLI bridges without token import; remaining subscription providers stay on official handoff until scoped bridges exist.",
+            "detail": "Verified Codex/ChatGPT, Claude Code, Qwen Code, Gemini CLI, Copilot CLI, and MiniMax Token Plan can invoke through governed bridges without browser-token import; remaining subscription providers stay on official handoff until scoped bridges exist.",
         },
         {
             "control": "oauth_device_flows",

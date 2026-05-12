@@ -932,6 +932,9 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(by_target["Google Gemini CLI subscription"]["external_login_instruction"], "/auth")
             self.assertEqual(by_target["DeepSeek"]["status"], "api_key_ready")
             self.assertEqual(by_target["MiniMax"]["status"], "api_key_ready")
+            self.assertEqual(by_target["MiniMax Token Plan"]["status"], "api_key_ready")
+            self.assertEqual(by_target["MiniMax Token Plan"]["required_auth"], ["api_key"])
+            self.assertEqual(by_target["MiniMax Token Plan"]["account_surface"], "MiniMax Token Plan")
             self.assertEqual(by_target["MiniMax OAuth"]["status"], "manual_provider_handoff_only")
             self.assertEqual(by_target["AWS Bedrock"]["status"], "official_cli_bridge_available")
             self.assertEqual(by_target["Azure Foundry API key"]["status"], "api_key_ready")
@@ -1140,6 +1143,53 @@ class ModelAuthTests(unittest.TestCase):
                     self.assertEqual(captured["payload"]["model"], model)
                     self.assertEqual(result.provider, provider)
                     self.assertEqual(result.content, "provider response")
+
+    def test_minimax_token_plan_uses_anthropic_compatible_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            broker = SecretsBroker(root / ".aegis" / "secrets.json")
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"), broker)
+            registry.login_provider("minimax-token-plan", "sk-minimax-token-plan")
+            route = registry.route("minimax-token-plan/MiniMax-M2.7-highspeed")
+
+            class FakeResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self) -> bytes:
+                    return b'{"content":[{"type":"text","text":"token plan response"}],"usage":{"input_tokens":11,"output_tokens":4}}'
+
+            captured: dict[str, object] = {}
+
+            def fake_urlopen(request, timeout):
+                captured["url"] = request.full_url
+                captured["headers"] = dict(request.header_items())
+                captured["payload"] = json.loads(request.data.decode("utf-8"))
+                self.assertNotIn("sk-minimax-token-plan", request.data.decode("utf-8"))
+                return FakeResponse()
+
+            with patch("aegis.models.client._open_model_request", fake_urlopen):
+                result = LiveModelClient(broker).chat(
+                    route,
+                    [
+                        {"role": "system", "content": "system policy"},
+                        {"role": "user", "content": "hello"},
+                    ],
+                )
+
+            self.assertEqual(captured["url"], "https://api.minimax.io/anthropic/v1/messages")
+            self.assertEqual(captured["headers"]["X-api-key"], "sk-minimax-token-plan")
+            self.assertEqual(captured["headers"]["Anthropic-version"], "2023-06-01")
+            self.assertEqual(captured["payload"]["model"], "MiniMax-M2.7-highspeed")
+            self.assertEqual(captured["payload"]["system"], "system policy")
+            self.assertEqual(result.provider, "minimax-token-plan")
+            self.assertEqual(result.content, "token plan response")
+            self.assertEqual(result.input_tokens, 11)
+            self.assertEqual(result.output_tokens, 4)
+            self.assertEqual(result.raw_usage["bridge"], "minimax_anthropic_compatible")
 
     def test_openrouter_live_client_uses_brokered_secret_and_records_usage(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
