@@ -1369,6 +1369,18 @@ const renderModelRouteOutput = (payload) => {
   `;
 };
 
+const renderModelAuthOutput = (payload) => {
+  const auth = payload.auth || payload;
+  const label = auth.external_command
+    ? `${auth.status || "auth"} · ${auth.external_command}`
+    : auth.provider || auth.status || "Model auth";
+  const node = document.getElementById("model-auth-output");
+  node.innerHTML = `
+    <strong>${text(label)}</strong>
+    <code>${text(JSON.stringify(payload, null, 2))}</code>
+  `;
+};
+
 const renderModelUsage = (payload) => {
   setList("model-usage-providers", payload.by_provider || [], (row) => ({
     title: row.key,
@@ -2069,15 +2081,19 @@ document.getElementById("model-auth-form").addEventListener("submit", async (eve
   const payload = { provider, method };
   if (method === "api_key") {
     payload.api_key = apiKey;
+  } else {
+    payload.verify_external = document.getElementById("model-auth-verify-external").checked;
   }
-  await api("/models/auth/login", { method: "POST", body: JSON.stringify(payload) });
+  const result = await api("/models/auth/login", { method: "POST", body: JSON.stringify(payload) });
+  renderModelAuthOutput(result);
   document.getElementById("model-api-key").value = "";
   await refresh();
 });
 
 document.getElementById("model-auth-logout").addEventListener("click", async () => {
   const provider = document.getElementById("model-provider").value;
-  await api("/models/auth/logout", { method: "POST", body: JSON.stringify({ provider }) });
+  const result = await api("/models/auth/logout", { method: "POST", body: JSON.stringify({ provider }) });
+  renderModelAuthOutput(result);
   await refresh();
 });
 

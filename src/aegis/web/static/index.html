@@ -305,9 +305,11 @@
               <option value="cloud_identity">Cloud identity</option>
             </select>
             <input id="model-api-key" type="password" autocomplete="off" placeholder="API key">
+            <label class="checkline"><input id="model-auth-verify-external" type="checkbox"> Verify external</label>
             <button type="submit">Login</button>
             <button id="model-auth-logout" type="button" class="secondary">Logout</button>
           </form>
+          <div id="model-auth-output" class="evidence-block"></div>
           <div id="model-providers" class="list card-grid"></div>
           <div id="model-auth-targets" class="list compact-list"></div>
         </section>
