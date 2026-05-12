@@ -456,7 +456,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
         def _do_POST(self) -> None:
             parsed = urlparse(self.path)
             path = parsed.path
-            if path in {"/remote-control/pair", "/remote-control/revoke"}:
+            if path in {"/remote-control/pair", "/remote-control/revoke", "/remote-control/relay"}:
                 self._authorize_local_mutation()
             elif re.fullmatch(r"/remote-control/tasks/[^/]+/(resume|pause|cancel)", path):
                 pass
@@ -503,6 +503,38 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                         "label": result["pairing"]["label"],
                         "session_id": result["pairing"].get("session_id"),
                         "token_captured": False,
+                    },
+                )
+                self._json(result)
+                return
+            if path == "/remote-control/relay":
+                payload = self._read_json()
+                if not bool(payload.get("approved", False)):
+                    raise PermissionError("remote-control relay registration requires explicit approval")
+                relay_secret = str(_required(payload, "relay_auth_secret"))
+                handle = orchestrator.secrets_broker.request_handle(
+                    name=relay_secret,
+                    requester="remote_control_relay",
+                    reason="register scoped remote-control pairing with relay",
+                    scopes=("remote_control:relay",),
+                )
+                relay_auth_token = orchestrator.secrets_broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                result = remote_control.relay_pairing(
+                    str(_required(payload, "pairing_id")),
+                    relay_url=str(_required(payload, "relay_url")),
+                    allowlist=orchestrator.config.network_allowlist,
+                    relay_auth_token=relay_auth_token,
+                    approved=True,
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.relay_registered",
+                    {
+                        "pairing_id": result["pairing"]["id"],
+                        "relay_target": result["relay_target"],
+                        "relay_auth_secret": "[REDACTED]",
+                        "pairing_token_relayed": result["pairing_token_relayed"],
+                        "raw_secret_values_included": False,
+                        "source": "api",
                     },
                 )
                 self._json(result)

@@ -422,8 +422,11 @@ def build_parser() -> argparse.ArgumentParser:
     remote_control_pair.add_argument("--port", type=int, default=8765, help="Local API port to render in endpoint hints")
     remote_control_revoke = remote_control_sub.add_parser("revoke", help="Revoke a local remote-control pairing")
     remote_control_revoke.add_argument("pairing_id")
-    remote_control_relay = remote_control_sub.add_parser("relay", help="Show outbound relay preflight blockers")
+    remote_control_relay = remote_control_sub.add_parser("relay", help="Show outbound relay preflight blockers or register an approved pairing")
     remote_control_relay.add_argument("--relay-url")
+    remote_control_relay.add_argument("--pairing-id", help="Active pairing id to register with the relay")
+    remote_control_relay.add_argument("--relay-auth-secret", help="Brokered secret name for relay bearer auth")
+    remote_control_relay.add_argument("--approved", action="store_true", help="Approve one outbound relay registration")
 
     models = subcommands.add_parser("model", help="Manage model routes and usage")
     model_sub = models.add_subparsers(dest="model_command", required=True)
@@ -1123,6 +1126,36 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             )
             return result
         if args.remote_control_command == "relay":
+            if args.approved or args.pairing_id or args.relay_auth_secret:
+                if not args.relay_url or not args.pairing_id or not args.relay_auth_secret:
+                    raise ValueError("approved remote-control relay requires --relay-url, --pairing-id, and --relay-auth-secret")
+                broker = SecretsBroker(config.secrets_path)
+                handle = broker.request_handle(
+                    name=args.relay_auth_secret,
+                    requester="remote_control_relay",
+                    reason="register scoped remote-control pairing with relay",
+                    scopes=("remote_control:relay",),
+                )
+                relay_auth_token = broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                result = registry.relay_pairing(
+                    args.pairing_id,
+                    relay_url=args.relay_url,
+                    allowlist=config.network_allowlist,
+                    relay_auth_token=relay_auth_token,
+                    approved=args.approved,
+                )
+                AuditLogger(config.audit_log_path).append(
+                    "remote_control.relay_registered",
+                    {
+                        "pairing_id": result["pairing"]["id"],
+                        "relay_target": result["relay_target"],
+                        "relay_auth_secret": "[REDACTED]",
+                        "pairing_token_relayed": result["pairing_token_relayed"],
+                        "raw_secret_values_included": False,
+                        "source": "cli",
+                    },
+                )
+                return result
             return registry.relay_preflight(relay_url=args.relay_url)
 
     if args.command == "model":

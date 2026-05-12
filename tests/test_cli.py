@@ -158,6 +158,40 @@ class CliTests(unittest.TestCase):
                     ]
                 )
             )
+            SecretsBroker(data_dir / "secrets.json").store_secret(name="AEGIS_REMOTE_RELAY_TOKEN", value="relay-raw-secret")
+
+            class FakeRelayResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def getcode(self) -> int:
+                    return 202
+
+                def read(self, limit: int) -> bytes:
+                    return b'{"ok":true,"token":"relay-raw-secret"}'
+
+            with patch("aegis.remote_control._private_network_error", return_value=None):
+                with patch("aegis.remote_control._open_without_redirects", return_value=FakeRelayResponse()):
+                    registered_relay = dispatch(
+                        parser.parse_args(
+                            [
+                                "--data-dir",
+                                str(data_dir),
+                                "remote-control",
+                                "relay",
+                                "--relay-url",
+                                "https://example.com/aegis-relay?token=secret",
+                                "--pairing-id",
+                                pair["pairing"]["id"],
+                                "--relay-auth-secret",
+                                "AEGIS_REMOTE_RELAY_TOKEN",
+                                "--approved",
+                            ]
+                        )
+                    )
             revoked = dispatch(parser.parse_args(["--data-dir", str(data_dir), "remote-control", "revoke", pair["pairing"]["id"]]))
 
             self.assertEqual(status["relay_preflight"]["status"], "relay_blocked_preflight")
@@ -170,9 +204,14 @@ class CliTests(unittest.TestCase):
             self.assertEqual(relay["relay_target"], "https://relay.example/aegis")
             self.assertFalse(relay["outbound_relay_enabled"])
             self.assertNotIn("token=secret", json.dumps(relay, sort_keys=True))
+            self.assertEqual(registered_relay["status"], "relay_registered")
+            self.assertEqual(registered_relay["relay_target"], "https://example.com/aegis-relay")
+            self.assertFalse(registered_relay["pairing_token_relayed"])
+            self.assertNotIn("relay-raw-secret", json.dumps(registered_relay, sort_keys=True))
             self.assertEqual(revoked["pairing"]["status"], "revoked")
             self.assertNotIn(pair["token"], (data_dir / "remote_control_pairings.json").read_text(encoding="utf-8"))
             self.assertNotIn(pair["token"], (data_dir / "audit.jsonl").read_text(encoding="utf-8"))
+            self.assertNotIn("relay-raw-secret", (data_dir / "audit.jsonl").read_text(encoding="utf-8"))
 
     def test_agents_cli_status_and_delegate_use_governed_queue(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

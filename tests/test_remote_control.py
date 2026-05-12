@@ -6,6 +6,7 @@ from pathlib import Path
 import stat
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from aegis.remote_control import RemoteControlPairingRegistry
 
@@ -53,6 +54,59 @@ class RemoteControlPairingTests(unittest.TestCase):
         self.assertFalse(result["pairing_token_relayed"])
         self.assertNotIn("token=secret", rendered)
         self.assertNotIn("#frag", rendered)
+        self.assertIsNone(registry.relay_preflight(relay_url="https://user:pass@relay.example/aegis")["relay_target"])
+
+    def test_approved_relay_registration_posts_redacted_pairing_metadata(self) -> None:
+        registry = RemoteControlPairingRegistry()
+        now = datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
+        created = registry.create_pairing(label="phone", task_id="task-1", allowed_actions=("status", "pause"), now=now)
+        captured = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def getcode(self) -> int:
+                return 202
+
+            def read(self, limit: int) -> bytes:
+                return b'{"ok":true,"token":"relay-raw-secret"}'
+
+        def fake_open(request, timeout: int):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return FakeResponse()
+
+        with patch("aegis.remote_control._private_network_error", return_value=None):
+            with patch("aegis.remote_control._open_without_redirects", side_effect=fake_open):
+                result = registry.relay_pairing(
+                    created["pairing"]["id"],
+                    relay_url="https://example.com/aegis-relay?token=secret",
+                    allowlist=("example.com",),
+                    relay_auth_token="relay-raw-secret",
+                    approved=True,
+                    now=now,
+                )
+
+        body = json.loads(captured["request"].data.decode("utf-8"))
+        rendered_result = json.dumps(result, sort_keys=True)
+        rendered_body = json.dumps(body, sort_keys=True)
+        self.assertEqual(result["status"], "relay_registered")
+        self.assertEqual(result["relay_target"], "https://example.com/aegis-relay")
+        self.assertTrue(result["outbound_relay_enabled"])
+        self.assertFalse(result["pairing_token_relayed"])
+        self.assertEqual(result["relay_response_status"], 202)
+        self.assertEqual(captured["request"].get_header("Authorization"), "Bearer relay-raw-secret")
+        self.assertEqual(body["pairing"]["id"], created["pairing"]["id"])
+        self.assertFalse(body["pairing_token_included"])
+        self.assertNotIn(created["token"], rendered_body)
+        self.assertNotIn(created["token"], rendered_result)
+        self.assertNotIn("relay-raw-secret", rendered_body)
+        self.assertNotIn("relay-raw-secret", rendered_result)
+        self.assertNotIn("token=secret", rendered_result)
 
     def test_relay_preflight_rejects_non_https_targets(self) -> None:
         registry = RemoteControlPairingRegistry()

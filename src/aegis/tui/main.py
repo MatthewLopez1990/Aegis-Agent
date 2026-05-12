@@ -2206,6 +2206,43 @@ class AegisTui(cmd.Cmd):
             registry = RemoteControlPairingRegistry(
                 self.orchestrator.config.data_dir / "remote_control_pairings.json"
             )
+            if "--approved" in parts or _option_value(parts, "--pairing-id") or _option_value(parts, "--relay-auth-secret"):
+                pairing_id = _option_value(parts, "--pairing-id")
+                relay_secret = _option_value(parts, "--relay-auth-secret")
+                if not relay_url or not pairing_id or not relay_secret:
+                    print("usage: remote-control relay --relay-url <https-url> --pairing-id <id> --relay-auth-secret <secret_name> --approved")
+                    return
+                try:
+                    handle = self.orchestrator.secrets_broker.request_handle(
+                        name=relay_secret,
+                        requester="remote_control_relay",
+                        reason="register scoped remote-control pairing with relay",
+                        scopes=("remote_control:relay",),
+                    )
+                    relay_auth_token = self.orchestrator.secrets_broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                    result = registry.relay_pairing(
+                        pairing_id,
+                        relay_url=relay_url,
+                        allowlist=self.orchestrator.config.network_allowlist,
+                        relay_auth_token=relay_auth_token,
+                        approved="--approved" in parts,
+                    )
+                except (KeyError, PermissionError, ValueError) as exc:
+                    print(f"remote-control relay error: {exc}")
+                    return
+                self.orchestrator.audit_logger.append(
+                    "remote_control.relay_registered",
+                    {
+                        "pairing_id": result["pairing"]["id"],
+                        "relay_target": result["relay_target"],
+                        "relay_auth_secret": "[REDACTED]",
+                        "pairing_token_relayed": result["pairing_token_relayed"],
+                        "raw_secret_values_included": False,
+                        "source": "tui",
+                    },
+                )
+                _print_json(result)
+                return
             _print_json(registry.relay_preflight(relay_url=relay_url))
             return
         if parts and parts[0] == "pair":
@@ -2272,9 +2309,9 @@ class AegisTui(cmd.Cmd):
                     "Status: local control plane available with short-lived pairing tokens.",
                     "Current secure surface: aegis serve --host 127.0.0.1 --port 8765",
                     "Pairing endpoint: POST /remote-control/pair returns one token for X-Aegis-Remote-Token.",
-                    "Relay preflight: remote-control relay shows blocked off-device transport controls.",
+                    "Relay: remote-control relay can preflight blockers or register an approved pairing with a brokered relay secret.",
                     "Security posture: host/origin checks still apply; no subscription token capture; pairing creation needs the local API token.",
-                    "Remaining live gap: outbound relay, mobile push delivery, and cloud session directory.",
+                    "Remaining live gap: relayed action proxy, mobile push delivery, and cloud session directory.",
                 ],
                 width,
             )
@@ -4614,11 +4651,11 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("plugins", "install-marketplace"): ("--catalog-path", "--enable"),
     ("plugin", "install-marketplace"): ("--catalog-path", "--enable"),
     ("remote-control", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
-    ("remote-control", "relay"): ("--relay-url",),
+    ("remote-control", "relay"): ("--relay-url", "--pairing-id", "--relay-auth-secret", "--approved"),
     ("remote_control", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
-    ("remote_control", "relay"): ("--relay-url",),
+    ("remote_control", "relay"): ("--relay-url", "--pairing-id", "--relay-auth-secret", "--approved"),
     ("rc", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
-    ("rc", "relay"): ("--relay-url",),
+    ("rc", "relay"): ("--relay-url", "--pairing-id", "--relay-auth-secret", "--approved"),
 }
 
 

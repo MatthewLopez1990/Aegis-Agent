@@ -2370,7 +2370,21 @@ document.getElementById("remote-control-form").addEventListener("submit", async 
 document.getElementById("remote-control-relay-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const relayUrl = document.getElementById("remote-control-relay-url").value.trim();
-  const result = await api(`/remote-control/relay${relayUrl ? `?relay_url=${encodeURIComponent(relayUrl)}` : ""}`);
+  const approved = document.getElementById("remote-control-relay-approved").checked;
+  let result;
+  if (approved) {
+    result = await api("/remote-control/relay", {
+      method: "POST",
+      body: JSON.stringify({
+        relay_url: relayUrl,
+        pairing_id: document.getElementById("remote-control-relay-pairing-id").value.trim(),
+        relay_auth_secret: document.getElementById("remote-control-relay-secret").value.trim(),
+        approved: true,
+      }),
+    });
+  } else {
+    result = await api(`/remote-control/relay${relayUrl ? `?relay_url=${encodeURIComponent(relayUrl)}` : ""}`);
+  }
   renderRemoteControlRelay(result);
   renderRemoteControlOutput(result);
 });

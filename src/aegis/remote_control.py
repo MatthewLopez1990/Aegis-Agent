@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.error import HTTPError, URLError
 import hashlib
 import json
 import os
 from pathlib import Path
 import secrets
 from urllib.parse import urlparse
+from urllib.request import Request
+
+from aegis.connectors.http import _open_without_redirects, _private_network_error, _validate_url
 
 
 REMOTE_CONTROL_TOKEN_HEADER = "X-Aegis-Remote-Token"
@@ -117,7 +121,7 @@ class RemoteControlPairingRegistry:
                 "remote task cancel",
             ],
             "blocked_until_relay": [
-                "off_device_outbound_relay",
+                "relayed_action_proxy",
                 "mobile_push_delivery",
                 "cloud_session_directory",
             ],
@@ -127,7 +131,7 @@ class RemoteControlPairingRegistry:
     def relay_preflight(self, *, relay_url: str | None = None) -> dict[str, Any]:
         relay_target = _redacted_relay_target(relay_url)
         blockers = [
-            {"control": "explicit_operator_enablement", "detail": "no outbound relay transport is enabled"},
+            {"control": "explicit_operator_enablement", "detail": "approved relay registration is required before outbound relay transport is used"},
             {"control": "brokered_relay_auth", "detail": "relay credentials must use brokered handles and must not expose raw tokens"},
             {"control": "relay_origin_allowlist", "detail": "remote origins must be allowlisted before off-device access"},
             {"control": "push_delivery_approval", "detail": "mobile push delivery requires an approved channel adapter"},
@@ -167,9 +171,104 @@ class RemoteControlPairingRegistry:
                 "POST /remote-control/tasks/:id/resume|pause|cancel",
             ],
             "next_steps": [
-                "Add an explicitly enabled relay transport with a brokered credential handle.",
+                "Register an active pairing with an allowlisted relay using a brokered credential handle.",
                 "Preserve local pairing scope, expiry, revocation, host checks, and audit receipts through the relay.",
-                "Add denied, approved, revoked, expired, and token-redaction tests before enabling off-device delivery.",
+                "Add relayed action proxy, mobile push delivery, cloud directory, and revocation-propagation tests before broad off-device delivery.",
+            ],
+        }
+
+    def relay_pairing(
+        self,
+        pairing_id: str,
+        *,
+        relay_url: str,
+        allowlist: tuple[str, ...],
+        relay_auth_token: str,
+        approved: bool = False,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if not approved:
+            raise PermissionError("remote-control relay registration requires explicit approval")
+        if not relay_auth_token.strip():
+            raise ValueError("remote-control relay registration requires a brokered relay auth token")
+        self._load()
+        checked_at = _utc_now(now)
+        pairing = self._pairings.get(pairing_id)
+        if pairing is None:
+            raise KeyError(pairing_id)
+        public_pairing = self._public_pairing(pairing, now=checked_at)
+        if public_pairing["status"] != "active":
+            raise ValueError("remote-control relay registration requires an active pairing")
+        parsed = urlparse(str(relay_url or "").strip())
+        validation_error = _validate_url(parsed)
+        if validation_error:
+            raise ValueError(validation_error)
+        if parsed.scheme != "https":
+            raise ValueError("remote-control relay URL must use https")
+        domain = parsed.hostname or ""
+        if not _allowed_domain(domain, allowlist):
+            raise ValueError(f"domain {domain!r} is not allowlisted")
+        private_error = _private_network_error(domain)
+        if private_error:
+            raise ValueError(private_error)
+        relay_target = _redacted_relay_target(relay_url)
+        payload = {
+            "type": "aegis.remote_control.pairing",
+            "version": 1,
+            "sent_at": checked_at.isoformat(),
+            "pairing": public_pairing,
+            "token_header": REMOTE_CONTROL_TOKEN_HEADER,
+            "allowed_actions": public_pairing["allowed_actions"],
+            "pairing_token_included": False,
+            "raw_secret_values_included": False,
+            "required_controls": list(REMOTE_CONTROL_RELAY_REQUIRED_CONTROLS),
+        }
+        body = json.dumps(payload, sort_keys=True).encode("utf-8")
+        request = Request(
+            str(relay_url),
+            data=body,
+            headers={
+                "Authorization": f"Bearer {relay_auth_token}",
+                "Content-Type": "application/json",
+                "User-Agent": "Aegis-Agent/0.1",
+            },
+            method="POST",
+        )
+        try:
+            response_context = _open_without_redirects(request, timeout=10)
+        except HTTPError as exc:
+            if 300 <= exc.code < 400:
+                raise ValueError("HTTP redirects are not followed for remote-control relay registration") from exc
+            raise ValueError(f"remote-control relay registration failed with status {exc.code}") from exc
+        except URLError as exc:
+            raise ValueError(f"remote-control relay registration failed: {exc.reason}") from exc
+        with response_context as response:
+            response_status = response.getcode() if hasattr(response, "getcode") else None
+            response_body = response.read(2048)
+        return {
+            "status": "relay_registered",
+            "mode": "approved_outbound_relay_registration",
+            "outbound_relay_enabled": True,
+            "relay_configured": True,
+            "relay_target": relay_target,
+            "relay_url_redacted": True,
+            "pairing": public_pairing,
+            "pairing_token_relayed": False,
+            "relay_auth_secret_used": True,
+            "relay_response_status": response_status,
+            "relay_response_bytes": len(response_body),
+            "raw_secret_values_included": False,
+            "configured_controls": [
+                "explicit_operator_enablement",
+                "brokered_relay_auth",
+                "relay_origin_allowlist",
+                "scoped_pairing_token_exchange",
+                "audit_receipts_without_tokens",
+                "local_revocation",
+            ],
+            "remaining_controls": [
+                "push_delivery_approval",
+                "revocation_and_expiry_propagation",
             ],
         }
 
@@ -328,10 +427,14 @@ def _redacted_relay_target(relay_url: str | None) -> str | None:
     if not raw:
         return None
     parsed = urlparse(raw)
-    if parsed.scheme != "https" or not parsed.netloc:
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
         return None
     path = parsed.path or ""
     return f"{parsed.scheme}://{parsed.netloc}{path}"
+
+
+def _allowed_domain(domain: str, allowlist: tuple[str, ...]) -> bool:
+    return any(domain == allowed or domain.endswith(f".{allowed}") for allowed in allowlist)
 
 
 def _local_remote_control_endpoints(*, host: str = "127.0.0.1", port: int = 8765) -> dict[str, str]:
