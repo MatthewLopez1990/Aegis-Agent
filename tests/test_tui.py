@@ -686,6 +686,45 @@ class TuiTests(unittest.TestCase):
             self.assertNotIn("abc123", json.dumps(session["metadata"], sort_keys=True))
             self.assertNotIn("should not render", json.dumps(session["metadata"], sort_keys=True))
 
+    def test_paste_and_image_commands_append_explicit_session_context_safely(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "image.png").write_bytes(
+                b"\x89PNG\r\n\x1a\n"
+                b"\x00\x00\x00\rIHDR"
+                b"\x00\x00\x00\x02\x00\x00\x00\x03"
+                b"\x08\x02\x00\x00\x00"
+                b"\x00\x00\x00\x00"
+                b"\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+            tui = AegisTui(data_dir=root / ".aegis", workspace=root)
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                tui.onecmd("/paste password=abc123 pasted context")
+                tui.onecmd("/image image.png")
+
+            rendered = output.getvalue()
+            self.assertIn('"status": "pasted_context_appended"', rendered)
+            self.assertIn('"status": "image_metadata_attached"', rendered)
+            self.assertIn('"mode": "local_image_metadata"', rendered)
+            self.assertIn('"raw_clipboard_content_included": false', rendered)
+            self.assertIn('"raw_image_bytes_included": false', rendered)
+            self.assertIn('"raw_ocr_content_included": false', rendered)
+            self.assertNotIn("password=abc123", rendered)
+            self.assertNotIn("pasted context", rendered)
+            history = tui.orchestrator.sessions.history(tui.session["id"], limit=10)
+            paste_message = next(row for row in history if row["metadata"].get("source") == "tui_paste")
+            image_message = next(row for row in history if row["metadata"].get("source") == "tui_image")
+            self.assertEqual(paste_message["trust_class"], "CHAT_CONTENT")
+            self.assertEqual(paste_message["content"], "password=abc123 pasted context")
+            self.assertFalse(paste_message["metadata"]["clipboard_read"])
+            self.assertEqual(image_message["trust_class"], "DOCUMENT_CONTENT")
+            self.assertEqual(image_message["metadata"]["format"], "png")
+            self.assertEqual(image_message["metadata"]["width"], 2)
+            self.assertEqual(image_message["metadata"]["height"], 3)
+            self.assertFalse(image_message["metadata"]["raw_image_bytes_included"])
+
     def test_missing_resources_print_errors_without_raising(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

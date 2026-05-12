@@ -2950,7 +2950,37 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_paste(self, arg: str) -> None:
-        """paste -- show safe paste/clipboard boundaries without reading the clipboard."""
+        """paste [content] -- append explicit pasted context without reading the clipboard."""
+        pasted = arg.strip()
+        if pasted:
+            message = self.orchestrator.sessions.add_message(
+                self.session["id"],
+                role="user",
+                content=pasted,
+                trust_class=TrustClass.CHAT_CONTENT,
+                metadata={
+                    "source": "tui_paste",
+                    "submitted": False,
+                    "clipboard_read": False,
+                    "raw_clipboard_content_rendered": False,
+                },
+            )
+            _print_json(
+                {
+                    "status": "pasted_context_appended",
+                    "mode": "explicit_session_context",
+                    "message_id": message["id"],
+                    "active_session_id": self.session["id"],
+                    "character_count": len(pasted),
+                    "trust_class": TrustClass.CHAT_CONTENT.value,
+                    "clipboard_read": False,
+                    "clipboard_mutated": False,
+                    "raw_clipboard_content_included": False,
+                    "submitted": False,
+                    "next_actions": ["submit <request>", "session history", "context"],
+                }
+            )
+            return
         _print_json(
             {
                 "status": "operator_action_required",
@@ -2964,7 +2994,7 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_image(self, arg: str) -> None:
-        """image <path> -- stage explicit image path metadata for future media sandboxing."""
+        """image <path> -- attach explicit local image metadata to the active session."""
         image_arg = arg.strip()
         if image_arg:
             image_path = Path(image_arg).expanduser()
@@ -2980,17 +3010,65 @@ class AegisTui(cmd.Cmd):
             resolved = None
             workspace_scoped = False
             exists = False
+        if resolved and workspace_scoped and exists and resolved.is_file():
+            vision = self.orchestrator.tools.execute("vision_analyze", {"image_path": str(resolved)})
+            image_metadata = vision.get("metadata", {}) if isinstance(vision.get("metadata", {}), dict) else {}
+            content = (
+                "Local image metadata attached: "
+                f"{Path(str(vision.get('path') or resolved)).name}; "
+                f"format={image_metadata.get('format') or 'unknown'}; "
+                f"dimensions={image_metadata.get('width') or 0}x{image_metadata.get('height') or 0}; "
+                f"bytes={vision.get('bytes') or 0}."
+            )
+            message = self.orchestrator.sessions.add_message(
+                self.session["id"],
+                role="user",
+                content=content,
+                trust_class=TrustClass.DOCUMENT_CONTENT,
+                metadata={
+                    "source": "tui_image",
+                    "submitted": False,
+                    "image_path": str(resolved),
+                    "vision_tool": "vision_analyze",
+                    "raw_image_bytes_included": False,
+                    "raw_ocr_content_included": False,
+                    "format": image_metadata.get("format"),
+                    "width": image_metadata.get("width"),
+                    "height": image_metadata.get("height"),
+                    "size_bytes": vision.get("bytes"),
+                },
+            )
+            _print_json(
+                {
+                    "status": "image_metadata_attached",
+                    "mode": "local_image_metadata",
+                    "message_id": message["id"],
+                    "active_session_id": self.session["id"],
+                    "image_path": str(resolved),
+                    "exists": True,
+                    "workspace_scoped": True,
+                    "format": image_metadata.get("format"),
+                    "width": image_metadata.get("width"),
+                    "height": image_metadata.get("height"),
+                    "size_bytes": vision.get("bytes"),
+                    "raw_image_bytes_included": False,
+                    "raw_ocr_content_included": False,
+                    "submitted": False,
+                    "next_actions": ["submit describe the attached image metadata", "session history", "browser screenshot"],
+                }
+            )
+            return
         _print_json(
             {
-                "status": "media_attachment_pending_sandbox" if resolved else "operator_action_required",
+                "status": "image_attachment_rejected" if resolved else "operator_action_required",
                 "mode": "metadata_only",
                 "image_path": str(resolved) if resolved else None,
                 "exists": exists,
                 "workspace_scoped": workspace_scoped,
                 "raw_image_bytes_included": False,
                 "raw_ocr_content_included": False,
-                "detail": "Explicit image paths are accepted as metadata only until the media worker sandbox is active.",
-                "next_actions": ["browser screenshot", "provider_media_depth", "submit describe explicit image path"],
+                "detail": "Provide an existing workspace-scoped image path to attach local metadata; raw image bytes are never rendered.",
+                "next_actions": ["image <workspace-image-path>", "browser screenshot", "submit describe explicit image path"],
             }
         )
 
