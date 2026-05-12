@@ -31,7 +31,7 @@ class GitHubConnectorStub(MockServiceConnector):
         super().__init__(
             name="github",
             operations=("read_repo", "read_issue", "read_pull_request", "read_pull_request_comments"),
-            write_operations=("create_issue", "comment_on_pull_request"),
+            write_operations=("create_issue", "comment_on_pull_request", "rollback_issue", "rollback_pull_request_comment"),
             sample_data={
                 "repositories": [{"name": "mock-repo", "default_branch": "main"}],
                 "issues": [{"number": 1, "title": "Mock issue", "state": "open"}],
@@ -65,16 +65,20 @@ class GitHubConnectorStub(MockServiceConnector):
                 "read_pull_request_comments": RiskLevel.LOW,
                 "create_issue": RiskLevel.HIGH,
                 "comment_on_pull_request": RiskLevel.HIGH,
+                "rollback_issue": RiskLevel.HIGH,
+                "rollback_pull_request_comment": RiskLevel.HIGH,
                 "dry_run": RiskLevel.MEDIUM,
             },
             rate_limits=configured_rate_limits,
             data_sensitivity=Sensitivity.INTERNAL,
             default_mode="mock_read_only",
-            approval_required=("create_issue", "comment_on_pull_request"),
+            approval_required=("create_issue", "comment_on_pull_request", "rollback_issue", "rollback_pull_request_comment"),
             operation_scopes=self.spec.operation_scopes,
         )
 
     def write(self, request: ConnectorRequest) -> ConnectorResult:
+        if request.operation in {"rollback_issue", "rollback_pull_request_comment"}:
+            return self.rollback(request)
         if not self._is_live_write_request(request):
             return super().write(request)
         require_scope(request, "write", connector=self.spec.name)
@@ -167,6 +171,102 @@ class GitHubConnectorStub(MockServiceConnector):
             error=live_result.get("error"),
         )
 
+    def rollback(self, request: ConnectorRequest) -> ConnectorResult:
+        if not self._is_live_write_request(request):
+            return super().rollback(request)
+        require_scope(request, "write", connector=self.spec.name)
+        operation = request.operation
+        if operation not in {"rollback_issue", "rollback_pull_request_comment"}:
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error=f"unsupported GitHub rollback operation: {operation}")
+        url = str(request.params.get("rollback_url") or request.params.get("api_url") or request.params.get("provider_url") or "")
+        parsed = urlparse(url)
+        domain = parsed.hostname or ""
+        if not request.approved:
+            return ConnectorResult(
+                self.spec.name,
+                operation,
+                False,
+                {"activation": live_connector_activation(connector=self.spec.name, operation=operation, enabled=self.live_writes, approved=False, allowlist=self.allowlist, domain=domain)},
+                rollback="no action performed",
+                error="GitHub rollback requires approval",
+            )
+        if not self.live_writes:
+            return ConnectorResult(
+                self.spec.name,
+                operation,
+                False,
+                {"activation": live_connector_activation(connector=self.spec.name, operation=operation, enabled=False, approved=True, allowlist=self.allowlist, domain=domain)},
+                rollback="no action performed",
+                error="GitHub live writes are disabled",
+            )
+        validation_error = _validate_url(parsed)
+        if validation_error:
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error=validation_error)
+        if parsed.scheme != "https":
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error="GitHub rollback requires https")
+        if not self._allowed(domain):
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error=f"domain {domain!r} is not allowlisted")
+        private_error = _private_network_error(domain)
+        if private_error:
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error=private_error)
+        token_secret = str(request.params.get("token_secret") or "GITHUB_TOKEN")
+        handle = self.secrets_broker.request_handle(
+            name=token_secret,
+            requester="github_connector",
+            reason=f"GitHub {operation}",
+            scopes=("github:write",),
+        )
+        if not handle.present:
+            return ConnectorResult(
+                self.spec.name,
+                operation,
+                False,
+                {"activation": live_connector_activation(connector=self.spec.name, operation=operation, enabled=True, approved=True, allowlist=self.allowlist, domain=domain, token_present=False)},
+                rollback="no action performed",
+                error=f"secret {token_secret!r} is not configured",
+            )
+        try:
+            token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="github_connector")
+        except KeyError as exc:
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error=str(exc))
+        method, payload = _github_rollback_request(operation, request.params)
+        rate_limit = self._check_live_rate_limit(domain=domain, operation=operation)
+        if not rate_limit["allowed"]:
+            return ConnectorResult(
+                self.spec.name,
+                operation,
+                False,
+                {"mode": "live_rollback", "domain": domain, "rate_limit": rate_limit},
+                rollback="no action performed",
+                error="GitHub rollback rate limit exceeded",
+            )
+        live_result = _send_github_rollback(method=method, url=url, token=token, payload=payload)
+        receipt = {
+            "receipt_schema": "github_rollback_receipt_v1",
+            "rollback_operation": operation,
+            "resource_ref_hash": _resource_ref_hash(url),
+            "http_status": live_result["http_status"],
+            "rate_limit": rate_limit,
+            "raw_secret_values_included": False,
+            "raw_response_body_included": False,
+        }
+        return ConnectorResult(
+            self.spec.name,
+            operation,
+            live_result["ok"],
+            {
+                "url": url,
+                "domain": domain,
+                "status": live_result["http_status"],
+                "mode": "live_rollback",
+                "accepted": _summarize_params({"url": url, "payload": payload, "token_secret": token_secret}),
+                "rollback_receipt": receipt,
+                "rate_limit": rate_limit,
+            },
+            rollback="rollback executed" if live_result["ok"] else "rollback attempted but provider rejected it",
+            error=live_result.get("error"),
+        )
+
     def health_check(self) -> dict[str, Any]:
         return {**super().health_check(), "live_writes": self.live_writes, "allowlist": list(self.allowlist)}
 
@@ -204,6 +304,13 @@ def _github_payload(operation: str, params: dict[str, Any]) -> dict[str, Any]:
     return {"body": body}
 
 
+def _github_rollback_request(operation: str, params: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+    if operation == "rollback_issue":
+        state_reason = str(params.get("state_reason") or "not_planned").strip() or "not_planned"
+        return "PATCH", {"state": "closed", "state_reason": state_reason[:80]}
+    return "DELETE", None
+
+
 def _send_github_write(*, url: str, token: str, payload: dict[str, Any]) -> dict[str, Any]:
     body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     http_request = Request(
@@ -235,6 +342,34 @@ def _send_github_write(*, url: str, token: str, payload: dict[str, Any]) -> dict
         "response_json": _decoded_json_object(response_body),
         "error": None if 200 <= status < 300 else f"GitHub write failed with status {status}",
     }
+
+
+def _send_github_rollback(*, method: str, url: str, token: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+    body = None if payload is None else json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    http_request = Request(
+        url,
+        data=body,
+        method=method,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "Aegis-Agent/0.1",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        response_context = _open_without_redirects(http_request, timeout=10)
+    except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            return {"ok": False, "http_status": exc.code, "error": "HTTP redirects are not followed by the governed GitHub connector"}
+        return {"ok": False, "http_status": exc.code, "error": f"GitHub rollback failed with status {exc.code}"}
+    except URLError as exc:
+        return {"ok": False, "http_status": 0, "error": f"GitHub rollback failed: {exc.reason}"}
+    with response_context as response:
+        status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+        response.read(4096)
+    return {"ok": 200 <= status < 300, "http_status": status, "error": None if 200 <= status < 300 else f"GitHub rollback failed with status {status}"}
 
 
 def _positive_int(value: Any) -> int | None:

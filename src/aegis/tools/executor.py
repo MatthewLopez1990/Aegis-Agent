@@ -1358,6 +1358,19 @@ class BuiltinToolExecutor:
         requested = str(params.get("operation", "read")).lower()
         connector = self.connectors.get("github")
         if name == "github_pr":
+            if requested in {"rollback_comment", "rollback_pull_request_comment", "delete_comment"}:
+                result = connector.rollback(ConnectorRequest(operation="rollback_pull_request_comment", params=params, scopes=("write",), approved=approved))
+                return {
+                    "ok": result.ok,
+                    "operation": "rollback_pull_request_comment",
+                    "connector": result.connector,
+                    "mode": result.data.get("mode"),
+                    "rate_limit": result.data.get("rate_limit"),
+                    "rollback_receipt": result.data.get("rollback_receipt"),
+                    **_connector_activation_fields(result),
+                    "rollback": result.rollback,
+                    "error": result.error,
+                }
             if requested in {"autofix_apply", "autofix_patch", "apply_autofix", "apply_patch", "local_patch"}:
                 return self._execute_github_pr_autofix_patch(params=params)
             if requested in {"autofix_response", "autofix_comment", "autofix_report", "post_autofix", "provider_autofix"}:
@@ -1424,6 +1437,19 @@ class BuiltinToolExecutor:
         if requested in {"create", "create_issue", "write"}:
             result = connector.write(ConnectorRequest(operation="create_issue", params=params, scopes=("write",), approved=approved))
             return {"ok": result.ok, "operation": "create_issue", "connector": result.connector, "accepted": result.data.get("accepted", {}), **_connector_activation_fields(result), "rollback": result.rollback, "error": result.error}
+        if requested in {"rollback", "rollback_issue", "close_issue"}:
+            result = connector.rollback(ConnectorRequest(operation="rollback_issue", params=params, scopes=("write",), approved=approved))
+            return {
+                "ok": result.ok,
+                "operation": "rollback_issue",
+                "connector": result.connector,
+                "mode": result.data.get("mode"),
+                "rate_limit": result.data.get("rate_limit"),
+                "rollback_receipt": result.data.get("rollback_receipt"),
+                **_connector_activation_fields(result),
+                "rollback": result.rollback,
+                "error": result.error,
+            }
         if params.get("provider_url") or params.get("api_url"):
             return self._execute_github_live_read(kind="issue", operation="read_issue", params=params)
         result = connector.read(ConnectorRequest(operation="read_issue", params=params, scopes=("read",)))
@@ -1517,6 +1543,19 @@ class BuiltinToolExecutor:
         requested = str(params.get("operation", "read")).lower()
         connector = self.connectors.get("gitlab")
         if name == "gitlab_merge_request":
+            if requested in {"rollback_note", "rollback_merge_request_note", "delete_note"}:
+                result = connector.rollback(ConnectorRequest(operation="rollback_merge_request_note", params=params, scopes=("write",), approved=approved))
+                return {
+                    "ok": result.ok,
+                    "operation": "rollback_merge_request_note",
+                    "connector": result.connector,
+                    "mode": result.data.get("mode"),
+                    "rate_limit": result.data.get("rate_limit"),
+                    "rollback_receipt": result.data.get("rollback_receipt"),
+                    **_connector_activation_fields(result),
+                    "rollback": result.rollback,
+                    "error": result.error,
+                }
             if requested in {"comment", "note", "comment_on_merge_request", "write"}:
                 result = connector.write(ConnectorRequest(operation="comment_on_merge_request", params=params, scopes=("write",), approved=approved))
                 return {"ok": result.ok, "operation": "comment_on_merge_request", "connector": result.connector, "accepted": result.data.get("accepted", {}), **_connector_activation_fields(result), "rollback": result.rollback, "error": result.error}
@@ -1527,6 +1566,19 @@ class BuiltinToolExecutor:
         if requested in {"create", "create_issue", "write"}:
             result = connector.write(ConnectorRequest(operation="create_issue", params=params, scopes=("write",), approved=approved))
             return {"ok": result.ok, "operation": "create_issue", "connector": result.connector, "accepted": result.data.get("accepted", {}), **_connector_activation_fields(result), "rollback": result.rollback, "error": result.error}
+        if requested in {"rollback", "rollback_issue", "close_issue"}:
+            result = connector.rollback(ConnectorRequest(operation="rollback_issue", params=params, scopes=("write",), approved=approved))
+            return {
+                "ok": result.ok,
+                "operation": "rollback_issue",
+                "connector": result.connector,
+                "mode": result.data.get("mode"),
+                "rate_limit": result.data.get("rate_limit"),
+                "rollback_receipt": result.data.get("rollback_receipt"),
+                **_connector_activation_fields(result),
+                "rollback": result.rollback,
+                "error": result.error,
+            }
         if params.get("provider_url") or params.get("api_url"):
             return self._execute_gitlab_live_read(kind="issue", operation="read_issue", params=params)
         result = connector.read(ConnectorRequest(operation="read_issue", params=params, scopes=("read",)))

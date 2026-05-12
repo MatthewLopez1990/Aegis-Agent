@@ -624,6 +624,83 @@ class ConnectorTests(unittest.TestCase):
                 self.assertNotIn(token_value, rendered)
                 self.assertNotIn("abc123", rendered)
 
+    def test_github_and_gitlab_live_rollback_requires_approval_and_redacts_receipt(self) -> None:
+        cases = (
+            (
+                "github",
+                GitHubConnectorStub,
+                "GITHUB_TOKEN",
+                "ghp_raw_secret",
+                "rollback_issue",
+                "https://api.github.com/repos/example/aegis/issues/1",
+                "PATCH",
+                "Bearer ghp_raw_secret",
+                "github_rollback_receipt_v1",
+                "aegis.connectors.github._open_without_redirects",
+            ),
+            (
+                "gitlab",
+                GitLabConnectorStub,
+                "GITLAB_TOKEN",
+                "glpat_raw_secret",
+                "rollback_issue",
+                "https://gitlab.com/api/v4/projects/1/issues/1",
+                "PUT",
+                "glpat_raw_secret",
+                "gitlab_rollback_receipt_v1",
+                "aegis.connectors.gitlab._open_without_redirects",
+            ),
+        )
+        for name, connector_type, token_secret, token_value, operation, api_url, method, expected_auth, receipt_schema, patch_target in cases:
+            with self.subTest(connector=name):
+                broker = SecretsBroker()
+                broker.store_secret(name=token_secret, value=token_value)
+                connector = connector_type(live_writes=True, secrets_broker=broker, rate_limits={"per_minute": 3})
+
+                class FakeResponse:
+                    status = 200
+
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, exc_type, exc, traceback):
+                        return False
+
+                    def read(self, limit: int) -> bytes:
+                        return b'{"status":"closed","note":"provider response-secret"}'
+
+                captured: dict[str, object] = {}
+
+                def fake_open(request, timeout):
+                    captured["url"] = request.full_url
+                    captured["method"] = request.get_method()
+                    captured["authorization"] = request.headers.get("Authorization") or request.headers.get("Private-token")
+                    captured["body"] = request.data.decode("utf-8") if request.data else ""
+                    return FakeResponse()
+
+                params = {"api_url": api_url, "token_secret": token_secret, "state_reason": "operator token=abc123"}
+                with patch(patch_target, side_effect=fake_open):
+                    unapproved = connector.rollback(ConnectorRequest(operation=operation, params=params, scopes=("write",)))
+                    rollback = connector.rollback(ConnectorRequest(operation=operation, params=params, scopes=("write",), approved=True))
+
+                rendered = json.dumps(rollback.data, sort_keys=True)
+                self.assertFalse(unapproved.ok)
+                self.assertIn("approval", unapproved.error or "")
+                self.assertTrue(rollback.ok)
+                self.assertEqual(rollback.operation, operation)
+                self.assertEqual(rollback.data["mode"], "live_rollback")
+                self.assertEqual(rollback.data["rollback_receipt"]["receipt_schema"], receipt_schema)
+                self.assertEqual(rollback.data["rollback_receipt"]["rollback_operation"], operation)
+                self.assertFalse(rollback.data["rollback_receipt"]["raw_secret_values_included"])
+                self.assertFalse(rollback.data["rollback_receipt"]["raw_response_body_included"])
+                self.assertTrue(rollback.data["rate_limit"]["allowed"])
+                self.assertEqual(captured["url"], api_url)
+                self.assertEqual(captured["method"], method)
+                self.assertEqual(captured["authorization"], expected_auth)
+                self.assertNotIn(token_value, rendered)
+                self.assertNotIn("abc123", rendered)
+                self.assertNotIn("response-secret", rendered)
+
     def test_service_desk_live_write_requires_approval_secret_and_summarizes_payload(self) -> None:
         broker = SecretsBroker()
         connector = MockServiceNowConnector(allowlist=("example.com",), live_writes=True, secrets_broker=broker)

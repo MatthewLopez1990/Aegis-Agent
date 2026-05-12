@@ -31,7 +31,7 @@ class GitLabConnectorStub(MockServiceConnector):
         super().__init__(
             name="gitlab",
             operations=("read_project", "read_issue", "read_merge_request"),
-            write_operations=("create_issue", "comment_on_merge_request"),
+            write_operations=("create_issue", "comment_on_merge_request", "rollback_issue", "rollback_merge_request_note"),
             sample_data={
                 "projects": [{"path": "example/aegis", "default_branch": "main"}],
                 "issues": [{"iid": 1, "title": "Mock GitLab issue", "state": "opened"}],
@@ -55,16 +55,20 @@ class GitLabConnectorStub(MockServiceConnector):
                 "read_merge_request": RiskLevel.LOW,
                 "create_issue": RiskLevel.HIGH,
                 "comment_on_merge_request": RiskLevel.HIGH,
+                "rollback_issue": RiskLevel.HIGH,
+                "rollback_merge_request_note": RiskLevel.HIGH,
                 "dry_run": RiskLevel.MEDIUM,
             },
             rate_limits=configured_rate_limits,
             data_sensitivity=Sensitivity.INTERNAL,
             default_mode="mock_read_only",
-            approval_required=("create_issue", "comment_on_merge_request"),
+            approval_required=("create_issue", "comment_on_merge_request", "rollback_issue", "rollback_merge_request_note"),
             operation_scopes=self.spec.operation_scopes,
         )
 
     def write(self, request: ConnectorRequest) -> ConnectorResult:
+        if request.operation in {"rollback_issue", "rollback_merge_request_note"}:
+            return self.rollback(request)
         if not self._is_live_write_request(request):
             return super().write(request)
         require_scope(request, "write", connector=self.spec.name)
@@ -157,6 +161,102 @@ class GitLabConnectorStub(MockServiceConnector):
             error=live_result.get("error"),
         )
 
+    def rollback(self, request: ConnectorRequest) -> ConnectorResult:
+        if not self._is_live_write_request(request):
+            return super().rollback(request)
+        require_scope(request, "write", connector=self.spec.name)
+        operation = request.operation
+        if operation not in {"rollback_issue", "rollback_merge_request_note"}:
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error=f"unsupported GitLab rollback operation: {operation}")
+        url = str(request.params.get("rollback_url") or request.params.get("api_url") or request.params.get("provider_url") or "")
+        parsed = urlparse(url)
+        domain = parsed.hostname or ""
+        if not request.approved:
+            return ConnectorResult(
+                self.spec.name,
+                operation,
+                False,
+                {"activation": live_connector_activation(connector=self.spec.name, operation=operation, enabled=self.live_writes, approved=False, allowlist=self.allowlist, domain=domain)},
+                rollback="no action performed",
+                error="GitLab rollback requires approval",
+            )
+        if not self.live_writes:
+            return ConnectorResult(
+                self.spec.name,
+                operation,
+                False,
+                {"activation": live_connector_activation(connector=self.spec.name, operation=operation, enabled=False, approved=True, allowlist=self.allowlist, domain=domain)},
+                rollback="no action performed",
+                error="GitLab live writes are disabled",
+            )
+        validation_error = _validate_url(parsed)
+        if validation_error:
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error=validation_error)
+        if parsed.scheme != "https":
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error="GitLab rollback requires https")
+        if not self._allowed(domain):
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error=f"domain {domain!r} is not allowlisted")
+        private_error = _private_network_error(domain)
+        if private_error:
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error=private_error)
+        token_secret = str(request.params.get("token_secret") or "GITLAB_TOKEN")
+        handle = self.secrets_broker.request_handle(
+            name=token_secret,
+            requester="gitlab_connector",
+            reason=f"GitLab {operation}",
+            scopes=("gitlab:write",),
+        )
+        if not handle.present:
+            return ConnectorResult(
+                self.spec.name,
+                operation,
+                False,
+                {"activation": live_connector_activation(connector=self.spec.name, operation=operation, enabled=True, approved=True, allowlist=self.allowlist, domain=domain, token_present=False)},
+                rollback="no action performed",
+                error=f"secret {token_secret!r} is not configured",
+            )
+        try:
+            token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="gitlab_connector")
+        except KeyError as exc:
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error=str(exc))
+        method, payload = _gitlab_rollback_request(operation, request.params)
+        rate_limit = self._check_live_rate_limit(domain=domain, operation=operation)
+        if not rate_limit["allowed"]:
+            return ConnectorResult(
+                self.spec.name,
+                operation,
+                False,
+                {"mode": "live_rollback", "domain": domain, "rate_limit": rate_limit},
+                rollback="no action performed",
+                error="GitLab rollback rate limit exceeded",
+            )
+        live_result = _send_gitlab_rollback(method=method, url=url, token=token, payload=payload)
+        receipt = {
+            "receipt_schema": "gitlab_rollback_receipt_v1",
+            "rollback_operation": operation,
+            "resource_ref_hash": _resource_ref_hash(url),
+            "http_status": live_result["http_status"],
+            "rate_limit": rate_limit,
+            "raw_secret_values_included": False,
+            "raw_response_body_included": False,
+        }
+        return ConnectorResult(
+            self.spec.name,
+            operation,
+            live_result["ok"],
+            {
+                "url": url,
+                "domain": domain,
+                "status": live_result["http_status"],
+                "mode": "live_rollback",
+                "accepted": _summarize_params({"url": url, "payload": payload, "token_secret": token_secret}),
+                "rollback_receipt": receipt,
+                "rate_limit": rate_limit,
+            },
+            rollback="rollback executed" if live_result["ok"] else "rollback attempted but provider rejected it",
+            error=live_result.get("error"),
+        )
+
     def health_check(self) -> dict[str, Any]:
         return {**super().health_check(), "live_writes": self.live_writes, "allowlist": list(self.allowlist)}
 
@@ -194,6 +294,12 @@ def _gitlab_payload(operation: str, params: dict[str, Any]) -> dict[str, Any]:
     return {"body": body}
 
 
+def _gitlab_rollback_request(operation: str, params: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+    if operation == "rollback_issue":
+        return "PUT", {"state_event": "close"}
+    return "DELETE", None
+
+
 def _send_gitlab_write(*, url: str, token: str, payload: dict[str, Any]) -> dict[str, Any]:
     body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     http_request = Request(
@@ -223,6 +329,32 @@ def _send_gitlab_write(*, url: str, token: str, payload: dict[str, Any]) -> dict
         "response_json": _decoded_json_object(response_body),
         "error": None if 200 <= status < 300 else f"GitLab write failed with status {status}",
     }
+
+
+def _send_gitlab_rollback(*, method: str, url: str, token: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+    body = None if payload is None else json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    http_request = Request(
+        url,
+        data=body,
+        method=method,
+        headers={
+            "Content-Type": "application/json",
+            "Private-Token": token,
+            "User-Agent": "Aegis-Agent/0.1",
+        },
+    )
+    try:
+        response_context = _open_without_redirects(http_request, timeout=10)
+    except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            return {"ok": False, "http_status": exc.code, "error": "HTTP redirects are not followed by the governed GitLab connector"}
+        return {"ok": False, "http_status": exc.code, "error": f"GitLab rollback failed with status {exc.code}"}
+    except URLError as exc:
+        return {"ok": False, "http_status": 0, "error": f"GitLab rollback failed: {exc.reason}"}
+    with response_context as response:
+        status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+        response.read(4096)
+    return {"ok": 200 <= status < 300, "http_status": status, "error": None if 200 <= status < 300 else f"GitLab rollback failed with status {status}"}
 
 
 def _positive_int(value: Any) -> int | None:
