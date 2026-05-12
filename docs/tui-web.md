@@ -15,12 +15,13 @@ Commands:
 - `status [task_id]`
 - `resume [task_id]`
 - `cancel [task_id] [reason]`
+- `task status|resume|pause|cancel|events|timeline|submit|list [args]`
 - `tasks [all|session <session_id>] [--limit N]`
 - `new [title]`, `reset [title]`, `clear`
 - `add-dir <path>`
 - `history [session_id] [--limit N]`, `title [name]`, `topic [off|help|session_id]`, `compress|compact [keep_last]`
-- `background <request>` / `bg <request>`
-- `fast [request]`, `goal`, `batch`, `queue [status|all|session|submit|request]` / `q [...]`, `loop`, `plan`, `branch`, `fork`, `context`, `copy`, `export`, `rename [title]`, `save`, `prompt`, `steer [instruction]`, `stop [task_id]`, `continue [task_id]`, `checkpoint`, `rewind`, `retry`, `undo`, `snapshot`, `snap`
+- `background <request>` / `bg <request>` / `btw <request>`
+- `fast [request]`, `goal`, `batch`, `queue [status|all|session|submit|request]` / `q [...]`, `loop`, `plan`, `ultraplan [prompt]`, `branch`, `fork`, `context`, `recap`, `copy`, `export`, `rename [title]`, `save`, `prompt`, `steer [instruction]`, `stop [task_id]`, `continue [task_id]`, `checkpoint`, `rewind`, `retry`, `undo`, `snapshot`, `snap`
 - `remote-control [name|pair|directory|revoke|relay|relay-directory|relay-notify|relay-outbox|relay-retry|relay-pull|relay-action]` / `rc [name|pair|directory|revoke|relay|relay-directory|relay-notify|relay-outbox|relay-retry|relay-pull|relay-action]`, including `directory --pairing-id <id>` for a sanitized scoped task/session snapshot, `relay-directory --pairing-id <id> --relay-auth-secret <name> --approved` for a one-shot sanitized relay directory publish, `relay-notify --pairing-id <id> --relay-auth-secret <name> --approved` for a one-shot metadata-only mobile/gateway relay notification, `relay-outbox [--status failed]` for durable relay-notification delivery state, `relay-retry --pairing-id <id> --relay-auth-secret <name> --approved` for approved retry, `revoke <pairing-id> [--relay-auth-secret name --approved]` for approved relay revocation propagation, and `relay-pull --pairing-id <id> --relay-auth-secret <name> --approved [--dry-run]` for approved relay action polling; `handoff [platform]`, `remote-env`, `teleport`, `tp`, `mobile`, `desktop`, `app`, `web-setup`
 - `agents [status|profiles|profile-create <name>|profile-disable <id>|delegate <role> <task> [--approved]|handoff <card-id> <lane> [reason]|run <card-id> --approved]`
 - CLI `task list [--session-id <session_id>] [--limit N]`
@@ -28,9 +29,9 @@ Commands:
 - `approve <approval_id> [--actor name] [--reason text] [--admin]`
 - `deny <approval_id> [--actor name] [--reason text] [--admin]`
 - `commands [prefix]`, `doctor`, `debug`, `details`, `config`, `settings`, `profile`, `init`
-- `permissions`, `security-review`, `bug|feedback <summary>`, `hooks list|add|enable|disable|remove|run`
+- `permissions`, `privacy-settings`, `security-review`, `simplify [focus]`, `ultrareview [PR]`, `bug|feedback <summary>`, `hooks list|add|enable|disable|remove|run`
 - `connectors`, `gateway`, `platforms`
-- `pr_comments`
+- `pr_comments`, `autofix-pr [prompt]`
 - `channels`
 - `channel render <channel> <text>`
 - `channel receive <channel> <text>`
@@ -42,7 +43,7 @@ Commands:
 - `events [task_id]`
 - `models`
 - `model [identifier|args]`
-- `login [provider [subscription]]`
+- `login [provider [subscription]]`, `setup-bedrock`, `setup-vertex`, `upgrade`
 - `logout <provider>`
 - `effort|reasoning [level]`, `cost`, `stats`, `insights [days]`, `statusbar|statusline|sb`, `footer`, `busy [status|queue|steer|interrupt|pause|resume]`, `queue [status|all|session|submit]`, `indicator`, `theme`, `skin`, `color`, `verbose`; UI preferences persist as active-session metadata
 - `models list`
@@ -116,14 +117,14 @@ Commands:
 - `evaluation trends [--limit N]`
 - `evaluation delta [--baseline-report-id id --candidate-report-id id] [--scenario name]`
 - `evaluation readiness [--baseline-report-id id --candidate-report-id id] [--scenario name] [--reviewer name] [--limit N]`
-- `browser status|connect|disconnect|session|sessions|close [session_id]|navigate <url>`
+- `browser status|connect|disconnect|session|sessions|close [session_id]|navigate <url>`, `chrome`
 - `browser extract|inspect|table [selector]|screenshot|render|click <selector> [--approval-id id]|fill <json> [--approval-id id]`
 - `boards`
 - `backends`, `sandbox`
-- `voice`
-- `terminal-setup`, `vim`
+- `voice`, `radio`, `stickers`
+- `terminal-setup`, `vim`, `tui [default|fullscreen]`, `scroll-speed [value]`
 - `rollback`
-- `diff`, `review`, `update`, `restart`
+- `diff`, `review`, `release-notes`, `update`, `restart`
 - `platforms`
 - `security [profile|evaluate <operation> <risk> <scopes> [target_domain]]`
 - `capabilities` shows capability groups plus implementation-readiness buckets.
@@ -143,6 +144,7 @@ The web model auth panel can request a local-terminal login handoff for subscrip
 Task lists, task cards, evidence, and timeline views show the linked session when a task belongs to a conversation.
 `/steer <instruction>` records a redacted active-session steering receipt with an instruction digest and character count, without storing or rendering the raw instruction. `/theme`, `/skin`, `/color`, and `/verbose` store sanitized UI preference values in active-session metadata rather than mutating global config.
 `/paste <content>` appends explicit pasted text as untrusted chat context without reading the system clipboard or echoing the raw content back to the terminal. `/image <path>` runs the local `vision_analyze` metadata path for an existing workspace-scoped image and appends only the format, dimensions, byte count, and path metadata to the active session; raw image bytes and OCR content are not rendered.
+Late Claude/Hermes slash aliases such as `/autofix-pr`, `/chrome`, `/privacy-settings`, `/recap`, `/release-notes`, `/scroll-speed`, `/setup-bedrock`, `/setup-vertex`, `/simplify`, `/tui`, `/ultraplan`, `/ultrareview`, and `/upgrade` resolve to governed local readiness or existing Aegis control surfaces instead of failing as unknown commands.
 Resume attempts write explicit audit events with redacted session ids plus readable context refs, so evidence and timeline views can show which original context was used after approval without weakening audit redaction. Distinct resume outcomes, including intermediate `waiting_approval`, approved, and denied states, are appended back to the original session transcript. When a TUI resume command targets a task from another active conversation, the TUI switches its active session back to that originating transcript after the resume result is recorded.
 Approval queues and approval details also show linked session context for task-bound approvals and direct runtime session ids for browser approvals. In the TUI, approval rows and detail views include copyable next steps plus chat-style phrases such as `approve`, `yes proceed`, `deny`, `no do not do that`, and `let's revert` when those intents are safe for the current approval state. The web approval detail card collects actor, reason, and admin-decision metadata before approving or denying, the same decision payload is used by inline transcript approval actions, and the approval panel keeps a bounded recent decision history for approved and denied gates.
 CLI and API approval list/approve/deny responses include the same linked session fields for task-bound approvals plus machine-readable `action_hints` for approval review, approve, deny, reject/revert intent, `session show`, `session history`, and approved task resume follow-up commands. These hints are designed for terminal use and future Slack/Discord adapters while preserving exact approval-payload matching before execution.

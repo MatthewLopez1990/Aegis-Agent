@@ -129,6 +129,14 @@ if (frames.length !== 2 || frames[1].event !== "task" || frames[1].data.status !
         self.assertIn('id="slash-palette"', markup)
         self.assertIn(".slash-palette-row.active", styles)
         self.assertIn("WEB_SLASH_COMMANDS", script)
+        self.assertIn("privacy-settings", script)
+        self.assertIn("setup-bedrock", script)
+        self.assertIn("setup-vertex", script)
+        self.assertIn("autofix-pr", script)
+        self.assertIn("ultraplan", script)
+        self.assertIn("ultrareview", script)
+        self.assertIn("release-notes", script)
+        self.assertIn("chrome", script)
         self.assertIn("slashCommandMatches(prefix).slice(0, 8)", script)
         self.assertIn('document.getElementById("slash-palette").addEventListener("click"', script)
         self.assertIn('document.getElementById("task-form").requestSubmit()', script)
@@ -161,6 +169,26 @@ if (parsed.kind !== "submit" || parsed.command !== "background" || parsed.reques
 const nav = api.parse("/models");
 if (nav.kind !== "section" || nav.section !== "models") {
   throw new Error(`models navigation parsed incorrectly: ${JSON.stringify(nav)}`);
+}
+const privacy = api.matches("privacy").map((entry) => entry.command);
+if (!privacy.includes("approvals")) {
+  throw new Error(`/privacy-settings alias did not resolve to approvals: ${JSON.stringify(privacy)}`);
+}
+const setup = api.matches("setup").map((entry) => entry.command);
+if (!setup.includes("models")) {
+  throw new Error(`/setup-* aliases did not resolve to models: ${JSON.stringify(setup)}`);
+}
+const chrome = api.matches("chrome").map((entry) => entry.command);
+if (!chrome.includes("browser")) {
+  throw new Error(`/chrome alias did not resolve to browser: ${JSON.stringify(chrome)}`);
+}
+const ultra = api.matches("ultra").map((entry) => entry.command);
+if (!ultra.includes("commands")) {
+  throw new Error(`/ultra* aliases did not resolve to commands: ${JSON.stringify(ultra)}`);
+}
+const release = api.matches("release").map((entry) => entry.command);
+if (!release.includes("settings")) {
+  throw new Error(`/release-notes alias did not resolve to settings: ${JSON.stringify(release)}`);
 }
 """
         result = subprocess.run((node, "-e", node_script, str(app_js)), capture_output=True, text=True, timeout=5, check=False)

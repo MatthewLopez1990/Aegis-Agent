@@ -41,6 +41,7 @@ TOP_LEVEL_COMMANDS = (
     "add-dir",
     "agents",
     "allowed-tools",
+    "autofix-pr",
     "backends",
     "batch",
     "background",
@@ -56,6 +57,7 @@ TOP_LEVEL_COMMANDS = (
     "capabilities",
     "channel",
     "channels",
+    "chrome",
     "clear",
     "checkpoint",
     "compact",
@@ -121,12 +123,16 @@ TOP_LEVEL_COMMANDS = (
     "plugin",
     "plugins",
     "pr_comments",
+    "privacy-settings",
     "provider",
     "prompt",
     "q",
     "queue",
+    "radio",
     "rc",
+    "recap",
     "redraw",
+    "release-notes",
     "reload",
     "reload-plugins",
     "reload-mcp",
@@ -149,12 +155,16 @@ TOP_LEVEL_COMMANDS = (
     "save",
     "schedule",
     "schedules",
+    "scroll-speed",
     "security",
     "security-review",
     "session",
     "sessions",
+    "setup-bedrock",
+    "setup-vertex",
     "settings",
     "sethome",
+    "simplify",
     "skills",
     "skin",
     "snap",
@@ -165,8 +175,10 @@ TOP_LEVEL_COMMANDS = (
     "statusbar",
     "stats",
     "steer",
+    "stickers",
     "stop",
     "submit",
+    "task",
     "tasks",
     "teleport",
     "terminal-setup",
@@ -177,7 +189,11 @@ TOP_LEVEL_COMMANDS = (
     "toolsets",
     "tools",
     "tp",
+    "tui",
+    "ultraplan",
+    "ultrareview",
     "undo",
+    "upgrade",
     "update",
     "usage",
     "vim",
@@ -203,6 +219,7 @@ HOOK_COMMANDS = ("list", "add", "enable", "disable", "remove", "run")
 AGENTS_COMMANDS = ("status", "profiles", "profile-create", "profile-disable", "delegate", "handoff", "run")
 REMOTE_CONTROL_COMMANDS = ("pair", "directory", "revoke", "relay", "relay-directory", "relay-notify", "relay-outbox", "relay-retry", "relay-pull", "relay-action")
 SESSION_COMMANDS = ("new", "open", "rename", "set-model", "set-personality", "activate", "archive", "pause", "append", "history", "tasks", "compact")
+TASK_COMMANDS = ("status", "resume", "pause", "cancel", "events", "timeline", "submit", "list", "all", "session")
 TASKS_COMMANDS = ("all", "session")
 QUEUE_COMMANDS = ("status", "show", "list", "active", "pending", "all", "session", "submit")
 BUSY_COMMANDS = ("status", "queue", "steer", "interrupt", "pause", "resume")
@@ -479,6 +496,9 @@ class AegisTui(cmd.Cmd):
     def complete_remote_control(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return _complete_subcommand(REMOTE_CONTROL_COMMANDS, text, line, begidx)
 
+    def complete_task(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return _complete_subcommand(TASK_COMMANDS, text, line, begidx)
+
     def complete_session(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return _complete_subcommand(SESSION_COMMANDS, text, line, begidx)
 
@@ -620,6 +640,43 @@ class AegisTui(cmd.Cmd):
                 ),
             )
         )
+
+    def do_task(self, arg: str) -> None:
+        """task status|resume|pause|cancel|events|timeline|submit|list -- compatibility task controls."""
+        parts = shlex.split(arg)
+        if not parts:
+            self.do_tasks("")
+            return
+        action = parts[0]
+        rest = " ".join(shlex.quote(part) for part in parts[1:])
+        if action in {"list", "show"}:
+            self.do_tasks(rest)
+            return
+        if action in {"all", "session"}:
+            self.do_tasks(" ".join(shlex.quote(part) for part in parts))
+            return
+        if action == "status":
+            self.do_status(rest)
+            return
+        if action in {"resume", "continue"}:
+            self.do_resume(rest)
+            return
+        if action == "pause":
+            self.do_pause(rest)
+            return
+        if action == "cancel":
+            self.do_cancel(rest)
+            return
+        if action == "events":
+            self.do_events(rest)
+            return
+        if action == "timeline":
+            self.do_timeline(rest)
+            return
+        if action == "submit":
+            self.do_submit(rest)
+            return
+        print("usage: task status|resume|pause|cancel|events|timeline|submit|list [args]")
 
     def do_session(self, arg: str) -> None:
         """session [new|rename|set-model|set-personality|activate|archive|pause|append|history|tasks|compact] -- manage active session."""
@@ -1708,6 +1765,25 @@ class AegisTui(cmd.Cmd):
                     ("updated", "updated_at", 22),
                 ),
             )
+        )
+
+    def do_recap(self, arg: str) -> None:
+        """recap -- show a one-line metadata-only active session recap."""
+        session = self.orchestrator.sessions.get_session(self.session["id"])
+        history = self.orchestrator.sessions.history(self.session["id"], limit=1000)
+        user_count = sum(1 for row in history if row.get("role") == "user")
+        assistant_count = sum(1 for row in history if row.get("role") == "assistant")
+        task_count = len(self.orchestrator.store.list_tasks(limit=1000, session_id=self.session["id"]))
+        title = str(session.get("title") or "Untitled session")
+        status = str(session.get("status") or "active")
+        _print_json(
+            {
+                "status": "session_recap",
+                "recap": f"{title}: {status}, {user_count} user turn(s), {assistant_count} assistant turn(s), {task_count} linked task(s).",
+                "active_session_id": session.get("id"),
+                "raw_message_content_included": False,
+                "next_actions": ["session history", "tasks session", "context", "compact"],
+            }
         )
 
     def do_schedules(self, arg: str) -> None:
@@ -3117,6 +3193,40 @@ class AegisTui(cmd.Cmd):
             return
         self.do_models(f"auth logout {shlex.quote(provider)}")
 
+    def do_setup_bedrock(self, arg: str) -> None:
+        """setup_bedrock -- show AWS Bedrock cloud-identity setup bridge."""
+        _print_json(
+            {
+                "status": "provider_setup_bridge",
+                "provider": "aws-bedrock",
+                "auth_method": "cloud_identity",
+                "interactive_browser_from_tui": False,
+                "next_actions": [
+                    "models auth login aws-bedrock cloud-identity --run-external",
+                    "models auth login aws-bedrock cloud-identity --verify-external",
+                    "model aws-bedrock/<model-id>",
+                ],
+                "raw_secret_values_included": False,
+            }
+        )
+
+    def do_setup_vertex(self, arg: str) -> None:
+        """setup_vertex -- show Google Vertex cloud-identity setup bridge."""
+        _print_json(
+            {
+                "status": "provider_setup_bridge",
+                "provider": "google-vertex",
+                "auth_method": "cloud_identity",
+                "interactive_browser_from_tui": False,
+                "next_actions": [
+                    "models auth login google cloud-identity --run-external",
+                    "models auth login google cloud-identity --verify-external",
+                    "model google-vertex/<model-id>",
+                ],
+                "raw_secret_values_included": False,
+            }
+        )
+
     def do_doctor(self, arg: str) -> None:
         """doctor -- diagnose local runtime posture."""
         dashboard = build_product_dashboard(self.orchestrator)
@@ -3354,6 +3464,24 @@ class AegisTui(cmd.Cmd):
     def do_permissions(self, arg: str) -> None:
         """permissions -- Claude-style alias for policy posture."""
         self.do_security("profile")
+
+    def do_privacy_settings(self, arg: str) -> None:
+        """privacy_settings -- show local privacy and telemetry posture."""
+        profile = policy_profile_to_dict(self.orchestrator.config.policy_profile)
+        _print_json(
+            {
+                "status": "local_privacy_settings",
+                "telemetry_enabled": False,
+                "transcript_upload_enabled": False,
+                "raw_secret_exposure": profile.get("raw_secret_exposure"),
+                "audit_redaction": "enabled",
+                "context_firewall": "enabled",
+                "local_state_dir": str(self.orchestrator.config.data_dir),
+                "raw_message_content_included": False,
+                "raw_secret_values_included": False,
+                "next_actions": ["security profile", "audit export-siem", "memory health", "channels"],
+            }
+        )
 
     def do_whoami(self, arg: str) -> None:
         """whoami -- show local actor, session, and policy posture metadata."""
@@ -3718,6 +3846,21 @@ class AegisTui(cmd.Cmd):
             }
         )
 
+    def do_ultraplan(self, arg: str) -> None:
+        """ultraplan [prompt] -- show governed plan handoff readiness."""
+        prompt = arg.strip()
+        _print_json(
+            {
+                "status": "ultraplan_readiness",
+                "cloud_plan_session_started": False,
+                "local_plan_mode_available": True,
+                "prompt_received": bool(prompt),
+                "prompt_chars": len(prompt),
+                "raw_prompt_included": False,
+                "next_actions": ["plan", "batch", "repair synthesis-prompt <proposal_id>", "evaluation readiness"],
+            }
+        )
+
     def do_remote_env(self, arg: str) -> None:
         """remote_env -- show remote environment readiness."""
         self.do_remote_control(arg)
@@ -3764,6 +3907,58 @@ class AegisTui(cmd.Cmd):
                 "selection_mode": "terminal_native",
                 "raw_message_content_included": False,
                 "detail": "Mouse-aware selection and click targets need terminal backend support before Aegis can safely bind them.",
+            }
+        )
+
+    def do_scroll_speed(self, arg: str) -> None:
+        """scroll_speed [value] -- record scroll preference metadata for this session."""
+        value = arg.strip()
+        preferences = dict(self.session.get("metadata", {}).get("tui_preferences") or {})
+        if value:
+            preferences["scroll_speed"] = value[:40]
+            self.session = self.orchestrator.sessions.update_metadata(
+                self.session["id"],
+                {"scroll_speed": preferences["scroll_speed"]},
+                namespace="tui_preferences",
+            )
+        _print_json(
+            {
+                "status": "ui_preference_updated" if value else "metadata_only",
+                "preference": "scroll_speed",
+                "value": preferences.get("scroll_speed"),
+                "terminal_backend_required": True,
+                "raw_message_content_included": False,
+                "next_actions": ["mouse", "terminal-setup", "tui fullscreen"],
+            }
+        )
+
+    def do_tui(self, arg: str) -> None:
+        """tui [default|fullscreen] -- show terminal renderer status."""
+        requested = arg.strip() or "default"
+        _print_json(
+            {
+                "status": "renderer_metadata",
+                "requested_renderer": requested,
+                "active_renderer": "inline",
+                "fullscreen_renderer_available": False,
+                "prompt_wrapping": "enabled",
+                "literal_newline_input": "enabled",
+                "raw_message_content_included": False,
+                "next_actions": ["terminal-setup", "redraw", "dashboard"],
+            }
+        )
+
+    def do_chrome(self, arg: str) -> None:
+        """chrome -- show guarded browser/Chrome integration readiness."""
+        _print_json(
+            {
+                "status": "browser_integration_readiness",
+                "chrome_extension_connected": False,
+                "static_browser_sandbox": "available",
+                "live_browser_automation": "blocked_by_activation_preflight",
+                "next_actions": ["browser status", "browser inspect", "browser render", "capabilities"],
+                "raw_browser_content_included": False,
+                "raw_secret_values_included": False,
             }
         )
 
@@ -4069,6 +4264,28 @@ class AegisTui(cmd.Cmd):
             }
         )
 
+    def do_autofix_pr(self, arg: str) -> None:
+        """autofix_pr [prompt] -- show governed PR autofix workflow."""
+        prompt = arg.strip()
+        _print_json(
+            {
+                "status": "autofix_pr_readiness",
+                "cloud_session_started": False,
+                "prompt_received": bool(prompt),
+                "prompt_chars": len(prompt),
+                "raw_prompt_included": False,
+                "autofix_plan_available": True,
+                "autofix_apply_requires_approved_patch": True,
+                "next_actions": [
+                    "pr_comments",
+                    "tools run github_pr '{\"operation\":\"comments\"}' --approved",
+                    "tools run github_pr '{\"operation\":\"autofix_plan\"}' --approved",
+                    "tools run github_pr '{\"operation\":\"autofix_apply\",\"action_items\":[],\"patch\":\"...\"}' --approved",
+                ],
+                "raw_secret_values_included": False,
+            }
+        )
+
     def do_reload_plugins(self, arg: str) -> None:
         """reload_plugins -- reload private local plugin inventory."""
         self.do_plugins("reload")
@@ -4134,6 +4351,31 @@ class AegisTui(cmd.Cmd):
     def do_update(self, arg: str) -> None:
         """update -- show guarded update readiness."""
         _print_json({"status": "operator_action_required", "detail": "Package self-update is not automatic; review git changes and run the installer/update command explicitly."})
+
+    def do_release_notes(self, arg: str) -> None:
+        """release_notes -- show local release/version metadata."""
+        _print_json(
+            {
+                "status": "local_release_metadata",
+                "package": "Aegis-Agent",
+                "release_channel": "local_git",
+                "changelog_file": "README.md",
+                "raw_git_log_included": False,
+                "next_actions": ["git log --oneline -5", "git status --short", "update"],
+            }
+        )
+
+    def do_upgrade(self, arg: str) -> None:
+        """upgrade -- show subscription/plan upgrade boundaries."""
+        _print_json(
+            {
+                "status": "operator_action_required",
+                "account_upgrade_started": False,
+                "detail": "Aegis does not open provider billing or subscription pages from the TUI. Use provider-owned account portals and then run the matching models auth login/doctor command.",
+                "next_actions": ["models auth targets", "models auth doctor", "login <provider> subscription"],
+                "raw_secret_values_included": False,
+            }
+        )
 
     def do_restart(self, arg: str) -> None:
         """restart -- show guarded restart readiness."""
@@ -4226,9 +4468,39 @@ class AegisTui(cmd.Cmd):
         """review -- show review workflow surfaces."""
         self.do_repair("readiness")
 
+    def do_simplify(self, arg: str) -> None:
+        """simplify [focus] -- show governed simplify workflow readiness."""
+        focus = arg.strip()
+        _print_json(
+            {
+                "status": "simplify_readiness",
+                "auto_mutation_enabled": False,
+                "focus_received": bool(focus),
+                "focus_chars": len(focus),
+                "raw_focus_included": False,
+                "review_agents_spawned": 0,
+                "next_actions": ["review", "security-review", "repair readiness", "batch <instruction>"],
+                "raw_secret_values_included": False,
+            }
+        )
+
     def do_security_review(self, arg: str) -> None:
         """security_review -- show security review surfaces."""
         self.do_security("profile")
+
+    def do_ultrareview(self, arg: str) -> None:
+        """ultrareview [PR] -- show governed deep review readiness."""
+        _print_json(
+            {
+                "status": "ultrareview_readiness",
+                "cloud_review_session_started": False,
+                "local_review_surfaces": ["review", "security-review", "pr_comments", "repair readiness"],
+                "pr_argument_received": bool(arg.strip()),
+                "raw_argument_included": False,
+                "next_actions": ["review", "security-review", "pr_comments"],
+                "raw_secret_values_included": False,
+            }
+        )
 
     def do_platforms(self, arg: str) -> None:
         """platforms -- show connector and channel platform status."""
@@ -4252,6 +4524,28 @@ class AegisTui(cmd.Cmd):
                 ],
                 width,
             )
+        )
+
+    def do_radio(self, arg: str) -> None:
+        """radio -- show external media launch boundary."""
+        _print_json(
+            {
+                "status": "operator_action_required",
+                "external_media_opened": False,
+                "detail": "Aegis does not open external media streams from the TUI. Use a browser explicitly if you want ambient audio.",
+                "raw_secret_values_included": False,
+            }
+        )
+
+    def do_stickers(self, arg: str) -> None:
+        """stickers -- show non-runtime merchandise boundary."""
+        _print_json(
+            {
+                "status": "not_applicable",
+                "detail": "Sticker ordering is outside the local governed runtime.",
+                "external_checkout_opened": False,
+                "raw_secret_values_included": False,
+            }
         )
 
     def do_plugins(self, arg: str) -> None:
@@ -5519,10 +5813,12 @@ def _command_reference() -> str:
             "resume [task_id]       Continue after approval",
             "pause [task_id]        Pause a non-terminal task",
             "cancel [task_id]       Cancel a non-terminal task",
+            "task status|resume|pause|cancel|events|timeline|submit|list",
             "tasks [all|session <id>]  Recent active-session tasks, all tasks, or another session",
             "session                Show active session context",
             "session new|open       Create or switch conversation sessions",
             "session history|tasks  Show active session transcript or tasks",
+            "recap                  Metadata-only active-session recap",
             "branch|fork|context    Branch readiness and context metadata",
             "copy|export|rename     Explicit copy/export and session rename surfaces",
             "paste|image <path>     Safe clipboard and image attachment boundaries",
@@ -5530,6 +5826,7 @@ def _command_reference() -> str:
             "new|reset|clear        Session reset and screen controls",
             "add-dir <path>         Record extra working directory context",
             "history|title|topic|compress Active session transcript helpers",
+            "checkpoint|rewind      Guarded rollback readiness aliases",
             "retry|undo             Resubmit or remove the latest session exchange",
             "background|bg|btw <req>  Submit a governed task from the deck",
             "fast [request]         Inspect fast route or submit a quick governed task",
@@ -5545,6 +5842,7 @@ def _command_reference() -> str:
             "approve <id> [--admin] Approve a gated action",
             "deny <id> [--admin]    Deny a gated action",
             "permissions            Claude-style policy posture alias",
+            "privacy-settings       Local privacy, redaction, and telemetry posture",
             "whoami|yolo            Identity posture and approval-bypass refusal",
             "security-review        Security review posture alias",
             "doctor|debug|config|settings Runtime diagnosis, safe debug, and config paths",
@@ -5556,7 +5854,7 @@ def _command_reference() -> str:
             "capabilities           Capability groups",
             "connectors             Connector health",
             "channels               Channel adapters",
-            "pr_comments            Pull request comment integration readiness",
+            "pr_comments|autofix-pr Pull request comment and autofix readiness",
             "channel render <c> <t>  Render outbound channel payload",
             "channel receive <c> <t> Normalize inbound channel payload",
             "channel resolve-approval <event> <approval>",
@@ -5564,6 +5862,8 @@ def _command_reference() -> str:
             "channel events [limit]  Recent channel activity",
             "models|model           Model providers",
             "login|logout <provider> Model auth aliases",
+            "setup-bedrock|setup-vertex Cloud identity setup bridges",
+            "upgrade                Provider account-upgrade boundary",
             "usage|stats|insights   Model usage and local analytics",
             "effort [level]         Guarded reasoning-effort status",
             "cost                   Model usage and estimated cost",
@@ -5601,17 +5901,21 @@ def _command_reference() -> str:
             "schedule approve|activate|pause <id>",
             "schedule run-due",
             "cron                   Alias for scheduled automation",
-            "voice                  Guarded voice-mode readiness",
+            "voice|radio            Guarded voice and external media readiness",
+            "stickers               Non-runtime merchandise boundary",
             "browser status|connect|disconnect|session|sessions|close|navigate <url>",
             "browser extract|inspect|screenshot|render|click <selector>|fill <json>",
             "boards                 Work boards and cards",
             "backends|sandbox       Execution backend sandbox posture",
             "terminal-setup|vim|mouse Terminal keybinding, vim, and mouse readiness",
+            "tui|scroll-speed       Renderer and scroll preference metadata",
             "footer|busy|indicator|details Runtime UI indicators and safe details",
             "redraw                 Refresh compact home surface",
             "snapshot|snap|rollback Guarded snapshot and rollback status",
             "sethome|set-home       Home workspace/channel readiness",
-            "diff|review            Guarded diff and review workflow surfaces",
+            "diff|review|simplify   Guarded diff, review, and simplify surfaces",
+            "ultraplan|ultrareview  Governed plan and deep-review readiness",
+            "release-notes          Local release metadata",
             "update|restart         Operator-controlled update/restart readiness",
             "audit                  Audit tail",
             "exit                   Quit",
@@ -5664,10 +5968,10 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("copy|export|rename", "explicit copy/export and session rename surfaces"),
             ("paste|image <path>", "safe clipboard and image attachment boundaries"),
             ("save|prompt|steer", "explicit save, prompt, and steering readiness"),
-            ("status|resume|pause|cancel", "task controls"),
+            ("status|resume|continue|pause|cancel", "task controls"),
             ("fast [request]", "quick route alias or governed task submission"),
             ("goal|batch|queue|q|loop", "goal state, evaluation queue, and self-improvement readiness"),
-            ("stop|retry|undo", "cancel alias plus session replay and undo"),
+            ("checkpoint|rewind|stop|retry|undo", "checkpoint readiness, cancel alias, session replay, and undo"),
         ),
     ),
     (
@@ -5678,6 +5982,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("approve|deny <id>", "decide gated work"),
             ("security", "policy posture"),
             ("permissions|security-review", "Claude-style policy and security review aliases"),
+            ("privacy-settings", "local privacy, redaction, and telemetry posture"),
             ("whoami|yolo", "identity posture and approval-bypass refusal"),
             ("doctor|debug|config|settings|init", "runtime diagnostics, local paths, and initialization status"),
             ("bug|feedback <summary>", "local-only bug report capture"),
@@ -5692,6 +5997,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("insights [days]", "sanitized local usage analytics"),
             ("gquota [model]", "Google Gemini Code Assist quota metadata"),
             ("login|logout <provider>", "model auth login/logout aliases"),
+            ("setup-bedrock|setup-vertex|upgrade", "cloud identity setup and account boundary"),
             ("effort|cost", "guarded reasoning-effort metadata and usage cost"),
             ("statusbar|statusline|sb|theme|skin|color|verbose", "UI preference and status metadata"),
             ("commands|keybindings", "slash command and terminal keybinding surfaces"),
@@ -5714,14 +6020,15 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("remote-control|rc|handoff|remote-env|teleport|tp|mobile|desktop|app", "local-first remote-control readiness"),
             ("web-setup", "local web control-plane setup"),
             ("connectors|channels|platforms", "integration surfaces"),
-            ("pr_comments", "pull request comment integration readiness"),
-            ("browser status|connect|disconnect|render", "sandboxed browser work"),
+            ("pr_comments|autofix-pr", "pull request comment and autofix readiness"),
+            ("browser status|connect|disconnect|render|chrome", "sandboxed browser work"),
             ("boards|backends|sandbox", "work and execution planes"),
-            ("voice|terminal-setup|vim|mouse", "optional interaction and terminal readiness"),
+            ("voice|radio|terminal-setup|vim|mouse|tui|scroll-speed", "optional interaction and terminal readiness"),
             ("footer|busy|indicator|details|redraw", "runtime UI indicators and safe details"),
-            ("rollback|snapshot|snap|diff|review", "guarded rollback, snapshot, diff, and review status"),
+            ("rollback|snapshot|snap|diff|review|simplify", "guarded rollback, snapshot, diff, and review status"),
+            ("ultraplan|ultrareview", "governed plan and deep-review readiness"),
             ("sethome|set-home", "home workspace/channel readiness"),
-            ("update|restart", "operator-controlled update and restart readiness"),
+            ("release-notes|update|restart", "operator-controlled update and release readiness"),
         ),
     ),
 )
@@ -5996,6 +6303,7 @@ def _next_command_hint(command: str) -> str:
         "tasks": "/events <id>",
         "session": "/session history",
         "topic": "/sessions",
+        "recap": "/session history",
         "branch": "/session new <title>",
         "copy": "/session history",
         "export": "/audit export-siem",
@@ -6013,12 +6321,16 @@ def _next_command_hint(command: str) -> str:
         "approve": "/resume <id>",
         "security": "/audit",
         "bug": "/repair readiness",
+        "autofix-pr": "/pr_comments",
         "audit": "/evidence <id>",
         "model": "/models auth targets",
         "models": "/models route <id>",
+        "setup-bedrock": "/models auth doctor",
+        "setup-vertex": "/models auth doctor",
         "gquota": "/models auth status google-gemini-oauth",
         "login": "/models auth targets",
         "logout": "/models auth methods",
+        "upgrade": "/models auth targets",
         "effort": "/model",
         "cost": "/models usage",
         "insights": "/usage",
@@ -6041,6 +6353,7 @@ def _next_command_hint(command: str) -> str:
         "indicator": "/statusbar",
         "details": "/dashboard",
         "permissions": "/security profile",
+        "privacy-settings": "/security profile",
         "whoami": "/permissions",
         "yolo": "/permissions",
         "paste": "/session append <content>",
@@ -6053,11 +6366,20 @@ def _next_command_hint(command: str) -> str:
         "connectors": "/channels",
         "pr_comments": "/connectors",
         "browser": "/browser status",
+        "chrome": "/browser status",
         "boards": "/backends",
+        "tui": "/terminal-setup",
+        "scroll-speed": "/mouse",
         "terminal-setup": "/vim",
         "mouse": "/terminal-setup",
+        "radio": "/voice",
+        "stickers": "/help",
         "redraw": "/dashboard",
+        "release-notes": "/update",
         "rollback": "/repair readiness",
+        "simplify": "/review",
+        "ultraplan": "/plan",
+        "ultrareview": "/security-review",
         "sethome": "/web-setup",
     }
     return hints.get(root, "/help")
@@ -6078,6 +6400,7 @@ SLASH_SUBCOMMANDS: dict[str, tuple[str, ...]] = {
     "remote_control": REMOTE_CONTROL_COMMANDS,
     "rc": REMOTE_CONTROL_COMMANDS,
     "session": SESSION_COMMANDS,
+    "task": TASK_COMMANDS,
     "tasks": TASKS_COMMANDS,
     "queue": QUEUE_COMMANDS,
     "q": QUEUE_COMMANDS,
@@ -6187,6 +6510,8 @@ def _complete_slash(text: str, line: str, begidx: int, endidx: int) -> list[str]
         return _slash_completion_labels(root_prefix)
     root = parts[0]
     current = "" if trailing_space else text
+    if root in {"model", "models"} and len(parts) >= 2 and parts[1] == "auth":
+        return _complete_options(MODEL_AUTH_COMMANDS, current)
     if current.startswith("--") or any(part.startswith("--") for part in parts[1:]):
         subcommand = parts[1] if len(parts) > 1 else ""
         return _complete_options(SLASH_FLAG_HINTS.get((root, subcommand), ()), current)

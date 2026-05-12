@@ -46,17 +46,18 @@ const TOOL_RUN_PRESETS = [
 const WEB_SLASH_COMMANDS = [
   { command: "submit", label: "/submit <request>", detail: "Submit a governed task", kind: "submit", acceptsRequest: true },
   { command: "background", aliases: ["bg", "btw", "queue", "q"], label: "/background|/bg|/btw <request>", detail: "Queue governed work from the active session", kind: "submit", acceptsRequest: true },
-  { command: "resume", label: "/resume", detail: "Resume the last waiting or paused task", kind: "resume" },
+  { command: "resume", aliases: ["continue"], label: "/resume", detail: "Resume the last waiting or paused task", kind: "resume" },
   { command: "tasks", aliases: ["task", "list"], label: "/tasks", detail: "Open the task feed", kind: "section", section: "activity" },
-  { command: "approvals", aliases: ["approve", "permissions"], label: "/approvals", detail: "Open pending approval gates", kind: "section", section: "security" },
-  { command: "models", aliases: ["model", "login", "logout"], label: "/models", detail: "Open provider login and model routing controls", kind: "section", section: "models" },
+  { command: "approvals", aliases: ["approve", "permissions", "privacy-settings", "whoami", "yolo"], label: "/approvals", detail: "Open pending approval and privacy gates", kind: "section", section: "security" },
+  { command: "models", aliases: ["model", "login", "logout", "setup-bedrock", "setup-vertex", "upgrade"], label: "/models", detail: "Open provider login and model routing controls", kind: "section", section: "models" },
   { command: "tools", aliases: ["tool", "allowed-tools"], label: "/tools", detail: "Open governed tool and MCP controls", kind: "section", section: "tools" },
+  { command: "browser", aliases: ["chrome"], label: "/browser|/chrome", detail: "Open guarded browser controls", kind: "section", section: "tools" },
   { command: "memory", aliases: ["mem"], label: "/memory", detail: "Open governed memory controls", kind: "section", section: "memory" },
   { command: "remote-control", aliases: ["rc", "remote"], label: "/remote-control", detail: "Open remote pairing and relay controls", kind: "section", section: "automation" },
   { command: "schedules", aliases: ["schedule", "hooks"], label: "/schedules", detail: "Open automation, hooks, and scheduled runs", kind: "section", section: "automation" },
   { command: "evidence", aliases: ["events", "timeline", "audit"], label: "/evidence", detail: "Open evidence, timelines, and audit output", kind: "section", section: "evidence" },
-  { command: "settings", aliases: ["status", "dashboard", "controls"], label: "/settings", detail: "Open runtime posture and security controls", kind: "section", section: "security" },
-  { command: "commands", aliases: ["help", "keybindings"], label: "/commands", detail: "Show slash command suggestions", kind: "palette" },
+  { command: "settings", aliases: ["status", "dashboard", "controls", "recap", "release-notes", "tui", "scroll-speed", "radio", "stickers"], label: "/settings", detail: "Open runtime posture and UI controls", kind: "section", section: "security" },
+  { command: "commands", aliases: ["help", "keybindings", "autofix-pr", "simplify", "ultraplan", "ultrareview"], label: "/commands", detail: "Show slash command suggestions", kind: "palette" },
 ];
 
 const api = async (url, options = {}) => {
