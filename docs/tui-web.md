@@ -16,6 +16,10 @@ Commands:
 - `resume [task_id]`
 - `cancel [task_id] [reason]`
 - `tasks [all|session <session_id>] [--limit N]`
+- `new [title]`, `reset [title]`, `clear`
+- `history [session_id] [--limit N]`, `title [name]`, `compress [keep_last]`
+- `background <request>` / `bg <request>`
+- `remote-control [name]` / `rc [name]`, `mobile`
 - CLI `task list [--session-id <session_id>] [--limit N]`
 - `approvals`
 - `approve <approval_id> [--actor name] [--reason text] [--admin]`
@@ -38,9 +42,14 @@ Commands:
 - `models usage`
 - `models auth [provider]`
 - `models auth login <provider>`
+- `models auth login <provider> subscription`
+- `models auth methods [provider]`
 - `models auth logout <provider>`
+- `provider`, `usage`
 - `tools`
+- `toolsets`
 - `skills [hub query|disable skill_id|enable skill_id]`
+- `plugins`
 - `memory search <query>`
 - `memory health [--limit N] [--owner owner] [--scope scope]`
 - `memory session-preview <session_id> [--owner name] [--scope scope]`
@@ -60,6 +69,7 @@ Commands:
 - `memory delete <memory_id>`
 - `migrate openclaw|hermes|openclaw-memory-preview|hermes-memory-preview|openclaw-memory-commit|hermes-memory-commit <path> [--owner USER] [--scope SCOPE]`
 - `mcp list|register <name> <command> <tool,tool>|call <server> <tool> <json> [--approved]`
+- `reload-mcp`
 - `session [new <title>|open <session_id>|rename <title>|set-model <model>|set-personality <name>|activate|archive|pause|append <content> [--role user|assistant] [--trust-class CLASS]|history [session_id] [--limit N]|tasks [--limit N]|compact [keep_last]]`
 - `sessions [--limit N]`
 - `schedules`
@@ -71,6 +81,7 @@ Commands:
 - `schedule due`
 - `schedule approve|activate|pause <id>`
 - `schedule run-due`
+- `cron [subcommand]`
 - `evaluation queue [--reviewer name] [--limit N]`
 - `evaluation review <report-id> <reviewed_passed|reviewed_failed|needs_followup|dismissed> [--reviewer name] [--notes text]`
 - `evaluation trends [--limit N]`
@@ -80,6 +91,9 @@ Commands:
 - `browser extract|inspect|table [selector]|screenshot|render|click <selector> [--approval-id id]|fill <json> [--approval-id id]`
 - `boards`
 - `backends`
+- `voice`
+- `rollback`
+- `platforms`
 - `security [profile|evaluate <operation> <risk> <scopes> [target_domain]]`
 - `capabilities` shows capability groups plus implementation-readiness buckets.
 - `audit [export-siem [limit]]`
@@ -87,7 +101,7 @@ Commands:
 
 The TUI uses the same orchestrator, policy gate, approval queue, audit logger, and context firewall as the CLI/API.
 Policies can require admin approval; use `approve <approval_id> --admin` for those gates.
-It starts with a compact control surface that shows the animated Aegis shield, active audit/approval/session/model/workspace flags, and only the next useful navigation prompts. The full posture still lives behind `dashboard`. Plain text submits a task, `/` opens a Codex-style command palette, slash aliases such as `/tasks` dispatch directly, `/mem`-style prefixes render filtered options, `menu operate|govern|build|explore` opens nested command groups, tab completion covers top-level commands plus common subcommands and selected flags, and local readline history persists in `.aegis/tui_history` with private file permissions. The identity banner rotates through deterministic ASCII shield frames so tests and CI remain stable while interactive operators get a stronger command-deck signal.
+It starts with a compact control surface that shows the animated Aegis shield, active audit/approval/session/model/workspace flags, and only the next useful navigation prompts. The full posture still lives behind `dashboard`. Plain text submits a task, `/` opens a Codex-style command palette, slash aliases such as `/tasks`, `/bg`, and `/rc` dispatch directly, `/mem`-style prefixes render filtered options, `menu operate|govern|build|explore` opens nested command groups, tab completion covers top-level commands plus common subcommands and selected flags, and local readline history persists in `.aegis/tui_history` with private file permissions. The identity banner rotates through deterministic ASCII shield frames so tests and CI remain stable while interactive operators get a stronger command-deck signal. `remote-control`/`rc` is a guarded readiness/status surface in this slice: it points operators at the local web control plane and records the remaining secure controls needed before off-device mobile/browser relay is allowed, including short-lived pairing tokens, outbound relay, approval prompts, and audit receipts.
 Task lists, task cards, evidence, and timeline views show the linked session when a task belongs to a conversation.
 Resume attempts write explicit audit events with redacted session ids plus readable context refs, so evidence and timeline views can show which original context was used after approval without weakening audit redaction. Distinct resume outcomes, including intermediate `waiting_approval`, approved, and denied states, are appended back to the original session transcript. When a TUI resume command targets a task from another active conversation, the TUI switches its active session back to that originating transcript after the resume result is recorded.
 Approval queues and approval details also show linked session context for task-bound approvals and direct runtime session ids for browser approvals. In the TUI, approval rows and detail views include copyable next steps plus chat-style phrases such as `approve`, `yes proceed`, `deny`, `no do not do that`, and `let's revert` when those intents are safe for the current approval state. The web approval detail card collects actor, reason, and admin-decision metadata before approving or denying, the same decision payload is used by inline transcript approval actions, and the approval panel keeps a bounded recent decision history for approved and denied gates.
@@ -160,7 +174,7 @@ The API is a local control plane and does not implement user authentication. Bin
 - `POST /models/alias`
 - `POST /models/fallbacks`
 - `GET /model-usage`
-- `POST /models/auth/login`
+- `POST /models/auth/login` with `method: "api_key"` or guarded `method: "subscription"` metadata
 - `POST /models/auth/logout`
 - `GET /tools`
 - `POST /tools/run`

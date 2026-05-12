@@ -305,8 +305,14 @@ const refresh = async () => {
       modelProviders.providers,
       (x) => ({
         title: x.provider,
-        detail: x.local ? "Local provider" : x.auth_configured ? `Auth configured via ${x.auth_source}` : "Auth missing",
-        meta: `${x.models.length} models · tools ${formatBool(x.supports_tools)}`,
+        detail: x.local
+          ? "Local provider"
+          : x.auth_configured
+            ? `Auth configured via ${x.auth_source}`
+            : x.subscription_auth_supported
+              ? `Auth missing · subscription setup: ${x.subscription_auth?.external_command || "external login required"}`
+              : "Auth missing",
+        meta: `${x.models.length} models · tools ${formatBool(x.supports_tools)} · auth ${(x.auth_methods || []).join(", ") || "none"} · subscription ${formatBool(x.subscription_auth_supported)}`,
         tone: x.local || x.auth_configured ? "ready" : "attention",
       })
     );
@@ -2010,8 +2016,9 @@ document.getElementById("repair-rollback-form").addEventListener("submit", async
 document.getElementById("model-auth-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const provider = document.getElementById("model-provider").value;
+  const method = document.getElementById("model-auth-method").value;
   const apiKey = document.getElementById("model-api-key").value;
-  await api("/models/auth/login", { method: "POST", body: JSON.stringify({ provider, api_key: apiKey }) });
+  await api("/models/auth/login", { method: "POST", body: JSON.stringify({ provider, method, api_key: apiKey }) });
   document.getElementById("model-api-key").value = "";
   await refresh();
 });

@@ -450,10 +450,16 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 return
             if path == "/models/auth/login":
                 payload = self._read_json()
+                provider = str(_required(payload, "provider"))
+                method = str(payload.get("method") or "api_key").replace("-", "_")
+                if method == "subscription":
+                    auth = orchestrator.models.login_provider_subscription(provider)
+                else:
+                    auth = orchestrator.models.login_provider(provider, str(_required(payload, "api_key")))
                 self._json(
                     {
                         "ok": True,
-                        "auth": orchestrator.models.login_provider(str(_required(payload, "provider")), str(_required(payload, "api_key"))),
+                        "auth": auth,
                     }
                 )
                 return

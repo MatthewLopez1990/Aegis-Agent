@@ -33,12 +33,16 @@ TOP_LEVEL_COMMANDS = (
     "approvals",
     "audit",
     "backends",
+    "background",
+    "bg",
     "boards",
     "browser",
     "cancel",
     "capabilities",
     "channel",
     "channels",
+    "clear",
+    "compress",
     "connectors",
     "dashboard",
     "deny",
@@ -52,11 +56,21 @@ TOP_LEVEL_COMMANDS = (
     "menu",
     "menus",
     "migrate",
+    "mobile",
     "models",
+    "new",
     "pause",
+    "platforms",
+    "plugins",
+    "provider",
+    "rc",
+    "reload-mcp",
+    "remote-control",
     "repair",
     "repairs",
+    "reset",
     "resume",
+    "rollback",
     "schedule",
     "schedules",
     "security",
@@ -67,12 +81,16 @@ TOP_LEVEL_COMMANDS = (
     "submit",
     "tasks",
     "timeline",
+    "title",
+    "toolsets",
     "tools",
+    "usage",
+    "voice",
 )
 MEMORY_COMMANDS = ("search", "health", "session-preview", "session-commit", "create", "review-queue", "review-digest", "review-action", "review-batch", "recertify", "update", "merge", "resolve-conflict", "expire", "cleanup-expired", "explain", "export", "delete")
 MIGRATE_COMMANDS = ("openclaw", "hermes", "openclaw-memory-preview", "hermes-memory-preview", "openclaw-memory-commit", "hermes-memory-commit")
 MODEL_COMMANDS = ("list", "route", "alias", "fallbacks", "usage", "auth", "providers")
-MODEL_AUTH_COMMANDS = ("login", "logout")
+MODEL_AUTH_COMMANDS = ("login", "logout", "methods")
 TOOLS_COMMANDS = ("run",)
 SKILLS_COMMANDS = ("hub", "disable", "enable")
 REPAIR_COMMANDS = ("readiness", "review", "approve", "reject", "candidate", "generate-candidate", "synthesis-prompt", "synthesize-candidate", "review-candidate", "apply-candidate", "rollback-candidate", "attempt")
@@ -95,8 +113,16 @@ SECURITY_COMMANDS = (
     "rollback-bundle",
     "evaluate",
 )
-CHANNEL_COMMANDS = ("render", "receive", "send-webhook", "send-email", "events")
+CHANNEL_COMMANDS = ("render", "receive", "resolve-approval", "send-webhook", "send-email", "send-chat-webhook", "events")
 EVALUATION_COMMANDS = ("queue", "review", "trends", "delta", "readiness")
+SLASH_COMMAND_ALIASES = {
+    "bg": "background",
+    "rc": "remote_control",
+    "remote-control": "remote_control",
+    "reload-mcp": "reload_mcp",
+    "reload_mcp": "reload_mcp",
+    "set-home": "sethome",
+}
 TUI_HISTORY_LIMIT = 1000
 AEGIS_AGENT_WORDMARK: tuple[str, ...] = (
     "::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::",
@@ -773,9 +799,16 @@ class AegisTui(cmd.Cmd):
             return
         if command == "auth":
             try:
+                if len(parts) >= 2 and parts[1] == "methods":
+                    provider = parts[2] if len(parts) > 2 else None
+                    _print_json({"auth": self.orchestrator.models.auth_status(provider)})
+                    return
                 if len(parts) >= 3 and parts[1] == "login":
-                    api_key = getpass.getpass(f"{parts[2]} API key: ")
-                    _print_json({"auth": self.orchestrator.models.login_provider(parts[2], api_key)})
+                    if len(parts) >= 4 and parts[3] in {"subscription", "oauth"}:
+                        _print_json({"auth": self.orchestrator.models.login_provider_subscription(parts[2])})
+                    else:
+                        api_key = getpass.getpass(f"{parts[2]} API key: ")
+                        _print_json({"auth": self.orchestrator.models.login_provider(parts[2], api_key)})
                     return
                 if len(parts) >= 3 and parts[1] == "logout":
                     _print_json({"auth": self.orchestrator.models.logout_provider(parts[2])})
@@ -788,7 +821,7 @@ class AegisTui(cmd.Cmd):
                 print(f"model auth invalid: {exc}")
             return
         if command != "providers":
-            print("usage: models list|providers|route <identifier>|alias <alias> <identifier>|fallbacks <identifier> <fallback> [fallback...]|usage|auth [provider]|auth login <provider>|auth logout <provider>")
+            print("usage: models list|providers|route <identifier>|alias <alias> <identifier>|fallbacks <identifier> <fallback> [fallback...]|usage|auth [provider]|auth methods [provider]|auth login <provider> [subscription]|auth logout <provider>")
             return
         print(
             _table(
@@ -1929,6 +1962,136 @@ class AegisTui(cmd.Cmd):
         except KeyError:
             print(f"task not found: {task_id}")
 
+    def do_clear(self, arg: str) -> None:
+        """clear -- clear the terminal screen."""
+        if sys.stdout.isatty():
+            print("\033[2J\033[H", end="")
+        else:
+            print("screen cleared")
+
+    def do_new(self, arg: str) -> None:
+        """new [title] -- start a fresh local session."""
+        title = arg.strip() or "Aegis TUI"
+        self.session = self.orchestrator.sessions.create_session(title=title, channel="terminal")
+        self.last_task_id = None
+        _print_json(self.session)
+
+    def do_reset(self, arg: str) -> None:
+        """reset [title] -- alias for new."""
+        self.do_new(arg)
+
+    def do_history(self, arg: str) -> None:
+        """history [session_id] [--limit N] -- show conversation history."""
+        self.do_session(f"history {arg}".strip())
+
+    def do_title(self, arg: str) -> None:
+        """title [name] -- show or rename the active session."""
+        if arg.strip():
+            self.do_session(f"rename {arg}")
+            return
+        self.do_session("")
+
+    def do_compress(self, arg: str) -> None:
+        """compress [keep_last] -- compact the active session history."""
+        self.do_session(f"compact {arg}".strip())
+
+    def do_background(self, arg: str) -> None:
+        """background <request> -- submit a governed task from the active session."""
+        if not arg.strip():
+            print("usage: background <request>")
+            return
+        self.do_submit(arg)
+
+    def do_rollback(self, arg: str) -> None:
+        """rollback -- show guarded rollback status."""
+        width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
+        print(
+            _boxed_lines(
+                "Rollback",
+                [
+                    "Filesystem checkpoint rollback is not enabled in this local runtime.",
+                    "Available guarded rollback surfaces: policy rollback-bundle, repair rollback-candidate, and explicit SQLite backups through migrate backup.",
+                    "A future filesystem rollback adapter must record changed files, approval, verification, and rollback receipts before it can mutate the workspace.",
+                ],
+                width,
+            )
+        )
+
+    def do_remote_control(self, arg: str) -> None:
+        """remote_control [name] -- show guarded remote-control readiness."""
+        width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
+        title = arg.strip() or self.session.get("title") or "Aegis TUI"
+        print(
+            _boxed_lines(
+                "Remote Control",
+                [
+                    f"Session: {title}",
+                    "Status: local control plane available; mobile/browser relay not yet enabled.",
+                    "Current secure surface: aegis serve --host 127.0.0.1 --port 8765",
+                    "Security posture: no inbound remote tunnel, no subscription token capture, no unauthenticated control URL.",
+                    "Next secure slice: short-lived pairing token, outbound relay, approval prompts, and audit receipts before any off-device control.",
+                ],
+                width,
+            )
+        )
+
+    def do_mobile(self, arg: str) -> None:
+        """mobile -- show mobile/remote-control readiness."""
+        self.do_remote_control(arg)
+
+    def do_provider(self, arg: str) -> None:
+        """provider -- show model providers."""
+        self.do_models("providers")
+
+    def do_usage(self, arg: str) -> None:
+        """usage -- show model usage summary."""
+        self.do_models("usage")
+
+    def do_platforms(self, arg: str) -> None:
+        """platforms -- show connector and channel platform status."""
+        _print_json(
+            {
+                "connectors": self.orchestrator.connectors.status(),
+                "channels": self.orchestrator.channels.list_channels(),
+                "remote_control": {"status": "local_only", "command": "remote-control"},
+            }
+        )
+
+    def do_voice(self, arg: str) -> None:
+        """voice -- show guarded voice-mode status."""
+        width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
+        print(
+            _boxed_lines(
+                "Voice",
+                [
+                    "Voice mode is not enabled in this dependency-light runtime.",
+                    "A secure implementation needs explicit microphone capture consent, local artifact sandboxing, provider selection, and redacted audio receipts.",
+                ],
+                width,
+            )
+        )
+
+    def do_plugins(self, arg: str) -> None:
+        """plugins -- show extension surfaces."""
+        _print_json({"skills": self.orchestrator.skills.list_public(), "mcp_servers": self.orchestrator.mcp.list_servers()})
+
+    def do_toolsets(self, arg: str) -> None:
+        """toolsets -- summarize governed tools by permission and risk."""
+        rows: dict[str, dict[str, Any]] = {}
+        for tool in self.orchestrator.tool_catalog.list():
+            key = f"{tool.get('permission')}:{tool.get('risk_level')}"
+            row = rows.setdefault(key, {"key": key, "permission": tool.get("permission"), "risk_level": tool.get("risk_level"), "tools": []})
+            row["tools"].append(tool.get("name"))
+        _print_json({"toolsets": list(rows.values())})
+
+    def do_cron(self, arg: str) -> None:
+        """cron [subcommand] -- alias for schedules."""
+        self.do_schedule(arg or "due")
+
+    def do_reload_mcp(self, arg: str) -> None:
+        """reload_mcp -- reload governed MCP registry metadata."""
+        _print_json({"ok": True, "mode": "one_shot_stdio_registry", "servers": self.orchestrator.mcp.list_servers()})
+
     def do_help(self, arg: str) -> None:
         """help -- show command reference."""
         print(_command_reference())
@@ -1968,8 +2131,10 @@ class AegisTui(cmd.Cmd):
             name = command.split(maxsplit=1)[0]
             if name in {"q", "quit"}:
                 return self.do_quit("")
-            if hasattr(self, f"do_{name}"):
-                return bool(self.onecmd(command))
+            canonical = SLASH_COMMAND_ALIASES.get(name, name.replace("-", "_"))
+            if hasattr(self, f"do_{canonical}"):
+                rest = command[len(name) :].strip()
+                return bool(self.onecmd(f"{canonical} {rest}".strip()))
             matches = _slash_matches(name)
             if matches:
                 print(self._render_slash_palette(name))
@@ -2719,6 +2884,11 @@ def _command_reference() -> str:
             "session                Show active session context",
             "session new|open       Create or switch conversation sessions",
             "session history|tasks  Show active session transcript or tasks",
+            "new|reset|clear        Session reset and screen controls",
+            "history|title|compress Active session transcript helpers",
+            "background|bg <req>    Submit a governed task from the deck",
+            "remote-control|rc      Local-first remote-control readiness",
+            "mobile                 Mobile/remote-control readiness",
             "evidence [task_id]     Show receipt and audit evidence",
             "timeline [task_id]     Show plan, receipt, and audit sequence",
             "events [task_id]       Show grouped run-event progress",
@@ -2734,14 +2904,20 @@ def _command_reference() -> str:
             "channels               Channel adapters",
             "channel render <c> <t>  Render outbound channel payload",
             "channel receive <c> <t> Normalize inbound channel payload",
+            "channel resolve-approval <event> <approval>",
+            "channel send-chat-webhook <text> --approved",
             "channel events [limit]  Recent channel activity",
             "models                 Model providers",
-            "models auth login|logout <provider>",
+            "provider|usage         Model provider and usage aliases",
+            "models auth methods|login|logout <provider>",
             "tools                  Governed tool catalog",
+            "toolsets               Group tools by permission and risk",
             "tools run <name> <json> Run a governed tool",
             "skills [hub query]     Governed skills and virtual Skill Hub",
+            "plugins                Skills and MCP extension surfaces",
             "memory health|search|session-preview|create|update|merge|expire",
             "mcp list|register|call Governed MCP registry",
+            "reload-mcp             Refresh governed one-shot MCP registry status",
             "repairs [status]       List self-repair proposals",
             "repair <id>            Inspect self-repair proposal evidence",
             "repair review|approve|reject <id>",
@@ -2758,6 +2934,8 @@ def _command_reference() -> str:
             "schedule due",
             "schedule approve|activate|pause <id>",
             "schedule run-due",
+            "cron                   Alias for scheduled automation",
+            "voice                  Guarded voice-mode readiness",
             "browser session|sessions|close|navigate <url>",
             "browser extract|inspect|screenshot|render|click <selector>|fill <json>",
             "boards                 Work boards and cards",
@@ -2765,7 +2943,7 @@ def _command_reference() -> str:
             "audit                  Audit tail",
             "exit                   Quit",
             "",
-            "Plain text submits a task. Slash aliases such as /tasks also work.",
+            "Plain text submits a task. Slash aliases such as /tasks, /rc, and /bg also work.",
         )
     )
 
@@ -2802,10 +2980,12 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     (
         "Operate",
         (
+            ("new|reset|clear", "session reset and screen controls"),
             ("submit <request>", "start a governed task"),
+            ("background|bg <request>", "start a governed task without leaving the deck"),
             ("dashboard", "runtime command deck"),
             ("tasks [all|session <id>]", "recent task lanes"),
-            ("session", "active transcript context"),
+            ("session|history|title|compress", "active transcript context"),
             ("status|resume|pause|cancel", "task controls"),
         ),
     ),
@@ -2822,20 +3002,24 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     (
         "Build",
         (
-            ("models", "provider routes and auth"),
+            ("models|provider|usage", "provider routes, auth, and usage"),
             ("tools run <name> <json>", "safe tool execution"),
+            ("toolsets", "tool catalog grouped by permission and risk"),
             ("skills [hub query]", "governed skill hub"),
             ("memory search|create|review", "durable memory"),
-            ("mcp|repair|schedules", "extensions and self-repair"),
+            ("mcp|reload-mcp|repair|schedules|cron", "extensions, schedules, and self-repair"),
         ),
     ),
     (
         "Explore",
         (
             ("capabilities", "parity and readiness"),
-            ("connectors|channels", "integration surfaces"),
+            ("remote-control|rc|mobile", "local-first remote-control readiness"),
+            ("connectors|channels|platforms", "integration surfaces"),
+            ("voice|plugins", "optional interaction and plugin surfaces"),
             ("browser session|render", "sandboxed browser work"),
             ("boards|backends", "work and execution planes"),
+            ("rollback", "guarded rollback status"),
         ),
     ),
 )

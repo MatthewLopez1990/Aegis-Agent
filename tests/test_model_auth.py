@@ -111,6 +111,44 @@ class ModelAuthTests(unittest.TestCase):
             logout_status = registry.logout_provider("openrouter")
             self.assertFalse(logout_status["auth_configured"])
 
+    def test_subscription_auth_surface_is_metadata_only_until_governed_bridge_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            secret_path = root / ".aegis" / "secrets.json"
+            audit_path = root / ".aegis" / "audit.jsonl"
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(audit_path), SecretsBroker(secret_path))
+
+            providers = {row["provider"]: row for row in registry.list_providers()}
+            openai = providers["openai"]
+            anthropic = providers["anthropic"]
+            openrouter = providers["openrouter"]
+
+            self.assertEqual(openai["auth_methods"], ["api_key", "subscription"])
+            self.assertTrue(openai["subscription_auth_supported"])
+            self.assertFalse(openai["subscription_auth_configured"])
+            self.assertEqual(openai["subscription_auth"]["external_command"], "codex login")
+            self.assertEqual(openai["subscription_auth"]["aegis_bridge_status"], "not_implemented")
+            self.assertEqual(anthropic["auth_methods"], ["api_key", "subscription"])
+            self.assertEqual(anthropic["subscription_auth"]["external_command"], "claude auth login")
+            self.assertFalse(openrouter["subscription_auth_supported"])
+            self.assertIsNone(openrouter["subscription_auth"])
+
+            status = registry.login_provider_subscription("openai")
+            self.assertEqual(status["status"], "external_login_required")
+            self.assertEqual(status["external_command"], "codex login")
+            self.assertFalse(status["token_captured"])
+            self.assertFalse(status["token_capture_supported"])
+            self.assertFalse(registry.auth_status("openai")["auth_configured"])
+            self.assertFalse(secret_path.exists())
+
+            with self.assertRaises(ValueError):
+                registry.login_provider_subscription("openrouter")
+
+            audit_text = audit_path.read_text(encoding="utf-8")
+            self.assertIn("model.auth_subscription_login_requested", audit_text)
+            self.assertNotIn("sk-", audit_text)
+            self.assertNotIn("session_cookie", audit_text)
+
     def test_openrouter_live_client_uses_brokered_secret_and_records_usage(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
             root = Path(temp)

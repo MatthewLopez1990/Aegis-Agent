@@ -1720,6 +1720,23 @@ class CliTests(unittest.TestCase):
             self.assertEqual(alias_route["identifier"], "ollama/llama3")
             self.assertEqual(fallback_route["fallbacks"], ["lmstudio/local"])
 
+    def test_model_auth_subscription_login_is_guarded_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            data_dir = Path(temp) / ".aegis"
+            parser = build_parser()
+
+            methods = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "methods", "openai"]))
+            login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "openai", "--subscription"]))
+
+            self.assertIn("subscription", methods["auth"]["auth_methods"])
+            self.assertEqual(methods["auth"]["subscription_auth"]["external_command"], "codex login")
+            self.assertTrue(methods["auth"]["subscription_auth_supported"])
+            self.assertFalse(methods["auth"]["subscription_auth_configured"])
+            self.assertTrue(login["ok"])
+            self.assertEqual(login["auth"]["status"], "external_login_required")
+            self.assertEqual(login["auth"]["external_command"], "codex login")
+            self.assertFalse(login["auth"]["token_captured"])
+
     @unittest.skipUnless(os.name == "posix", "POSIX mode assertions only apply on POSIX")
     def test_local_state_files_are_private(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

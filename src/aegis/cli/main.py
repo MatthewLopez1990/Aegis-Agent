@@ -380,8 +380,12 @@ def build_parser() -> argparse.ArgumentParser:
     model_auth_sub = model_auth.add_subparsers(dest="auth_command", required=True)
     model_auth_status = model_auth_sub.add_parser("status", help="Show model provider auth status")
     model_auth_status.add_argument("provider", nargs="?")
-    model_auth_login = model_auth_sub.add_parser("login", help="Store a model provider API key in the local secret store")
+    model_auth_methods = model_auth_sub.add_parser("methods", help="Show supported auth methods and subscription login status")
+    model_auth_methods.add_argument("provider", nargs="?")
+    model_auth_login = model_auth_sub.add_parser("login", help="Store an API key or start a guarded subscription-login flow")
     model_auth_login.add_argument("provider", choices=("openai", "openrouter", "anthropic", "google", "mistral", "cohere", "custom"))
+    model_auth_login.add_argument("--method", choices=("api-key", "subscription"), default="api-key")
+    model_auth_login.add_argument("--subscription", action="store_true", help="Alias for --method subscription")
     model_auth_login.add_argument("--api-key", help="API key value. Prefer --api-key-stdin or interactive entry.")
     model_auth_login.add_argument("--api-key-stdin", action="store_true", help="Read API key from stdin")
     model_auth_logout = model_auth_sub.add_parser("logout", help="Remove a model provider API key from the local secret store")
@@ -921,8 +925,16 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
         if args.model_command == "auth":
             if args.auth_command == "status":
                 return {"auth": registry.auth_status(args.provider)}
+            if args.auth_command == "methods":
+                return {"auth": registry.auth_status(args.provider)}
             if args.auth_command == "login":
-                status = registry.login_provider(args.provider, _read_api_key(args))
+                method = "subscription" if getattr(args, "subscription", False) else str(args.method)
+                if method == "subscription":
+                    if getattr(args, "api_key", None) or getattr(args, "api_key_stdin", False):
+                        raise ValueError("subscription login does not accept API key input")
+                    status = registry.login_provider_subscription(args.provider)
+                else:
+                    status = registry.login_provider(args.provider, _read_api_key(args))
                 return {"ok": True, "auth": status}
             if args.auth_command == "logout":
                 status = registry.logout_provider(args.provider)

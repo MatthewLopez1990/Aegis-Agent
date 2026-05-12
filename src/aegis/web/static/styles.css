@@ -936,7 +936,7 @@ pre {
 }
 
 .auth-form {
-  grid-template-columns: minmax(110px, 0.8fr) minmax(0, 1.5fr) auto auto;
+  grid-template-columns: minmax(110px, 0.8fr) minmax(120px, 0.75fr) minmax(0, 1.5fr) auto auto;
 }
 
 .card-form {

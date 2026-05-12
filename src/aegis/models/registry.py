@@ -80,6 +80,9 @@ class ModelRegistry:
                         "auth_required": provider.auth_secret is not None,
                         "auth_configured": self._auth_configured(provider),
                         "auth_source": self._auth_source(provider),
+                        "auth_methods": self._auth_methods(provider),
+                        "subscription_auth_supported": self._subscription_auth_supported(provider),
+                        "subscription_auth_configured": False,
                         "context_window_tokens": provider.context_window_tokens,
                         "tokenizer_profile": provider.tokenizer_profile,
                     }
@@ -102,6 +105,10 @@ class ModelRegistry:
                     "auth_secret": provider.auth_secret,
                     "auth_configured": self._auth_configured(provider),
                     "auth_source": self._auth_source(provider),
+                    "auth_methods": self._auth_methods(provider),
+                    "subscription_auth_supported": self._subscription_auth_supported(provider),
+                    "subscription_auth_configured": False,
+                    "subscription_auth": self._subscription_auth_profile(provider),
                     "context_window_tokens": provider.context_window_tokens,
                     "tokenizer_profile": provider.tokenizer_profile,
                     "metadata": dict(provider.metadata),
@@ -124,6 +131,32 @@ class ModelRegistry:
         self.audit_logger.append(
             "model.auth_login",
             {"provider": provider.provider, "auth_secret": provider.auth_secret, "auth_source": status["auth_source"]},
+        )
+        return status
+
+    def login_provider_subscription(self, provider_name: str) -> dict[str, Any]:
+        provider = self._provider(provider_name)
+        profile = self._subscription_auth_profile(provider)
+        if profile is None:
+            raise ValueError(f"provider {provider_name!r} does not support subscription login")
+        status = {
+            "provider": provider.provider,
+            "method": "subscription",
+            "status": "external_login_required",
+            "auth_configured": False,
+            "auth_source": None,
+            "token_captured": False,
+            "token_capture_supported": False,
+            **profile,
+        }
+        self.audit_logger.append(
+            "model.auth_subscription_login_requested",
+            {
+                "provider": provider.provider,
+                "method": "subscription",
+                "status": status["status"],
+                "token_captured": False,
+            },
         )
         return status
 
@@ -275,6 +308,10 @@ class ModelRegistry:
             "auth_secret": provider.auth_secret,
             "auth_configured": self._auth_configured(provider),
             "auth_source": self._auth_source(provider),
+            "auth_methods": self._auth_methods(provider),
+            "subscription_auth_supported": self._subscription_auth_supported(provider),
+            "subscription_auth_configured": False,
+            "subscription_auth": self._subscription_auth_profile(provider),
         }
 
     def _auth_configured(self, provider: ModelProviderSpec) -> bool:
@@ -284,6 +321,21 @@ class ModelRegistry:
         if provider.auth_secret is None:
             return None
         return self.secrets_broker.secret_source(provider.auth_secret)
+
+    def _auth_methods(self, provider: ModelProviderSpec) -> list[str]:
+        methods = ["none"] if provider.auth_secret is None else ["api_key"]
+        if self._subscription_auth_supported(provider):
+            methods.append("subscription")
+        return methods
+
+    def _subscription_auth_supported(self, provider: ModelProviderSpec) -> bool:
+        return provider.provider in SUBSCRIPTION_AUTH_PROFILES
+
+    def _subscription_auth_profile(self, provider: ModelProviderSpec) -> dict[str, Any] | None:
+        profile = SUBSCRIPTION_AUTH_PROFILES.get(provider.provider)
+        if profile is None:
+            return None
+        return {key: value for key, value in profile.items()}
 
 
 def _accumulate_usage(bucket: dict[str, dict[str, Any]], key: str, row: dict[str, Any]) -> None:
@@ -332,6 +384,34 @@ def _metadata_keys(raw: Any) -> list[str]:
     if not isinstance(value, dict):
         return []
     return sorted(str(key) for key in value.keys())
+
+
+SUBSCRIPTION_AUTH_PROFILES: dict[str, dict[str, Any]] = {
+    "openai": {
+        "account_surface": "ChatGPT / Codex",
+        "external_command": "codex login",
+        "requires": "ChatGPT account with Codex access",
+        "provider_token_source": "official Codex CLI auth store",
+        "aegis_bridge_status": "not_implemented",
+        "next_steps": [
+            "Sign in with the official Codex CLI for subscription-backed local Codex access.",
+            "Keep using model auth login openai --api-key-stdin for Aegis live OpenAI API calls until a governed token bridge is implemented.",
+            "Do not paste ChatGPT session cookies or browser tokens into Aegis.",
+        ],
+    },
+    "anthropic": {
+        "account_surface": "claude.ai / Claude Code",
+        "external_command": "claude auth login",
+        "requires": "claude.ai account with Claude Code access; Remote Control requires full-scope claude.ai login, not API key auth",
+        "provider_token_source": "official Claude Code auth store",
+        "aegis_bridge_status": "not_implemented",
+        "next_steps": [
+            "Sign in with the official Claude Code CLI for subscription-backed Claude Code access.",
+            "Keep using model auth login anthropic --api-key-stdin for Aegis live Anthropic API calls until a governed token bridge is implemented.",
+            "Do not paste claude.ai browser session tokens into Aegis.",
+        ],
+    },
+}
 
 
 def default_providers(*, custom_base_url: str | None = None) -> dict[str, ModelProviderSpec]:
