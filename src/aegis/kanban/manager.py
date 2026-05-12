@@ -246,6 +246,107 @@ class KanbanManager:
             "card": _subagent_card_summary(updated_card),
         }
 
+    def run_subagent_batch(
+        self,
+        *,
+        card_ids: list[str] | tuple[str, ...] | None = None,
+        limit: int = 5,
+        actor: str = "operator",
+        approved: bool = False,
+    ) -> dict[str, Any]:
+        if not approved:
+            return {
+                "status": "approval_required",
+                "reason": "isolated subagent batch runs require explicit approval",
+                "approval_required": True,
+                "autonomous_runtime": False,
+            }
+        board = self.subagent_delegation_board(create=False)
+        if board is None:
+            return {
+                "ok": True,
+                "status": "no_runnable_cards",
+                "batch_schema": "aegis.subagent.run_batch.v1",
+                "run_count": 0,
+                "results": [],
+                "autonomous_runtime": False,
+                "raw_instruction_included": False,
+                "raw_instruction_forwarded_to_model": False,
+            }
+        try:
+            run_limit = max(1, min(int(limit), 20))
+        except (TypeError, ValueError):
+            run_limit = 5
+        explicit_ids = [str(card_id).strip() for card_id in (card_ids or ()) if str(card_id).strip()]
+        cards = self.list_cards(board["id"])
+        if explicit_ids:
+            requested = set(explicit_ids)
+            runnable_cards = [card for card in cards if str(card.get("id")) in requested]
+            missing = [card_id for card_id in explicit_ids if card_id not in {str(card.get("id")) for card in runnable_cards}]
+            if missing:
+                raise KeyError(missing[0])
+        else:
+            runnable_cards = [card for card in cards if card.get("lane") in {"ready", "in_progress"}]
+        runnable_cards = [
+            card
+            for card in sorted(runnable_cards, key=lambda row: (str(row.get("created_at", "")), str(row.get("id", ""))))
+            if card.get("lane") in {"ready", "in_progress"}
+        ][:run_limit]
+        batch_id = str(uuid4())
+        started_at = now_utc()
+        results: list[dict[str, Any]] = []
+        for card in runnable_cards:
+            results.append(self.run_subagent_delegation(str(card["id"]), actor=actor, approved=True))
+        completed_count = len([result for result in results if result.get("status") == "completed"])
+        failed_count = len([result for result in results if result.get("status") == "failed"])
+        status = "completed" if results and failed_count == 0 else "partial_failure" if results else "no_runnable_cards"
+        receipt = {
+            "receipt_schema": "aegis.subagent.run_batch.v1",
+            "event_type": "subagent.batch_completed",
+            "batch_id": batch_id,
+            "board_id": board["id"],
+            "actor": _safe_actor(actor),
+            "requested_card_count": len(explicit_ids) if explicit_ids else None,
+            "selected_card_count": len(runnable_cards),
+            "run_count": len(results),
+            "completed_count": completed_count,
+            "failed_count": failed_count,
+            "limit": run_limit,
+            "status": status,
+            "worker_process": "python_isolated_subprocess",
+            "batch_runtime": "operator_approved_card_batch",
+            "network_access": "disabled",
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+            "autonomous_runtime": False,
+            "started_at": started_at,
+            "completed_at": now_utc(),
+            "card_ids": [str(card["id"]) for card in runnable_cards],
+            "run_ids": [str(result.get("run_id")) for result in results if result.get("run_id")],
+        }
+        self.store.update_kanban_board_metadata(
+            board["id"],
+            {
+                "batch_runtime": "operator_approved_card_batch",
+                "last_batch_receipt": receipt,
+            },
+        )
+        audit_entry = self.audit_logger.append("subagent.batch_completed", receipt)
+        return {
+            "ok": failed_count == 0,
+            "status": status,
+            "batch_id": batch_id,
+            "receipt": receipt,
+            "audit_event_hash": audit_entry["event_hash"],
+            "run_count": len(results),
+            "completed_count": completed_count,
+            "failed_count": failed_count,
+            "results": results,
+            "autonomous_runtime": False,
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+        }
+
     def list_boards(self) -> list[dict[str, Any]]:
         return [_decode(row) for row in self.store.list_kanban_boards()]
 
@@ -456,6 +557,7 @@ class KanbanManager:
                 "agent_profile_lifecycle",
                 "recursive_budget_limits",
                 "isolated_parallel_runtime",
+                "operator_approved_batch_runtime",
             ],
             "remaining_depth_work": [],
             "raw_instruction_included": False,

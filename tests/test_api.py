@@ -741,6 +741,28 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertFalse(subagent_run["receipt"]["worker_result"]["raw_instruction_included"])
                 self.assertEqual(subagent_run["subagents"]["review_cards"], 1)
                 self.assertTrue(subagent_run["subagents"]["cards"][0]["isolated_parallel_runtime"])
+                subagent_second_gated = _json_post(port, "/subagents/delegate", {"role": "Researcher", "task": "Review remote receipts."}, token=token)
+                _json_post(
+                    port,
+                    f"/approvals/{subagent_second_gated['approval_id']}/approve",
+                    {"actor": "api-admin", "reason": "Reviewed second subagent delegation."},
+                    token=token,
+                )
+                subagent_second = _json_post(
+                    port,
+                    "/subagents/delegate",
+                    {"role": "Researcher", "task": "Review remote receipts.", "approval_id": subagent_second_gated["approval_id"]},
+                    token=token,
+                )
+                self.assertTrue(subagent_second["ok"])
+                subagent_batch_gated = _json_post(port, "/subagents/run-batch", {}, token=token)
+                self.assertEqual(subagent_batch_gated["status"], "approval_required")
+                subagent_batch = _json_post(port, "/subagents/run-batch", {"actor": "api-admin", "approved": True, "run_limit": 5}, token=token)
+                self.assertTrue(subagent_batch["ok"])
+                self.assertEqual(subagent_batch["run_count"], 1)
+                self.assertEqual(subagent_batch["receipt"]["batch_runtime"], "operator_approved_card_batch")
+                self.assertFalse(subagent_batch["receipt"]["raw_instruction_forwarded_to_model"])
+                self.assertIn("operator_approved_batch_runtime", subagent_batch["subagents"]["implemented_controls"])
                 disabled_subagent_profile = _json_post(port, "/subagents/profiles/researcher/disable", {"actor": "api-admin"}, token=token)
                 self.assertTrue(disabled_subagent_profile["ok"])
                 self.assertFalse(disabled_subagent_profile["profile"]["enabled"])

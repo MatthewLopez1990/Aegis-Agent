@@ -743,7 +743,8 @@ const refresh = async () => {
 
 const renderSubagents = (payload) => {
   const summary = document.getElementById("subagent-summary");
-  summary.textContent = `${payload.open_cards || 0} open · ${payload.ready_cards || 0} ready · ${payload.in_progress_cards || 0} active · ${payload.done_cards || 0} done · profiles ${payload.enabled_profile_count || 0}/${payload.profile_count || 0} · autonomous runtime ${payload.autonomous_runtime ? "enabled" : "blocked"}`;
+  const batchControl = (payload.implemented_controls || []).includes("operator_approved_batch_runtime") ? " · batch run ready" : "";
+  summary.textContent = `${payload.open_cards || 0} open · ${payload.ready_cards || 0} ready · ${payload.in_progress_cards || 0} active · ${payload.done_cards || 0} done · profiles ${payload.enabled_profile_count || 0}/${payload.profile_count || 0} · autonomous runtime ${payload.autonomous_runtime ? "enabled" : "blocked"}${batchControl}`;
   setList("subagent-cards", payload.cards || [], (x) => ({
     title: x.title,
     detail: x.description_preview || "No preview",
@@ -3760,6 +3761,16 @@ document.getElementById("subagent-cards").addEventListener("click", async (event
   const result = await api("/subagents/handoff", {
     method: "POST",
     body: JSON.stringify({ card_id: card, lane, actor: "web-operator" }),
+  });
+  renderSubagentOutput(result);
+  renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
+  await refresh();
+});
+
+document.getElementById("subagent-run-batch").addEventListener("click", async () => {
+  const result = await api("/subagents/run-batch", {
+    method: "POST",
+    body: JSON.stringify({ actor: "web-operator", approved: true, run_limit: 5, limit: 12 }),
   });
   renderSubagentOutput(result);
   renderSubagents(result.subagents || await api("/subagents/status?limit=12"));

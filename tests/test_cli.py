@@ -128,6 +128,11 @@ class CliTests(unittest.TestCase):
             self.assertIn("disabled_live_browser_denial", browser_gap["verification_gates"])
             browser_checklist = {item["control"]: item for item in browser_gap["operator_checklist"]}
             self.assertEqual(browser_checklist["live_browser_automation"]["state"], "blocked_with_preflight")
+            subagent_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "subagent_runtime_depth")
+            self.assertIn("operator_batch_receipts", subagent_gap["required_controls"])
+            self.assertIn("subagent.operator_batch_receipts", subagent_gap["evaluation_scenarios"])
+            subagent_checklist = {item["control"]: item for item in subagent_gap["operator_checklist"]}
+            self.assertEqual(subagent_checklist["operator_approved_batch_runtime"]["state"], "enforced")
             backend_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "remote_backend_activation")
             self.assertEqual(backend_gap["status"], "backend_adapters_available_unconfigured")
             self.assertIn("available_backend_adapters", backend_gap)
@@ -567,6 +572,74 @@ class CliTests(unittest.TestCase):
             disabled_profile = dispatch(parser.parse_args(["--data-dir", str(data_dir), "agents", "profile-disable", "researcher"]))
             self.assertTrue(disabled_profile["ok"])
             self.assertFalse(disabled_profile["profile"]["enabled"])
+
+    def test_agents_cli_run_batch_uses_approved_isolated_workers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            data_dir = Path(temp) / ".aegis"
+
+            profile = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "profile-create",
+                        "Researcher",
+                        "--max-parallel-cards",
+                        "5",
+                    ]
+                )
+            )
+            self.assertTrue(profile["ok"])
+
+            for task in ("Compare auth surfaces.", "Review remote-control receipts."):
+                delegated = dispatch(
+                    parser.parse_args(
+                        [
+                            "--data-dir",
+                            str(data_dir),
+                            "agents",
+                            "delegate",
+                            "Researcher",
+                            task,
+                            "--approved",
+                        ]
+                    )
+                )
+                self.assertTrue(delegated["ok"])
+
+            gated = dispatch(parser.parse_args(["--data-dir", str(data_dir), "agents", "run-batch"]))
+            self.assertEqual(gated["status"], "approval_required")
+            self.assertFalse(gated["autonomous_runtime"])
+
+            batch = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "run-batch",
+                        "--approved",
+                        "--actor",
+                        "cli-operator",
+                        "--run-limit",
+                        "5",
+                    ]
+                )
+            )
+            self.assertTrue(batch["ok"])
+            self.assertEqual(batch["status"], "completed")
+            self.assertEqual(batch["run_count"], 2)
+            self.assertEqual(batch["completed_count"], 2)
+            self.assertEqual(batch["receipt"]["batch_runtime"], "operator_approved_card_batch")
+            self.assertFalse(batch["receipt"]["autonomous_runtime"])
+            self.assertFalse(batch["raw_instruction_forwarded_to_model"])
+            self.assertEqual(batch["subagents"]["review_cards"], 2)
+            self.assertIn("operator_approved_batch_runtime", batch["subagents"]["implemented_controls"])
+            self.assertTrue(all(result["receipt"]["worker_process"] == "python_isolated_subprocess" for result in batch["results"]))
+            audit_text = (data_dir / "audit.jsonl").read_text(encoding="utf-8")
+            self.assertIn("subagent.batch_completed", audit_text)
 
     def test_enterprise_readiness_reports_memory_improvement_and_tui_flags(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

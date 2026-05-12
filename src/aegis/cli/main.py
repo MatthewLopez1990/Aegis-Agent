@@ -667,6 +667,12 @@ def build_parser() -> argparse.ArgumentParser:
     agents_run.add_argument("--approved", action="store_true")
     agents_run.add_argument("--actor", default="operator")
     agents_run.add_argument("--limit", type=int, default=20)
+    agents_run_batch = agents_sub.add_parser("run-batch", help="Run approved isolated subagent workers for ready/in-progress cards")
+    agents_run_batch.add_argument("--card-id", action="append", default=[])
+    agents_run_batch.add_argument("--approved", action="store_true")
+    agents_run_batch.add_argument("--actor", default="operator")
+    agents_run_batch.add_argument("--run-limit", type=int, default=5)
+    agents_run_batch.add_argument("--limit", type=int, default=20)
     agents_profiles = agents_sub.add_parser("profiles", help="List durable subagent profiles")
     agents_profiles.add_argument("--limit", type=int, default=20)
     agents_profile_create = agents_sub.add_parser("profile-create", help="Create or update a governed subagent profile")
@@ -1762,6 +1768,14 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
         if args.agents_command == "run":
             result = orchestrator.kanban.run_subagent_delegation(args.card_id, actor=args.actor, approved=args.approved)
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
+        if args.agents_command == "run-batch":
+            result = orchestrator.kanban.run_subagent_batch(
+                card_ids=args.card_id,
+                actor=args.actor,
+                approved=args.approved,
+                limit=args.run_limit,
+            )
             return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
         if args.agents_command == "profiles":
             return {"profiles": orchestrator.kanban.list_subagent_profiles(), "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}

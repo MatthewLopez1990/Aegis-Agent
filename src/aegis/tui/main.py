@@ -216,7 +216,7 @@ SCHEDULE_COMMANDS = ("create", "memory-review-digest", "memory-review-escalation
 BROWSER_COMMANDS = ("status", "connect", "disconnect", "session", "sessions", "close", "navigate", "extract", "inspect", "table", "screenshot", "render", "click", "fill")
 MCP_COMMANDS = ("list", "register", "auth", "call")
 HOOK_COMMANDS = ("list", "add", "enable", "disable", "remove", "run")
-AGENTS_COMMANDS = ("status", "profiles", "profile-create", "profile-disable", "delegate", "handoff", "run")
+AGENTS_COMMANDS = ("status", "profiles", "profile-create", "profile-disable", "delegate", "handoff", "run", "run-batch")
 REMOTE_CONTROL_COMMANDS = ("pair", "directory", "revoke", "relay", "relay-directory", "relay-notify", "relay-outbox", "relay-retry", "relay-pull", "relay-action")
 SESSION_COMMANDS = ("new", "open", "rename", "set-model", "set-personality", "activate", "archive", "pause", "append", "history", "tasks", "compact")
 TASK_COMMANDS = ("status", "resume", "pause", "cancel", "events", "timeline", "submit", "list", "all", "session")
@@ -3548,7 +3548,7 @@ class AegisTui(cmd.Cmd):
         self.do_models("route alias/fast")
 
     def do_agents(self, arg: str) -> None:
-        """agents [status|profiles|profile-create|profile-disable|delegate|handoff|run] -- manage subagent delegations."""
+        """agents [status|profiles|profile-create|profile-disable|delegate|handoff|run|run-batch] -- manage subagent delegations."""
         parts = shlex.split(arg)
         if parts and parts[0] == "profiles":
             _print_json({"profiles": self.orchestrator.kanban.list_subagent_profiles(), "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
@@ -3602,6 +3602,16 @@ class AegisTui(cmd.Cmd):
                 parts[1],
                 actor="tui-operator",
                 approved="--approved" in parts[2:],
+            )
+            _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
+            return
+        if parts and parts[0] == "run-batch":
+            options = _parse_subagent_run_batch_options(parts[1:])
+            result = self.orchestrator.kanban.run_subagent_batch(
+                card_ids=options["card_ids"],
+                actor="tui-operator",
+                approved=options["approved"],
+                limit=options["limit"],
             )
             _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
             return
@@ -5658,6 +5668,28 @@ def _parse_subagent_profile_options(parts: list[str]) -> dict[str, Any]:
     return options
 
 
+def _parse_subagent_run_batch_options(parts: list[str]) -> dict[str, Any]:
+    options: dict[str, Any] = {"approved": False, "limit": 5, "card_ids": []}
+    index = 0
+    while index < len(parts):
+        part = parts[index]
+        if part == "--approved":
+            options["approved"] = True
+            index += 1
+            continue
+        if part == "--limit":
+            options["limit"] = int(_next_required(parts, index, "--limit"))
+            index += 2
+            continue
+        if part == "--card-id":
+            options["card_ids"].append(_next_required(parts, index, "--card-id"))
+            index += 2
+            continue
+        options["card_ids"].append(part)
+        index += 1
+    return options
+
+
 def _parse_hook_add_args(parts: list[str]) -> dict[str, Any]:
     if not parts:
         raise ValueError("hook event required")
@@ -6443,6 +6475,8 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("hooks", "add"): ("--id", "--enabled", "--approval-required", "--no-approval-required", "--timeout", "--max-output-bytes"),
     ("hooks", "run"): ("--approved", "--context-json"),
     ("agents", "delegate"): ("--approved",),
+    ("agents", "run"): ("--approved",),
+    ("agents", "run-batch"): ("--approved", "--limit", "--card-id"),
     ("mcp", "call"): ("--approved",),
     ("mcp", "register"): ("--discover", "--transport", "--token-secret", "--tool", "--exclude-tool", "--no-resources", "--no-prompts", "--enable", "--no-approval"),
     ("plugins", "fetch-manifest"): ("--catalog-path",),
