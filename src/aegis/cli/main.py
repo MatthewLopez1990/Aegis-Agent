@@ -342,6 +342,11 @@ def build_parser() -> argparse.ArgumentParser:
         plugin_remove = plugin_sub.add_parser("remove", help="Remove a plugin and its owned resources")
         plugin_remove.add_argument("plugin_id")
         plugin_sub.add_parser("reload", help="Reload plugin inventory from private local state")
+        plugin_marketplace = plugin_sub.add_parser("marketplace", help="Search the metadata-only plugin marketplace catalog")
+        plugin_marketplace.add_argument("--query", "-q", default="")
+        plugin_marketplace.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
+        plugin_updates = plugin_sub.add_parser("updates", help="Plan plugin updates from marketplace metadata without downloading code")
+        plugin_updates.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
 
     connector = subcommands.add_parser("connector", help="List connector status")
     connector_sub = connector.add_subparsers(dest="connector_command", required=True)
@@ -960,6 +965,10 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return manager.remove_plugin(args.plugin_id)
         if args.plugin_command == "reload":
             return {"ok": True, "mode": "private_plugin_inventory", "plugins": manager.list_plugins()}
+        if args.plugin_command == "marketplace":
+            return manager.marketplace(query=args.query, catalog_path=args.catalog_path)
+        if args.plugin_command == "updates":
+            return manager.update_plan(catalog_path=args.catalog_path)
 
     if args.command == "connector":
         audit = AuditLogger(config.audit_log_path)

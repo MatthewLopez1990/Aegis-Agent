@@ -446,7 +446,16 @@
             <button type="submit">Install</button>
             <button id="plugin-reload" type="button" class="secondary">Reload</button>
           </form>
+          <form id="plugin-marketplace-form" class="inline-form two-col">
+            <input id="plugin-marketplace-query" placeholder="Search marketplace metadata">
+            <input id="plugin-marketplace-catalog" placeholder="/path/to/catalog.json">
+            <button type="submit" class="secondary">Search Marketplace</button>
+          </form>
           <div id="installed-plugins" class="list compact-list"></div>
+          <p class="section-label">Marketplace</p>
+          <div id="plugin-marketplace" class="list compact-list"></div>
+          <p class="section-label">Updates</p>
+          <div id="plugin-updates" class="list compact-list"></div>
           <div id="plugin-output" class="evidence-block"></div>
         </section>
 

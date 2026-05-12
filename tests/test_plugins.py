@@ -100,6 +100,34 @@ class PluginManagerTests(unittest.TestCase):
                 McpRegistry(LocalStore(data_dir / "aegis.db"), AuditLogger(data_dir / "audit.jsonl")).get_server("plugin-mcp")
             self.assertEqual(manager.hooks.list_hooks(), [])
 
+    def test_plugin_marketplace_and_update_plan_are_metadata_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            plugin_path = _write_plugin_fixture(root)
+            catalog_path = _write_plugin_catalog(root)
+            manager = _plugin_manager(data_dir, workspace=root)
+            manager.install_plugin(plugin_path, unsigned_local=True)
+
+            marketplace = manager.marketplace(query="test", catalog_path=catalog_path)
+            updates = manager.update_plan(catalog_path=catalog_path)
+            serialized = json.dumps({"marketplace": marketplace, "updates": updates}, sort_keys=True)
+
+            self.assertEqual(marketplace["status"], "virtual_marketplace_no_code_download")
+            self.assertEqual(marketplace["catalog_source"], "local_file")
+            self.assertEqual([entry["id"] for entry in marketplace["entries"]], ["test.plugin"])
+            self.assertTrue(marketplace["entries"][0]["installed"])
+            self.assertTrue(marketplace["entries"][0]["update_available"])
+            self.assertFalse(marketplace["entries"][0]["download_supported"])
+            self.assertFalse(marketplace["entries"][0]["dynamic_code_import_supported"])
+            self.assertEqual(updates["status"], "updates_available")
+            self.assertEqual(updates["updates"][0]["id"], "test.plugin")
+            self.assertEqual(updates["updates"][0]["installed_version"], "0.1.0")
+            self.assertEqual(updates["updates"][0]["available_version"], "0.2.0")
+            self.assertIn("remote_code_download", updates["blocked_operations"])
+            self.assertFalse(updates["raw_secret_values_included"])
+            self.assertNotIn("token=", serialized)
+
     @unittest.skipUnless(os.name == "posix", "POSIX mode assertions only apply on POSIX")
     def test_plugin_store_is_private(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -137,6 +165,37 @@ def _write_plugin_fixture(root: Path) -> Path:
     plugin_path = root / "plugin.json"
     plugin_path.write_text(json.dumps(plugin), encoding="utf-8")
     return plugin_path
+
+
+def _write_plugin_catalog(root: Path) -> Path:
+    catalog_path = root / "marketplace.json"
+    catalog_path.write_text(
+        json.dumps(
+            {
+                "plugins": [
+                    {
+                        "id": "test.plugin",
+                        "name": "Test Plugin",
+                        "version": "0.2.0",
+                        "description": "Updated local catalog metadata.",
+                        "platforms": ["Hermes Agent"],
+                        "tags": ["test", "plugin"],
+                        "resource_kinds": ["skill", "mcp_server", "hook"],
+                        "manifest_url": "https://example.com/plugins/test.plugin/plugin.json",
+                        "manifest_sha256": "sha256:abc123",
+                    },
+                    {
+                        "id": "other.plugin",
+                        "name": "Other Plugin",
+                        "version": "1.0.0",
+                        "description": "Different plugin.",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return catalog_path
 
 
 if __name__ == "__main__":

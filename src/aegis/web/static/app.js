@@ -20,6 +20,8 @@ const state = {
   taskScope: "session",
   memoryQuery: "",
   skillHubQuery: "",
+  pluginMarketplaceQuery: "",
+  pluginMarketplaceCatalogPath: "",
   pendingSkillEnable: {},
 };
 
@@ -198,6 +200,8 @@ const refresh = async () => {
       skillHub,
       skills,
       plugins,
+      pluginMarketplace,
+      pluginUpdates,
       mcpServers,
       schedules,
       sessions,
@@ -232,6 +236,8 @@ const refresh = async () => {
       api(`/skill-hub?q=${encodeURIComponent(state.skillHubQuery)}`),
       api("/skills"),
       api("/plugins"),
+      api(`/plugins/marketplace?q=${encodeURIComponent(state.pluginMarketplaceQuery)}${state.pluginMarketplaceCatalogPath ? `&catalog_path=${encodeURIComponent(state.pluginMarketplaceCatalogPath)}` : ""}`),
+      api(`/plugins/updates${state.pluginMarketplaceCatalogPath ? `?catalog_path=${encodeURIComponent(state.pluginMarketplaceCatalogPath)}` : ""}`),
       api("/mcp/servers"),
       api("/schedules"),
       api("/sessions"),
@@ -396,6 +402,18 @@ const refresh = async () => {
         <button type="button" class="secondary" data-plugin-remove="${escapeHtml(x.id)}">Remove</button>
       `,
     }), "No installed plugins");
+    setList("plugin-marketplace", pluginMarketplace.entries || [], (x) => ({
+      title: x.name || x.id,
+      detail: `${x.description || "Marketplace metadata"} Resources: ${(x.resource_kinds || []).join(", ") || "none"}`,
+      meta: `${x.installed ? `installed ${x.installed_version || "unknown"}` : "not installed"} · catalog v${x.version || "0.0.0"} · ${x.install_mode || "manual"} · download ${formatBool(x.download_supported)}`,
+      tone: x.update_available ? "attention" : x.installed ? "ready" : "",
+    }), "No marketplace plugin metadata");
+    setList("plugin-updates", pluginUpdates.updates || [], (x) => ({
+      title: x.name || x.id,
+      detail: `${x.installed_version} -> ${x.available_version}. ${(x.next_actions || []).join(" ")}`,
+      meta: `${x.status} · ${x.install_mode || "manual_manifest_review"} · review ${formatBool(x.requires_review)}`,
+      tone: "attention",
+    }), "No plugin updates");
     setList("mcp-servers", mcpServers.servers, (x) => ({
       title: x.name,
       detail: x.command,
@@ -2384,6 +2402,13 @@ document.getElementById("plugin-install-form").addEventListener("submit", async 
 document.getElementById("plugin-reload").addEventListener("click", async () => {
   const result = await api("/plugins/reload", { method: "POST", body: JSON.stringify({}) });
   renderPluginOutput(result);
+  await refresh();
+});
+
+document.getElementById("plugin-marketplace-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  state.pluginMarketplaceQuery = document.getElementById("plugin-marketplace-query").value || "";
+  state.pluginMarketplaceCatalogPath = document.getElementById("plugin-marketplace-catalog").value || "";
   await refresh();
 });
 

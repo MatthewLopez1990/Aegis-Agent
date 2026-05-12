@@ -250,6 +250,12 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
             if path == "/plugins":
                 self._json(_plugins_payload(orchestrator))
                 return
+            if path == "/plugins/marketplace":
+                self._json(orchestrator.plugins.marketplace(query=query.get("q", [""])[0], catalog_path=query.get("catalog_path", [None])[0]))
+                return
+            if path == "/plugins/updates":
+                self._json(orchestrator.plugins.update_plan(catalog_path=query.get("catalog_path", [None])[0]))
+                return
             if path == "/mcp/servers":
                 self._json({"servers": orchestrator.mcp.list_servers()})
                 return

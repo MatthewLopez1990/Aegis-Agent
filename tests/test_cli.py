@@ -19,7 +19,7 @@ from aegis.config.loader import load_config
 from aegis.memory.store import LocalStore
 from aegis.research.harness import ResearchHarness
 from aegis.security.secrets_broker import SecretsBroker
-from tests.test_plugins import _write_plugin_fixture
+from tests.test_plugins import _write_plugin_catalog, _write_plugin_fixture
 
 
 class CliTests(unittest.TestCase):
@@ -1839,15 +1839,21 @@ class CliTests(unittest.TestCase):
             data_dir = root / ".aegis"
             parser = build_parser()
             plugin_path = _write_plugin_fixture(root)
+            catalog_path = _write_plugin_catalog(root)
 
             installed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugin", "install", str(plugin_path), "--unsigned-local"]))
             listed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "list"]))
+            marketplace = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "marketplace", "--query", "test", "--catalog-path", str(catalog_path)]))
+            updates = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "updates", "--catalog-path", str(catalog_path)]))
             enabled = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugin", "enable", "test.plugin"]))
             disabled = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugin", "disable", "test.plugin"]))
             removed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugin", "remove", "test.plugin"]))
 
             self.assertEqual(installed["plugin"]["id"], "test.plugin")
             self.assertEqual(listed["plugins"][0]["id"], "test.plugin")
+            self.assertEqual(marketplace["status"], "virtual_marketplace_no_code_download")
+            self.assertEqual(marketplace["entries"][0]["id"], "test.plugin")
+            self.assertEqual(updates["updates"][0]["status"], "update_available")
             self.assertTrue(enabled["plugin"]["enabled"])
             self.assertFalse(disabled["plugin"]["enabled"])
             self.assertTrue(removed["removed"])

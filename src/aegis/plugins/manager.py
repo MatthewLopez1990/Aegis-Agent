@@ -45,6 +45,94 @@ class PluginManager:
     def list_plugins(self) -> list[dict[str, Any]]:
         return sorted(self._read_store()["plugins"].values(), key=lambda plugin: str(plugin["id"]))
 
+    def marketplace(self, *, query: str = "", catalog_path: str | Path | None = None) -> dict[str, Any]:
+        catalog = _read_plugin_catalog(catalog_path)
+        installed = {plugin["id"]: plugin for plugin in self.list_plugins()}
+        needle = query.strip().lower()
+        entries: list[dict[str, Any]] = []
+        for entry in catalog:
+            public = _public_marketplace_entry(entry, installed=installed.get(str(entry.get("id") or "")))
+            haystack = " ".join(
+                [
+                    public["id"],
+                    public["name"],
+                    public["description"],
+                    " ".join(public["tags"]),
+                    " ".join(public["platforms"]),
+                ]
+            ).lower()
+            if needle and needle not in haystack:
+                continue
+            entries.append(public)
+        return {
+            "status": "virtual_marketplace_no_code_download",
+            "mode": "metadata_only_update_planning",
+            "catalog_source": "local_file" if catalog_path else "built_in",
+            "query": query,
+            "entries": sorted(entries, key=lambda entry: entry["id"]),
+            "raw_secret_values_included": False,
+            "blocked_operations": [
+                "remote_code_download",
+                "dynamic_plugin_import",
+                "marketplace_token_capture",
+                "unsigned_auto_update",
+            ],
+        }
+
+    def update_plan(self, *, catalog_path: str | Path | None = None) -> dict[str, Any]:
+        catalog = {str(entry.get("id") or ""): _public_marketplace_entry(entry) for entry in _read_plugin_catalog(catalog_path)}
+        installed = self.list_plugins()
+        updates: list[dict[str, Any]] = []
+        current: list[dict[str, Any]] = []
+        missing_from_catalog: list[dict[str, Any]] = []
+        for plugin in installed:
+            entry = catalog.get(plugin["id"])
+            if entry is None:
+                missing_from_catalog.append(
+                    {
+                        "id": plugin["id"],
+                        "name": plugin["name"],
+                        "installed_version": plugin["version"],
+                        "status": "not_in_catalog",
+                    }
+                )
+                continue
+            row = {
+                "id": plugin["id"],
+                "name": plugin["name"] or entry["name"],
+                "installed_version": plugin["version"],
+                "available_version": entry["version"],
+                "status": "update_available" if _version_newer(entry["version"], plugin["version"]) else "current",
+                "install_mode": entry["install_mode"],
+                "manifest_url": entry["manifest_url"],
+                "manifest_sha256": entry["manifest_sha256"],
+                "requires_review": entry["requires_review"],
+                "next_actions": [
+                    "review marketplace metadata",
+                    "obtain and verify the plugin manifest out of band",
+                    "install through plugins install <plugin.json> using the existing governed lifecycle",
+                ],
+            }
+            if row["status"] == "update_available":
+                updates.append(row)
+            else:
+                current.append(row)
+        return {
+            "status": "updates_available" if updates else "no_updates",
+            "mode": "metadata_only_update_planning",
+            "catalog_source": "local_file" if catalog_path else "built_in",
+            "updates": sorted(updates, key=lambda entry: entry["id"]),
+            "current": sorted(current, key=lambda entry: entry["id"]),
+            "missing_from_catalog": sorted(missing_from_catalog, key=lambda entry: entry["id"]),
+            "raw_secret_values_included": False,
+            "blocked_operations": [
+                "remote_code_download",
+                "dynamic_plugin_import",
+                "marketplace_token_capture",
+                "unsigned_auto_update",
+            ],
+        }
+
     def install_plugin(
         self,
         manifest_path: str | Path,
@@ -337,3 +425,125 @@ def _plugin_audit_payload(plugin: dict[str, Any]) -> dict[str, Any]:
         "resource_count": len(plugin["resources"]),
         "resources": [{"kind": resource.get("kind"), "id": resource.get("id")} for resource in plugin["resources"]],
     }
+
+
+def _read_plugin_catalog(catalog_path: str | Path | None = None) -> list[dict[str, Any]]:
+    if catalog_path:
+        path = Path(catalog_path).expanduser().resolve()
+        if path.suffix.lower() != ".json":
+            raise ValueError("plugin marketplace catalog must be a JSON file")
+        with path.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+    else:
+        raw = {"plugins": _BUILT_IN_MARKETPLACE}
+    entries = raw.get("plugins") if isinstance(raw, dict) else raw
+    if not isinstance(entries, list):
+        raise ValueError("plugin marketplace catalog must contain a plugins array")
+    result: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("plugin marketplace entries must be JSON objects")
+        plugin_id = str(entry.get("id") or "").strip()
+        if not _PLUGIN_ID_RE.fullmatch(plugin_id):
+            raise ValueError("marketplace plugin id must be 1-120 characters of letters, digits, dot, underscore, or dash")
+        result.append(entry)
+    return result
+
+
+def _public_marketplace_entry(raw: dict[str, Any], *, installed: dict[str, Any] | None = None) -> dict[str, Any]:
+    resource_kinds = _string_list(raw.get("resource_kinds", raw.get("resources", [])))
+    entry = {
+        "id": str(raw.get("id") or ""),
+        "name": str(raw.get("name") or raw.get("id") or ""),
+        "version": str(raw.get("version") or "0.0.0"),
+        "description": str(raw.get("description") or ""),
+        "platforms": _string_list(raw.get("platforms", [])),
+        "tags": _string_list(raw.get("tags", [])),
+        "resource_kinds": resource_kinds,
+        "install_mode": str(raw.get("install_mode") or "manual_manifest_review"),
+        "manifest_url": str(raw.get("manifest_url") or ""),
+        "manifest_sha256": str(raw.get("manifest_sha256") or ""),
+        "requires_review": bool(raw.get("requires_review", True)),
+        "download_supported": False,
+        "dynamic_code_import_supported": False,
+        "token_capture_supported": False,
+        "installed": installed is not None,
+        "installed_version": str(installed.get("version") or "") if installed else "",
+        "update_available": bool(installed and _version_newer(str(raw.get("version") or "0.0.0"), str(installed.get("version") or "0.0.0"))),
+        "next_actions": [
+            "review marketplace metadata",
+            "obtain and verify the plugin manifest out of band",
+            "install through the existing governed plugin lifecycle",
+        ],
+    }
+    return redact(entry)
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        if isinstance(item, dict):
+            kind = item.get("kind")
+            if kind:
+                result.append(str(kind))
+            continue
+        text = str(item).strip()
+        if text:
+            result.append(text)
+    return sorted(set(result))
+
+
+def _version_newer(candidate: str, installed: str) -> bool:
+    return _version_key(candidate) > _version_key(installed)
+
+
+def _version_key(value: str) -> tuple[int, ...]:
+    parts = re.findall(r"\d+", value)
+    if not parts:
+        return (0,)
+    return tuple(int(part) for part in parts[:4])
+
+
+_BUILT_IN_MARKETPLACE = [
+    {
+        "id": "aegis.github-workflow",
+        "name": "GitHub Workflow Pack",
+        "version": "0.1.0",
+        "description": "Governed issue, PR, and CI workflow helpers routed through existing connector and approval controls.",
+        "platforms": ["Hermes Agent", "Claude Code parity"],
+        "tags": ["github", "workflow", "automation"],
+        "resource_kinds": ["skill", "hook"],
+        "install_mode": "manual_manifest_review",
+        "manifest_url": "https://example.com/aegis/plugins/github-workflow/plugin.json",
+        "manifest_sha256": "",
+        "requires_review": True,
+    },
+    {
+        "id": "aegis.remote-operator",
+        "name": "Remote Operator Pack",
+        "version": "0.1.0",
+        "description": "Remote-control task triage and notification helpers for the local pairing-token control plane.",
+        "platforms": ["Hermes Agent", "OpenClaw"],
+        "tags": ["remote-control", "mobile", "operator"],
+        "resource_kinds": ["skill", "hook"],
+        "install_mode": "manual_manifest_review",
+        "manifest_url": "https://example.com/aegis/plugins/remote-operator/plugin.json",
+        "manifest_sha256": "",
+        "requires_review": True,
+    },
+    {
+        "id": "aegis.research-pipeline",
+        "name": "Research Pipeline Pack",
+        "version": "0.1.0",
+        "description": "Research trajectory and evaluation workflow helpers that preserve audit and prompt-boundary controls.",
+        "platforms": ["Hermes Agent"],
+        "tags": ["research", "evaluation", "workflow"],
+        "resource_kinds": ["skill", "mcp_server"],
+        "install_mode": "manual_manifest_review",
+        "manifest_url": "https://example.com/aegis/plugins/research-pipeline/plugin.json",
+        "manifest_sha256": "",
+        "requires_review": True,
+    },
+]

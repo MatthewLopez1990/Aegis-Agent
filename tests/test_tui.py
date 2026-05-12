@@ -19,7 +19,7 @@ from aegis.skills.manifest import SkillManifest
 from aegis.tui.main import AegisTui, _live_input_block
 
 from tests.test_mcp import FAKE_MCP_SERVER
-from tests.test_plugins import _write_plugin_fixture
+from tests.test_plugins import _write_plugin_catalog, _write_plugin_fixture
 
 
 class TuiTests(unittest.TestCase):
@@ -603,16 +603,21 @@ class TuiTests(unittest.TestCase):
             root = Path(temp)
             tui = AegisTui(data_dir=root / ".aegis", workspace=root)
             plugin_path = _write_plugin_fixture(root)
+            catalog_path = _write_plugin_catalog(root)
             output = io.StringIO()
 
             with redirect_stdout(output):
                 tui.onecmd(f"plugins install {plugin_path} --unsigned-local")
                 tui.onecmd("plugins list")
+                tui.onecmd(f"plugins marketplace --query test --catalog-path {catalog_path}")
+                tui.onecmd(f"plugins updates --catalog-path {catalog_path}")
                 tui.onecmd("reload-plugins")
 
             rendered = output.getvalue()
             self.assertIn('"id": "test.plugin"', rendered)
             self.assertIn('"mode": "private_plugin_inventory"', rendered)
+            self.assertIn('"status": "virtual_marketplace_no_code_download"', rendered)
+            self.assertIn('"status": "update_available"', rendered)
             self.assertIn('"raw_secret_values_included": false', rendered)
 
     def test_skills_hub_search_is_read_only_virtual_catalog(self) -> None:

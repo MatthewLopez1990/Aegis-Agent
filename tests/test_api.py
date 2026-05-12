@@ -20,7 +20,7 @@ from aegis.security.taint import TrustClass
 from aegis.skills.manifest import SkillManifest
 from aegis.skills.runtime import builtin_workflow_candidate_manifest
 from tests.test_mcp import FAKE_MCP_SERVER
-from tests.test_plugins import _write_plugin_fixture
+from tests.test_plugins import _write_plugin_catalog, _write_plugin_fixture
 
 
 class ApiServerSecurityTests(unittest.TestCase):
@@ -187,6 +187,7 @@ class ApiServerSecurityTests(unittest.TestCase):
             workspace.mkdir()
             data_dir = Path(temp) / ".aegis"
             plugin_path = _write_plugin_fixture(Path(temp))
+            catalog_path = _write_plugin_catalog(Path(temp))
             env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
             process = subprocess.Popen(
                 [
@@ -214,11 +215,16 @@ class ApiServerSecurityTests(unittest.TestCase):
 
                 installed = _json_post(port, "/plugins", {"manifest_path": str(plugin_path), "unsigned_local": True}, token=token)
                 listed = _json_get(port, "/plugins", token=token)
+                marketplace = _json_get(port, f"/plugins/marketplace?q=test&catalog_path={quote(str(catalog_path))}", token=token)
+                updates = _json_get(port, f"/plugins/updates?catalog_path={quote(str(catalog_path))}", token=token)
                 enabled = _json_post(port, "/plugins/test.plugin/enable", {}, token=token)
                 removed = _json_post(port, "/plugins/test.plugin/remove", {}, token=token)
 
                 self.assertEqual(installed["plugin"]["id"], "test.plugin")
                 self.assertEqual(listed["plugins"][0]["id"], "test.plugin")
+                self.assertEqual(marketplace["status"], "virtual_marketplace_no_code_download")
+                self.assertEqual(marketplace["entries"][0]["id"], "test.plugin")
+                self.assertEqual(updates["updates"][0]["status"], "update_available")
                 self.assertTrue(enabled["plugin"]["enabled"])
                 self.assertTrue(removed["removed"])
             finally:
