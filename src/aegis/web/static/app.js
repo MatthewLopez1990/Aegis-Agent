@@ -196,6 +196,7 @@ const refresh = async () => {
       browserSessions,
       skillHub,
       skills,
+      plugins,
       mcpServers,
       schedules,
       sessions,
@@ -228,6 +229,7 @@ const refresh = async () => {
       api("/browser/sessions"),
       api(`/skill-hub?q=${encodeURIComponent(state.skillHubQuery)}`),
       api("/skills"),
+      api("/plugins"),
       api("/mcp/servers"),
       api("/schedules"),
       api("/sessions"),
@@ -372,6 +374,17 @@ const refresh = async () => {
           : `<button type="button" class="secondary" data-skill-enable="${escapeHtml(x.id)}">${pendingApprovalId ? "Replay Enable" : "Enable"}</button>`,
       };
     }, "No installed skills");
+    setList("installed-plugins", plugins.plugins || [], (x) => ({
+      title: x.name || x.id,
+      detail: `${x.description || "Local plugin"} Resources: ${(x.resources || []).map((resource) => `${resource.kind}:${resource.id || resource.name}`).join(", ") || "none"}`,
+      meta: `${x.enabled ? "enabled" : "disabled"} · v${x.version || "0.0.0"} · ${x.unsigned_local ? "unsigned local" : "signed resources"} · ${x.resources?.length || 0} resources`,
+      tone: x.enabled ? "ready" : "",
+      actions: `
+        <button type="button" class="secondary" data-plugin-enable="${escapeHtml(x.id)}">Enable</button>
+        <button type="button" class="secondary" data-plugin-disable="${escapeHtml(x.id)}">Disable</button>
+        <button type="button" class="secondary" data-plugin-remove="${escapeHtml(x.id)}">Remove</button>
+      `,
+    }), "No installed plugins");
     setList("mcp-servers", mcpServers.servers, (x) => ({
       title: x.name,
       detail: x.command,
@@ -1473,6 +1486,14 @@ const renderMcpCallOutput = (payload) => {
   `;
 };
 
+const renderPluginOutput = (payload) => {
+  const node = document.getElementById("plugin-output");
+  node.innerHTML = `
+    <strong>${text(payload.plugin?.name || payload.plugin?.id || payload.status || "Plugin")}</strong>
+    <code>${text(JSON.stringify(payload, null, 2))}</code>
+  `;
+};
+
 const renderChannelOutput = (payload) => {
   const node = document.getElementById("channel-render-output");
   node.innerHTML = `
@@ -2275,6 +2296,39 @@ document.getElementById("installed-skills").addEventListener("click", async (eve
   } else if (result.ok && action === "enable") {
     delete state.pendingSkillEnable[skillId];
   }
+  await refresh();
+});
+
+document.getElementById("plugin-install-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const manifestPath = document.getElementById("plugin-manifest-path").value;
+  const result = await api("/plugins", {
+    method: "POST",
+    body: JSON.stringify({
+      manifest_path: manifestPath,
+      enable: document.getElementById("plugin-install-enable").checked,
+      unsigned_local: document.getElementById("plugin-install-unsigned").checked,
+    }),
+  });
+  renderPluginOutput(result);
+  await refresh();
+});
+
+document.getElementById("plugin-reload").addEventListener("click", async () => {
+  const result = await api("/plugins/reload", { method: "POST", body: JSON.stringify({}) });
+  renderPluginOutput(result);
+  await refresh();
+});
+
+document.getElementById("installed-plugins").addEventListener("click", async (event) => {
+  const enableId = event.target.dataset.pluginEnable;
+  const disableId = event.target.dataset.pluginDisable;
+  const removeId = event.target.dataset.pluginRemove;
+  const pluginId = enableId || disableId || removeId;
+  if (!pluginId) return;
+  const action = enableId ? "enable" : disableId ? "disable" : "remove";
+  const result = await api(`/plugins/${encodeURIComponent(pluginId)}/${action}`, { method: "POST", body: JSON.stringify({}) });
+  renderPluginOutput(result);
   await refresh();
 });
 

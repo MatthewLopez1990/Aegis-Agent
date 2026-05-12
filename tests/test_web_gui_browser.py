@@ -575,6 +575,32 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertNotIn("x.commands", script)
         self.assertNotIn("x.secrets", script)
 
+    def test_web_plugins_panel_exposes_governed_local_lifecycle(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "src" / "aegis" / "web" / "static"
+        markup = (root / "index.html").read_text(encoding="utf-8")
+        script = (root / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="plugin-install-form"', markup)
+        self.assertIn('id="plugin-manifest-path"', markup)
+        self.assertIn('id="plugin-install-enable"', markup)
+        self.assertIn('id="plugin-install-unsigned"', markup)
+        self.assertIn('id="plugin-reload"', markup)
+        self.assertIn('id="installed-plugins"', markup)
+        self.assertIn('id="plugin-output"', markup)
+        self.assertIn('api("/plugins")', script)
+        self.assertIn('api("/plugins/reload"', script)
+        self.assertIn('setList("installed-plugins"', script)
+        self.assertIn("data-plugin-enable", script)
+        self.assertIn("data-plugin-disable", script)
+        self.assertIn("data-plugin-remove", script)
+        self.assertIn('document.getElementById("plugin-install-form").addEventListener("submit"', script)
+        self.assertIn('document.getElementById("installed-plugins").addEventListener("click"', script)
+        self.assertIn('api(`/plugins/${encodeURIComponent(pluginId)}/${action}`', script)
+        self.assertIn("renderPluginOutput", script)
+        self.assertNotIn("x.manifest", script)
+        self.assertNotIn("x.commands", script)
+        self.assertNotIn("x.secrets", script)
+
     def test_web_channel_control_exposes_live_channel_sends(self) -> None:
         root = Path(__file__).resolve().parents[1] / "src" / "aegis" / "web" / "static"
         markup = (root / "index.html").read_text(encoding="utf-8")

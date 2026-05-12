@@ -433,6 +433,24 @@
         <section class="panel span-2" data-section="tools">
           <div class="panel-header">
             <div>
+              <p class="eyebrow">Extensions</p>
+              <h3>Plugins</h3>
+            </div>
+          </div>
+          <form id="plugin-install-form" class="inline-form two-col">
+            <input id="plugin-manifest-path" placeholder="/path/to/plugin.json">
+            <label class="checkline"><input id="plugin-install-enable" type="checkbox"> Enable</label>
+            <label class="checkline"><input id="plugin-install-unsigned" type="checkbox"> Unsigned local</label>
+            <button type="submit">Install</button>
+            <button id="plugin-reload" type="button" class="secondary">Reload</button>
+          </form>
+          <div id="installed-plugins" class="list compact-list"></div>
+          <div id="plugin-output" class="evidence-block"></div>
+        </section>
+
+        <section class="panel span-2" data-section="tools">
+          <div class="panel-header">
+            <div>
               <p class="eyebrow">MCP</p>
               <h3>Servers</h3>
             </div>
