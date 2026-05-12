@@ -10,6 +10,13 @@ Provider support:
 - Mistral.
 - Cohere.
 - OpenRouter.
+- Nous Portal API.
+- DeepSeek.
+- xAI/Grok.
+- Kimi/Moonshot.
+- MiniMax.
+- Z.AI/GLM.
+- Qwen/DashScope.
 - Ollama.
 - LM Studio.
 - Custom OpenAI-compatible endpoints.
@@ -22,7 +29,7 @@ Features:
 - Usage and cost tracking with aggregate totals, provider/model breakdowns, and recent sanitized usage receipts.
 - Provider context-window metadata and conservative prompt budget trimming before live calls.
 - Secret handles through the secrets broker.
-- Local auth login for OpenAI, Anthropic, Google, Mistral, Cohere, OpenRouter, and custom API keys.
+- Local auth login for OpenAI, Anthropic, Google, Mistral, Cohere, OpenRouter, Nous, DeepSeek, xAI, Kimi, MiniMax, Z.AI, Qwen, and custom API keys.
 - Guarded subscription-login metadata for OpenAI/ChatGPT Codex and Anthropic/claude.ai. Aegis reports the required provider-native command (`codex login` or `claude auth login`) but does not capture browser cookies, subscription session tokens, or refresh tokens until a governed token bridge exists.
 - Hermes/Claude provider-auth target tracking for OpenAI Codex, Claude Code, Copilot, Nous Portal, OpenRouter, Gemini, Qwen OAuth, Bedrock, Azure Foundry, xAI/Grok, Z.AI, Kimi, MiniMax, DeepSeek, Ollama, LM Studio, and custom endpoints. Unsupported provider-native login bridges are surfaced as explicit gaps instead of silent stubs.
 - Live chat completion calls for OpenAI, Anthropic, Google Gemini, Mistral, Cohere, OpenRouter, Ollama, LM Studio, and configured custom OpenAI-compatible routes. LM Studio accepts arbitrary local model IDs after the `lmstudio/` prefix.
@@ -37,6 +44,13 @@ PYTHONPATH=src python3 -m aegis.cli.main model auth login google --api-key-stdin
 PYTHONPATH=src python3 -m aegis.cli.main model auth login mistral --api-key-stdin
 PYTHONPATH=src python3 -m aegis.cli.main model auth login cohere --api-key-stdin
 PYTHONPATH=src python3 -m aegis.cli.main model auth login openrouter --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login nous --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login deepseek --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login xai --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login kimi --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login minimax --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login zai --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login qwen --api-key-stdin
 PYTHONPATH=src python3 -m aegis.cli.main model auth login custom --api-key-stdin
 PYTHONPATH=src python3 -m aegis.cli.main model auth methods openai
 PYTHONPATH=src python3 -m aegis.cli.main model auth login openai --subscription
@@ -50,12 +64,12 @@ PYTHONPATH=src python3 -m aegis.cli.main model fallbacks ollama/llama3 lmstudio/
 PYTHONPATH=src python3 -m aegis.cli.main model usage
 ```
 
-Keys are stored in the local secret store and are not returned to model-facing code or audit logs. Environment variables such as `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY`, `COHERE_API_KEY`, `OPENROUTER_API_KEY`, and `CUSTOM_API_KEY` still take precedence when present.
+Keys are stored in the local secret store and are not returned to model-facing code or audit logs. Environment variables such as `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY`, `COHERE_API_KEY`, `OPENROUTER_API_KEY`, `NOUS_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `MINIMAX_API_KEY`, `GLM_API_KEY`, `DASHSCOPE_API_KEY`, and `CUSTOM_API_KEY` still take precedence when present.
 Model aliases and fallback routes are persisted in the local SQLite state so CLI, TUI, and web sessions resolve the same routes after restart.
 
 Before a live model call, Aegis estimates prompt size with the routed provider's tokenizer profile, reserves output space, preserves the system instruction and current task request, keeps the newest session and memory context that fits, and records context-budget plus tokenizer metadata in the model response receipt. If `tiktoken` is installed, OpenAI-compatible profiles use exact `cl100k_base` counting. Llama and Mistral-style local profiles can use exact SentencePiece counting when the optional `sentencepiece` package is installed and `AEGIS_SENTENCEPIECE_MODEL_LLAMA`, `AEGIS_SENTENCEPIECE_MODEL_MISTRAL`, or the generic `AEGIS_SENTENCEPIECE_MODEL` points at a local tokenizer model. Otherwise Aegis stays dependency-light and falls back to built-in provider-specific estimators. Long-running sessions therefore retain recent continuity without sending unbounded history to a provider.
 
-OpenAI, Anthropic, Google Gemini, Mistral, Cohere, OpenRouter, LM Studio, and custom routes invoke live chat completions through the local secrets broker when their provider domains are allowed by policy. Ollama uses its local chat API without auth. Subscription login is not treated as an API key substitute: use the official Codex or Claude Code login flow for provider-native subscription access, and use Aegis API-key auth for Aegis live provider calls until a scoped refresh-token bridge is implemented.
+OpenAI, Anthropic, Google Gemini, Mistral, Cohere, OpenRouter, Nous, DeepSeek, xAI, Kimi, MiniMax, Z.AI, Qwen, LM Studio, and custom routes invoke live chat completions through the local secrets broker when their provider domains are allowed by policy. Ollama uses its local chat API without auth. Subscription login is not treated as an API key substitute: use the official Codex or Claude Code login flow for provider-native subscription access, and use Aegis API-key auth for Aegis live provider calls until a scoped refresh-token bridge is implemented.
 
 Custom OpenAI-compatible endpoints are configured in `.aegis/config.toml`:
 

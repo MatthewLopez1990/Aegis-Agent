@@ -166,11 +166,67 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(by_target["OpenAI Codex / ChatGPT subscription"]["external_command"], "codex login")
             self.assertEqual(by_target["Claude Code subscription"]["status"], "metadata_only_bridge_pending")
             self.assertEqual(by_target["Claude Code subscription"]["external_command"], "claude auth login")
+            self.assertEqual(by_target["Nous Portal API key"]["status"], "api_key_ready")
             self.assertEqual(by_target["GitHub Copilot"]["status"], "not_started")
+            self.assertEqual(by_target["DeepSeek"]["status"], "api_key_ready")
+            self.assertEqual(by_target["MiniMax OAuth"]["status"], "provider_native_auth_bridge_required")
             self.assertEqual(by_target["Qwen OAuth"]["required_auth"], ["oauth"])
+            self.assertEqual(by_target["Qwen OAuth"]["status"], "provider_native_auth_bridge_required")
             self.assertEqual(by_target["Ollama"]["status"], "local_ready")
             self.assertFalse(any(row["raw_tokens_captured"] for row in targets["targets"]))
             self.assertIn("raw_token_capture_rejection", targets["verification_gates"])
+
+    def test_expanded_openai_compatible_providers_use_shared_guarded_client(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            broker = SecretsBroker(root / ".aegis" / "secrets.json")
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"), broker)
+            client = LiveModelClient(broker)
+            cases = (
+                ("nous", "Hermes-4-70B", "https://inference-api.nousresearch.com/v1/chat/completions", "NOUS_API_KEY"),
+                ("deepseek", "deepseek-v4-flash", "https://api.deepseek.com/chat/completions", "DEEPSEEK_API_KEY"),
+                ("xai", "grok-4", "https://api.x.ai/v1/chat/completions", "XAI_API_KEY"),
+                ("kimi", "kimi-k2.5", "https://api.moonshot.ai/v1/chat/completions", "KIMI_API_KEY"),
+                ("minimax", "MiniMax-M2.7", "https://api.minimax.io/v1/chat/completions", "MINIMAX_API_KEY"),
+                ("zai", "glm-5.1", "https://api.z.ai/api/paas/v4/chat/completions", "GLM_API_KEY"),
+                ("qwen", "qwen-plus", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions", "DASHSCOPE_API_KEY"),
+            )
+
+            for provider, model, expected_url, secret_name in cases:
+                with self.subTest(provider=provider):
+                    api_key = f"sk-{provider}-test"
+                    registry.login_provider(provider, api_key)
+                    route = registry.route(f"{provider}/{model}")
+                    self.assertEqual(route.provider.auth_secret, secret_name)
+                    self.assertTrue(route.secret_handle_id)
+
+                    class FakeResponse:
+                        def __enter__(self):
+                            return self
+
+                        def __exit__(self, exc_type, exc, traceback):
+                            return False
+
+                        def read(self) -> bytes:
+                            return b'{"choices":[{"message":{"content":"provider response"}}],"usage":{"prompt_tokens":5,"completion_tokens":2}}'
+
+                    captured: dict[str, object] = {}
+
+                    def fake_urlopen(request, timeout):
+                        captured["url"] = request.full_url
+                        captured["headers"] = dict(request.header_items())
+                        captured["payload"] = json.loads(request.data.decode("utf-8"))
+                        self.assertNotIn(api_key, request.data.decode("utf-8"))
+                        return FakeResponse()
+
+                    with patch("aegis.models.client._open_model_request", fake_urlopen):
+                        result = client.chat(route, [{"role": "user", "content": "hello"}])
+
+                    self.assertEqual(captured["url"], expected_url)
+                    self.assertIn(f"Bearer {api_key}", captured["headers"]["Authorization"])
+                    self.assertEqual(captured["payload"]["model"], model)
+                    self.assertEqual(result.provider, provider)
+                    self.assertEqual(result.content, "provider response")
 
     def test_openrouter_live_client_uses_brokered_secret_and_records_usage(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):

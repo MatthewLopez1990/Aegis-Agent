@@ -52,6 +52,9 @@ class PlatformLayerTests(unittest.TestCase):
 
             models = orchestrator.models.list_models()
             self.assertTrue(any(model["identifier"] == "openai/gpt-4o" for model in models))
+            self.assertTrue(any(model["identifier"] == "deepseek/deepseek-v4-flash" for model in models))
+            self.assertTrue(any(model["identifier"] == "xai/grok-4" for model in models))
+            self.assertTrue(any(model["identifier"] == "qwen/qwen-plus" for model in models))
             route = orchestrator.models.route("alias/smart")
             self.assertEqual(route.identifier, "openrouter/anthropic/claude-sonnet-4.6")
             usage = orchestrator.models.record_usage(identifier="openai/gpt-4o", input_tokens=1000, output_tokens=500)
@@ -948,6 +951,8 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(auth_targets["OpenAI API"]["status"], "api_key_ready")
             self.assertEqual(auth_targets["Claude Code subscription"]["status"], "metadata_only_bridge_pending")
             self.assertEqual(auth_targets["GitHub Copilot"]["status"], "not_started")
+            self.assertEqual(auth_targets["DeepSeek"]["status"], "api_key_ready")
+            self.assertEqual(auth_targets["MiniMax OAuth"]["status"], "provider_native_auth_bridge_required")
             self.assertEqual(auth_targets["Qwen OAuth"]["required_auth"], ["oauth"])
             self.assertFalse(any(row["raw_tokens_captured"] for row in auth_parity["targets"]))
             backlog = {item["area"]: item for item in dashboard["live_gap_backlog"]}

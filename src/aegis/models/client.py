@@ -24,7 +24,20 @@ class ModelInvocationResult:
     raw_usage: dict[str, Any]
 
 
-OPENAI_COMPATIBLE_PROVIDERS = {"openai", "openrouter", "mistral", "lmstudio", "custom"}
+OPENAI_COMPATIBLE_PROVIDERS = {
+    "openai",
+    "openrouter",
+    "mistral",
+    "lmstudio",
+    "custom",
+    "nous",
+    "deepseek",
+    "xai",
+    "kimi",
+    "minimax",
+    "zai",
+    "qwen",
+}
 
 
 class LiveModelClient:

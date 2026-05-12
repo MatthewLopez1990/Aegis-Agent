@@ -384,13 +384,49 @@ def build_parser() -> argparse.ArgumentParser:
     model_auth_methods.add_argument("provider", nargs="?")
     model_auth_sub.add_parser("targets", help="Show Hermes/Claude provider auth parity targets")
     model_auth_login = model_auth_sub.add_parser("login", help="Store an API key or start a guarded subscription-login flow")
-    model_auth_login.add_argument("provider", choices=("openai", "openrouter", "anthropic", "google", "mistral", "cohere", "custom"))
+    model_auth_login.add_argument(
+        "provider",
+        choices=(
+            "openai",
+            "openrouter",
+            "anthropic",
+            "google",
+            "mistral",
+            "cohere",
+            "nous",
+            "deepseek",
+            "xai",
+            "kimi",
+            "minimax",
+            "zai",
+            "qwen",
+            "custom",
+        ),
+    )
     model_auth_login.add_argument("--method", choices=("api-key", "subscription"), default="api-key")
     model_auth_login.add_argument("--subscription", action="store_true", help="Alias for --method subscription")
     model_auth_login.add_argument("--api-key", help="API key value. Prefer --api-key-stdin or interactive entry.")
     model_auth_login.add_argument("--api-key-stdin", action="store_true", help="Read API key from stdin")
     model_auth_logout = model_auth_sub.add_parser("logout", help="Remove a model provider API key from the local secret store")
-    model_auth_logout.add_argument("provider", choices=("openai", "openrouter", "anthropic", "google", "mistral", "cohere", "custom"))
+    model_auth_logout.add_argument(
+        "provider",
+        choices=(
+            "openai",
+            "openrouter",
+            "anthropic",
+            "google",
+            "mistral",
+            "cohere",
+            "nous",
+            "deepseek",
+            "xai",
+            "kimi",
+            "minimax",
+            "zai",
+            "qwen",
+            "custom",
+        ),
+    )
     model_sub.add_parser("usage", help="Show usage summary")
 
     tools = subcommands.add_parser("tool", help="List or run built-in tools")

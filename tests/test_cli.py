@@ -1736,6 +1736,7 @@ class CliTests(unittest.TestCase):
 
             methods = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "methods", "openai"]))
             targets = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "targets"]))
+            deepseek_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "deepseek", "--api-key", "sk-deepseek-test"]))
             login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "openai", "--subscription"]))
 
             self.assertIn("subscription", methods["auth"]["auth_methods"])
@@ -1743,6 +1744,9 @@ class CliTests(unittest.TestCase):
             self.assertTrue(methods["auth"]["subscription_auth_supported"])
             self.assertFalse(methods["auth"]["subscription_auth_configured"])
             self.assertTrue(login["ok"])
+            self.assertTrue(deepseek_login["ok"])
+            self.assertTrue(deepseek_login["auth"]["auth_configured"])
+            self.assertEqual(deepseek_login["auth"]["auth_secret"], "DEEPSEEK_API_KEY")
             self.assertEqual(login["auth"]["status"], "external_login_required")
             self.assertEqual(login["auth"]["external_command"], "codex login")
             self.assertFalse(login["auth"]["token_captured"])
@@ -1750,6 +1754,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(targets["auth_targets"]["status"], "auth_parity_gap_tracked")
             self.assertEqual(target_rows["Claude Code subscription"]["status"], "metadata_only_bridge_pending")
             self.assertEqual(target_rows["GitHub Copilot"]["status"], "not_started")
+            self.assertEqual(target_rows["DeepSeek"]["status"], "api_key_ready")
+            self.assertNotIn("sk-deepseek-test", json.dumps(deepseek_login, sort_keys=True))
 
     @unittest.skipUnless(os.name == "posix", "POSIX mode assertions only apply on POSIX")
     def test_local_state_files_are_private(self) -> None:
