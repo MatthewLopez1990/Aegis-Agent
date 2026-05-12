@@ -308,6 +308,7 @@ class ConnectorTests(unittest.TestCase):
         self.assertTrue(live.ok)
         self.assertEqual(live.data["mode"], "live_write")
         self.assertEqual(live.data["status"], 202)
+        self.assertTrue(live.data["rate_limit"]["allowed"])
         self.assertEqual(captured["url"], "https://example.com/hooks/messages")
         self.assertEqual(captured["authorization"], "Bearer msg_raw_secret")
         self.assertIn('"channel": "general"', str(captured["body"]))
@@ -318,6 +319,48 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(live.data["accepted"]["receipt_schema"], "redacted_param_summary_v1")
         self.assertFalse(live.data["accepted"]["raw_secret_values_included"])
         self.assertFalse(live.data["accepted"]["raw_response_body_included"])
+
+    def test_mock_messaging_live_write_rate_limit_blocks_second_send(self) -> None:
+        broker = SecretsBroker()
+        broker.store_secret(name="MESSAGING_TOKEN", value="msg_raw_secret")
+        connector = MockMessagingConnector(allowlist=("example.com",), live_writes=True, secrets_broker=broker, rate_limits={"per_minute": 1})
+        live_params = {
+            "provider_url": "https://example.com/hooks/messages",
+            "channel": "general",
+            "text": "please post token=abc123",
+        }
+
+        class FakeResponse:
+            status = 202
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self, limit: int) -> bytes:
+                return b'{"ok":true}'
+
+        captured: dict[str, int] = {"calls": 0}
+
+        def fake_open(request, timeout):
+            captured["calls"] += 1
+            return FakeResponse()
+
+        with patch("aegis.connectors.mock_messaging._open_without_redirects", side_effect=fake_open):
+            live = connector.write(ConnectorRequest(operation="send_message", params=live_params, scopes=("write",), approved=True))
+            limited = connector.write(ConnectorRequest(operation="send_message", params=live_params, scopes=("write",), approved=True))
+
+        rendered = json.dumps(limited.data, sort_keys=True)
+        self.assertTrue(live.ok)
+        self.assertEqual(live.data["rate_limit"]["limit"], 1)
+        self.assertFalse(limited.ok)
+        self.assertIn("rate limit", limited.error or "")
+        self.assertFalse(limited.data["rate_limit"]["allowed"])
+        self.assertEqual(captured["calls"], 1)
+        self.assertNotIn("msg_raw_secret", rendered)
+        self.assertNotIn("abc123", rendered)
 
     def test_mock_connector_results_summarize_and_redact_params(self) -> None:
         connector = MockMessagingConnector()
