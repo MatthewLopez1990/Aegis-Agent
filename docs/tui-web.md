@@ -73,6 +73,7 @@ Commands:
 - `tools`, `allowed-tools`, `bashes`
 - `toolsets`
 - `skills [hub query|disable skill_id|enable skill_id]`
+- `curator [status|run [--dry-run]|pin <skill_id>|unpin <skill_id>|archive <skill_id>|restore <skill_id>|pause|resume]`
 - `plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-bundle|install-marketplace|update-marketplace`, `plugin`, `reload`, `reload-plugins`, `reload-skills`
 - `memory search <query>`
 - `memory health [--limit N] [--owner owner] [--scope scope]`

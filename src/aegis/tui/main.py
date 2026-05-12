@@ -66,6 +66,7 @@ TOP_LEVEL_COMMANDS = (
     "cost",
     "color",
     "context",
+    "curator",
     "dashboard",
     "debug",
     "deny",
@@ -189,6 +190,7 @@ MODEL_AUTH_COMMANDS = ("login", "logout", "methods", "targets")
 TOOLS_COMMANDS = ("run",)
 SKILLS_COMMANDS = ("hub", "disable", "enable")
 PLUGIN_COMMANDS = ("list", "install", "enable", "disable", "remove", "reload", "marketplace", "updates", "fetch-manifest", "fetch-bundle", "install-bundle", "install-marketplace", "update-marketplace")
+CURATOR_COMMANDS = ("status", "run", "pin", "unpin", "archive", "restore", "pause", "resume")
 REPAIR_COMMANDS = ("readiness", "review", "approve", "reject", "candidate", "generate-candidate", "synthesis-prompt", "synthesize-candidate", "review-candidate", "apply-candidate", "rollback-candidate", "attempt")
 SCHEDULE_COMMANDS = ("create", "memory-review-digest", "memory-review-escalation", "evaluation-run", "evaluation-suite", "due", "approve", "activate", "pause", "run-due")
 BROWSER_COMMANDS = ("session", "sessions", "close", "navigate", "extract", "inspect", "table", "screenshot", "render", "click", "fill")
@@ -484,6 +486,9 @@ class AegisTui(cmd.Cmd):
 
     def complete_plugin(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return _complete_subcommand(PLUGIN_COMMANDS, text, line, begidx)
+
+    def complete_curator(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return _complete_subcommand(CURATOR_COMMANDS, text, line, begidx)
 
     def do_dashboard(self, arg: str) -> None:
         """dashboard -- show runtime, security, and capability posture."""
@@ -1073,6 +1078,42 @@ class AegisTui(cmd.Cmd):
                 ),
             )
         )
+
+    def do_curator(self, arg: str) -> None:
+        """curator [status|run|pin|unpin|archive|restore|pause|resume] -- maintain local authored skills."""
+        try:
+            parts = shlex.split(arg) if arg else []
+        except ValueError as exc:
+            print(f"invalid curator command: {exc}")
+            return
+        curator = self.orchestrator.skill_curator
+        action = parts[0] if parts else "status"
+        try:
+            if action == "status":
+                _print_json(curator.status())
+                return
+            if action == "run":
+                _print_json(curator.run(dry_run="--dry-run" in parts[1:]))
+                return
+            if action in {"pin", "unpin", "archive", "restore"}:
+                if len(parts) < 2:
+                    print(f"usage: curator {action} <skill_id>")
+                    return
+                _print_json(getattr(curator, action)(parts[1]))
+                return
+            if action == "pause":
+                _print_json(curator.pause())
+                return
+            if action == "resume":
+                _print_json(curator.resume())
+                return
+        except KeyError as exc:
+            print(f"curator skill not found: {exc}")
+            return
+        except (PermissionError, ValueError) as exc:
+            print(f"curator error: {exc}")
+            return
+        print("usage: curator [status|run [--dry-run]|pin <skill_id>|unpin <skill_id>|archive <skill_id>|restore <skill_id>|pause|resume]")
 
     def do_migrate(self, arg: str) -> None:
         """migrate openclaw|hermes|openclaw-memory-preview|hermes-memory-preview|openclaw-memory-commit|hermes-memory-commit <path> [--owner USER] [--scope SCOPE] -- migration inspection and governed memory commit."""
@@ -4502,6 +4543,7 @@ def _command_reference() -> str:
             "allowed-tools|bashes   Policy-visible tools and shell posture",
             "tools run <name> <json> Run a governed tool",
             "skills [hub query]     Governed skills and virtual Skill Hub",
+            "curator status|run|pin|archive  Local authored skill maintenance",
             "plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-bundle|install-marketplace|update-marketplace",
             "plugin|reload|reload-plugins|reload-skills  Extension inventory aliases",
             "memory health|search|session-preview|create|update|merge|expire",
@@ -4622,6 +4664,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("tools run <name> <json>", "safe tool execution"),
             ("toolsets", "tool catalog grouped by permission and risk"),
             ("skills [hub query]", "governed skill hub"),
+            ("curator status|run|pin|archive", "local authored skill maintenance"),
             ("plugin|plugins|reload|reload-plugins|reload-skills", "extension inventory and reload readiness"),
             ("memory search|create|review", "durable memory"),
             ("mcp|reload-mcp|repair|schedules|cron", "extensions, schedules, and self-repair"),
@@ -4900,6 +4943,7 @@ def _next_command_hint(command: str) -> str:
         "bashes": "/sandbox",
         "tools": "/tools run <name> <json>",
         "skills": "/skills hub <query>",
+        "curator": "/curator run --dry-run",
         "plugin": "/plugins",
         "reload": "/plugins",
         "hooks": "/hooks list",
@@ -4955,6 +4999,7 @@ SLASH_SUBCOMMANDS: dict[str, tuple[str, ...]] = {
     "evaluation": EVALUATION_COMMANDS,
     "tools": TOOLS_COMMANDS,
     "skills": SKILLS_COMMANDS,
+    "curator": CURATOR_COMMANDS,
     "plugin": PLUGIN_COMMANDS,
     "plugins": PLUGIN_COMMANDS,
     "menu": _command_group_names(),
@@ -4982,6 +5027,7 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("plugin", "install-marketplace"): ("--catalog-path", "--enable"),
     ("plugins", "update-marketplace"): ("--catalog-path", "--enable", "--disable", "--force"),
     ("plugin", "update-marketplace"): ("--catalog-path", "--enable", "--disable", "--force"),
+    ("curator", "run"): ("--dry-run",),
     ("remote-control", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
     ("remote-control", "relay"): ("--relay-url", "--pairing-id", "--relay-auth-secret", "--approved"),
     ("remote-control", "relay-action"): ("--pairing-id", "--task-id", "--action", "--relay-auth-secret", "--session-id", "--reason"),

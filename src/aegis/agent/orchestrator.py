@@ -54,6 +54,7 @@ from aegis.security.taint import RiskLevel, Sensitivity, TrustClass, now_utc
 from aegis.sessions.manager import SessionManager
 from aegis.skills.manifest import SkillManifest
 from aegis.skills.hub import SkillHubCatalog
+from aegis.skills.curator import SkillCurator
 from aegis.skills.registry import SkillRegistry
 from aegis.skills.runtime import builtin_project_summary_manifest, builtin_workflow_candidate_manifest
 from aegis.tools.catalog import ToolCatalog
@@ -107,6 +108,7 @@ class AgentOrchestrator:
             escalation_routes=config.memory_retention.escalation_routes,
         )
         self.skills = SkillRegistry(store, audit_logger, self.secrets_broker)
+        self.skill_curator = SkillCurator(config.data_dir / "skill-curator.json", audit_logger, skills=self.skills)
         self.evidence = EvidenceBundleBuilder(store, audit_logger)
         self.sessions = SessionManager(store, audit_logger)
         self.channels = ChannelRegistry(store, audit_logger)

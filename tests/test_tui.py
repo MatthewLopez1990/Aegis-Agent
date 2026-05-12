@@ -158,6 +158,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("branch", tui.completenames("bra"))
             self.assertIn("btw", tui.completenames("bt"))
             self.assertIn("context", tui.completenames("con"))
+            self.assertIn("curator", tui.completenames("cur"))
             self.assertIn("export", tui.completenames("exp"))
             self.assertIn("image", tui.completenames("im"))
             self.assertIn("keybindings", tui.completenames("key"))
@@ -185,6 +186,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("/debug", tui.completedefault("deb", "/deb", 1, 4))
             self.assertIn("/tp", tui.completedefault("tp", "/tp", 1, 3))
             self.assertIn("/commands", tui.completedefault("com", "/com", 1, 4))
+            self.assertIn("/curator", tui.completedefault("cur", "/cur", 1, 4))
             self.assertIn("/copy", tui.completedefault("cop", "/cop", 1, 4))
             self.assertIn("/btw", tui.completedefault("bt", "/bt", 1, 3))
             self.assertIn("/paste", tui.completedefault("pa", "/pa", 1, 3))
@@ -237,6 +239,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("model|models|provider|usage", help_rendered)
             self.assertIn("insights [days]", help_rendered)
             self.assertIn("gquota [model]", help_rendered)
+            self.assertIn("curator status|run|pin|archive", help_rendered)
             self.assertIn("login|logout <provider>", help_rendered)
             self.assertIn("reasoning-effort metadata and usage cost", help_rendered)
             self.assertIn("UI preference and status metadata", help_rendered)
@@ -258,6 +261,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn("create", tui.complete_memory("cr", "memory cr", len("memory "), len("memory cr")))
             self.assertIn("health", tui.complete_memory("he", "memory he", len("memory "), len("memory he")))
             self.assertIn("enable", tui.complete_skills("en", "skills en", len("skills "), len("skills en")))
+            self.assertIn("archive", tui.complete_curator("ar", "curator ar", len("curator "), len("curator ar")))
+            self.assertIn("run", tui.complete_curator("ru", "curator ru", len("curator "), len("curator ru")))
             self.assertIn("fetch-manifest", tui.complete_plugins("fetch", "plugins fetch", len("plugins "), len("plugins fetch")))
             self.assertIn("fetch-bundle", tui.complete_plugins("fetch-b", "plugins fetch-b", len("plugins "), len("plugins fetch-b")))
             self.assertIn("install-bundle", tui.complete_plugins("install-b", "plugins install-b", len("plugins "), len("plugins install-b")))
@@ -268,6 +273,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("--enable", tui.completedefault("--", "/plugins install-bundle remote.plugin --", len("/plugins install-bundle remote.plugin "), len("/plugins install-bundle remote.plugin --")))
             self.assertIn("--enable", tui.completedefault("--", "/plugins install-marketplace remote.plugin --", len("/plugins install-marketplace remote.plugin "), len("/plugins install-marketplace remote.plugin --")))
             self.assertIn("--force", tui.completedefault("--", "/plugins update-marketplace remote.plugin --", len("/plugins update-marketplace remote.plugin "), len("/plugins update-marketplace remote.plugin --")))
+            self.assertIn("--dry-run", tui.completedefault("--", "/curator run --", len("/curator run "), len("/curator run --")))
             self.assertIn("openclaw-memory-preview", tui.complete_migrate("openclaw", "migrate openclaw", len("migrate "), len("migrate openclaw")))
             self.assertIn("candidate", tui.complete_repair("ca", "repair ca", len("repair "), len("repair ca")))
             self.assertIn("readiness", tui.complete_repair("rea", "repair rea", len("repair "), len("repair rea")))
@@ -392,6 +398,8 @@ class TuiTests(unittest.TestCase):
                 tui.onecmd("/queue")
                 tui.onecmd("/reload")
                 tui.onecmd("/reload-skills")
+                tui.onecmd("/curator")
+                tui.onecmd("/curator run --dry-run")
                 tui.onecmd("/profile")
                 tui.onecmd("/whoami")
                 tui.onecmd("/yolo")
@@ -452,6 +460,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn('"routines"', alias_commands)
             self.assertIn('"latest_task_ids"', alias_commands)
             self.assertIn('"mode": "skill_inventory_metadata"', alias_commands)
+            self.assertIn('"status": "curator_status"', alias_commands)
+            self.assertIn('"status": "curator_run_dry_run"', alias_commands)
             self.assertIn('"home_channel_readiness"', alias_commands)
             self.assertIn("Filesystem checkpoint rollback", alias_commands)
             self.assertGreaterEqual(alias_commands.count("Filesystem checkpoint rollback"), 2)
@@ -490,6 +500,43 @@ class TuiTests(unittest.TestCase):
             background_task = tui.orchestrator.store.get_task(tui.last_task_id or "")
             self.assertEqual(background_task["user_request"], "summarize this workspace")
             self.assertEqual(background_task["session_id"], tui.session["id"])
+
+    def test_curator_manages_local_skills_without_touching_builtins(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tui = AegisTui(data_dir=root / ".aegis", workspace=root)
+            tui.orchestrator.skills.register(_local_skill_manifest(), enable=False)
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                tui.onecmd("/curator")
+                tui.onecmd("/curator run --dry-run")
+                tui.onecmd("/curator pin local.curated")
+                tui.onecmd("/curator archive local.curated")
+                tui.onecmd("/curator unpin local.curated")
+                tui.onecmd("/curator archive local.curated")
+                tui.onecmd("/curator restore local.curated")
+                tui.onecmd("/curator archive aegis.project_summary")
+                tui.onecmd("/curator pause")
+                tui.onecmd("/curator run")
+                tui.onecmd("/curator resume")
+
+            rendered = output.getvalue()
+            self.assertIn('"status": "curator_status"', rendered)
+            self.assertIn('"status": "curator_run_dry_run"', rendered)
+            self.assertIn('"status": "curator_skill_pinned"', rendered)
+            self.assertIn("pinned skills cannot be archived", rendered)
+            self.assertIn('"status": "curator_skill_unpinned"', rendered)
+            self.assertIn('"status": "curator_skill_archived"', rendered)
+            self.assertIn('"restore_command": "curator restore local.curated"', rendered)
+            self.assertIn('"status": "curator_skill_restored"', rendered)
+            self.assertIn("built-in and hub skills are protected", rendered)
+            self.assertIn('"status": "curator_paused"', rendered)
+            self.assertIn('"status": "curator_run_paused"', rendered)
+            self.assertIn('"status": "curator_resumed"', rendered)
+            self.assertIn('"raw_secret_values_included": false', rendered)
+            self.assertIn("unattended_skill_deletion", rendered)
+            self.assertFalse(tui.orchestrator.skills.get("local.curated")[1])
 
     def test_tui_busy_and_dashboard_show_active_work_counts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1597,6 +1644,34 @@ class TuiTests(unittest.TestCase):
             self.assertIn("artifact_path", rendered)
             self.assertIn('"status": "closed"', rendered)
             self.assertIn("browser session required", rendered)
+
+
+def _local_skill_manifest() -> SkillManifest:
+    return SkillManifest.from_dict(
+        {
+            "id": "local.curated",
+            "name": "Local Curated Skill",
+            "description": "Fixture for curator lifecycle tests.",
+            "version": "0.1.0",
+            "author": "Aegis Test",
+            "source": "agent-created",
+            "permissions": {},
+            "connectors": [],
+            "secrets": [],
+            "network": {},
+            "filesystem": {},
+            "commands": [],
+            "input_schema": {"type": "object", "additionalProperties": False},
+            "output_schema": {"type": "object", "additionalProperties": False},
+            "risk_level": "low",
+            "approval_required": False,
+            "sandbox_profile": "no_tools",
+            "tests": [{"name": "curator fixture"}],
+            "evals": [{"name": "curator fixture"}],
+            "rollback": "Disable the skill.",
+            "changelog": ["Initial test fixture."],
+        }
+    )
 
 
 if __name__ == "__main__":
