@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import ipaddress
@@ -108,9 +109,16 @@ COPILOT_DENIED_TOOLS = (
 class LiveModelClient:
     """Invokes configured live providers without exposing raw secrets to callers."""
 
-    def __init__(self, secrets_broker: SecretsBroker, *, timeout_seconds: float = 60.0) -> None:
+    def __init__(
+        self,
+        secrets_broker: SecretsBroker,
+        *,
+        timeout_seconds: float = 60.0,
+        auth_metadata_recorder: Callable[[ModelRoute, dict[str, Any]], bool] | None = None,
+    ) -> None:
         self.secrets_broker = secrets_broker
         self.timeout_seconds = timeout_seconds
+        self.auth_metadata_recorder = auth_metadata_recorder
 
     def chat(self, route: ModelRoute, messages: list[dict[str, str]], *, temperature: float = 0.2) -> ModelInvocationResult:
         if route.auth_method == "subscription_cli":
@@ -1165,7 +1173,7 @@ class LiveModelClient:
             rotated_refresh = str(refreshed.get("refresh_token") or "").strip()
             if rotated_refresh:
                 self.secrets_broker.store_secret(name=refresh_secret, value=rotated_refresh)
-            route.auth_metadata["expires_at"] = _expires_at_from_ttl(refreshed.get("expires_in"))
+            self._record_auth_metadata(route, {"expires_at": _expires_at_from_ttl(refreshed.get("expires_in")), "expires_in": _ttl_seconds(refreshed.get("expires_in"))})
 
         minted = self._post_json(
             f"{portal_base_url}/api/oauth/agent-key",
@@ -1180,8 +1188,13 @@ class LiveModelClient:
         if not agent_key:
             raise RuntimeError("Nous OAuth agent-key response did not include api_key")
         self.secrets_broker.store_secret(name=agent_key_secret, value=agent_key)
-        route.auth_metadata["agent_key_expires_at"] = str(minted.get("expires_at") or _expires_at_from_ttl(minted.get("expires_in"))).strip()
-        route.auth_metadata["agent_key_expires_in"] = minted.get("expires_in")
+        self._record_auth_metadata(
+            route,
+            {
+                "agent_key_expires_at": str(minted.get("expires_at") or _expires_at_from_ttl(minted.get("expires_in"))).strip(),
+                "agent_key_expires_in": _ttl_seconds(minted.get("expires_in")),
+            },
+        )
         return agent_key
 
     def _resolve_minimax_oauth_access_token(self, route: ModelRoute) -> str:
@@ -1210,6 +1223,7 @@ class LiveModelClient:
         rotated_refresh = str(payload.get("refresh_token") or "").strip()
         if rotated_refresh:
             self.secrets_broker.store_secret(name=refresh_secret, value=rotated_refresh)
+        self._record_auth_metadata(route, {"expires_at": _expires_at_from_ttl(payload.get("expires_in")), "expires_in": _ttl_seconds(payload.get("expires_in"))})
         return access_token
 
     def _resolve_google_gemini_oauth_access_token(self, route: ModelRoute) -> str:
@@ -1235,7 +1249,7 @@ class LiveModelClient:
         rotated_refresh = str(payload.get("refresh_token") or "").strip()
         if rotated_refresh:
             self.secrets_broker.store_secret(name=refresh_secret, value=rotated_refresh)
-        route.auth_metadata["expires_at"] = _expires_at_from_ttl(payload.get("expires_in"))
+        self._record_auth_metadata(route, {"expires_at": _expires_at_from_ttl(payload.get("expires_in")), "expires_in": _ttl_seconds(payload.get("expires_in"))})
         return access_token
 
     def _resolve_github_copilot_oauth_token(self, route: ModelRoute) -> str:
@@ -1254,7 +1268,7 @@ class LiveModelClient:
         loaded = self._post_json(f"{base_url}/v1internal:loadCodeAssist", payload=load_payload, headers=headers)
         project = _google_gemini_project_id(loaded)
         if project:
-            route.auth_metadata["project_id"] = project
+            self._record_auth_metadata(route, {"project_id": project})
             return project, "discovered"
         tier = _google_gemini_tier_id(loaded)
         if not tier:
@@ -1265,7 +1279,7 @@ class LiveModelClient:
             )
             project = _google_gemini_project_id(onboarded)
             if project:
-                route.auth_metadata["project_id"] = project
+                self._record_auth_metadata(route, {"project_id": project})
                 return project, "onboarded"
         raise RuntimeError("Google Gemini OAuth could not resolve a Code Assist project")
 
@@ -1289,12 +1303,28 @@ class LiveModelClient:
             with _open_model_request(request, timeout=self.timeout_seconds) as response:  # noqa: S310 - fixed GitHub Copilot token endpoint.
                 raw = response.read().decode("utf-8")
             decoded = json.loads(raw)
-        except (HTTPError, URLError, OSError, json.JSONDecodeError):
-            return token
+        except HTTPError as exc:
+            raise RuntimeError(f"GitHub Copilot token exchange failed with HTTP {exc.code}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"GitHub Copilot token exchange failed: {exc.reason}") from exc
+        except OSError as exc:
+            raise RuntimeError(f"GitHub Copilot token exchange failed: {exc}") from exc
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("GitHub Copilot token exchange returned invalid JSON") from exc
         if not isinstance(decoded, dict):
-            return token
+            raise RuntimeError("GitHub Copilot token exchange returned an invalid payload")
         api_token = str(decoded.get("token") or "").strip()
-        return api_token or token
+        if not api_token:
+            raise RuntimeError("GitHub Copilot token exchange response did not include token")
+        return api_token
+
+    def _record_auth_metadata(self, route: ModelRoute, updates: dict[str, Any]) -> None:
+        clean = {key: value for key, value in updates.items() if value is not None}
+        if not clean:
+            return
+        route.auth_metadata.update(clean)
+        if self.auth_metadata_recorder is not None:
+            self.auth_metadata_recorder(route, clean)
 
     def _post_openai_compatible(self, url: str, *, api_key: str | None, payload: dict[str, Any]) -> dict[str, Any]:
         headers = {
@@ -1403,11 +1433,15 @@ def _oauth_expires_soon(expires_at: str, skew_seconds: int) -> bool:
 
 
 def _expires_at_from_ttl(expires_in: Any) -> str:
+    return datetime.fromtimestamp(time.time() + _ttl_seconds(expires_in), tz=timezone.utc).isoformat()
+
+
+def _ttl_seconds(expires_in: Any) -> int:
     try:
         ttl = int(expires_in)
     except (TypeError, ValueError):
         ttl = 0
-    return datetime.fromtimestamp(time.time() + max(0, ttl), tz=timezone.utc).isoformat()
+    return max(0, ttl)
 
 
 def _subscription_cli_prompt(messages: list[dict[str, str]], *, provider: str, temperature: float) -> str:

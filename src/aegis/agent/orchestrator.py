@@ -122,7 +122,7 @@ class AgentOrchestrator:
             google_vertex_project=config.google_vertex_project,
             google_vertex_location=config.google_vertex_location,
         )
-        self.model_client = LiveModelClient(self.models.secrets_broker)
+        self.model_client = LiveModelClient(self.models.secrets_broker, auth_metadata_recorder=self.models.record_external_auth_metadata)
         self.hooks = HookManager(config.data_dir / "hooks.json", audit_logger, allowed_executables=config.allowed_shell_commands, workspace=self.workspace)
         self.schedules = ScheduleManager(store, audit_logger)
         self.kanban = KanbanManager(store, audit_logger)

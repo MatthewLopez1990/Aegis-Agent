@@ -727,18 +727,8 @@ class ModelRegistry:
         secret_handle_id = None
         auth_method = "none"
         auth_metadata: dict[str, Any] = {}
-        if provider.auth_secret:
-            if self._api_key_auth_configured(provider):
-                secret_handle = self.secrets_broker.request_handle(
-                    name=provider.auth_secret,
-                    requester=f"model:{provider.provider}",
-                    reason="model provider API call",
-                    scopes=("model.invoke",),
-                )
-                secret_handle_id = secret_handle.handle_id
-                auth_method = "api_key"
-            elif self._subscription_auth_configured(provider):
-                auth_method = "subscription_cli"
+        if self._subscription_auth_configured(provider):
+            auth_method = "subscription_cli"
         if auth_method == "none" and provider.external_auth_method:
             external_link = self._external_auth_link(provider.provider, provider.external_auth_method)
             if external_link is not None:
@@ -747,6 +737,15 @@ class ModelRegistry:
                     auth_method = "oauth_token"
                 else:
                     auth_method = f"{provider.external_auth_method}_cli"
+        if auth_method == "none" and provider.auth_secret and self._api_key_auth_configured(provider):
+            secret_handle = self.secrets_broker.request_handle(
+                name=provider.auth_secret,
+                requester=f"model:{provider.provider}",
+                reason="model provider API call",
+                scopes=("model.invoke",),
+            )
+            secret_handle_id = secret_handle.handle_id
+            auth_method = "api_key"
         route = ModelRoute(resolved, provider, model, self.fallbacks.get(resolved, ()), secret_handle_id, auth_method, auth_metadata)
         self.audit_logger.append("model.routed", {"identifier": resolved, "fallbacks": list(route.fallback_identifiers), "auth_method": auth_method})
         return route
@@ -933,10 +932,6 @@ class ModelRegistry:
         return provider.auth_secret is not None and self.secrets_broker.has_secret(provider.auth_secret)
 
     def _auth_source(self, provider: ModelProviderSpec) -> str | None:
-        if provider.auth_secret is not None:
-            source = self.secrets_broker.secret_source(provider.auth_secret)
-            if source is not None:
-                return source
         if self._subscription_auth_configured(provider):
             return "subscription_cli"
         external_link = self._external_auth_link(provider.provider, provider.external_auth_method) if provider.external_auth_method else None
@@ -944,6 +939,10 @@ class ModelRegistry:
             if external_link.get("auth_source"):
                 return str(external_link["auth_source"])
             return "official_cli"
+        if provider.auth_secret is not None:
+            source = self.secrets_broker.secret_source(provider.auth_secret)
+            if source is not None:
+                return source
         return None
 
     def _auth_methods(self, provider: ModelProviderSpec) -> list[str]:
@@ -1084,6 +1083,43 @@ class ModelRegistry:
                 link[key] = value
         self.external_auth_links[_external_auth_link_key(provider_name, method)] = link
         self._persist_external_auth_links()
+
+    def record_external_auth_metadata(self, route: ModelRoute, updates: dict[str, Any]) -> bool:
+        method = str(route.auth_metadata.get("method") or route.provider.external_auth_method or "")
+        if not method:
+            return False
+        link = self._external_auth_link(route.provider.provider, method)
+        if link is None:
+            return False
+        allowed_keys = {
+            "expires_at",
+            "expires_in",
+            "agent_key_expires_at",
+            "agent_key_expires_in",
+            "project_id",
+        }
+        applied: dict[str, Any] = {}
+        for key in allowed_keys:
+            value = updates.get(key)
+            if value is None:
+                continue
+            link[key] = value
+            route.auth_metadata[key] = value
+            applied[key] = value
+        if not applied:
+            return False
+        link["metadata_updated_at"] = now_utc()
+        self._persist_external_auth_links()
+        self.audit_logger.append(
+            "model.auth_external_metadata_updated",
+            {
+                "provider": route.provider.provider,
+                "method": method,
+                "metadata_keys": sorted(applied),
+                "raw_secret_values_included": False,
+            },
+        )
+        return True
 
     def _forget_external_auth_links(self, provider_name: str) -> int:
         prefix = f"{_normalize_auth_key(provider_name)}:"

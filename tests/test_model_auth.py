@@ -281,6 +281,71 @@ class ModelAuthTests(unittest.TestCase):
             self.assertNotIn("CODEX_ACCESS_TOKEN", audit_text)
             self.assertNotIn("session_cookie", audit_text)
 
+    def test_verified_external_auth_routes_take_precedence_over_api_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            broker = SecretsBroker(root / ".aegis" / "secrets.json")
+            registry = ModelRegistry(
+                LocalStore(root / ".aegis" / "aegis.db"),
+                AuditLogger(root / ".aegis" / "audit.jsonl"),
+                broker,
+                azure_foundry_base_url="https://aoai.example.openai.azure.com/openai/v1",
+            )
+
+            registry.login_provider("openai", "sk-openai-test")
+            registry._remember_external_auth_link(  # noqa: SLF001 - test seeds verified subscription metadata.
+                "openai",
+                "subscription",
+                {
+                    "target": "OpenAI Codex / ChatGPT subscription",
+                    "auth_source": "subscription_cli",
+                    "invocation_bridge": "codex_exec",
+                },
+            )
+            openai_route = registry.route("openai/gpt-4o-mini")
+            self.assertEqual(openai_route.auth_method, "subscription_cli")
+            self.assertIsNone(openai_route.secret_handle_id)
+            self.assertEqual(registry.auth_status("openai")["auth_source"], "subscription_cli")
+
+            registry.login_provider("azure-foundry", "sk-azure-test")
+            registry._remember_external_auth_link(  # noqa: SLF001 - test seeds verified cloud identity metadata.
+                "azure-foundry",
+                "cloud_identity",
+                {
+                    "target": "Azure Foundry",
+                    "auth_source": "official_cli",
+                    "invocation_bridge": "az_rest",
+                },
+            )
+            azure_route = registry.route("azure-foundry/prod-gpt-4o")
+            self.assertEqual(azure_route.auth_method, "cloud_identity_cli")
+            self.assertIsNone(azure_route.secret_handle_id)
+            self.assertEqual(registry.auth_status("azure-foundry")["auth_source"], "official_cli")
+
+            registry.login_provider("nous", "sk-nous-test")
+            broker.store_secret(name="NOUS_OAUTH_ACCESS_TOKEN", value="nous-access-secret")
+            broker.store_secret(name="NOUS_OAUTH_REFRESH_TOKEN", value="nous-refresh-secret")
+            broker.store_secret(name="NOUS_OAUTH_AGENT_KEY", value="nous-agent-key-secret")
+            registry._remember_external_auth_link(  # noqa: SLF001 - test seeds verified OAuth metadata.
+                "nous",
+                "oauth",
+                {
+                    "target": "Nous Portal OAuth subscription",
+                    "auth_source": "oauth_device_flow",
+                    "aegis_bridge_status": "oauth_device_flow_ready",
+                    "oauth_token_brokered": True,
+                    "agent_key_brokered": True,
+                    "access_token_secret": "NOUS_OAUTH_ACCESS_TOKEN",
+                    "refresh_token_secret": "NOUS_OAUTH_REFRESH_TOKEN",
+                    "agent_key_secret": "NOUS_OAUTH_AGENT_KEY",
+                    "agent_key_expires_at": "2999-01-01T00:00:00+00:00",
+                },
+            )
+            nous_route = registry.route("nous/Hermes-4-70B")
+            self.assertEqual(nous_route.auth_method, "oauth_token")
+            self.assertIsNone(nous_route.secret_handle_id)
+            self.assertEqual(registry.auth_status("nous")["auth_source"], "oauth_device_flow")
+
     def test_verified_claude_subscription_can_invoke_without_api_key_or_token_import(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
             root = Path(temp)
@@ -554,7 +619,7 @@ class ModelAuthTests(unittest.TestCase):
                 return FakeResponse({"choices": [{"message": {"content": "copilot response"}}], "usage": {"prompt_tokens": 4, "completion_tokens": 2}})
 
             with patch("aegis.models.client._open_model_request", fake_model_open):
-                result = LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello from aegis"}])
+                result = LiveModelClient(broker, auth_metadata_recorder=registry.record_external_auth_metadata).chat(route, [{"role": "user", "content": "hello from aegis"}])
 
             self.assertEqual(result.content, "copilot response")
             self.assertEqual(result.raw_usage["source"], "oauth_device_flow")
@@ -566,6 +631,39 @@ class ModelAuthTests(unittest.TestCase):
             self.assertNotIn("COPILOT_GITHUB_TOKEN", audit_text)
             self.assertNotIn("gho_copilot_secret", audit_text)
             self.assertNotIn("copilot-api-secret", audit_text)
+
+    def test_github_copilot_oauth_token_exchange_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            broker = SecretsBroker(root / ".aegis" / "secrets.json")
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"), broker)
+            broker.store_secret(name="GITHUB_COPILOT_OAUTH_TOKEN", value="gho_copilot_secret")
+            registry._remember_external_auth_link(  # noqa: SLF001 - test seeds verified Copilot OAuth metadata.
+                "github-copilot",
+                "oauth_device",
+                {
+                    "target": "GitHub Copilot",
+                    "auth_source": "oauth_device_flow",
+                    "aegis_bridge_status": "oauth_device_flow_ready",
+                    "oauth_token_brokered": True,
+                    "access_token_secret": "GITHUB_COPILOT_OAUTH_TOKEN",
+                    "invocation_bridge": "copilot_oauth_chat_completions",
+                },
+            )
+            route = registry.route("github-copilot/gpt-5.1-codex")
+            captured_urls: list[str] = []
+
+            def failing_exchange(request, timeout):
+                captured_urls.append(request.full_url)
+                raise HTTPError(request.full_url, 401, "unauthorized", {}, None)
+
+            with (
+                patch("aegis.models.client._open_model_request", failing_exchange),
+                self.assertRaisesRegex(RuntimeError, "GitHub Copilot token exchange failed with HTTP 401"),
+            ):
+                LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello"}])
+
+            self.assertEqual(captured_urls, ["https://api.github.com/copilot_internal/v2/token"])
 
     def test_google_gemini_oauth_login_brokers_tokens_and_invokes_cloudcode(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"AEGIS_GOOGLE_GEMINI_OAUTH_CLIENT_ID": "test-google-client-id", "AEGIS_GOOGLE_GEMINI_OAUTH_CLIENT_SECRET": "test-google-client-secret"}, clear=True):
@@ -638,6 +736,7 @@ class ModelAuthTests(unittest.TestCase):
             route = registry.route("google-gemini-oauth/gemini-2.5-flash")
             self.assertEqual(route.auth_method, "oauth_token")
             route.auth_metadata["expires_at"] = "2000-01-01T00:00:00+00:00"
+            registry.record_external_auth_metadata(route, {"expires_at": "2000-01-01T00:00:00+00:00"})
             captured_model: list[tuple[str, dict[str, str], dict[str, object] | str]] = []
 
             def fake_model_open(request, timeout):
@@ -670,7 +769,7 @@ class ModelAuthTests(unittest.TestCase):
                 )
 
             with patch("aegis.models.client._open_model_request", fake_model_open):
-                result = LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello from aegis"}])
+                result = LiveModelClient(broker, auth_metadata_recorder=registry.record_external_auth_metadata).chat(route, [{"role": "user", "content": "hello from aegis"}])
 
             self.assertEqual(result.content, "gemini oauth response")
             self.assertEqual(result.input_tokens, 5)
@@ -680,10 +779,15 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(result.raw_usage["project_source"], "discovered")
             self.assertEqual(broker.resolve_stored_secret("GOOGLE_GEMINI_OAUTH_ACCESS_TOKEN"), "google-access-refreshed")
             self.assertEqual(broker.resolve_stored_secret("GOOGLE_GEMINI_OAUTH_REFRESH_TOKEN"), "google-refresh-rotated")
+            reloaded = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(audit_path), broker)
+            reloaded_route = reloaded.route("google-gemini-oauth/gemini-2.5-flash")
+            self.assertNotEqual(reloaded_route.auth_metadata["expires_at"], "2000-01-01T00:00:00+00:00")
+            self.assertEqual(reloaded_route.auth_metadata["project_id"], "cloud-project-123")
             self.assertEqual([entry[0] for entry in captured_model], ["https://oauth2.googleapis.com/token", "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist", "https://cloudcode-pa.googleapis.com/v1internal:generateContent"])
 
             audit_text = audit_path.read_text(encoding="utf-8")
             self.assertIn("model.auth_external_login_requested", audit_text)
+            self.assertIn("model.auth_external_metadata_updated", audit_text)
             self.assertNotIn("google-access-secret", audit_text)
             self.assertNotIn("google-refresh-secret", audit_text)
             self.assertNotIn("google-access-refreshed", audit_text)
