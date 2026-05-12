@@ -193,7 +193,7 @@ MODEL_COMMANDS = ("list", "route", "alias", "fallbacks", "usage", "auth", "provi
 MODEL_AUTH_COMMANDS = ("login", "logout", "methods", "targets")
 TOOLS_COMMANDS = ("run",)
 SKILLS_COMMANDS = ("hub", "disable", "enable")
-PLUGIN_COMMANDS = ("list", "install", "enable", "disable", "remove", "reload", "marketplace", "updates", "fetch-manifest", "fetch-bundle", "install-bundle", "install-marketplace", "update-marketplace")
+PLUGIN_COMMANDS = ("list", "install", "enable", "disable", "remove", "reload", "marketplace", "updates", "fetch-manifest", "fetch-bundle", "install-bundle", "install-marketplace", "update-marketplace", "prepare-update", "apply-prepared-update")
 CURATOR_COMMANDS = ("status", "run", "pin", "unpin", "archive", "restore", "pause", "resume")
 REPAIR_COMMANDS = ("readiness", "review", "approve", "reject", "candidate", "generate-candidate", "synthesis-prompt", "synthesize-candidate", "review-candidate", "apply-candidate", "rollback-candidate", "attempt")
 SCHEDULE_COMMANDS = ("create", "memory-review-digest", "memory-review-escalation", "evaluation-run", "evaluation-suite", "due", "approve", "activate", "pause", "run-due")
@@ -3901,7 +3901,7 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_plugins(self, arg: str) -> None:
-        """plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-bundle|install-marketplace|update-marketplace -- manage governed local plugins."""
+        """plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-bundle|install-marketplace|update-marketplace|prepare-update|apply-prepared-update -- manage governed local plugins."""
         try:
             parts = shlex.split(arg) if arg else []
         except ValueError as exc:
@@ -3999,10 +3999,31 @@ class AegisTui(cmd.Cmd):
                     )
                 )
                 return
+            if parts[0] == "prepare-update" and len(parts) >= 2:
+                _print_json(
+                    manager.prepare_marketplace_update(
+                        parts[1],
+                        catalog_path=_option_value(parts, "--catalog-path"),
+                        allowlist=self.orchestrator.config.network_allowlist,
+                        force="--force" in parts[2:],
+                    )
+                )
+                return
+            if parts[0] == "apply-prepared-update" and len(parts) >= 2:
+                if "--enable" in parts[2:] and "--disable" in parts[2:]:
+                    raise ValueError("use either --enable or --disable, not both")
+                _print_json(
+                    manager.apply_prepared_marketplace_update(
+                        parts[1],
+                        approved="--approved" in parts[2:],
+                        enable=True if "--enable" in parts[2:] else False if "--disable" in parts[2:] else None,
+                    )
+                )
+                return
         except (KeyError, PermissionError, ValueError) as exc:
             print(f"plugin error: {exc}")
             return
-        print("usage: plugins list | plugins install <plugin.json> [--enable] [--unsigned-local] | plugins enable|disable|remove <plugin_id> | plugins reload | plugins marketplace [--query q] [--catalog-path file] | plugins updates [--catalog-path file] | plugins fetch-manifest <plugin_id> [--catalog-path file] | plugins fetch-bundle <plugin_id> [--catalog-path file] [--key-name name] | plugins install-bundle <plugin_id> [--catalog-path file] [--key-name name] [--enable] | plugins install-marketplace <plugin_id> [--catalog-path file] [--enable] | plugins update-marketplace <plugin_id> [--catalog-path file] [--enable|--disable] [--force]")
+        print("usage: plugins list | plugins install <plugin.json> [--enable] [--unsigned-local] | plugins enable|disable|remove <plugin_id> | plugins reload | plugins marketplace [--query q] [--catalog-path file] | plugins updates [--catalog-path file] | plugins fetch-manifest <plugin_id> [--catalog-path file] | plugins fetch-bundle <plugin_id> [--catalog-path file] [--key-name name] | plugins install-bundle <plugin_id> [--catalog-path file] [--key-name name] [--enable] | plugins install-marketplace <plugin_id> [--catalog-path file] [--enable] | plugins update-marketplace <plugin_id> [--catalog-path file] [--enable|--disable] [--force] | plugins prepare-update <plugin_id> [--catalog-path file] [--force] | plugins apply-prepared-update <candidate_id> --approved [--enable|--disable]")
 
     def do_toolsets(self, arg: str) -> None:
         """toolsets -- summarize governed tools by permission and risk."""
@@ -5203,7 +5224,7 @@ def _command_reference() -> str:
             "tools run <name> <json> Run a governed tool",
             "skills [hub query]     Governed skills and virtual Skill Hub",
             "curator status|run|pin|archive  Local authored skill maintenance",
-            "plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-bundle|install-marketplace|update-marketplace",
+            "plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-bundle|install-marketplace|update-marketplace|prepare-update|apply-prepared-update",
             "plugin|reload|reload-plugins|reload-skills|reload_skills  Extension inventory aliases",
             "memory health|search|session-preview|create|update|merge|expire",
             "mcp list|register|call Governed MCP registry",
@@ -5738,6 +5759,10 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("plugin", "install-marketplace"): ("--catalog-path", "--enable"),
     ("plugins", "update-marketplace"): ("--catalog-path", "--enable", "--disable", "--force"),
     ("plugin", "update-marketplace"): ("--catalog-path", "--enable", "--disable", "--force"),
+    ("plugins", "prepare-update"): ("--catalog-path", "--force"),
+    ("plugin", "prepare-update"): ("--catalog-path", "--force"),
+    ("plugins", "apply-prepared-update"): ("--approved", "--enable", "--disable"),
+    ("plugin", "apply-prepared-update"): ("--approved", "--enable", "--disable"),
     ("curator", "run"): ("--dry-run",),
     ("remote-control", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
     ("remote-control", "directory"): ("--pairing-id", "--limit"),

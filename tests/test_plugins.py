@@ -372,6 +372,79 @@ class PluginManagerTests(unittest.TestCase):
             with self.assertRaises(KeyError):
                 SkillRegistry(LocalStore(data_dir / "aegis.db"), AuditLogger(data_dir / "audit.jsonl"), SecretsBroker(data_dir / "secrets.json")).get("test.plugin_skill")
 
+    def test_plugin_marketplace_update_can_be_prepared_then_explicitly_applied(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            plugin_path = _write_plugin_fixture(root)
+            manager = _plugin_manager(data_dir, workspace=root)
+            manager.install_plugin(plugin_path, unsigned_local=True)
+            body = json.dumps({"id": "test.plugin", "name": "Test Plugin", "version": "0.3.0", "description": "Prepared update."}).encode("utf-8")
+            digest = sha256(body).hexdigest()
+            catalog_path = root / "prepared-update-marketplace.json"
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "plugins": [
+                            {
+                                "id": "test.plugin",
+                                "name": "Test Plugin",
+                                "version": "0.3.0",
+                                "description": "Prepared update metadata.",
+                                "manifest_url": "https://example.com/plugins/test.plugin/plugin.json",
+                                "manifest_sha256": digest,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            class FakeResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return body
+
+            with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeResponse()):
+                prepared = manager.prepare_marketplace_update("test.plugin", catalog_path=catalog_path, allowlist=("example.com",))
+
+            self.assertEqual(prepared["status"], "marketplace_update_prepared")
+            self.assertEqual(prepared["mode"], "verified_manifest_update_candidate")
+            self.assertEqual(prepared["previous_version"], "0.1.0")
+            self.assertEqual(prepared["available_version"], "0.3.0")
+            self.assertEqual(prepared["fetch"]["manifest_sha256"], digest)
+            self.assertTrue(Path(prepared["candidate_path"]).exists())
+            self.assertNotEqual(prepared["fetch"]["manifest_path"], prepared["fetch"]["source_manifest_path"])
+            self.assertTrue(str(Path(prepared["fetch"]["manifest_path"]).parent).endswith("update-candidates"))
+            self.assertEqual(Path(prepared["fetch"]["manifest_path"]).read_bytes(), body)
+            self.assertFalse(prepared["auto_update_supported"])
+            self.assertTrue(prepared["approved_apply_supported"])
+            with self.assertRaises(PermissionError):
+                manager.apply_prepared_marketplace_update(prepared["candidate_id"])
+
+            applied = manager.apply_prepared_marketplace_update(prepared["candidate_id"], approved=True)
+            candidate = json.loads(Path(prepared["candidate_path"]).read_text(encoding="utf-8"))
+
+            self.assertEqual(applied["status"], "marketplace_prepared_update_applied")
+            self.assertEqual(applied["mode"], "approved_verified_manifest_update_candidate")
+            self.assertEqual(applied["candidate_id"], prepared["candidate_id"])
+            self.assertEqual(applied["previous_version"], "0.1.0")
+            self.assertEqual(applied["plugin"]["version"], "0.3.0")
+            self.assertEqual(applied["manifest_sha256"], digest)
+            self.assertFalse(applied["auto_update_supported"])
+            self.assertTrue(applied["approved_candidate_apply_supported"])
+            self.assertFalse(applied["provider_writes_performed"])
+            self.assertEqual(candidate["status"], "applied")
+            self.assertEqual(candidate["applied_plugin_version"], "0.3.0")
+            self.assertEqual(manager.list_plugins()[0]["description"], "Prepared update.")
+            with self.assertRaises(ValueError):
+                manager.apply_prepared_marketplace_update(prepared["candidate_id"], approved=True)
+
     @unittest.skipUnless(os.name == "posix", "POSIX mode assertions only apply on POSIX")
     def test_plugin_store_is_private(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

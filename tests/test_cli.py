@@ -2333,6 +2333,8 @@ class CliTests(unittest.TestCase):
             manifest_digest = sha256(manifest_body).hexdigest()
             update_body = json.dumps({"id": "test.plugin", "name": "Test Plugin", "version": "0.2.0", "description": "CLI updated plugin."}).encode("utf-8")
             update_digest = sha256(update_body).hexdigest()
+            prepared_update_body = json.dumps({"id": "test.plugin", "name": "Test Plugin", "version": "0.3.0", "description": "CLI prepared plugin update."}).encode("utf-8")
+            prepared_update_digest = sha256(prepared_update_body).hexdigest()
             bundle_body = b"cli remote plugin bundle"
             bundle_digest = sha256(bundle_body).hexdigest()
             SecretsBroker(data_dir / "secrets.json").store_secret(name=DEFAULT_SKILL_SIGNING_KEY, value="cli-bundle-key")
@@ -2407,6 +2409,24 @@ class CliTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            prepared_update_catalog = root / "prepared-update-marketplace.json"
+            prepared_update_catalog.write_text(
+                json.dumps(
+                    {
+                        "plugins": [
+                            {
+                                "id": "test.plugin",
+                                "name": "Test Plugin",
+                                "version": "0.3.0",
+                                "description": "CLI prepared update catalog metadata.",
+                                "manifest_url": "https://example.com/plugins/test.plugin/plugin.json",
+                                "manifest_sha256": prepared_update_digest,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             class FakeResponse:
                 def __enter__(self):
@@ -2448,12 +2468,27 @@ class CliTests(unittest.TestCase):
                 def read(self, limit: int) -> bytes:
                     return update_body
 
+            class FakePreparedUpdateResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return prepared_update_body
+
             installed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugin", "install", str(plugin_path), "--unsigned-local"]))
             listed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "list"]))
             marketplace = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "marketplace", "--query", "test", "--catalog-path", str(catalog_path)]))
             updates = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "updates", "--catalog-path", str(catalog_path)]))
             with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeUpdateResponse()):
                 updated_marketplace = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "update-marketplace", "test.plugin", "--catalog-path", str(update_catalog)]))
+            with patch("aegis.plugins.manager._open_without_redirects", return_value=FakePreparedUpdateResponse()):
+                prepared_marketplace_update = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "prepare-update", "test.plugin", "--catalog-path", str(prepared_update_catalog)]))
+            applied_prepared_update = dispatch(
+                parser.parse_args(["--data-dir", str(data_dir), "plugins", "apply-prepared-update", prepared_marketplace_update["candidate_id"], "--approved"])
+            )
             with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeResponse()):
                 fetched = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "fetch-manifest", "remote.plugin", "--catalog-path", str(fetch_catalog)]))
             with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeBundleResponse()):
@@ -2479,6 +2514,12 @@ class CliTests(unittest.TestCase):
             self.assertEqual(updated_marketplace["plugin"]["version"], "0.2.0")
             self.assertEqual(updated_marketplace["fetch"]["manifest_sha256"], update_digest)
             self.assertFalse(updated_marketplace["auto_update_supported"])
+            self.assertEqual(prepared_marketplace_update["status"], "marketplace_update_prepared")
+            self.assertEqual(prepared_marketplace_update["fetch"]["manifest_sha256"], prepared_update_digest)
+            self.assertEqual(applied_prepared_update["status"], "marketplace_prepared_update_applied")
+            self.assertEqual(applied_prepared_update["plugin"]["version"], "0.3.0")
+            self.assertFalse(applied_prepared_update["auto_update_supported"])
+            self.assertTrue(applied_prepared_update["approved_candidate_apply_supported"])
             self.assertEqual(fetched["status"], "manifest_downloaded_for_review")
             self.assertEqual(Path(fetched["manifest_path"]).read_bytes(), manifest_body)
             self.assertEqual(fetched_bundle["status"], "bundle_downloaded_for_review")

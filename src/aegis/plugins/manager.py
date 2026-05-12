@@ -121,6 +121,7 @@ class PluginManager:
                 "next_actions": [
                     "review marketplace metadata",
                     "run plugins fetch-manifest <plugin_id> to verify the remote manifest",
+                    "run plugins prepare-update <plugin_id> to stage a reviewed update candidate",
                     "run plugins update-marketplace <plugin_id> for an explicit governed update",
                     "install through plugins install <plugin.json> using the existing governed lifecycle",
                 ],
@@ -433,6 +434,161 @@ class PluginManager:
         self.audit_logger.append("plugin.marketplace_updated", redact(result))
         return result
 
+    def prepare_marketplace_update(
+        self,
+        plugin_id: str,
+        *,
+        catalog_path: str | Path | None = None,
+        allowlist: tuple[str, ...] = (),
+        force: bool = False,
+    ) -> dict[str, Any]:
+        store = self._read_store()
+        previous = store["plugins"].get(plugin_id)
+        if previous is None:
+            raise KeyError(plugin_id)
+        catalog = {str(entry.get("id") or ""): _public_marketplace_entry(entry) for entry in _read_plugin_catalog(catalog_path)}
+        entry = catalog.get(plugin_id)
+        if entry is None:
+            raise KeyError(plugin_id)
+        if not force and not _version_newer(entry["version"], previous["version"]):
+            raise ValueError("marketplace update candidate requires a newer catalog version or force=True")
+        candidate_id = "plugupd_" + uuid4().hex[:16]
+        fetched = self.fetch_marketplace_manifest(plugin_id, catalog_path=catalog_path, allowlist=allowlist)
+        candidate_manifest_path = ensure_private_file(self._update_candidate_manifest_path(candidate_id))
+        shutil.copyfile(Path(str(fetched["manifest_path"])), candidate_manifest_path)
+        ensure_private_file(candidate_manifest_path)
+        candidate = {
+            "id": candidate_id,
+            "status": "prepared",
+            "plugin_id": plugin_id,
+            "name": entry["name"],
+            "previous_version": previous["version"],
+            "available_version": entry["version"],
+            "manifest_path": str(candidate_manifest_path),
+            "manifest_sha256": fetched["manifest_sha256"],
+            "prepared_at": now_utc(),
+            "prepared_from_catalog": "local_file" if catalog_path else "built_in",
+            "enable_default": bool(previous.get("enabled", False)),
+            "raw_secret_values_included": False,
+            "blocked_operations": [
+                "unattended_remote_plugin_auto_update",
+                "remote_bundle_auto_install",
+                "dynamic_plugin_import",
+                "marketplace_token_capture",
+            ],
+        }
+        candidate_path = self._write_update_candidate(candidate)
+        result = {
+            "status": "marketplace_update_prepared",
+            "mode": "verified_manifest_update_candidate",
+            "candidate_id": candidate_id,
+            "candidate_path": str(candidate_path),
+            "id": plugin_id,
+            "previous_version": previous["version"],
+            "available_version": entry["version"],
+            "fetch": {
+                "id": fetched["id"],
+                "manifest_url": fetched["manifest_url"],
+                "manifest_sha256": fetched["manifest_sha256"],
+                "manifest_path": str(candidate_manifest_path),
+                "source_manifest_path": fetched["manifest_path"],
+            },
+            "apply_command": f"plugins apply-prepared-update {candidate_id} --approved",
+            "approved_apply_supported": True,
+            "auto_update_supported": False,
+            "provider_writes_performed": False,
+            "raw_secret_values_included": False,
+            "blocked_operations": candidate["blocked_operations"],
+        }
+        self.audit_logger.append("plugin.marketplace_update_prepared", redact(result))
+        return result
+
+    def apply_prepared_marketplace_update(
+        self,
+        candidate_id: str,
+        *,
+        approved: bool = False,
+        enable: bool | None = None,
+    ) -> dict[str, Any]:
+        if not approved:
+            raise PermissionError("prepared marketplace plugin update requires explicit approval")
+        candidate = self._read_update_candidate(candidate_id)
+        if candidate.get("status") != "prepared":
+            raise ValueError("marketplace update candidate is not prepared")
+        plugin_id = str(candidate.get("plugin_id") or "")
+        if not _PLUGIN_ID_RE.fullmatch(plugin_id):
+            raise ValueError("marketplace update candidate has invalid plugin id")
+        manifest_path = Path(str(candidate.get("manifest_path") or "")).expanduser().resolve()
+        if not manifest_path.exists():
+            raise FileNotFoundError(str(manifest_path))
+        manifest_body = manifest_path.read_bytes()
+        digest = hashlib.sha256(manifest_body).hexdigest()
+        expected_digest = str(candidate.get("manifest_sha256") or "")
+        if digest != expected_digest:
+            raise ValueError("prepared marketplace update manifest SHA-256 does not match candidate")
+        manifest = _read_plugin_manifest(manifest_path)
+        if str(manifest.get("id") or "") != plugin_id:
+            raise ValueError("prepared marketplace update manifest id does not match candidate")
+        store = self._read_store()
+        previous = store["plugins"].get(plugin_id)
+        if previous is None:
+            raise KeyError(plugin_id)
+        previous_version = str(candidate.get("previous_version") or "")
+        if previous_version and previous["version"] != previous_version:
+            raise ValueError("prepared marketplace update candidate is stale for the installed plugin version")
+        rollback_manifest_path = self._backup_plugin_manifest(previous)
+        removed: dict[str, Any] | None = None
+        try:
+            removed = self.remove_plugin(plugin_id)
+            updated = self.install_plugin(
+                manifest_path,
+                enable=bool(previous.get("enabled", False)) if enable is None else bool(enable),
+                unsigned_local=False,
+            )
+        except Exception:
+            if removed is not None and rollback_manifest_path is not None:
+                try:
+                    restored = self.install_plugin(
+                        rollback_manifest_path,
+                        enable=bool(previous.get("enabled", False)),
+                        unsigned_local=bool(previous.get("unsigned_local", False)),
+                    )
+                    self.audit_logger.append("plugin.prepared_update_rolled_back", redact({"plugin_id": plugin_id, "restored": restored}))
+                except Exception as rollback_exc:  # pragma: no cover - preserve the original update failure if rollback also fails.
+                    self.audit_logger.append("plugin.prepared_update_rollback_failed", redact({"plugin_id": plugin_id, "reason": str(rollback_exc)}))
+            raise
+        candidate["status"] = "applied"
+        candidate["applied_at"] = now_utc()
+        candidate["applied_plugin_version"] = updated["version"]
+        candidate["rollback_manifest_path"] = str(rollback_manifest_path) if rollback_manifest_path else ""
+        self._write_update_candidate(candidate)
+        result = {
+            "status": "marketplace_prepared_update_applied",
+            "mode": "approved_verified_manifest_update_candidate",
+            "candidate_id": candidate_id,
+            "id": plugin_id,
+            "previous_version": previous["version"],
+            "available_version": str(candidate.get("available_version") or updated["version"]),
+            "plugin": updated,
+            "enabled": bool(updated.get("enabled", False)),
+            "manifest_path": str(manifest_path),
+            "manifest_sha256": digest,
+            "removed_resources": removed.get("removed_resources", []) if removed else [],
+            "rollback_manifest_path": str(rollback_manifest_path) if rollback_manifest_path else "",
+            "auto_update_supported": False,
+            "approved_candidate_apply_supported": True,
+            "provider_writes_performed": False,
+            "raw_secret_values_included": False,
+            "blocked_operations": [
+                "unattended_remote_plugin_auto_update",
+                "remote_bundle_auto_install",
+                "dynamic_plugin_import",
+                "marketplace_token_capture",
+            ],
+        }
+        self.audit_logger.append("plugin.prepared_marketplace_update_applied", redact(result))
+        return result
+
     def install_plugin(
         self,
         manifest_path: str | Path,
@@ -641,6 +797,38 @@ class PluginManager:
         shutil.copyfile(source_path, backup_path)
         ensure_private_file(backup_path)
         return backup_path
+
+    def _update_candidate_dir(self) -> Path:
+        return ensure_private_dir(self.path.parent / "plugin-marketplace" / "update-candidates")
+
+    def _update_candidate_path(self, candidate_id: str) -> Path:
+        if not re.fullmatch(r"plugupd_[0-9a-f]{16}", candidate_id):
+            raise ValueError("invalid marketplace update candidate id")
+        return self._update_candidate_dir() / f"{candidate_id}.json"
+
+    def _update_candidate_manifest_path(self, candidate_id: str) -> Path:
+        if not re.fullmatch(r"plugupd_[0-9a-f]{16}", candidate_id):
+            raise ValueError("invalid marketplace update candidate id")
+        return self._update_candidate_dir() / f"{candidate_id}.plugin.json"
+
+    def _write_update_candidate(self, candidate: dict[str, Any]) -> Path:
+        candidate_id = str(candidate.get("id") or "")
+        path = ensure_private_file(self._update_candidate_path(candidate_id))
+        with path.open("w", encoding="utf-8") as handle:
+            json.dump(redact(candidate), handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        ensure_private_file(path)
+        return path
+
+    def _read_update_candidate(self, candidate_id: str) -> dict[str, Any]:
+        path = self._update_candidate_path(candidate_id)
+        if not path.exists():
+            raise KeyError(candidate_id)
+        with path.open("r", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        if not isinstance(raw, dict):
+            raise ValueError("marketplace update candidate must be a JSON object")
+        return raw
 
     def _read_store(self) -> dict[str, Any]:
         if not self.path.exists():
@@ -884,6 +1072,7 @@ def _public_marketplace_entry(raw: dict[str, Any], *, installed: dict[str, Any] 
             "run plugins fetch-manifest <plugin_id> to verify the remote manifest",
             "run plugins install-marketplace <plugin_id> for an explicit governed install",
             "run plugins install-bundle <plugin_id> for an explicit signed-bundle install",
+            "run plugins prepare-update <plugin_id> to stage a reviewed update candidate",
             "run plugins update-marketplace <plugin_id> for an explicit governed update",
             "install through the existing governed plugin lifecycle",
         ],

@@ -371,6 +371,15 @@ def build_parser() -> argparse.ArgumentParser:
         plugin_marketplace_update.add_argument("--enable", action="store_true", help="Enable default-enabled resources after update")
         plugin_marketplace_update.add_argument("--disable", action="store_true", help="Keep updated resources disabled")
         plugin_marketplace_update.add_argument("--force", action="store_true", help="Allow reinstalling the same or older catalog version")
+        plugin_prepare_update = plugin_sub.add_parser("prepare-update", help="Fetch and verify one marketplace update as a private review candidate")
+        plugin_prepare_update.add_argument("plugin_id")
+        plugin_prepare_update.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
+        plugin_prepare_update.add_argument("--force", action="store_true", help="Allow preparing the same or older catalog version")
+        plugin_apply_prepared = plugin_sub.add_parser("apply-prepared-update", help="Apply a prepared marketplace update candidate after explicit approval")
+        plugin_apply_prepared.add_argument("candidate_id")
+        plugin_apply_prepared.add_argument("--approved", action="store_true", help="Approve applying the prepared update candidate")
+        plugin_apply_prepared.add_argument("--enable", action="store_true", help="Enable default-enabled resources after applying")
+        plugin_apply_prepared.add_argument("--disable", action="store_true", help="Keep updated resources disabled")
 
     connector = subcommands.add_parser("connector", help="List connector status")
     connector_sub = connector.add_subparsers(dest="connector_command", required=True)
@@ -1163,6 +1172,21 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 allowlist=config.network_allowlist,
                 enable=True if args.enable else False if args.disable else None,
                 force=args.force,
+            )
+        if args.plugin_command == "prepare-update":
+            return manager.prepare_marketplace_update(
+                args.plugin_id,
+                catalog_path=args.catalog_path,
+                allowlist=config.network_allowlist,
+                force=args.force,
+            )
+        if args.plugin_command == "apply-prepared-update":
+            if args.enable and args.disable:
+                raise ValueError("use either --enable or --disable, not both")
+            return manager.apply_prepared_marketplace_update(
+                args.candidate_id,
+                approved=args.approved,
+                enable=True if args.enable else False if args.disable else None,
             )
 
     if args.command == "connector":

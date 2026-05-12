@@ -1325,6 +1325,27 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     )
                 )
                 return
+            if path == "/plugins/marketplace/prepare-update":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.plugins.prepare_marketplace_update(
+                        str(_required(payload, "plugin_id")),
+                        catalog_path=_optional_str(payload, "catalog_path"),
+                        allowlist=orchestrator.config.network_allowlist,
+                        force=bool(payload.get("force", False)),
+                    )
+                )
+                return
+            if path == "/plugins/marketplace/apply-prepared-update":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.plugins.apply_prepared_marketplace_update(
+                        str(_required(payload, "candidate_id")),
+                        approved=bool(payload.get("approved", False)),
+                        enable=payload.get("enable") if "enable" in payload else None,
+                    )
+                )
+                return
             if path == "/plugins/marketplace/fetch-bundle":
                 payload = self._read_json()
                 self._json(

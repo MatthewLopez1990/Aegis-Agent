@@ -360,6 +360,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "verified plugin marketplace manifest fetch/install",
                 "signed remote plugin bundle review",
                 "explicit signed remote plugin bundle install",
+                "prepared verified plugin marketplace update candidates",
                 "verified plugin marketplace update application",
                 "PR review comment autofix planning",
                 "approved PR local patch application",
