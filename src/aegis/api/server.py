@@ -21,6 +21,7 @@ from aegis.memory.models import MemoryType
 from aegis.migration.openclaw import preview_hermes_memory_import, preview_openclaw_memory_import
 from aegis.product.capabilities import build_product_dashboard
 from aegis.research.harness import ResearchHarness
+from aegis.remote_control import REMOTE_CONTROL_TOKEN_HEADER, RemoteControlPairingRegistry
 from aegis.scheduler.worker import ScheduleWorker
 from aegis.security.policy_engine import PolicyDecision, PolicyRequest
 from aegis.security.policy_profile import activate_due_policy_rollouts, apply_policy_bundle, apply_policy_bundle_text, diff_policy_bundle, diff_policy_bundle_text, import_policy_bundle_text, list_policy_bundles, list_policy_promotions, list_policy_rollouts, policy_profile_to_dict, promote_policy_bundle, rollback_policy_bundle, schedule_policy_bundle
@@ -95,6 +96,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
     api_token = secrets.token_urlsafe(32)
     allowed_hosts = _allowed_hosts(host, port)
     allowed_origins = _allowed_origins(host, port)
+    remote_control = RemoteControlPairingRegistry()
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "AegisAgent/0.1"
@@ -139,6 +141,25 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
             if path == "/auth":
                 self._require_allowed_host()
                 self._json({"token": api_token})
+                return
+            if path == "/remote-control/status":
+                auth = self._authorize_remote_control_status()
+                if auth.get("auth_kind") == "remote_control":
+                    self._json({"status": "remote_pairing_active", "pairing": auth["pairing"], "token_header": REMOTE_CONTROL_TOKEN_HEADER})
+                else:
+                    self._json(remote_control.status())
+                return
+            match_remote_task = re.fullmatch(r"/remote-control/tasks/([^/]+)", path)
+            if match_remote_task:
+                task_id = match_remote_task.group(1)
+                self._authorize_remote_control_action("status", task_id)
+                self._json(orchestrator.status(task_id))
+                return
+            match_remote_task_events = re.fullmatch(r"/remote-control/tasks/([^/]+)/events", path)
+            if match_remote_task_events:
+                task_id = match_remote_task_events.group(1)
+                self._authorize_remote_control_action("events", task_id)
+                self._json(orchestrator.evidence.run_events(task_id))
                 return
             self._authorize_read()
             if path.startswith("/tool-artifacts/"):
@@ -394,12 +415,79 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
         def _do_POST(self) -> None:
             parsed = urlparse(self.path)
             path = parsed.path
-            if path != "/channels/webhook":
+            if path in {"/remote-control/pair", "/remote-control/revoke"}:
+                self._authorize_local_mutation()
+            elif re.fullmatch(r"/remote-control/tasks/[^/]+/(resume|pause|cancel)", path):
+                pass
+            elif path != "/channels/webhook":
                 self._authorize_mutation()
 
             if path == "/tasks":
                 payload = self._read_json()
                 self._json(orchestrator.submit_task(str(_required(payload, "request")), path=payload.get("path"), session_id=payload.get("session_id")))
+                return
+            if path == "/remote-control/pair":
+                payload = self._read_json()
+                result = remote_control.create_pairing(
+                    label=str(payload.get("label") or ""),
+                    session_id=_optional_str(payload, "session_id"),
+                    task_id=_optional_str(payload, "task_id"),
+                    allowed_actions=_optional_str_list(payload, "allowed_actions"),
+                    ttl_seconds=_optional_int(payload, "expires_in_seconds"),
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.pairing_created",
+                    {
+                        "pairing_id": result["pairing"]["id"],
+                        "label": result["pairing"]["label"],
+                        "session_id": result["pairing"].get("session_id"),
+                        "task_id": result["pairing"].get("task_id"),
+                        "allowed_actions": result["pairing"].get("allowed_actions"),
+                        "expires_at": result["pairing"]["expires_at"],
+                        "token_header": result["token_header"],
+                        "token_captured": False,
+                    },
+                )
+                self._json(result)
+                return
+            if path == "/remote-control/revoke":
+                payload = self._read_json()
+                result = remote_control.revoke(str(_required(payload, "pairing_id")))
+                orchestrator.audit_logger.append(
+                    "remote_control.pairing_revoked",
+                    {
+                        "pairing_id": result["pairing"]["id"],
+                        "label": result["pairing"]["label"],
+                        "session_id": result["pairing"].get("session_id"),
+                        "token_captured": False,
+                    },
+                )
+                self._json(result)
+                return
+            match_remote_action = re.fullmatch(r"/remote-control/tasks/([^/]+)/(resume|pause|cancel)", path)
+            if match_remote_action:
+                task_id = match_remote_action.group(1)
+                action = match_remote_action.group(2)
+                auth = self._authorize_remote_control_action(action, task_id)
+                payload = self._read_json()
+                actor = f"remote-control:{auth['pairing'].get('label') or auth['pairing']['id']}"
+                if action == "resume":
+                    result = orchestrator.resume_task(task_id, session_id=payload.get("session_id"), actor=actor)
+                elif action == "pause":
+                    result = orchestrator.pause_task(task_id, session_id=payload.get("session_id"), actor=actor, reason=str(payload.get("reason", "remote control pause")))
+                else:
+                    result = orchestrator.cancel_task(task_id, session_id=payload.get("session_id"), actor=actor, reason=str(payload.get("reason", "remote control cancel")))
+                orchestrator.audit_logger.append(
+                    "remote_control.task_action",
+                    {
+                        "pairing_id": auth["pairing"]["id"],
+                        "task_id": task_id,
+                        "action": action,
+                        "actor": actor,
+                        "token_captured": False,
+                    },
+                )
+                self._json(result)
                 return
             if path == "/sessions":
                 payload = self._read_json()
@@ -456,6 +544,8 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 provider = str(_required(payload, "provider"))
                 method = str(payload.get("method") or "api_key").replace("-", "_")
                 if method in {"subscription", "oauth", "oauth_device", "cloud_identity"}:
+                    if payload.get("api_key"):
+                        raise ValueError(f"{method} login does not accept API key input")
                     auth = orchestrator.models.login_provider_external(provider, method=method)
                     if payload.get("run_external"):
                         auth = {
@@ -1265,6 +1355,23 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
         def _authorize_read(self) -> None:
             authorize_local_request(self.headers, token=api_token, allowed_hosts=allowed_hosts, allowed_origins=allowed_origins)
 
+        def _authorize_local_mutation(self) -> None:
+            authorize_local_request(self.headers, token=api_token, allowed_hosts=allowed_hosts, allowed_origins=allowed_origins)
+
+        def _authorize_remote_control_status(self) -> dict[str, Any]:
+            return authorize_remote_control_request(self.headers, token=api_token, allowed_hosts=allowed_hosts, allowed_origins=allowed_origins, remote_control=remote_control)
+
+        def _authorize_remote_control_action(self, action: str, task_id: str) -> dict[str, Any]:
+            return authorize_remote_control_request(
+                self.headers,
+                token=api_token,
+                allowed_hosts=allowed_hosts,
+                allowed_origins=allowed_origins,
+                remote_control=remote_control,
+                action=action,
+                task_id=task_id,
+            )
+
         def _require_allowed_host(self) -> None:
             require_allowed_host(self.headers, allowed_hosts=allowed_hosts)
 
@@ -1653,6 +1760,21 @@ def _optional_str(payload: dict[str, Any], key: str) -> str | None:
     return None if value is None else str(value)
 
 
+def _optional_int(payload: dict[str, Any], key: str) -> int | None:
+    if key not in payload or payload[key] is None:
+        return None
+    return int(payload[key])
+
+
+def _optional_str_list(payload: dict[str, Any], key: str) -> list[str] | None:
+    if key not in payload or payload[key] is None:
+        return None
+    value = payload[key]
+    if not isinstance(value, list):
+        raise ValueError(f"{key} must be a JSON array")
+    return [str(item) for item in value]
+
+
 def _exception_detail(exc: KeyError) -> str:
     if exc.args:
         return str(exc.args[0])
@@ -1857,3 +1979,30 @@ def authorize_local_request(headers: Any, *, token: str, allowed_hosts: set[str]
     supplied = headers.get("X-Aegis-Token", "")
     if not secrets.compare_digest(supplied, token):
         raise PermissionError("missing or invalid local API token")
+
+
+def authorize_remote_control_request(
+    headers: Any,
+    *,
+    token: str,
+    allowed_hosts: set[str],
+    allowed_origins: set[str],
+    remote_control: RemoteControlPairingRegistry,
+    action: str | None = None,
+    task_id: str | None = None,
+) -> dict[str, Any]:
+    require_allowed_host(headers, allowed_hosts=allowed_hosts)
+    origin = headers.get("Origin")
+    if origin and origin not in allowed_origins:
+        raise PermissionError("origin is not allowed")
+    supplied = headers.get("X-Aegis-Token", "")
+    if secrets.compare_digest(supplied, token):
+        return {"auth_kind": "local_api"}
+    remote_token = headers.get(REMOTE_CONTROL_TOKEN_HEADER, "")
+    if action and task_id:
+        pairing = remote_control.authorize_action(remote_token, action=action, task_id=task_id)
+    else:
+        pairing = remote_control.authorize(remote_token)
+    if pairing is not None:
+        return {"auth_kind": "remote_control", "pairing": pairing}
+    raise PermissionError("missing or invalid remote-control token")

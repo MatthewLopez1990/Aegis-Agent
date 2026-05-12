@@ -46,9 +46,12 @@ TOP_LEVEL_COMMANDS = (
     "channel",
     "channels",
     "clear",
+    "checkpoint",
+    "compact",
     "compress",
     "config",
     "connectors",
+    "continue",
     "cost",
     "dashboard",
     "deny",
@@ -61,10 +64,12 @@ TOP_LEVEL_COMMANDS = (
     "exit",
     "effort",
     "fast",
+    "gateway",
     "goal",
     "help",
     "hooks",
     "init",
+    "kanban",
     "login",
     "logout",
     "loop",
@@ -78,6 +83,7 @@ TOP_LEVEL_COMMANDS = (
     "models",
     "new",
     "pause",
+    "plan",
     "platforms",
     "permissions",
     "personality",
@@ -93,9 +99,11 @@ TOP_LEVEL_COMMANDS = (
     "repair",
     "repairs",
     "reset",
+    "reasoning",
     "restart",
     "resume",
     "review",
+    "rewind",
     "rollback",
     "schedule",
     "schedules",
@@ -105,6 +113,7 @@ TOP_LEVEL_COMMANDS = (
     "sessions",
     "skills",
     "status",
+    "stats",
     "stop",
     "submit",
     "tasks",
@@ -2065,6 +2074,10 @@ class AegisTui(cmd.Cmd):
         """compress [keep_last] -- compact the active session history."""
         self.do_session(f"compact {arg}".strip())
 
+    def do_compact(self, arg: str) -> None:
+        """compact [keep_last] -- Claude-style alias for session compaction."""
+        self.do_compress(arg)
+
     def do_background(self, arg: str) -> None:
         """background <request> -- submit a governed task from the active session."""
         if not arg.strip():
@@ -2087,8 +2100,31 @@ class AegisTui(cmd.Cmd):
             )
         )
 
+    def do_checkpoint(self, arg: str) -> None:
+        """checkpoint -- show checkpoint and rollback readiness."""
+        self.do_rollback(arg)
+
+    def do_rewind(self, arg: str) -> None:
+        """rewind -- show rewind/rollback readiness."""
+        self.do_rollback(arg)
+
     def do_remote_control(self, arg: str) -> None:
-        """remote_control [name] -- show guarded remote-control readiness."""
+        """remote_control [name|pair] -- show guarded remote-control readiness."""
+        parts = shlex.split(arg) if arg else []
+        if parts and parts[0] == "pair":
+            _print_json(
+                {
+                    "status": "pairing_endpoint_ready",
+                    "command": "PYTHONPATH=src python3 -m aegis.cli.main serve --workspace . --host 127.0.0.1 --port 8765",
+                    "create_pairing": "POST /remote-control/pair",
+                    "status_endpoint": "GET /remote-control/status",
+                    "token_header": "X-Aegis-Remote-Token",
+                    "auth_required": "local API token required to create or revoke pairings",
+                    "scope": "scoped_remote_task_control",
+                    "blocked_until_relay": ["off_device_outbound_relay", "mobile_push_delivery", "cloud_session_directory"],
+                }
+            )
+            return
         width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
         title = arg.strip() or self.session.get("title") or "Aegis TUI"
         print(
@@ -2096,10 +2132,11 @@ class AegisTui(cmd.Cmd):
                 "Remote Control",
                 [
                     f"Session: {title}",
-                    "Status: local control plane available; mobile/browser relay not yet enabled.",
+                    "Status: local control plane available with short-lived pairing tokens.",
                     "Current secure surface: aegis serve --host 127.0.0.1 --port 8765",
-                    "Security posture: no inbound remote tunnel, no subscription token capture, no unauthenticated control URL.",
-                    "Next secure slice: short-lived pairing token, outbound relay, approval prompts, and audit receipts before any off-device control.",
+                    "Pairing endpoint: POST /remote-control/pair returns one token for X-Aegis-Remote-Token.",
+                    "Security posture: host/origin checks still apply; no subscription token capture; pairing creation needs the local API token.",
+                    "Remaining live gap: outbound relay, mobile push delivery, and cloud session directory.",
                 ],
                 width,
             )
@@ -2117,9 +2154,29 @@ class AegisTui(cmd.Cmd):
         """usage -- show model usage summary."""
         self.do_models("usage")
 
+    def do_stats(self, arg: str) -> None:
+        """stats -- Hermes-style alias for usage."""
+        self.do_usage(arg)
+
     def do_cost(self, arg: str) -> None:
         """cost -- Claude-style alias for model usage and estimated cost."""
         self.do_models("usage")
+
+    def do_reasoning(self, arg: str) -> None:
+        """reasoning [level] -- alias for effort."""
+        self.do_effort(arg)
+
+    def do_gateway(self, arg: str) -> None:
+        """gateway -- show channels, connectors, and remote-control surfaces."""
+        self.do_platforms(arg)
+
+    def do_kanban(self, arg: str) -> None:
+        """kanban -- alias for boards."""
+        self.do_boards(arg)
+
+    def do_continue(self, arg: str) -> None:
+        """continue <task_id> -- alias for resume."""
+        self.do_resume(arg)
 
     def do_add_dir(self, arg: str) -> None:
         """add_dir <path> -- record an additional working directory request for the active session."""
@@ -2155,8 +2212,34 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_model(self, arg: str) -> None:
-        """model [args] -- Claude/Hermes-style alias for models."""
-        self.do_models(arg or "providers")
+        """model [identifier|args] -- set active session model or inspect models."""
+        raw = arg.strip()
+        if not raw:
+            self.do_models("providers")
+            return
+        parts = shlex.split(raw)
+        if parts and parts[0] in MODEL_COMMANDS:
+            self.do_models(raw)
+            return
+        if len(parts) != 1:
+            print("usage: model <identifier>|list|providers|route <identifier>|auth ...")
+            return
+        identifier = parts[0]
+        try:
+            route = self.orchestrator.models.route(identifier)
+            self.session = self.orchestrator.sessions.update_session(self.session["id"], model=identifier)
+        except (KeyError, ValueError) as exc:
+            print(f"model route failed: {exc}")
+            return
+        _print_json(
+            {
+                "status": "session_model_updated",
+                "session_id": self.session["id"],
+                "model": identifier,
+                "provider": route.provider.provider,
+                "resolved_model": route.model,
+            }
+        )
 
     def do_login(self, arg: str) -> None:
         """login [provider [subscription]] -- model auth login alias."""
@@ -2283,6 +2366,18 @@ class AegisTui(cmd.Cmd):
             {
                 "repair_readiness": self.orchestrator.repair_readiness_summary(limit=20),
                 "evaluation_readiness": ResearchHarness(data_dir=self.orchestrator.config.data_dir).release_readiness_summary(limit=20),
+            }
+        )
+
+    def do_plan(self, arg: str) -> None:
+        """plan -- show no-mutation planning/readiness context."""
+        _print_json(
+            {
+                "status": "plan_mode_readiness",
+                "mutation": "disabled_by_command",
+                "active_session_id": self.session.get("id"),
+                "model": self.session.get("model") or "alias/smart",
+                "next_actions": ["dashboard", "tasks", "approvals", "repair readiness", "evaluation readiness"],
             }
         )
 

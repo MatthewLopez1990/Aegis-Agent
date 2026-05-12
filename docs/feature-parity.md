@@ -61,9 +61,9 @@ Dashboard fields for audit: `enterprise_readiness`, `memory_readiness`, `self_im
 
 ### Models
 
-- Model registry supports OpenAI, Anthropic, Google, Mistral, Cohere, OpenRouter, Ollama, LM Studio, and custom endpoints.
+- Model registry supports OpenAI, Anthropic, Google, Mistral, Cohere, OpenRouter, Nous, DeepSeek, xAI, Kimi, MiniMax, Z.AI, Qwen, Ollama, LM Studio, and custom endpoints.
 - Aliases, fallback routes, usage tracking, cost estimation, provider-specific tokenizer-profile context accounting with optional exact `tiktoken` support for OpenAI-compatible profiles and optional local SentencePiece support for Llama/Mistral profiles, and secret handles are implemented without exposing raw secrets to model-facing code.
-- Live model invocation is available for OpenAI, Anthropic, Google Gemini, Mistral, Cohere, OpenRouter, Ollama, LM Studio, and configured custom OpenAI-compatible endpoints, with prompt-boundary redaction and taint-labeled session context.
+- Live model invocation is available for OpenAI, Anthropic, Google Gemini, Mistral, Cohere, OpenRouter, Nous, DeepSeek, xAI, Kimi, MiniMax, Z.AI, Qwen, Ollama, LM Studio, and configured custom OpenAI-compatible endpoints, with prompt-boundary redaction and taint-labeled session context.
 
 ### Scheduling and Work Orchestration
 

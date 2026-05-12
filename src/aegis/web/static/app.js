@@ -2026,7 +2026,11 @@ document.getElementById("model-auth-form").addEventListener("submit", async (eve
   const provider = document.getElementById("model-provider").value;
   const method = document.getElementById("model-auth-method").value;
   const apiKey = document.getElementById("model-api-key").value;
-  await api("/models/auth/login", { method: "POST", body: JSON.stringify({ provider, method, api_key: apiKey }) });
+  const payload = { provider, method };
+  if (method === "api_key") {
+    payload.api_key = apiKey;
+  }
+  await api("/models/auth/login", { method: "POST", body: JSON.stringify(payload) });
   document.getElementById("model-api-key").value = "";
   await refresh();
 });

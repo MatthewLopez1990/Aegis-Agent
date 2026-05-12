@@ -231,8 +231,12 @@ class ApiServerSecurityTests(unittest.TestCase):
                 with self.assertRaises(HTTPError) as skills_error:
                     _json_get(port, "/skills")
                 self.assertEqual(skills_error.exception.code, 403)
+                with self.assertRaises(HTTPError) as remote_status_error:
+                    _json_get(port, "/remote-control/status")
+                self.assertEqual(remote_status_error.exception.code, 403)
 
                 token = _json_get(port, "/auth")["token"]
+                remote_status_initial = _json_get(port, "/remote-control/status", token=token)
                 artifact_dir = workspace / ".aegis" / "tool-artifacts"
                 artifact_dir.mkdir(parents=True)
                 (artifact_dir / "fixture.txt").write_text("preview artifact", encoding="utf-8")
@@ -368,6 +372,38 @@ class ApiServerSecurityTests(unittest.TestCase):
                     {"session_id": web_session["id"], "reason": "No longer needed", "actor": "api-user"},
                     token=token,
                 )
+                remote_control_task = _json_post(port, f"/sessions/{web_session['id']}/messages", {"content": "send message remote control", "submit": True}, token=token)
+                remote_pair = _json_post(
+                    port,
+                    "/remote-control/pair",
+                    {
+                        "label": "API smoke phone",
+                        "task_id": remote_control_task["id"],
+                        "session_id": web_session["id"],
+                        "allowed_actions": ["status", "events", "pause", "cancel"],
+                        "expires_in_seconds": 90,
+                    },
+                    token=token,
+                )
+                remote_token = str(remote_pair["token"])
+                remote_status_paired = _json_get(port, "/remote-control/status", remote_token=remote_token)
+                remote_task_status = _json_get(port, f"/remote-control/tasks/{remote_control_task['id']}", remote_token=remote_token)
+                remote_task_events = _json_get(port, f"/remote-control/tasks/{remote_control_task['id']}/events", remote_token=remote_token)
+                with self.assertRaises(HTTPError) as remote_dashboard_error:
+                    _json_get(port, "/dashboard", remote_token=remote_token)
+                with self.assertRaises(HTTPError) as remote_wrong_scope_error:
+                    _json_get(port, f"/remote-control/tasks/{session_task['id']}", remote_token=remote_token)
+                remote_paused_task = _json_post(
+                    port,
+                    f"/remote-control/tasks/{remote_control_task['id']}/pause",
+                    {"session_id": web_session["id"], "reason": "Remote operator pause"},
+                    remote_token=remote_token,
+                )
+                with self.assertRaises(HTTPError) as remote_pair_replay_error:
+                    _json_post(port, "/remote-control/pair", {"label": "should fail"}, remote_token=remote_token)
+                remote_revoked = _json_post(port, "/remote-control/revoke", {"pairing_id": remote_pair["pairing"]["id"]}, token=token)
+                with self.assertRaises(HTTPError) as revoked_remote_error:
+                    _json_get(port, f"/remote-control/tasks/{remote_control_task['id']}", remote_token=remote_token)
                 session_task_status = _json_get(port, f"/tasks/{session_task['id']}", token=token)
                 listed_tasks = _json_get(port, "/tasks?limit=10", token=token)
                 listed_session_tasks = _json_get(port, f"/sessions/{web_session['id']}/tasks?limit=10", token=token)
@@ -398,6 +434,8 @@ class ApiServerSecurityTests(unittest.TestCase):
                 model_subscription_login = _json_post(port, "/models/auth/login", {"provider": "openai", "method": "subscription"}, token=token)
                 model_subscription_login_external = _json_post(port, "/models/auth/login", {"provider": "openai", "method": "subscription", "run_external": True}, token=token)
                 model_oauth_login_external = _json_post(port, "/models/auth/login", {"provider": "github-copilot", "method": "oauth_device", "run_external": True}, token=token)
+                with self.assertRaises(HTTPError) as model_external_api_key_error:
+                    _json_post(port, "/models/auth/login", {"provider": "github-copilot", "method": "oauth_device", "api_key": "ghp_secret"}, token=token)
                 model_auth_login = _json_post(port, "/models/auth/login", {"provider": "openai", "api_key": "sk-api-secret"}, token=token)
                 model_providers_after_login = _json_get(port, "/model-providers", token=token)
                 model_auth_targets = _json_get(port, "/models/auth/targets", token=token)
@@ -776,6 +814,24 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(migration_memory_commit["memories"][0]["provenance"]["reviewer"], "api-reviewer")
                 self.assertNotIn("abc123", json.dumps(migration_memory_commit, sort_keys=True))
                 self.assertEqual(invalid_role.exception.code, 400)
+                self.assertEqual(remote_status_initial["status"], "local_pairing_available")
+                self.assertEqual(remote_status_initial["active_pairing_count"], 0)
+                self.assertEqual(remote_pair["token_header"], "X-Aegis-Remote-Token")
+                self.assertEqual(remote_pair["pairing"]["status"], "active")
+                self.assertEqual(remote_pair["pairing"]["task_id"], remote_control_task["id"])
+                self.assertEqual(remote_pair["pairing"]["allowed_actions"], ["cancel", "events", "pause", "status"])
+                self.assertNotIn(remote_token, json.dumps(remote_pair["pairing"], sort_keys=True))
+                self.assertEqual(remote_status_paired["status"], "remote_pairing_active")
+                self.assertEqual(remote_task_status["id"], remote_control_task["id"])
+                self.assertEqual(remote_task_events["task_id"], remote_control_task["id"])
+                self.assertEqual(remote_dashboard_error.exception.code, 403)
+                self.assertEqual(remote_wrong_scope_error.exception.code, 403)
+                self.assertEqual(remote_paused_task["id"], remote_control_task["id"])
+                self.assertEqual(remote_paused_task["status"], "paused")
+                self.assertEqual(remote_pair_replay_error.exception.code, 403)
+                self.assertEqual(remote_revoked["pairing"]["status"], "revoked")
+                self.assertEqual(revoked_remote_error.exception.code, 403)
+                self.assertNotIn(remote_token, (data_dir / "audit.jsonl").read_text(encoding="utf-8"))
                 self.assertEqual(model_route["identifier"], "ollama/llama3")
                 self.assertEqual(model_alias["alias"], "webfast")
                 self.assertEqual(model_fallbacks["fallbacks"], ["lmstudio/local"])
@@ -791,6 +847,7 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(model_oauth_login_external["auth"]["method"], "oauth_device")
                 self.assertFalse(model_oauth_login_external["auth"]["api_run_external_allowed"])
                 self.assertFalse(model_oauth_login_external["auth"]["token_captured"])
+                self.assertEqual(model_external_api_key_error.exception.code, 400)
                 self.assertTrue(model_auth_login["auth"]["auth_configured"])
                 self.assertFalse(model_auth_logout["auth"]["auth_configured"])
                 self.assertTrue(any(row["provider"] == "openai" and row["auth_configured"] for row in model_providers_after_login["providers"]))
@@ -1032,10 +1089,12 @@ def _wait_for_server(port: int) -> None:
     raise RuntimeError("server did not start")
 
 
-def _json_get(port: int, path: str, *, token: str | None = None) -> dict[str, object]:
+def _json_get(port: int, path: str, *, token: str | None = None, remote_token: str | None = None) -> dict[str, object]:
     headers = {}
     if token is not None:
         headers["X-Aegis-Token"] = token
+    if remote_token is not None:
+        headers["X-Aegis-Remote-Token"] = remote_token
     request = Request(f"http://127.0.0.1:{port}{path}", headers=headers)
     with urlopen(request, timeout=2) as response:
         return json.loads(response.read().decode("utf-8"))
@@ -1059,11 +1118,16 @@ def _bytes_get(port: int, path: str, *, token: str | None = None) -> tuple[bytes
         return response.read(), response.headers
 
 
-def _json_post(port: int, path: str, payload: dict[str, object], *, token: str) -> dict[str, object]:
+def _json_post(port: int, path: str, payload: dict[str, object], *, token: str | None = None, remote_token: str | None = None) -> dict[str, object]:
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["X-Aegis-Token"] = token
+    if remote_token is not None:
+        headers["X-Aegis-Remote-Token"] = remote_token
     request = Request(
         f"http://127.0.0.1:{port}{path}",
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "X-Aegis-Token": token},
+        headers=headers,
         method="POST",
     )
     with urlopen(request, timeout=5) as response:
