@@ -176,6 +176,9 @@ class CliTests(unittest.TestCase):
             SecretsBroker(data_dir / "secrets.json").store_secret(name="AEGIS_REMOTE_RELAY_TOKEN", value="relay-raw-secret")
 
             class FakeRelayResponse:
+                def __init__(self, payload: dict[str, object] | None = None) -> None:
+                    self.payload = payload or {"ok": True, "token": "relay-raw-secret"}
+
                 def __enter__(self):
                     return self
 
@@ -186,10 +189,16 @@ class CliTests(unittest.TestCase):
                     return 202
 
                 def read(self, limit: int) -> bytes:
-                    return b'{"ok":true,"token":"relay-raw-secret"}'
+                    return json.dumps(self.payload).encode("utf-8")
+
+            def fake_relay_open(request, timeout: int):
+                body = json.loads(request.data.decode("utf-8"))
+                if body.get("type") == "aegis.remote_control.pull":
+                    return FakeRelayResponse({"actions": [{"request_id": "pull-1", "action": "status", "task_id": relay_task["id"]}]})
+                return FakeRelayResponse()
 
             with patch("aegis.remote_control._private_network_error", return_value=None):
-                with patch("aegis.remote_control._open_without_redirects", return_value=FakeRelayResponse()):
+                with patch("aegis.remote_control._open_without_redirects", side_effect=fake_relay_open):
                     registered_relay = dispatch(
                         parser.parse_args(
                             [
@@ -199,6 +208,21 @@ class CliTests(unittest.TestCase):
                                 "relay",
                                 "--relay-url",
                                 "https://example.com/aegis-relay?token=secret",
+                                "--pairing-id",
+                                pair["pairing"]["id"],
+                                "--relay-auth-secret",
+                                "AEGIS_REMOTE_RELAY_TOKEN",
+                                "--approved",
+                            ]
+                        )
+                    )
+                    relay_pull = dispatch(
+                        parser.parse_args(
+                            [
+                                "--data-dir",
+                                str(data_dir),
+                                "remote-control",
+                                "relay-pull",
                                 "--pairing-id",
                                 pair["pairing"]["id"],
                                 "--relay-auth-secret",
@@ -244,6 +268,11 @@ class CliTests(unittest.TestCase):
             self.assertTrue(registered_relay["relay_action_proxy_enabled"])
             self.assertFalse(registered_relay["pairing_token_relayed"])
             self.assertNotIn("relay-raw-secret", json.dumps(registered_relay, sort_keys=True))
+            self.assertEqual(relay_pull["status"], "relay_actions_pulled")
+            self.assertEqual(relay_pull["executed_action_count"], 1)
+            self.assertEqual(relay_pull["executed_actions"][0]["result"]["id"], relay_task["id"])
+            self.assertFalse(relay_pull["pairing_token_relayed"])
+            self.assertFalse(relay_pull["relay_auth_token_captured"])
             self.assertEqual(relay_action["status"], "relay_action_proxied")
             self.assertEqual(relay_action["mode"], "approved_relay_action_proxy")
             self.assertEqual(relay_action["result"]["status"], "paused")

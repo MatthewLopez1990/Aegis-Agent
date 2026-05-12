@@ -128,6 +128,7 @@ class RemoteControlPairingRegistry:
                 "remote task resume",
                 "remote task pause",
                 "remote task cancel",
+                "registered relay action pull",
                 "registered relay action proxy",
             ],
             "blocked_until_relay": [
@@ -168,6 +169,7 @@ class RemoteControlPairingRegistry:
                 "scoped_task_actions",
                 "local_revocation",
                 "approved_relay_revocation_propagation",
+                "approved_relay_action_pull",
             ],
             "blockers": blockers,
             "verification_gates": list(REMOTE_CONTROL_RELAY_VERIFICATION_GATES),
@@ -285,6 +287,7 @@ class RemoteControlPairingRegistry:
                 "audit_receipts_without_tokens",
                 "local_revocation",
                 "approved_relay_revocation_propagation",
+                "approved_relay_action_pull",
             ],
             "remaining_controls": [
                 "mobile_push_delivery_approval",
@@ -326,6 +329,114 @@ class RemoteControlPairingRegistry:
             "relay_target": str(relay_registration.get("relay_target") or ""),
             "relay_registered_at": relay_registration.get("registered_at"),
             "pairing_token_relayed": False,
+            "raw_secret_values_included": False,
+        }
+
+    def pull_relay_actions(
+        self,
+        pairing_id: str,
+        *,
+        relay_auth_token: str,
+        allowlist: tuple[str, ...],
+        approved: bool = False,
+        limit: int = 10,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if not approved:
+            raise PermissionError("remote-control relay pull requires explicit approval")
+        self._load()
+        checked_at = _utc_now(now)
+        pairing = self._pairings.get(pairing_id)
+        if pairing is None:
+            raise KeyError(pairing_id)
+        relay_registration = pairing.get("relay_registration")
+        if not isinstance(relay_registration, dict):
+            raise ValueError("remote-control relay pull requires a registered relay")
+        if not relay_auth_token.strip():
+            raise ValueError("remote-control relay pull requires a brokered relay auth token")
+        stored_hash = str(relay_registration.get("relay_auth_sha256") or "")
+        if not stored_hash or not secrets.compare_digest(stored_hash, _token_hash(relay_auth_token)):
+            raise PermissionError("remote-control relay pull auth does not match registration")
+        public_pairing = self._public_pairing(pairing, now=checked_at)
+        if public_pairing["status"] != "active":
+            raise ValueError("remote-control relay pull requires an active pairing")
+        relay_target = str(relay_registration.get("relay_target") or "")
+        parsed = urlparse(relay_target)
+        validation_error = _validate_url(parsed)
+        if validation_error:
+            raise ValueError(validation_error)
+        if parsed.scheme != "https":
+            raise ValueError("remote-control relay URL must use https")
+        domain = parsed.hostname or ""
+        if not _allowed_domain(domain, allowlist):
+            raise ValueError(f"domain {domain!r} is not allowlisted")
+        private_error = _private_network_error(domain)
+        if private_error:
+            raise ValueError(private_error)
+        action_limit = max(1, min(int(limit), 25))
+        payload = {
+            "type": "aegis.remote_control.pull",
+            "version": 1,
+            "sent_at": checked_at.isoformat(),
+            "pairing_id": pairing["id"],
+            "action_limit": action_limit,
+            "pairing_token_included": False,
+            "raw_secret_values_included": False,
+            "required_controls": ["relay_action_authorization", "audit_receipts_without_tokens"],
+        }
+        request = Request(
+            relay_target,
+            data=json.dumps(payload, sort_keys=True).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {relay_auth_token}",
+                "Content-Type": "application/json",
+                "User-Agent": "Aegis-Agent/0.1",
+            },
+            method="POST",
+        )
+        try:
+            response_context = _open_without_redirects(request, timeout=10)
+        except HTTPError as exc:
+            if 300 <= exc.code < 400:
+                raise ValueError("HTTP redirects are not followed for remote-control relay pull") from exc
+            raise ValueError(f"remote-control relay pull failed with status {exc.code}") from exc
+        except URLError as exc:
+            raise ValueError(f"remote-control relay pull failed: {exc.reason}") from exc
+        with response_context as response:
+            response_status = response.getcode() if hasattr(response, "getcode") else None
+            response_body = response.read(65536)
+        try:
+            decoded = json.loads(response_body.decode("utf-8") or "{}")
+        except json.JSONDecodeError as exc:
+            raise ValueError("remote-control relay pull returned invalid JSON") from exc
+        actions_source = decoded.get("actions", []) if isinstance(decoded, dict) else []
+        if not isinstance(actions_source, list):
+            raise ValueError("remote-control relay pull actions must be a JSON array")
+        actions = [
+            _normalize_relay_action_envelope(action, public_pairing)
+            for action in actions_source[:action_limit]
+            if isinstance(action, dict)
+        ]
+        relay_registration["last_pull_at"] = checked_at.isoformat()
+        relay_registration["last_pull_response_status"] = response_status
+        relay_registration["last_pull_action_count"] = len(actions)
+        relay_registration["pairing_token_relayed"] = False
+        relay_registration["raw_secret_values_included"] = False
+        self._save()
+        executable_count = sum(1 for action in actions if action["accepted"])
+        return {
+            "status": "relay_actions_pulled",
+            "mode": "approved_relay_action_pull",
+            "pairing": public_pairing,
+            "relay_target": relay_target,
+            "relay_response_status": response_status,
+            "relay_response_bytes": len(response_body),
+            "action_count": len(actions),
+            "executable_action_count": executable_count,
+            "actions": actions,
+            "pairing_token_relayed": False,
+            "relay_auth_secret_used": True,
+            "relay_auth_token_captured": False,
             "raw_secret_values_included": False,
         }
 
@@ -508,6 +619,7 @@ class RemoteControlPairingRegistry:
         relay_registration = pairing.get("relay_registration")
         relay_registered = isinstance(relay_registration, dict) and bool(relay_registration.get("relay_auth_sha256"))
         relay_revocation_relayed_at = str(relay_registration.get("revocation_relayed_at") or "") if isinstance(relay_registration, dict) else ""
+        relay_last_pull_at = str(relay_registration.get("last_pull_at") or "") if isinstance(relay_registration, dict) else ""
         return {
             "id": pairing["id"],
             "label": pairing["label"],
@@ -521,6 +633,8 @@ class RemoteControlPairingRegistry:
             "relay_registered": relay_registered,
             "relay_target": str(relay_registration.get("relay_target") or "") if isinstance(relay_registration, dict) else None,
             "relay_action_proxy_enabled": bool(status == "active" and relay_registered),
+            "relay_action_pull_enabled": bool(status == "active" and relay_registered),
+            "relay_last_pull_at": relay_last_pull_at or None,
             "relay_revocation_propagated": bool(relay_revocation_relayed_at),
             "relay_revocation_relayed_at": relay_revocation_relayed_at or None,
         }
@@ -568,6 +682,12 @@ def _normalize_relay_registration(value: Any) -> dict[str, Any] | None:
         normalized["revocation_relayed_at"] = str(value["revocation_relayed_at"])
     if value.get("revocation_response_status") is not None:
         normalized["revocation_response_status"] = int(value["revocation_response_status"])
+    if value.get("last_pull_at"):
+        normalized["last_pull_at"] = str(value["last_pull_at"])
+    if value.get("last_pull_response_status") is not None:
+        normalized["last_pull_response_status"] = int(value["last_pull_response_status"])
+    if value.get("last_pull_action_count") is not None:
+        normalized["last_pull_action_count"] = int(value["last_pull_action_count"])
     return normalized
 
 
@@ -601,6 +721,35 @@ def _redacted_relay_target(relay_url: str | None) -> str | None:
 
 def _allowed_domain(domain: str, allowlist: tuple[str, ...]) -> bool:
     return any(domain == allowed or domain.endswith(f".{allowed}") for allowed in allowlist)
+
+
+def _normalize_relay_action_envelope(raw: dict[str, Any], public_pairing: dict[str, Any]) -> dict[str, Any]:
+    request_id = _optional_clean_string(raw.get("request_id") or raw.get("id"))
+    action = str(raw.get("action") or "").strip().lower().replace("-", "_")
+    task_id = _optional_clean_string(raw.get("task_id"))
+    session_id = _optional_clean_string(raw.get("session_id"))
+    reason = str(raw.get("reason") or "").strip()[:500]
+    rejection_reason = None
+    allowed_actions = set(public_pairing.get("allowed_actions") or ())
+    if action not in DEFAULT_ALLOWED_TASK_ACTIONS:
+        rejection_reason = "action is not supported"
+    elif action not in allowed_actions:
+        rejection_reason = "action is outside pairing scope"
+    elif not task_id:
+        rejection_reason = "task_id is required"
+    elif public_pairing.get("task_id") and public_pairing["task_id"] != task_id:
+        rejection_reason = "task_id is outside pairing scope"
+    return {
+        "request_id": request_id,
+        "action": action,
+        "task_id": task_id,
+        "session_id": session_id,
+        "reason": reason,
+        "accepted": rejection_reason is None,
+        "rejection_reason": rejection_reason,
+        "pairing_token_relayed": False,
+        "raw_secret_values_included": False,
+    }
 
 
 def _local_remote_control_endpoints(*, host: str = "127.0.0.1", port: int = 8765) -> dict[str, str]:

@@ -200,7 +200,7 @@ BROWSER_COMMANDS = ("session", "sessions", "close", "navigate", "extract", "insp
 MCP_COMMANDS = ("list", "register", "call")
 HOOK_COMMANDS = ("list", "add", "enable", "disable", "remove", "run")
 AGENTS_COMMANDS = ("status", "delegate")
-REMOTE_CONTROL_COMMANDS = ("pair", "revoke", "relay", "relay-action")
+REMOTE_CONTROL_COMMANDS = ("pair", "revoke", "relay", "relay-pull", "relay-action")
 SESSION_COMMANDS = ("new", "open", "rename", "set-model", "set-personality", "activate", "archive", "pause", "append", "history", "tasks", "compact")
 TASKS_COMMANDS = ("all", "session")
 SECURITY_COMMANDS = (
@@ -2348,8 +2348,86 @@ class AegisTui(cmd.Cmd):
         self.do_rollback(arg)
 
     def do_remote_control(self, arg: str) -> None:
-        """remote_control [name|pair|revoke|relay|relay-action] -- manage guarded remote-control readiness."""
+        """remote_control [name|pair|revoke|relay|relay-pull|relay-action] -- manage guarded remote-control readiness."""
         parts = shlex.split(arg) if arg else []
+        if parts and parts[0] == "relay-pull":
+            pairing_id = _option_value(parts, "--pairing-id")
+            relay_secret = _option_value(parts, "--relay-auth-secret")
+            approved = "--approved" in parts
+            dry_run = "--dry-run" in parts
+            limit = _optional_int(_option_value(parts, "--limit")) or 10
+            if not pairing_id or not relay_secret:
+                print("usage: remote-control relay-pull --pairing-id <id> --relay-auth-secret <secret_name> --approved [--limit N] [--dry-run]")
+                return
+            registry = RemoteControlPairingRegistry(
+                self.orchestrator.config.data_dir / "remote_control_pairings.json"
+            )
+            try:
+                handle = self.orchestrator.secrets_broker.request_handle(
+                    name=relay_secret,
+                    requester="remote_control_relay",
+                    reason="pull queued scoped remote-control relay actions",
+                    scopes=("remote_control:relay",),
+                )
+                relay_auth_token = self.orchestrator.secrets_broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                pulled = registry.pull_relay_actions(
+                    pairing_id,
+                    relay_auth_token=relay_auth_token,
+                    allowlist=self.orchestrator.config.network_allowlist,
+                    approved=approved,
+                    limit=limit,
+                )
+            except (KeyError, PermissionError, ValueError) as exc:
+                print(f"remote-control relay-pull error: {exc}")
+                return
+            actor = f"remote-control-relay:{pulled['pairing'].get('label') or pulled['pairing']['id']}"
+            executed_actions = []
+            if not dry_run:
+                for action_row in pulled["actions"]:
+                    if not action_row["accepted"]:
+                        continue
+                    action_result = self._execute_remote_control_action(action_row, actor=actor)
+                    self.orchestrator.audit_logger.append(
+                        "remote_control.relay_action",
+                        {
+                            "pairing_id": pulled["pairing"]["id"],
+                            "relay_target": pulled["relay_target"],
+                            "task_id": action_row["task_id"],
+                            "action": action_row["action"],
+                            "actor": actor,
+                            "request_id": action_row.get("request_id"),
+                            "pairing_token_relayed": False,
+                            "relay_auth_token_captured": False,
+                            "raw_secret_values_included": False,
+                            "source": "tui_pull",
+                        },
+                    )
+                    executed_actions.append(
+                        {
+                            "request_id": action_row.get("request_id"),
+                            "action": action_row["action"],
+                            "task_id": action_row["task_id"],
+                            "status": "executed",
+                            "result": action_result,
+                        }
+                    )
+            self.orchestrator.audit_logger.append(
+                "remote_control.relay_actions_pulled",
+                {
+                    "pairing_id": pulled["pairing"]["id"],
+                    "relay_target": pulled["relay_target"],
+                    "action_count": pulled["action_count"],
+                    "executable_action_count": pulled["executable_action_count"],
+                    "executed_action_count": len(executed_actions),
+                    "dry_run": dry_run,
+                    "pairing_token_relayed": False,
+                    "relay_auth_token_captured": False,
+                    "raw_secret_values_included": False,
+                    "source": "tui",
+                },
+            )
+            _print_json({**pulled, "dry_run": dry_run, "executed_action_count": len(executed_actions), "executed_actions": executed_actions})
+            return
         if parts and parts[0] == "relay-action":
             pairing_id = _option_value(parts, "--pairing-id")
             task_id = _option_value(parts, "--task-id")
@@ -2562,13 +2640,30 @@ class AegisTui(cmd.Cmd):
                     "Status: local control plane available with short-lived pairing tokens.",
                     "Current secure surface: aegis serve --host 127.0.0.1 --port 8765",
                     "Pairing endpoint: POST /remote-control/pair returns one token for X-Aegis-Remote-Token.",
-                    "Relay: remote-control relay can register an approved pairing; relay-action proxies scoped task actions through the registered bearer.",
+                    "Relay: remote-control relay can register an approved pairing; relay-pull polls queued relay actions; relay-action proxies one scoped task action through the registered bearer.",
                     "Security posture: host/origin checks still apply; no subscription token capture; pairing creation needs the local API token.",
                     "Remaining live gap: mobile push delivery and cloud session directory.",
                 ],
                 width,
             )
         )
+
+    def _execute_remote_control_action(self, action_row: dict[str, Any], *, actor: str) -> dict[str, Any]:
+        task_id = str(action_row["task_id"])
+        action = str(action_row["action"])
+        session_id = action_row.get("session_id")
+        reason = str(action_row.get("reason") or "")
+        if action == "status":
+            return self.orchestrator.status(task_id)
+        if action == "events":
+            return self.orchestrator.evidence.run_events(task_id)
+        if action == "resume":
+            return self.orchestrator.resume_task(task_id, session_id=session_id, actor=actor)
+        if action == "pause":
+            return self.orchestrator.pause_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay pause")
+        if action == "cancel":
+            return self.orchestrator.cancel_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay cancel")
+        raise PermissionError("remote-control relay action is not allowed")
 
     def do_mobile(self, arg: str) -> None:
         """mobile -- show mobile/remote-control readiness."""
@@ -5340,14 +5435,17 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("remote-control", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
     ("remote-control", "revoke"): ("--relay-auth-secret", "--approved"),
     ("remote-control", "relay"): ("--relay-url", "--pairing-id", "--relay-auth-secret", "--approved"),
+    ("remote-control", "relay-pull"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit", "--dry-run"),
     ("remote-control", "relay-action"): ("--pairing-id", "--task-id", "--action", "--relay-auth-secret", "--session-id", "--reason"),
     ("remote_control", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
     ("remote_control", "revoke"): ("--relay-auth-secret", "--approved"),
     ("remote_control", "relay"): ("--relay-url", "--pairing-id", "--relay-auth-secret", "--approved"),
+    ("remote_control", "relay-pull"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit", "--dry-run"),
     ("remote_control", "relay-action"): ("--pairing-id", "--task-id", "--action", "--relay-auth-secret", "--session-id", "--reason"),
     ("rc", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
     ("rc", "revoke"): ("--relay-auth-secret", "--approved"),
     ("rc", "relay"): ("--relay-url", "--pairing-id", "--relay-auth-secret", "--approved"),
+    ("rc", "relay-pull"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit", "--dry-run"),
     ("rc", "relay-action"): ("--pairing-id", "--task-id", "--action", "--relay-auth-secret", "--session-id", "--reason"),
 }
 

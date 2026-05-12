@@ -63,6 +63,9 @@ class RemoteControlPairingTests(unittest.TestCase):
         captured = {"requests": []}
 
         class FakeResponse:
+            def __init__(self, payload: dict[str, object] | None = None) -> None:
+                self.payload = payload or {"ok": True, "token": "relay-raw-secret"}
+
             def __enter__(self):
                 return self
 
@@ -73,12 +76,23 @@ class RemoteControlPairingTests(unittest.TestCase):
                 return 202
 
             def read(self, limit: int) -> bytes:
-                return b'{"ok":true,"token":"relay-raw-secret"}'
+                return json.dumps(self.payload).encode("utf-8")
 
         def fake_open(request, timeout: int):
             captured["request"] = request
             captured["requests"].append(request)
             captured["timeout"] = timeout
+            body = json.loads(request.data.decode("utf-8"))
+            if body.get("type") == "aegis.remote_control.pull":
+                return FakeResponse(
+                    {
+                        "actions": [
+                            {"request_id": "a1", "action": "status", "task_id": "task-1", "extra": "ignored"},
+                            {"request_id": "a2", "action": "cancel", "task_id": "task-1"},
+                            {"request_id": "a3", "action": "pause", "task_id": "other-task"},
+                        ]
+                    }
+                )
             return FakeResponse()
 
         with patch("aegis.remote_control._private_network_error", return_value=None):
@@ -112,12 +126,34 @@ class RemoteControlPairingTests(unittest.TestCase):
         self.assertIsNone(registry.authorize_relay_action(created["pairing"]["id"], "wrong-secret", action="pause", task_id="task-1", now=now))
         self.assertIsNone(registry.authorize_relay_action(created["pairing"]["id"], "relay-raw-secret", action="cancel", task_id="task-1", now=now))
         self.assertIsNone(registry.authorize_relay_action(created["pairing"]["id"], "relay-raw-secret", action="pause", task_id="other-task", now=now))
+        with patch("aegis.remote_control._private_network_error", return_value=None):
+            with patch("aegis.remote_control._open_without_redirects", side_effect=fake_open):
+                pulled = registry.pull_relay_actions(
+                    created["pairing"]["id"],
+                    relay_auth_token="relay-raw-secret",
+                    allowlist=("example.com",),
+                    approved=True,
+                    limit=5,
+                    now=now + timedelta(seconds=1),
+                )
+        pull_body = json.loads(captured["requests"][-1].data.decode("utf-8"))
+        rendered_pulled = json.dumps(pulled, sort_keys=True)
+        self.assertEqual(pulled["status"], "relay_actions_pulled")
+        self.assertEqual(pulled["action_count"], 3)
+        self.assertEqual(pulled["executable_action_count"], 1)
+        self.assertTrue(pulled["actions"][0]["accepted"])
+        self.assertEqual(pulled["actions"][1]["rejection_reason"], "action is outside pairing scope")
+        self.assertEqual(pulled["actions"][2]["rejection_reason"], "task_id is outside pairing scope")
+        self.assertEqual(pull_body["type"], "aegis.remote_control.pull")
+        self.assertFalse(pull_body["pairing_token_included"])
+        self.assertNotIn(created["token"], rendered_pulled)
+        self.assertNotIn("relay-raw-secret", rendered_pulled)
         with patch("aegis.remote_control._open_without_redirects", side_effect=fake_open):
             revoked = registry.revoke(
                 created["pairing"]["id"],
                 relay_auth_token="relay-raw-secret",
                 notify_relay=True,
-                now=now + timedelta(seconds=1),
+                now=now + timedelta(seconds=2),
             )
         revoked_body = json.loads(captured["requests"][-1].data.decode("utf-8"))
         rendered_revoked = json.dumps(revoked, sort_keys=True)
@@ -132,8 +168,8 @@ class RemoteControlPairingTests(unittest.TestCase):
         self.assertNotIn(created["token"], rendered_revoked_body)
         self.assertNotIn("relay-raw-secret", rendered_revoked)
         self.assertNotIn("relay-raw-secret", rendered_revoked_body)
-        self.assertTrue(registry.status(now=now + timedelta(seconds=2))["pairings"][0]["relay_revocation_propagated"])
-        self.assertIsNone(registry.authorize_relay_action(created["pairing"]["id"], "relay-raw-secret", action="pause", task_id="task-1", now=now + timedelta(seconds=2)))
+        self.assertTrue(registry.status(now=now + timedelta(seconds=3))["pairings"][0]["relay_revocation_propagated"])
+        self.assertIsNone(registry.authorize_relay_action(created["pairing"]["id"], "relay-raw-secret", action="pause", task_id="task-1", now=now + timedelta(seconds=3)))
 
     def test_relay_preflight_rejects_non_https_targets(self) -> None:
         registry = RemoteControlPairingRegistry()

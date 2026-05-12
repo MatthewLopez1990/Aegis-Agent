@@ -2398,6 +2398,21 @@ document.getElementById("remote-control-relay-form").addEventListener("submit", 
   renderRemoteControlOutput(result);
 });
 
+document.getElementById("remote-control-relay-pull").addEventListener("click", async () => {
+  const result = await api("/remote-control/relay/pull", {
+    method: "POST",
+    body: JSON.stringify({
+      pairing_id: document.getElementById("remote-control-relay-pairing-id").value.trim(),
+      relay_auth_secret: document.getElementById("remote-control-relay-secret").value.trim(),
+      approved: document.getElementById("remote-control-relay-approved").checked,
+      dry_run: document.getElementById("remote-control-relay-dry-run").checked,
+      limit: 10,
+    }),
+  });
+  renderRemoteControlOutput(result);
+  await refresh();
+});
+
 document.getElementById("remote-control-pairings").addEventListener("click", async (event) => {
   const pairingId = event.target.dataset.remoteControlRevoke;
   if (!pairingId) return;

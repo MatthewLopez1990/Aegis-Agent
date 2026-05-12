@@ -445,6 +445,12 @@ def build_parser() -> argparse.ArgumentParser:
     remote_control_relay.add_argument("--pairing-id", help="Active pairing id to register with the relay")
     remote_control_relay.add_argument("--relay-auth-secret", help="Brokered secret name for relay bearer auth")
     remote_control_relay.add_argument("--approved", action="store_true", help="Approve one outbound relay registration")
+    remote_control_relay_pull = remote_control_sub.add_parser("relay-pull", help="Pull queued scoped actions from a registered relay")
+    remote_control_relay_pull.add_argument("--pairing-id", required=True, help="Registered pairing id")
+    remote_control_relay_pull.add_argument("--relay-auth-secret", required=True, help="Brokered secret name for relay bearer auth")
+    remote_control_relay_pull.add_argument("--approved", action="store_true", help="Approve one outbound relay action pull")
+    remote_control_relay_pull.add_argument("--limit", type=int, default=10, help="Maximum action envelopes to pull")
+    remote_control_relay_pull.add_argument("--dry-run", action="store_true", help="Pull and validate queued actions without executing them")
     remote_control_relay_action = remote_control_sub.add_parser("relay-action", help="Execute a registered relay-authenticated task action")
     remote_control_relay_action.add_argument("--pairing-id", required=True, help="Registered pairing id")
     remote_control_relay_action.add_argument("--task-id", required=True, help="Task id to control through the relay proxy")
@@ -1254,6 +1260,70 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 )
                 return result
             return registry.relay_preflight(relay_url=args.relay_url)
+        if args.remote_control_command == "relay-pull":
+            broker = SecretsBroker(config.secrets_path)
+            handle = broker.request_handle(
+                name=args.relay_auth_secret,
+                requester="remote_control_relay",
+                reason="pull queued scoped remote-control relay actions",
+                scopes=("remote_control:relay",),
+            )
+            relay_auth_token = broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+            pulled = registry.pull_relay_actions(
+                args.pairing_id,
+                relay_auth_token=relay_auth_token,
+                allowlist=config.network_allowlist,
+                approved=args.approved,
+                limit=args.limit,
+            )
+            orchestrator = build_orchestrator(data_dir=config.data_dir)
+            actor = f"remote-control-relay:{pulled['pairing'].get('label') or pulled['pairing']['id']}"
+            executed_actions = []
+            if not args.dry_run:
+                for action_row in pulled["actions"]:
+                    if not action_row["accepted"]:
+                        continue
+                    action_result = _execute_remote_control_action(orchestrator, action_row, actor=actor)
+                    orchestrator.audit_logger.append(
+                        "remote_control.relay_action",
+                        {
+                            "pairing_id": pulled["pairing"]["id"],
+                            "relay_target": pulled["relay_target"],
+                            "task_id": action_row["task_id"],
+                            "action": action_row["action"],
+                            "actor": actor,
+                            "request_id": action_row.get("request_id"),
+                            "pairing_token_relayed": False,
+                            "relay_auth_token_captured": False,
+                            "raw_secret_values_included": False,
+                            "source": "cli_pull",
+                        },
+                    )
+                    executed_actions.append(
+                        {
+                            "request_id": action_row.get("request_id"),
+                            "action": action_row["action"],
+                            "task_id": action_row["task_id"],
+                            "status": "executed",
+                            "result": action_result,
+                        }
+                    )
+            orchestrator.audit_logger.append(
+                "remote_control.relay_actions_pulled",
+                {
+                    "pairing_id": pulled["pairing"]["id"],
+                    "relay_target": pulled["relay_target"],
+                    "action_count": pulled["action_count"],
+                    "executable_action_count": pulled["executable_action_count"],
+                    "executed_action_count": len(executed_actions),
+                    "dry_run": args.dry_run,
+                    "pairing_token_relayed": False,
+                    "relay_auth_token_captured": False,
+                    "raw_secret_values_included": False,
+                    "source": "cli",
+                },
+            )
+            return {**pulled, "dry_run": args.dry_run, "executed_action_count": len(executed_actions), "executed_actions": executed_actions}
         if args.remote_control_command == "relay-action":
             broker = SecretsBroker(config.secrets_path)
             handle = broker.request_handle(
@@ -1836,6 +1906,24 @@ def _approval_payload(orchestrator: Any, row: dict[str, Any]) -> dict[str, Any]:
         admin_required=bool(request_payload.get("admin_required")) if isinstance(request_payload, dict) else False,
     )
     return payload
+
+
+def _execute_remote_control_action(orchestrator: Any, action_row: dict[str, Any], *, actor: str) -> dict[str, Any]:
+    task_id = str(action_row["task_id"])
+    action = str(action_row["action"])
+    session_id = action_row.get("session_id")
+    reason = str(action_row.get("reason") or "")
+    if action == "status":
+        return orchestrator.status(task_id)
+    if action == "events":
+        return orchestrator.evidence.run_events(task_id)
+    if action == "resume":
+        return orchestrator.resume_task(task_id, session_id=session_id, actor=actor)
+    if action == "pause":
+        return orchestrator.pause_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay pause")
+    if action == "cancel":
+        return orchestrator.cancel_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay cancel")
+    raise PermissionError("remote-control relay action is not allowed")
 
 
 def _channel_registry(config: Any) -> ChannelRegistry:

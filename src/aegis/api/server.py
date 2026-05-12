@@ -457,7 +457,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
         def _do_POST(self) -> None:
             parsed = urlparse(self.path)
             path = parsed.path
-            if path in {"/remote-control/pair", "/remote-control/revoke", "/remote-control/relay"}:
+            if path in {"/remote-control/pair", "/remote-control/revoke", "/remote-control/relay", "/remote-control/relay/pull"}:
                 self._authorize_local_mutation()
             elif path == "/remote-control/relay/action":
                 pass
@@ -558,6 +558,72 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     },
                 )
                 self._json(result)
+                return
+            if path == "/remote-control/relay/pull":
+                payload = self._read_json()
+                relay_secret = str(_required(payload, "relay_auth_secret"))
+                handle = orchestrator.secrets_broker.request_handle(
+                    name=relay_secret,
+                    requester="remote_control_relay",
+                    reason="pull queued scoped remote-control relay actions",
+                    scopes=("remote_control:relay",),
+                )
+                relay_auth_token = orchestrator.secrets_broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                pulled = remote_control.pull_relay_actions(
+                    str(_required(payload, "pairing_id")),
+                    relay_auth_token=relay_auth_token,
+                    allowlist=orchestrator.config.network_allowlist,
+                    approved=bool(payload.get("approved", False)),
+                    limit=int(payload.get("limit", 10)),
+                )
+                dry_run = bool(payload.get("dry_run", False))
+                actor = f"remote-control-relay:{pulled['pairing'].get('label') or pulled['pairing']['id']}"
+                executed_actions = []
+                if not dry_run:
+                    for action_row in pulled["actions"]:
+                        if not action_row["accepted"]:
+                            continue
+                        result = _execute_remote_control_action(orchestrator, action_row, actor=actor)
+                        orchestrator.audit_logger.append(
+                            "remote_control.relay_action",
+                            {
+                                "pairing_id": pulled["pairing"]["id"],
+                                "relay_target": pulled["relay_target"],
+                                "task_id": action_row["task_id"],
+                                "action": action_row["action"],
+                                "actor": actor,
+                                "request_id": action_row.get("request_id"),
+                                "pairing_token_relayed": False,
+                                "relay_auth_token_captured": False,
+                                "raw_secret_values_included": False,
+                                "source": "api_pull",
+                            },
+                        )
+                        executed_actions.append(
+                            {
+                                "request_id": action_row.get("request_id"),
+                                "action": action_row["action"],
+                                "task_id": action_row["task_id"],
+                                "status": "executed",
+                                "result": result,
+                            }
+                        )
+                orchestrator.audit_logger.append(
+                    "remote_control.relay_actions_pulled",
+                    {
+                        "pairing_id": pulled["pairing"]["id"],
+                        "relay_target": pulled["relay_target"],
+                        "action_count": pulled["action_count"],
+                        "executable_action_count": pulled["executable_action_count"],
+                        "executed_action_count": len(executed_actions),
+                        "dry_run": dry_run,
+                        "pairing_token_relayed": False,
+                        "relay_auth_token_captured": False,
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json({**pulled, "dry_run": dry_run, "executed_action_count": len(executed_actions), "executed_actions": executed_actions})
                 return
             if path == "/remote-control/relay/action":
                 require_allowed_host(self.headers, allowed_hosts=allowed_hosts)
@@ -2236,6 +2302,24 @@ def _mcp_call_approval(
             "reason": f"MCP tool {server}.{tool} requires approval",
         },
     }
+
+
+def _execute_remote_control_action(orchestrator: Any, action_row: dict[str, Any], *, actor: str) -> dict[str, Any]:
+    task_id = str(action_row["task_id"])
+    action = str(action_row["action"])
+    session_id = action_row.get("session_id")
+    reason = str(action_row.get("reason") or "")
+    if action == "status":
+        return orchestrator.status(task_id)
+    if action == "events":
+        return orchestrator.evidence.run_events(task_id)
+    if action == "resume":
+        return orchestrator.resume_task(task_id, session_id=session_id, actor=actor)
+    if action == "pause":
+        return orchestrator.pause_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay pause")
+    if action == "cancel":
+        return orchestrator.cancel_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay cancel")
+    raise PermissionError("remote-control relay action is not allowed")
 
 
 def _mcp_call_payload(*, server: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
