@@ -42,7 +42,9 @@ Commands:
 - `tools`
 - `skills [hub query|disable skill_id|enable skill_id]`
 - `memory search <query>`
+- `memory health [--limit N] [--owner owner] [--scope scope]`
 - `memory session-preview <session_id> [--owner name] [--scope scope]`
+- `memory session-commit <session_id> [--owner name] [--scope scope] [--candidate-id id] [--confirmed]`
 - `memory create <type> <content> [--confidence N] [--tag tag] [--ttl-days N] [--confirmed]`
 - `memory review-queue [limit|--limit N] [--scope scope]`
 - `memory review-digest [limit|--limit N] [--scope scope]`
@@ -50,6 +52,7 @@ Commands:
 - `memory recertify [--max-age-days N] [--limit N] [--scope scope] [--dry-run]`
 - `memory update <memory_id> [--content text] [--confidence N] [--confirmed]`
 - `memory merge <primary_id> <duplicate_id>`
+- `memory resolve-conflict <primary_id> <conflicting_id> <keep_primary|keep_conflicting|synthesize|keep_both> <rationale>`
 - `memory expire <memory_id>`
 - `memory cleanup-expired`
 - `memory explain <memory_id> <query>`
@@ -84,7 +87,7 @@ Commands:
 
 The TUI uses the same orchestrator, policy gate, approval queue, audit logger, and context firewall as the CLI/API.
 Policies can require admin approval; use `approve <approval_id> --admin` for those gates.
-It starts with a product command deck that summarizes runtime counts, security controls, parity-oriented capability groups, and implementation-readiness buckets for ready, facade, mock/placeholder, and backend-gated tools. Plain text submits a task, slash aliases such as `/tasks` work for chat-style operation, tab completion covers top-level commands plus common subcommands, and local readline history persists in `.aegis/tui_history` with private file permissions.
+It starts with a compact control surface that shows the animated Aegis shield, active audit/approval/session/model/workspace flags, and only the next useful navigation prompts. The full posture still lives behind `dashboard`. Plain text submits a task, `/` opens a Codex-style command palette, slash aliases such as `/tasks` dispatch directly, `/mem`-style prefixes render filtered options, `menu operate|govern|build|explore` opens nested command groups, tab completion covers top-level commands plus common subcommands and selected flags, and local readline history persists in `.aegis/tui_history` with private file permissions. The identity banner rotates through deterministic ASCII shield frames so tests and CI remain stable while interactive operators get a stronger command-deck signal.
 Task lists, task cards, evidence, and timeline views show the linked session when a task belongs to a conversation.
 Resume attempts write explicit audit events with redacted session ids plus readable context refs, so evidence and timeline views can show which original context was used after approval without weakening audit redaction. Distinct resume outcomes, including intermediate `waiting_approval`, approved, and denied states, are appended back to the original session transcript. When a TUI resume command targets a task from another active conversation, the TUI switches its active session back to that originating transcript after the resume result is recorded.
 Approval queues and approval details also show linked session context for task-bound approvals and direct runtime session ids for browser approvals. In the TUI, approval rows and detail views include copyable next steps plus chat-style phrases such as `approve`, `yes proceed`, `deny`, `no do not do that`, and `let's revert` when those intents are safe for the current approval state. The web approval detail card collects actor, reason, and admin-decision metadata before approving or denying, the same decision payload is used by inline transcript approval actions, and the approval panel keeps a bounded recent decision history for approved and denied gates.
@@ -110,7 +113,7 @@ PYTHONPATH=src python3 -m aegis.cli.main serve --host 127.0.0.1 --port 8765
 
 Open `http://127.0.0.1:8765/`.
 
-The CLI, TUI, and GUI all expose the governed tool catalog plus a conservative tool runner. The TUI dashboard opens with a stable Aegis ASCII identity banner and grouped command palette, and the `menu` command renders a polished grouped command view before operators drill into competitive parity targets with their remaining live-integration gaps plus the structured live-gap backlog, including the controls and verification gates needed before each gap can be closed. The TUI capabilities view and GUI live-gap cards also expose the browser/media readiness checklist for boundary receipts, taint preservation, artifact hashing, approval, secret-capture boundaries, media sandboxing, live automation status, and provider depth; live connector readiness for credential handles, allowlists, enablement flags, approval, redaction, mock fallback, read inventory, and promotion scope; plus remote backend readiness for explicit enablement, brokered auth, scope/resource limits, rollback receipts, disabled-backend denial, and lifecycle depth. The GUI parity cards render the same gap metadata. The GUI is static HTML/CSS/JavaScript served by the local API. It exposes task submission, the approval queue, recent tasks, a dedicated session-linked task recovery feed, runtime health, security controls, parity targets, connectors with operation risk/scope/sensitivity metadata, channels, outbound channel rendering, channel events, governed memory create/search/update/explain/export/delete controls, session memory preview and commit controls, Hermes/OpenClaw memory migration preview and commit controls, models with provider/model usage telemetry, tools, installed governed skill inventory, virtual Skill Hub search, a conservative tool runner, browser sandbox actions, schedules, scheduled evaluation runs, evaluation review queues, trend dashboards, regression deltas, release readiness summaries, session create/update controls, work boards, verified repair attempts, audit logs, and normalized SIEM JSONL audit export.
+The CLI, TUI, and GUI all expose the governed tool catalog plus a conservative tool runner. The TUI dashboard opens with a stable Aegis ASCII identity banner and focused command palette, and the `menu` command renders a minimal lane selector before operators open nested operate/govern/build/explore groups or drill into competitive parity targets with their remaining live-integration gaps plus the structured live-gap backlog, including the controls and verification gates needed before each gap can be closed. The TUI capabilities view and GUI live-gap cards also expose the browser/media readiness checklist for boundary receipts, taint preservation, artifact hashing, approval, secret-capture boundaries, media sandboxing, live automation status, and provider depth; live connector readiness for credential handles, allowlists, enablement flags, approval, redaction, mock fallback, read inventory, and promotion scope; plus remote backend readiness for explicit enablement, brokered auth, scope/resource limits, rollback receipts, disabled-backend denial, and lifecycle depth. The GUI parity cards render the same gap metadata. The GUI is static HTML/CSS/JavaScript served by the local API. It exposes task submission, the approval queue, recent tasks, a dedicated session-linked task recovery feed, runtime health, security controls, parity targets, connectors with operation risk/scope/sensitivity metadata, channels, outbound channel rendering, channel events, governed memory create/search/update/explain/export/delete controls, session memory preview and commit controls, Hermes/OpenClaw memory migration preview and commit controls, models with provider/model usage telemetry, tools, installed governed skill inventory, virtual Skill Hub search, a conservative tool runner, browser sandbox actions, schedules, scheduled evaluation runs, evaluation review queues, trend dashboards, regression deltas, release readiness summaries, session create/update controls, work boards, verified repair attempts, audit logs, and normalized SIEM JSONL audit export.
 When a task belongs to a session, GUI resume first reloads the task and resumes it against that original session context, even if another session is currently selected.
 Recent task rows, task result cards, and task evidence cards show the linked session id or title so resumed work remains visibly tied to its original conversation. Task result and evidence cards also expose an Open Session action that switches the browser transcript back to that originating session.
 Session transcript bubbles show message source, task id, resume status, and checkpoint approval id metadata when present, so resume results in the original conversation are distinguishable from ordinary assistant turns.
@@ -144,7 +147,6 @@ The API is a local control plane and does not implement user authentication. Bin
 - `POST /policy/schedule-bundle`
 - `POST /policy/promote-bundle` with optional clean evaluation and live parity gate fields, including named live-gap deferrals with an operator reason
 - `POST /policy/activate-due`
-- `POST /policy/promote-bundle`
 - `POST /channels/render`
 - `POST /channels/receive`
 - `POST /channels/approval-intent/resolve`
@@ -192,8 +194,10 @@ The API is a local control plane and does not implement user authentication. Bin
 - `GET /approvals/{approval_id}`
 - `GET /memory?q=...`
 - `GET /sessions/:id/memory-preview`
+- `POST /sessions/:id/memory-commit`
 - `POST /memory`
 - `POST /memory/:id/update`
+- `POST /memory/resolve-conflict`
 - `GET /memory/review-queue`
 - `GET /memory/review-digest`
 - `GET /memory/review-escalation`

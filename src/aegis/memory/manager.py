@@ -50,6 +50,20 @@ SEMANTIC_ALIASES = {
     "database": "sqlite",
     "db": "sqlite",
 }
+CONFLICT_MARKER_PAIRS = (
+    ("concise", "detailed"),
+    ("concise", "verbose"),
+    ("brief", "detailed"),
+    ("short", "long"),
+    ("daily", "weekly"),
+    ("manual", "automatic"),
+    ("always", "never"),
+    ("enable", "disable"),
+    ("enabled", "disabled"),
+    ("allow", "block"),
+    ("allow", "deny"),
+    ("local", "remote"),
+)
 
 
 class MemorySafetyError(ValueError):
@@ -481,6 +495,206 @@ class MemoryManager:
         )
         return result
 
+    def health_report(
+        self,
+        *,
+        limit: int = 50,
+        owner: str = "local-user",
+        scope: str | None = "workspace",
+        low_confidence_threshold: float = 0.7,
+        duplicate_similarity_threshold: float = 0.88,
+        log: bool = True,
+    ) -> dict[str, Any]:
+        if low_confidence_threshold < 0.0 or low_confidence_threshold > 1.0:
+            raise ValueError("low_confidence_threshold must be between 0.0 and 1.0")
+        if duplicate_similarity_threshold < 0.0 or duplicate_similarity_threshold > 1.0:
+            raise ValueError("duplicate_similarity_threshold must be between 0.0 and 1.0")
+
+        effective_limit = max(1, int(limit))
+        now = datetime.now(UTC)
+        rows = self.store.search_memories("%", limit=max(effective_limit * 10, 500), owner=owner, scope=scope)
+        memories = [decode_memory_row(row) for row in rows]
+        type_counts = Counter(str(memory.get("type", "unknown")) for memory in memories)
+        source_counts = Counter(str(memory.get("source", "unknown")) for memory in memories)
+        confirmed = [memory for memory in memories if memory.get("last_confirmed_at")]
+        expiring_soon = _expiring_soon(memories, days=14)
+        provenance_missing = [
+            {
+                "memory_id": memory["id"],
+                "summary": _safe_memory_summary(str(memory.get("summary", ""))),
+                "source": memory.get("source", ""),
+            }
+            for memory in memories
+            if not isinstance(memory.get("provenance"), dict) or not memory.get("provenance")
+        ]
+        score_by_id = {
+            str(memory["id"]): _memory_quality_signals(
+                memory,
+                now=now,
+                recertification_days=self._memory_recertification_days(str(memory.get("type", ""))),
+            )
+            for memory in memories
+        }
+        issues_by_id: dict[str, set[str]] = {str(memory["id"]): set() for memory in memories}
+        issue_counts: Counter[str] = Counter()
+        recommendations: list[dict[str, Any]] = []
+
+        for memory in memories:
+            memory_id = str(memory["id"])
+            confidence = float(memory.get("confidence", 0.0))
+            if confidence < low_confidence_threshold:
+                issues_by_id[memory_id].add("low_confidence")
+                issue_counts["low_confidence"] += 1
+            if not memory.get("last_confirmed_at"):
+                issues_by_id[memory_id].add("unconfirmed")
+                issue_counts["unconfirmed"] += 1
+            if self._memory_needs_recertification(memory, now=now):
+                issues_by_id[memory_id].add("stale_confirmation")
+                issue_counts["stale_confirmation"] += 1
+            if issues_by_id[memory_id]:
+                recommendations.append(
+                    {
+                        "kind": "memory_review",
+                        "severity": "high" if "stale_confirmation" in issues_by_id[memory_id] else "medium",
+                        "memory_id": memory_id,
+                        "summary": _safe_memory_summary(str(memory.get("summary", ""))),
+                        "quality_score": score_by_id[memory_id]["quality_score"],
+                        "issues": sorted(issues_by_id[memory_id]),
+                        "action": "review_memory confirm|delete",
+                    }
+                )
+
+        for index, primary in enumerate(memories):
+            for candidate in memories[index + 1 :]:
+                primary_id = str(primary["id"])
+                candidate_id = str(candidate["id"])
+                similarity = _memory_similarity(primary, candidate)
+                if _is_duplicate_memory(primary, candidate, similarity=similarity, threshold=duplicate_similarity_threshold):
+                    keeper, duplicate = _preferred_memory(primary, candidate, score_by_id)
+                    issues_by_id[str(keeper["id"])].add("duplicate")
+                    issues_by_id[str(duplicate["id"])].add("duplicate")
+                    issue_counts["duplicate"] += 1
+                    recommendations.append(
+                        {
+                            "kind": "duplicate",
+                            "severity": "medium",
+                            "suggested_primary_id": str(keeper["id"]),
+                            "duplicate_id": str(duplicate["id"]),
+                            "summary": _safe_memory_summary(str(keeper.get("summary", ""))),
+                            "duplicate_summary": _safe_memory_summary(str(duplicate.get("summary", ""))),
+                            "similarity": round(similarity, 3),
+                            "quality_delta": round(
+                                score_by_id[str(keeper["id"])]["quality_score"] - score_by_id[str(duplicate["id"])]["quality_score"],
+                                3,
+                            ),
+                            "action": "merge_duplicate",
+                        }
+                    )
+                    continue
+
+                conflict_terms = _conflict_shared_terms(primary, candidate)
+                if conflict_terms:
+                    issues_by_id[primary_id].add("conflict")
+                    issues_by_id[candidate_id].add("conflict")
+                    issue_counts["conflict"] += 1
+                    recommendations.append(
+                        {
+                            "kind": "conflict",
+                            "severity": "high",
+                            "primary_id": primary_id,
+                            "conflicting_id": candidate_id,
+                            "primary_summary": _safe_memory_summary(str(primary.get("summary", ""))),
+                            "conflicting_summary": _safe_memory_summary(str(candidate.get("summary", ""))),
+                            "shared_terms": conflict_terms[:12],
+                            "action": "resolve_conflict",
+                        }
+                    )
+
+        records = [
+            {
+                "memory_id": str(memory["id"]),
+                "type": memory.get("type"),
+                "summary": _safe_memory_summary(str(memory.get("summary", ""))),
+                "source": memory.get("source"),
+                "confidence": float(memory.get("confidence", 0.0)),
+                "quality_score": score_by_id[str(memory["id"])]["quality_score"],
+                "quality_signals": score_by_id[str(memory["id"])],
+                "issues": sorted(issues_by_id[str(memory["id"])]),
+                "provenance_keys": _safe_provenance_keys(memory.get("provenance", {})),
+            }
+            for memory in memories
+        ]
+        records.sort(key=lambda item: (len(item["issues"]), -float(item["quality_score"]), str(item["memory_id"])), reverse=True)
+        recommendations.sort(key=_health_recommendation_sort_key, reverse=True)
+        average_quality = sum(score["quality_score"] for score in score_by_id.values()) / len(score_by_id) if score_by_id else 0.0
+        compatibility_issue_counts = {
+            "duplicates": issue_counts.get("duplicate", 0),
+            "unresolved_conflicts": issue_counts.get("conflict", 0),
+            "low_confidence": issue_counts.get("low_confidence", 0),
+            "unconfirmed": issue_counts.get("unconfirmed", 0),
+            "recertification_due": issue_counts.get("stale_confirmation", 0),
+            "expiring_soon": len(expiring_soon),
+            "missing_provenance": len(provenance_missing),
+        }
+        combined_issue_counts = dict(sorted({**compatibility_issue_counts, **issue_counts}.items()))
+        score = _memory_health_score(total=len(memories), issue_counts=compatibility_issue_counts)
+        result = {
+            "ok": True,
+            "mode": "memory_health_report",
+            "generated_at": now_utc(),
+            "owner": owner,
+            "scope": scope,
+            "memory_count": len(memories),
+            "status": _memory_health_status(score, issue_counts=compatibility_issue_counts),
+            "health_score": score,
+            "confirmed_count": len(confirmed),
+            "unconfirmed_count": issue_counts.get("unconfirmed", 0),
+            "average_confidence": round(sum(float(memory.get("confidence", 0.0)) for memory in memories) / len(memories), 3) if memories else 0.0,
+            "type_counts": dict(sorted(type_counts.items())),
+            "source_counts": dict(sorted(source_counts.items())),
+            "issue_counts": combined_issue_counts,
+            "average_quality_score": round(average_quality, 3),
+            "record_count": min(len(records), effective_limit),
+            "total_records": len(records),
+            "records": records[:effective_limit],
+            "recommendation_count": min(len(recommendations), effective_limit),
+            "total_recommendations": len(recommendations),
+            "recommendations": recommendations[:effective_limit],
+            "consolidation": {
+                "duplicate_groups": _duplicate_memory_groups(memories, limit=effective_limit),
+                "conflict_candidates": _conflict_candidates(memories, limit=effective_limit),
+                "recertification_due": [_memory_health_item(memory) for memory in memories if "stale_confirmation" in issues_by_id[str(memory["id"])]][:effective_limit],
+                "low_confidence": [_memory_health_item(memory) for memory in memories if "low_confidence" in issues_by_id[str(memory["id"])]][:effective_limit],
+                "unconfirmed": [_memory_health_item(memory) for memory in memories if "unconfirmed" in issues_by_id[str(memory["id"])]][:effective_limit],
+                "expiring_soon": [_memory_health_item(memory) for memory in expiring_soon[:effective_limit]],
+                "missing_provenance": provenance_missing[:effective_limit],
+            },
+            "enterprise_flags": [
+                "local_semantic_index",
+                "scoped_recall",
+                "provenance_scoring",
+                "secret_like_refusal",
+                "operator_recertification",
+                "audited_consolidation",
+            ],
+            "next_actions": _memory_health_next_actions(compatibility_issue_counts),
+        }
+        if log:
+            self.audit_logger.append(
+                "memory.health_reported",
+                {
+                    "memory_count": result["memory_count"],
+                    "health_score": result["health_score"],
+                    "status": result["status"],
+                    "issue_counts": result["issue_counts"],
+                    "recommendation_count": result["recommendation_count"],
+                    "total_recommendations": result["total_recommendations"],
+                    "owner": owner,
+                    "scope": scope,
+                },
+            )
+        return result
+
     def review_escalation(
         self,
         *,
@@ -542,9 +756,17 @@ class MemoryManager:
         if content is not None:
             if SECRET_LIKE.search(content):
                 raise MemorySafetyError("refusing to store secret-like content as normal memory")
+            existing_row = self.store.get_memory(memory_id)
+            if not existing_row:
+                raise KeyError(memory_id)
             changes["content"] = content
             changes["summary"] = summarize(content)
-            changes["search_text"] = content.lower()
+            existing = decode_memory_row(existing_row)
+            tags = " ".join(str(tag) for tag in existing.get("tags", []))
+            source = str(existing.get("source", ""))
+            owner = str(existing.get("owner", ""))
+            scope = str(existing.get("scope", ""))
+            changes["search_text"] = " ".join([memory_id, content, changes["summary"], tags, source, owner, scope]).lower()
         if confidence is not None:
             changes["confidence"] = max(0.0, min(confidence, 1.0))
         if confirmed:
@@ -956,6 +1178,18 @@ class MemoryManager:
             return None
         return (datetime.now(UTC) + timedelta(days=days)).isoformat()
 
+    def _memory_recertification_days(self, memory_type: str) -> int | None:
+        return self.recertification_days_by_type.get(memory_type, self.default_recertification_days)
+
+    def _memory_needs_recertification(self, memory: dict[str, Any], *, now: datetime) -> bool:
+        if "recertification-due" in set(memory.get("tags", [])):
+            return True
+        max_age = self._memory_recertification_days(str(memory.get("type", "")))
+        if max_age is None:
+            return False
+        confirmed_at = _parse_datetime(memory.get("last_confirmed_at"))
+        return confirmed_at is not None and confirmed_at <= now - timedelta(days=max_age)
+
     def _review_item_with_age(self, item: dict[str, Any], *, cutoff: datetime) -> dict[str, Any] | None:
         memory_ids = [str(item["memory_id"])] if item.get("memory_id") else [str(value) for value in (item.get("primary_id"), item.get("conflicting_id")) if value]
         timestamps: list[datetime] = []
@@ -991,8 +1225,292 @@ def _memory_terms(content: str) -> set[str]:
     return {term for term in re.findall(r"[a-z0-9_]+", content.lower()) if term not in STOPWORDS}
 
 
+def _memory_quality_signals(memory: dict[str, Any], *, now: datetime, recertification_days: int | None) -> dict[str, Any]:
+    confidence = max(0.0, min(float(memory.get("confidence", 0.0)), 1.0))
+    confirmed_at = _parse_datetime(memory.get("last_confirmed_at"))
+    freshness_score = _freshness_score(memory, now=now, recertification_days=recertification_days)
+    provenance_score = _provenance_score(memory)
+    score = confidence * 0.55 + provenance_score * 0.2 + freshness_score * 0.1
+    if confirmed_at is not None:
+        score += 0.15
+    if confidence < 0.7:
+        score -= 0.08
+    if recertification_days is not None and confirmed_at is not None and confirmed_at <= now - timedelta(days=recertification_days):
+        score -= 0.12
+    if "recertification-due" in set(memory.get("tags", [])):
+        score -= 0.12
+    expires_at = _parse_datetime(memory.get("expires_at"))
+    if expires_at is not None:
+        if expires_at <= now:
+            score -= 0.25
+        elif expires_at <= now + timedelta(days=7):
+            score -= 0.05
+    return {
+        "quality_score": round(max(0.0, min(score, 1.0)), 3),
+        "confidence": round(confidence, 3),
+        "provenance_score": round(provenance_score, 3),
+        "freshness_score": round(freshness_score, 3),
+        "confirmed": confirmed_at is not None,
+    }
+
+
+def _provenance_score(memory: dict[str, Any]) -> float:
+    source = str(memory.get("source") or "")
+    provenance = memory.get("provenance", {})
+    provenance = provenance if isinstance(provenance, dict) else {}
+    score = 0.0
+    if source:
+        score += 0.2
+    if provenance:
+        score += 0.2
+    trust_class = str(provenance.get("trust_class", ""))
+    if trust_class == TrustClass.USER_DIRECTIVE.value:
+        score += 0.25
+    elif trust_class == TrustClass.DEVELOPER_TRUSTED.value:
+        score += 0.2
+    if provenance.get("reviewer") or provenance.get("accepted_at") or provenance.get("committed_from_preview"):
+        score += 0.15
+    if any(key in provenance for key in ("path", "file", "message_id", "session_id", "platform")):
+        score += 0.15
+    if memory.get("last_confirmed_at"):
+        score += 0.1
+    return max(0.0, min(score, 1.0))
+
+
+def _freshness_score(memory: dict[str, Any], *, now: datetime, recertification_days: int | None) -> float:
+    anchor = _parse_datetime(memory.get("last_confirmed_at")) or _parse_datetime(memory.get("updated_at")) or _parse_datetime(memory.get("created_at"))
+    if anchor is None:
+        return 0.5
+    age_days = max(0.0, (now - anchor).total_seconds() / 86400)
+    horizon = float(recertification_days or 365)
+    return max(0.0, min(1.0, 1.0 - (age_days / max(horizon * 2.0, 1.0))))
+
+
+def _safe_memory_summary(value: str, *, limit: int = 160) -> str:
+    redacted = redact_secret_values(value)
+    if SECRET_LIKE.search(redacted):
+        return "[REDACTED_SECRET_LIKE_MEMORY_SUMMARY]"
+    return summarize(redacted, limit=limit)
+
+
+def _safe_provenance_keys(provenance: Any) -> list[str]:
+    if not isinstance(provenance, dict):
+        return []
+    return sorted(summarize(str(key), limit=80) for key in provenance.keys())[:20]
+
+
+def _memory_similarity(left: dict[str, Any], right: dict[str, Any]) -> float:
+    left_text = _memory_similarity_text(left)
+    right_text = _memory_similarity_text(right)
+    left_tokens = set(semantic_tokens(left_text))
+    right_tokens = set(semantic_tokens(right_text))
+    if not left_tokens or not right_tokens:
+        return 0.0
+    jaccard = len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
+    cosine = cosine_similarity(local_embedding(left_text), local_embedding(right_text))
+    return max(jaccard, cosine)
+
+
+def _memory_similarity_text(memory: dict[str, Any]) -> str:
+    tags = memory.get("tags", [])
+    if not isinstance(tags, list):
+        tags = []
+    return " ".join([str(memory.get("content", "")), " ".join(str(tag) for tag in tags)])
+
+
+def _is_duplicate_memory(left: dict[str, Any], right: dict[str, Any], *, similarity: float, threshold: float) -> bool:
+    left_normalized = _normalized_memory_content(left)
+    right_normalized = _normalized_memory_content(right)
+    if left_normalized and left_normalized == right_normalized:
+        return True
+    if left.get("type") != right.get("type"):
+        return False
+    if _has_conflict_cue(left, right):
+        return False
+    left_terms = _memory_terms(str(left.get("content", "")))
+    right_terms = _memory_terms(str(right.get("content", "")))
+    if min(len(left_terms), len(right_terms)) < 4:
+        return False
+    return similarity >= threshold
+
+
+def _preferred_memory(left: dict[str, Any], right: dict[str, Any], score_by_id: dict[str, dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+    def sort_key(memory: dict[str, Any]) -> tuple[float, float, bool, str, str]:
+        signals = score_by_id[str(memory["id"])]
+        return (
+            float(signals["quality_score"]),
+            float(memory.get("confidence", 0.0)),
+            bool(signals["confirmed"]),
+            str(memory.get("updated_at", "")),
+            str(memory["id"]),
+        )
+
+    first, second = sorted((left, right), key=sort_key, reverse=True)
+    return first, second
+
+
+def _normalized_memory_content(memory: dict[str, Any]) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(memory.get("content", "")).lower()).strip()
+
+
+def _conflict_shared_terms(left: dict[str, Any], right: dict[str, Any]) -> list[str]:
+    if _normalized_memory_content(left) == _normalized_memory_content(right):
+        return []
+    if not _has_conflict_cue(left, right):
+        return []
+    shared_terms = sorted(_memory_terms(str(left.get("content", ""))) & _memory_terms(str(right.get("content", ""))))
+    if len(shared_terms) < 3:
+        return []
+    return shared_terms
+
+
+def _has_conflict_cue(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_terms = _memory_terms(str(left.get("content", "")))
+    right_terms = _memory_terms(str(right.get("content", "")))
+    for first, second in CONFLICT_MARKER_PAIRS:
+        if (first in left_terms and second in right_terms) or (second in left_terms and first in right_terms):
+            return True
+    return False
+
+
+def _health_recommendation_sort_key(item: dict[str, Any]) -> tuple[int, int, float, float]:
+    kind_rank = {"conflict": 3, "duplicate": 2, "memory_review": 1}.get(str(item.get("kind", "")), 0)
+    quality_score = float(item.get("quality_score", 0.5))
+    similarity = float(item.get("similarity", 0.0))
+    return (_review_severity_rank(str(item.get("severity", "low"))), kind_rank, 1.0 - quality_score, similarity)
+
+
 def _review_severity_rank(severity: str) -> int:
     return {"low": 0, "medium": 1, "high": 2, "critical": 3}.get(severity, 0)
+
+
+def _memory_health_item(memory: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "memory_id": memory.get("id"),
+        "type": memory.get("type"),
+        "summary": _safe_memory_summary(str(memory.get("summary", ""))),
+        "source": memory.get("source"),
+        "confidence": memory.get("confidence"),
+        "last_confirmed_at": memory.get("last_confirmed_at"),
+        "expires_at": memory.get("expires_at"),
+        "tags": memory.get("tags", []),
+    }
+
+
+def _expiring_soon(memories: list[dict[str, Any]], *, days: int) -> list[dict[str, Any]]:
+    now = datetime.now(UTC)
+    cutoff = now + timedelta(days=days)
+    expiring: list[dict[str, Any]] = []
+    for memory in memories:
+        expires_at = _parse_datetime(memory.get("expires_at"))
+        if expires_at is not None and now <= expires_at <= cutoff:
+            expiring.append(memory)
+    expiring.sort(key=lambda memory: str(memory.get("expires_at") or ""))
+    return expiring
+
+
+def _duplicate_memory_groups(memories: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for memory in memories:
+        fingerprint = _memory_fingerprint(str(memory.get("content", "")))
+        if fingerprint:
+            groups.setdefault(fingerprint, []).append(memory)
+    duplicate_groups: list[dict[str, Any]] = []
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        sorted_group = sorted(group, key=lambda memory: (float(memory.get("confidence", 0.0)), bool(memory.get("last_confirmed_at")), str(memory.get("updated_at", ""))), reverse=True)
+        canonical = sorted_group[0]
+        duplicate_groups.append(
+            {
+                "canonical_id": canonical["id"],
+                "memory_ids": [memory["id"] for memory in sorted_group],
+                "count": len(sorted_group),
+                "summary": _safe_memory_summary(str(canonical.get("summary", ""))),
+                "sources": sorted({str(memory.get("source", "")) for memory in sorted_group}),
+                "recommended_action": "memory merge",
+            }
+        )
+    duplicate_groups.sort(key=lambda item: (int(item["count"]), item["summary"]), reverse=True)
+    return duplicate_groups[:limit]
+
+
+def _conflict_candidates(memories: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    conflicts: list[dict[str, Any]] = []
+    for index, primary in enumerate(memories):
+        if "conflict-reviewed" in set(primary.get("tags", [])):
+            continue
+        for conflicting in memories[index + 1 :]:
+            if "conflict-reviewed" in set(conflicting.get("tags", [])):
+                continue
+            if primary.get("id") == conflicting.get("id"):
+                continue
+            shared_terms = _conflict_shared_terms(primary, conflicting)
+            if not shared_terms:
+                continue
+            conflicts.append(
+                {
+                    "primary_id": primary["id"],
+                    "conflicting_id": conflicting["id"],
+                    "primary_summary": _safe_memory_summary(str(primary.get("summary", ""))),
+                    "conflicting_summary": _safe_memory_summary(str(conflicting.get("summary", ""))),
+                    "conflict_score": len(shared_terms),
+                    "shared_terms": shared_terms[:12],
+                    "recommended_action": "memory resolve-conflict",
+                }
+            )
+            if len(conflicts) >= limit:
+                return conflicts
+    return conflicts
+
+
+def _memory_fingerprint(content: str) -> str:
+    normalized = " ".join(sorted(_memory_terms(content)))
+    return hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest() if normalized else ""
+
+
+def _memory_health_score(*, total: int, issue_counts: dict[str, int]) -> int:
+    if total <= 0:
+        return 100
+    weights = {
+        "duplicates": 9,
+        "unresolved_conflicts": 14,
+        "low_confidence": 4,
+        "unconfirmed": 3,
+        "recertification_due": 5,
+        "expiring_soon": 1,
+        "missing_provenance": 7,
+    }
+    penalty = sum(weights.get(key, 1) * int(value) for key, value in issue_counts.items())
+    scaled = min(100, round((penalty / max(total, 1)) * 10))
+    return max(0, 100 - scaled)
+
+
+def _memory_health_status(score: int, *, issue_counts: dict[str, int]) -> str:
+    if issue_counts.get("unresolved_conflicts", 0):
+        return "needs_conflict_review"
+    if score >= 90:
+        return "enterprise_ready"
+    if score >= 75:
+        return "review_recommended"
+    return "consolidation_required"
+
+
+def _memory_health_next_actions(issue_counts: dict[str, int]) -> list[str]:
+    actions: list[str] = []
+    if issue_counts.get("unresolved_conflicts", 0):
+        actions.append("Resolve conflicting memories before using affected recall for high-impact work.")
+    if issue_counts.get("duplicates", 0):
+        actions.append("Merge duplicate memories into canonical records while preserving provenance.")
+    if issue_counts.get("unconfirmed", 0) or issue_counts.get("low_confidence", 0):
+        actions.append("Confirm useful uncertain memories or delete records that should not influence future tasks.")
+    if issue_counts.get("recertification_due", 0):
+        actions.append("Reconfirm stale memories through the review queue.")
+    if issue_counts.get("missing_provenance", 0):
+        actions.append("Backfill source and evidence details before treating memory as enterprise-grade.")
+    if not actions:
+        actions.append("Memory posture is clean; continue scheduled recertification and audit review.")
+    return actions
 
 
 def _digest_item(item: dict[str, Any]) -> dict[str, Any]:

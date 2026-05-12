@@ -36,12 +36,17 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
     live_connector_adapters = _live_connector_adapters(connectors, orchestrator.config)
     available_live_connector_adapters = _available_live_connector_adapters(connectors, orchestrator.config)
     competitive_targets = _competitive_targets()
+    memory_readiness = _memory_readiness(orchestrator)
+    self_improvement_readiness = _self_improvement_readiness(orchestrator)
+    enterprise_readiness = _enterprise_readiness(memory_readiness, self_improvement_readiness)
 
     return {
         "product": {
             "name": "Aegis Agent",
             "positioning": "Local-first governed agent runtime",
             "release_stage": "product_foundation",
+            "release_stage_detail": "Governed local foundation with enterprise-ready controls where health gates are clean, mock-default integrations where credentials are absent, and backend-gated execution where remote adapters require explicit enablement.",
+            "readiness_states": ["enterprise_ready", "governed_local_ready", "mock_default", "backend_gated", "not_started"],
             "security_posture": "strict_by_default",
         },
         "runtime": {
@@ -63,6 +68,10 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
             "boards": len(boards),
             "recent_tasks": len(tasks),
             "pending_approvals": len(pending_approvals),
+            "memories": memory_readiness["memory_count"],
+            "memory_health_score": memory_readiness["health_score"],
+            "memory_review_recommendations": memory_readiness["recommendation_count"],
+            "self_improvement_blockers": self_improvement_readiness["blocker_count"],
         },
         "security_controls": [
             {
@@ -111,10 +120,22 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
                 "detail": "Cloud, local, OpenRouter, Ollama, LM Studio, and custom endpoints share aliases, fallbacks, auth state, and usage tracking.",
             },
             {
-                "name": "Memory and skills",
+                "name": "Memory",
+                "state": memory_readiness["status"],
+                "coverage": f"{memory_readiness['memory_count']} memories, score {memory_readiness['health_score']}, {memory_readiness['recommendation_count']} review recommendation(s)",
+                "detail": "Memory health scores provenance, confirmation freshness, duplicate candidates, conflicts, recertification, and scoped recall without exposing raw secrets.",
+            },
+            {
+                "name": "Self improvement",
+                "state": self_improvement_readiness["status"],
+                "coverage": f"{self_improvement_readiness['proposal_count']} proposals, {self_improvement_readiness['candidate_counts']['total']} candidates, {self_improvement_readiness['blocker_count']} blocker(s)",
+                "detail": "Repair loops require proposal review, sandboxed candidates, candidate approval, workspace-scoped application, verification receipts, and learned procedural memory.",
+            },
+            {
+                "name": "Skills",
                 "state": "governed",
-                "coverage": "Provenance, sensitivity, approval, tests, evals, rollback, and sandbox metadata",
-                "detail": "Generated procedures stay disabled or approval-required until reviewed.",
+                "coverage": "Signed manifests, permissions, tests, evals, rollback, and sandbox metadata",
+                "detail": "Generated procedures and high-risk skills stay disabled or approval-required until reviewed.",
             },
             {
                 "name": "Scheduling and orchestration",
@@ -146,9 +167,81 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
             backends,
         ),
         "implementation_readiness": implementation_readiness,
+        "enterprise_readiness": enterprise_readiness,
+        "memory_readiness": memory_readiness,
+        "self_improvement_readiness": self_improvement_readiness,
         "recent_tasks": tasks,
         "recent_session_tasks": session_tasks,
         "pending_approvals": pending_approvals[:12],
+    }
+
+
+def _memory_readiness(orchestrator: Any) -> dict[str, Any]:
+    report = orchestrator.memory.health_report(limit=20, log=False)
+    return {
+        "status": _dashboard_memory_status(report),
+        "health_score": report["health_score"],
+        "memory_count": report["memory_count"],
+        "confirmed_count": report["confirmed_count"],
+        "unconfirmed_count": report["unconfirmed_count"],
+        "issue_counts": report["issue_counts"],
+        "recommendation_count": report["recommendation_count"],
+        "total_recommendations": report["total_recommendations"],
+        "enterprise_flags": report["enterprise_flags"],
+        "next_actions": report["next_actions"],
+        "audit_event": "memory.health_reported",
+        "raw_memory_content_included": False,
+    }
+
+
+def _dashboard_memory_status(report: dict[str, Any]) -> str:
+    status = str(report.get("status") or "")
+    if status == "enterprise_ready":
+        return "enterprise_ready"
+    if report.get("memory_count", 0) == 0:
+        return "governed_local_ready"
+    return status or "review_recommended"
+
+
+def _self_improvement_readiness(orchestrator: Any) -> dict[str, Any]:
+    readiness = orchestrator.repair_readiness_summary(limit=20)
+    return {
+        "status": "enterprise_ready" if readiness["ready"] else "blocked",
+        "ready": readiness["ready"],
+        "proposal_count": readiness["proposal_count"],
+        "by_status": readiness["by_status"],
+        "candidate_counts": readiness["candidate_counts"],
+        "attempt_count": readiness["attempt_count"],
+        "blocker_count": readiness["blocker_count"],
+        "blockers": readiness["blockers"][:10],
+        "next_actions": readiness["next_actions"][:5],
+        "state_machine": [
+            "failed_task",
+            "proposal",
+            "sandbox_plan",
+            "candidate",
+            "candidate_review",
+            "apply_or_rollback",
+            "verification",
+            "learned_procedural_memory",
+        ],
+    }
+
+
+def _enterprise_readiness(memory_readiness: dict[str, Any], self_improvement_readiness: dict[str, Any]) -> dict[str, Any]:
+    surfaces = {
+        "memory": memory_readiness["status"],
+        "self_improvement": self_improvement_readiness["status"],
+        "tui": "enterprise_ready",
+        "connectors": "mock_default",
+        "remote_backends": "backend_gated",
+    }
+    blocked = [name for name, status in surfaces.items() if status == "blocked"]
+    return {
+        "status": "blocked" if blocked else "governed_local_ready",
+        "surfaces": surfaces,
+        "blocked_surfaces": blocked,
+        "operator_gates": ["approval_required_mutation", "memory_review", "candidate_review", "verification_receipts"],
     }
 
 

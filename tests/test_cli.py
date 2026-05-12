@@ -47,6 +47,15 @@ class CliTests(unittest.TestCase):
             self.assertIn("session_bound_recent_tasks", result["runtime"])
             self.assertGreaterEqual(result["runtime"]["session_bound_recent_tasks"], 1)
             self.assertIn("limited_or_facade_tools", result["runtime"])
+            self.assertIn("memory_health_score", result["runtime"])
+            self.assertIn("memory_readiness", result)
+            self.assertIn("self_improvement_readiness", result)
+            self.assertIn("enterprise_readiness", result)
+            self.assertIn(result["memory_readiness"]["status"], {"enterprise_ready", "governed_local_ready", "review_recommended", "consolidation_recommended", "needs_conflict_review", "consolidation_required"})
+            self.assertFalse(result["memory_readiness"]["raw_memory_content_included"])
+            self.assertIn("state_machine", result["self_improvement_readiness"])
+            self.assertIn("failed_task", result["self_improvement_readiness"]["state_machine"])
+            self.assertIn("tui", result["enterprise_readiness"]["surfaces"])
             self.assertNotIn(session_task["id"], {task["id"] for task in result["recent_tasks"]})
             self.assertIn(session_task["id"], {task["id"] for task in result["recent_session_tasks"]})
             linked_session_task = next(task for task in result["recent_session_tasks"] if task["id"] == session_task["id"])
@@ -96,6 +105,36 @@ class CliTests(unittest.TestCase):
             self.assertEqual(backend_checklist["scope_limits"]["state"], "enforced")
             self.assertEqual(backend_checklist["rollback_receipts"]["state"], "enforced")
             self.assertEqual(backend_checklist["provider_lifecycle_depth"]["state"], "not_started")
+
+    def test_enterprise_readiness_reports_memory_improvement_and_tui_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            data_dir = Path(temp) / ".aegis"
+
+            result = dispatch(parser.parse_args(["--data-dir", str(data_dir), "enterprise-readiness"]))
+            filtered = dispatch(parser.parse_args(["--data-dir", str(data_dir), "enterprise-readiness", "--memory"]))
+
+            self.assertEqual(result["status"], "ready_with_operator_gates")
+            self.assertEqual(result["flags"], {"memory": True, "self_improvement": True, "tui": True})
+            surfaces = {surface["surface"]: surface for surface in result["surfaces"]}
+            self.assertEqual(set(surfaces), {"memory", "self_improvement", "tui"})
+            self.assertEqual(surfaces["memory"]["command"], "memory")
+            self.assertIn("session_preview_and_commit", surfaces["memory"]["capabilities"])
+            self.assertIn("health_report", surfaces["memory"]["capabilities"])
+            self.assertIn("health_score", surfaces["memory"])
+            self.assertTrue(surfaces["memory"]["policy"]["recertification_policy_configured"])
+            self.assertEqual(surfaces["self_improvement"]["command"], "improvement")
+            self.assertIn("repair_readiness_gate", surfaces["self_improvement"]["capabilities"])
+            self.assertEqual(surfaces["self_improvement"]["blocker_count"], 0)
+            self.assertEqual(surfaces["tui"]["command"], "tui")
+            self.assertIn("--session-id", surfaces["tui"]["cli_flags"])
+            self.assertIn("approvals", surfaces["tui"]["active_flags"])
+            self.assertGreaterEqual(surfaces["tui"]["shield_frames"], 5)
+            self.assertTrue(surfaces["tui"]["slash_palette"])
+            self.assertTrue(surfaces["tui"]["nested_menus"])
+            self.assertEqual(filtered["surface_count"], 1)
+            self.assertEqual(filtered["flags"], {"memory": True})
+            self.assertEqual(filtered["surfaces"][0]["surface"], "memory")
 
     def test_evaluation_readiness_can_block_on_live_parity_gaps(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

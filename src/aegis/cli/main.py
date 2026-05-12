@@ -38,7 +38,7 @@ from aegis.skills.hub import SkillHubCatalog
 from aegis.skills.registry import SkillRegistry
 from aegis.skills.signing import ensure_signing_key, sign_manifest, verify_manifest_signature
 from aegis.tools.catalog import ToolCatalog
-from aegis.tui.main import run_tui
+from aegis.tui.main import SHIELD_FRAMES, run_tui
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -62,6 +62,11 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands.add_parser("init", help="Create default local configuration")
     subcommands.add_parser("health", help="Show local runtime health")
     subcommands.add_parser("dashboard", help="Show product capability and security posture")
+    enterprise = subcommands.add_parser("enterprise-readiness", help="Show concise enterprise readiness flags")
+    enterprise.add_argument("--memory", action="store_true", help="Only report governed memory readiness")
+    enterprise.add_argument("--self-improvement", action="store_true", help="Only report self-improvement readiness")
+    enterprise.add_argument("--tui", action="store_true", help="Only report TUI readiness")
+    enterprise.add_argument("--limit", type=int, default=20, help="Maximum readiness blockers to include")
     server = subcommands.add_parser("serve", help="Run the local development API server")
     server.add_argument("--workspace", default=".")
     server.add_argument("--host", default="127.0.0.1")
@@ -223,6 +228,10 @@ def build_parser() -> argparse.ArgumentParser:
     memory_create.add_argument("--ttl-days", type=int)
     memory_search = memory_sub.add_parser("search", help="Search memory")
     memory_search.add_argument("query")
+    memory_health = memory_sub.add_parser("health", help="Summarize memory quality, consolidation, and review posture")
+    memory_health.add_argument("--limit", type=int, default=50)
+    memory_health.add_argument("--scope", default="workspace")
+    memory_health.add_argument("--owner", default="local-user")
     memory_review = memory_sub.add_parser("review-queue", help="List memory items needing review")
     memory_review.add_argument("--limit", type=int, default=50)
     memory_review.add_argument("--scope", default="workspace")
@@ -615,6 +624,9 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
         orchestrator = build_orchestrator(data_dir=args.data_dir)
         return build_product_dashboard(orchestrator)
 
+    if args.command == "enterprise-readiness":
+        return _enterprise_readiness(args, config)
+
     if args.command == "serve":
         serve(data_dir=args.data_dir, workspace=args.workspace, host=args.host, port=args.port)
         return None
@@ -750,6 +762,8 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return record.to_row()
         if args.memory_command == "search":
             return {"memories": manager.retrieve_relevant(args.query)}
+        if args.memory_command == "health":
+            return manager.health_report(limit=args.limit, owner=args.owner, scope=args.scope)
         if args.memory_command == "review-queue":
             return manager.review_queue(limit=args.limit, scope=args.scope)
         if args.memory_command == "session-preview":
@@ -1159,6 +1173,105 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return {"ok": audit.verify_chain()}
 
     raise ValueError("unhandled command")
+
+
+def _enterprise_readiness(args: argparse.Namespace, config: Any) -> dict[str, Any]:
+    selected = _selected_enterprise_surfaces(args)
+    surfaces: list[dict[str, Any]] = []
+    if "memory" in selected:
+        surfaces.append(_memory_enterprise_readiness(config))
+    if "self_improvement" in selected:
+        orchestrator = build_orchestrator(data_dir=args.data_dir, workspace=".")
+        surfaces.append(_self_improvement_enterprise_readiness(orchestrator, limit=args.limit))
+    if "tui" in selected:
+        surfaces.append(_tui_enterprise_readiness())
+
+    flags = {str(surface["surface"]): bool(surface["ready"]) for surface in surfaces}
+    blocked = [surface for surface in surfaces if not surface["ready"]]
+    return {
+        "ok": True,
+        "status": "blocked" if blocked else "ready_with_operator_gates",
+        "flags": flags,
+        "surface_count": len(surfaces),
+        "surfaces": surfaces,
+    }
+
+
+def _selected_enterprise_surfaces(args: argparse.Namespace) -> list[str]:
+    selected = []
+    if args.memory:
+        selected.append("memory")
+    if args.self_improvement:
+        selected.append("self_improvement")
+    if args.tui:
+        selected.append("tui")
+    return selected or ["memory", "self_improvement", "tui"]
+
+
+def _memory_enterprise_readiness(config: Any) -> dict[str, Any]:
+    retention = config.memory_retention
+    health = _memory_manager(config).health_report(limit=20, log=False)
+    return {
+        "surface": "memory",
+        "ready": True,
+        "status": health["status"],
+        "command": "memory",
+        "capabilities": [
+            "create_search_update_export",
+            "session_preview_and_commit",
+            "health_report",
+            "review_queue_digest_escalation",
+            "recertification_and_expiry",
+            "merge_and_conflict_resolution",
+        ],
+        "health_score": health["health_score"],
+        "memory_count": health["memory_count"],
+        "recommendation_count": health["recommendation_count"],
+        "issue_counts": health["issue_counts"],
+        "policy": {
+            "ttl_policy_configured": retention.default_ttl_days is not None or bool(retention.ttl_days_by_type),
+            "recertification_policy_configured": retention.default_recertification_days is not None or bool(retention.recertification_days_by_type),
+            "escalation_routes_configured": bool(retention.escalation_routes),
+        },
+        "operator_gates": ["review-required memory candidates", "recertification", "sensitivity labels"],
+    }
+
+
+def _self_improvement_enterprise_readiness(orchestrator: Any, *, limit: int) -> dict[str, Any]:
+    readiness = orchestrator.repair_readiness_summary(limit=limit)
+    return {
+        "surface": "self_improvement",
+        "ready": bool(readiness["ready"]),
+        "status": readiness["status"],
+        "command": "improvement",
+        "capabilities": [
+            "proposal_review",
+            "repair_readiness_gate",
+            "candidate_generation_and_synthesis",
+            "candidate_review",
+            "apply_rollback_and_verification_receipts",
+        ],
+        "proposal_count": readiness["proposal_count"],
+        "blocker_count": readiness["blocker_count"],
+        "blockers": readiness["blockers"],
+        "next_actions": readiness["next_actions"][:3],
+    }
+
+
+def _tui_enterprise_readiness() -> dict[str, Any]:
+    return {
+        "surface": "tui",
+        "ready": True,
+        "status": "ready",
+        "command": "tui",
+        "cli_flags": ["--workspace", "--session-id", "--model", "--personality"],
+        "active_flags": ["audit", "approvals", "session", "mode", "tools", "providers", "model", "workspace"],
+        "shield_frames": len(SHIELD_FRAMES),
+        "slash_aliases": True,
+        "slash_palette": True,
+        "nested_menus": True,
+        "operator_gates": ["interactive local session", "existing approval and policy gates"],
+    }
 
 
 def _memory_manager(config: Any) -> MemoryManager:

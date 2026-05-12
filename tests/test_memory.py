@@ -559,6 +559,121 @@ class MemoryTests(unittest.TestCase):
         self.assertTrue(any("Resolve" in action for action in digest["next_actions"]))
         self.assertIn("memory.review_digest_generated", self.audit.path.read_text(encoding="utf-8"))
 
+    def test_health_report_scores_and_recommends_memory_consolidation(self) -> None:
+        trusted = self.manager.create_memory(
+            memory_type=MemoryType.PROJECT,
+            content="Project Atlas uses SQLite as the local durable store.",
+            source="session:trusted",
+            provenance={"message_id": "m-1", "trust_class": TrustClass.USER_DIRECTIVE.value, "reviewer": "operator"},
+            confidence=0.95,
+            confirmed=True,
+            tags=("atlas",),
+        )
+        duplicate = self.manager.create_memory(
+            memory_type=MemoryType.PROJECT,
+            content="Project Atlas uses SQLite as local durable store.",
+            source="migration:openclaw",
+            provenance={"path": "MEMORY.md"},
+            confidence=0.72,
+            tags=("atlas",),
+        )
+        concise = self.manager.create_memory(
+            memory_type=MemoryType.PREFERENCE,
+            content="Prefer concise release status updates for this workspace.",
+            source="test",
+            provenance={"turn": 1},
+            confidence=0.9,
+            confirmed=True,
+            tags=("status",),
+        )
+        detailed = self.manager.create_memory(
+            memory_type=MemoryType.PREFERENCE,
+            content="Prefer detailed release status updates for this workspace.",
+            source="test",
+            provenance={"turn": 2},
+            confidence=0.9,
+            confirmed=True,
+            tags=("status",),
+        )
+        stale = self.manager.create_memory(
+            memory_type=MemoryType.PROJECT,
+            content="Old project handoff memory should be recertified.",
+            source="test",
+            provenance={"case": "stale"},
+            confidence=0.9,
+            confirmed=True,
+        )
+        low_confidence = self.manager.create_memory(
+            memory_type=MemoryType.PROJECT,
+            content="Tentative deployment detail needs memory review.",
+            source="test",
+            provenance={"case": "low-confidence"},
+            confidence=0.55,
+        )
+        self.store.update_memory(stale.id, {"last_confirmed_at": "2000-01-01T00:00:00+00:00"})
+
+        report = self.manager.health_report(limit=20)
+
+        self.assertEqual(report["mode"], "memory_health_report")
+        self.assertEqual(report["memory_count"], 6)
+        self.assertGreaterEqual(report["issue_counts"]["duplicate"], 1)
+        self.assertGreaterEqual(report["issue_counts"]["conflict"], 1)
+        self.assertGreaterEqual(report["issue_counts"]["stale_confirmation"], 1)
+        self.assertGreaterEqual(report["issue_counts"]["low_confidence"], 1)
+        recommendations_by_kind = {item["kind"]: item for item in report["recommendations"]}
+        self.assertEqual(recommendations_by_kind["duplicate"]["action"], "merge_duplicate")
+        self.assertEqual(recommendations_by_kind["duplicate"]["suggested_primary_id"], trusted.id)
+        self.assertEqual(recommendations_by_kind["duplicate"]["duplicate_id"], duplicate.id)
+        self.assertEqual(recommendations_by_kind["conflict"]["action"], "resolve_conflict")
+        self.assertEqual(
+            {recommendations_by_kind["conflict"]["primary_id"], recommendations_by_kind["conflict"]["conflicting_id"]},
+            {concise.id, detailed.id},
+        )
+        record_by_id = {item["memory_id"]: item for item in report["records"]}
+        self.assertGreater(record_by_id[trusted.id]["quality_score"], record_by_id[duplicate.id]["quality_score"])
+        self.assertIn("provenance_score", record_by_id[trusted.id]["quality_signals"])
+        self.assertIn("stale_confirmation", record_by_id[stale.id]["issues"])
+        self.assertIn("low_confidence", record_by_id[low_confidence.id]["issues"])
+        self.assertIn("memory.health_reported", self.audit.path.read_text(encoding="utf-8"))
+
+    def test_health_report_respects_owner_scope_and_audits_only_aggregates(self) -> None:
+        scoped = self.manager.create_memory(
+            memory_type=MemoryType.PROJECT,
+            content="Scoped health memory should be reviewed by the operator.",
+            source="test",
+            provenance={"case": "in-scope"},
+            confidence=0.6,
+            owner="local-user",
+            scope="workspace",
+        )
+        self.manager.create_memory(
+            memory_type=MemoryType.PROJECT,
+            content="Other owner health memory should not appear in scoped report.",
+            source="test",
+            provenance={"case": "out-owner"},
+            confidence=0.6,
+            owner="other-user",
+            scope="workspace",
+        )
+        self.manager.create_memory(
+            memory_type=MemoryType.PROJECT,
+            content="Other scope health memory should not appear in scoped report.",
+            source="test",
+            provenance={"case": "out-scope"},
+            confidence=0.6,
+            owner="local-user",
+            scope="other-workspace",
+        )
+
+        report = self.manager.health_report(owner="local-user", scope="workspace", limit=10)
+
+        self.assertEqual(report["memory_count"], 1)
+        self.assertEqual([item["memory_id"] for item in report["records"]], [scoped.id])
+        self.assertEqual(report["issue_counts"]["low_confidence"], 1)
+        audit_text = self.audit.path.read_text(encoding="utf-8")
+        self.assertIn("memory.health_reported", audit_text)
+        self.assertNotIn("Scoped health memory should be reviewed", audit_text)
+
     def test_review_escalation_summarizes_overdue_review_items(self) -> None:
         overdue = self.manager.create_memory(
             memory_type=MemoryType.PROJECT,

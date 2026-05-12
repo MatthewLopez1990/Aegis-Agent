@@ -9,6 +9,7 @@ import getpass
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import sys
@@ -68,7 +69,7 @@ TOP_LEVEL_COMMANDS = (
     "timeline",
     "tools",
 )
-MEMORY_COMMANDS = ("search", "session-preview", "session-commit", "create", "review-queue", "review-digest", "review-action", "review-batch", "recertify", "update", "merge", "resolve-conflict", "expire", "cleanup-expired", "explain", "export", "delete")
+MEMORY_COMMANDS = ("search", "health", "session-preview", "session-commit", "create", "review-queue", "review-digest", "review-action", "review-batch", "recertify", "update", "merge", "resolve-conflict", "expire", "cleanup-expired", "explain", "export", "delete")
 MIGRATE_COMMANDS = ("openclaw", "hermes", "openclaw-memory-preview", "hermes-memory-preview", "openclaw-memory-commit", "hermes-memory-commit")
 MODEL_COMMANDS = ("list", "route", "alias", "fallbacks", "usage", "auth", "providers")
 MODEL_AUTH_COMMANDS = ("login", "logout")
@@ -97,6 +98,93 @@ SECURITY_COMMANDS = (
 CHANNEL_COMMANDS = ("render", "receive", "send-webhook", "send-email", "events")
 EVALUATION_COMMANDS = ("queue", "review", "trends", "delta", "readiness")
 TUI_HISTORY_LIMIT = 1000
+AEGIS_AGENT_WORDMARK: tuple[str, ...] = (
+    "::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::",
+    "\\                                                                                            \\",
+    "\\  .d8b.  d88888b d888b  d888888b .d8888.     .d8b.  d888b  d88888b d8b   db d888888b  \\",
+    "\\ d8' `8b 88'     88' Y8b   `88'   88'  YP    d8' `8b 88' Y8b 88'     888o  88 `~~88~~' \\",
+    "\\ 88ooo88 88ooooo 88         88    `8bo.      88ooo88 88      88ooooo 88V8o 88    88     \\",
+    "\\ 88~~~88 88~~~~~ 88  ooo    88      `Y8b.    88~~~88 88  ooo 88~~~~~ 88 V8o88    88     \\",
+    "\\ 88   88 88.     88. ~8~   .88.   db   8D    88   88 88. ~8~ 88.     88  V888    88     \\",
+    "\\ YP   YP Y88888P  Y888P  Y888888P `8888Y'    YP   YP  Y888P  Y88888P VP   V8P    YP     \\",
+    "\\                                                                                            \\",
+    "::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::",
+)
+AEGIS_COMPACT_WORDMARK: tuple[str, ...] = (
+    "::::::::::::::::::::::::::::::::::::::::::::::::::::",
+    "\\  .d8b.  d88888b  d888b  d888888b .d8888.     \\",
+    "\\ d8' `8b 88'     88' Y8b   `88'   88'  YP     \\",
+    "\\ 88ooo88 88ooooo 88         88    `8bo.       \\",
+    "\\ 88~~~88 88~~~~~ 88  ooo    88      `Y8b.     \\",
+    "\\ 88   88 88.     88. ~8~   .88.   db   8D     \\",
+    "\\ YP   YP Y88888P  Y888P  Y888888P `8888Y'     \\",
+    "\\                 AEGIS AGENT                  \\",
+    "::::::::::::::::::::::::::::::::::::::::::::::::::::",
+)
+AEGIS_WORDMARK_COLORS: tuple[str, ...] = (
+    "38;2;255;0;110",
+    "38;2;214;19;152",
+    "38;2;172;37;194",
+    "38;2;131;56;236",
+    "38;2;107;82;242",
+    "38;2;82;108;249",
+    "38;2;58;134;255",
+    "38;2;39;171;241",
+    "38;2;19;208;226",
+    "38;2;0;245;212",
+)
+SHIELD_FRAMES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    (
+        "BOOT",
+        "policy core online",
+        (
+            "+------------------------------------------------------+",
+            "|  && POLICY ONLINE     %% RISK SCOPED     ## RECEIPTS  |",
+            "|  @@ APPROVALS CLEAR   __ MEMORY LOCAL    // PALETTE   |",
+            "+------------------------------------------------------+",
+        ),
+    ),
+    (
+        "VERIFY",
+        "receipts and taint checks locked",
+        (
+            "+------------------------------------------------------+",
+            "|  ## HASH CHAIN OK     @@ EVIDENCE HELD   %% TAINT     |",
+            "|  __ CONTEXT SAFE      && POLICY CHECKED  // REVIEW    |",
+            "+------------------------------------------------------+",
+        ),
+    ),
+    (
+        "GUARD",
+        "approval gates armed",
+        (
+            "+------------------------------------------------------+",
+            "|  @@ HUMAN GATE ARMED  && APPROVAL QUEUE  %% RISK      |",
+            "|  ## ACTION HELD       __ AUDIT READY     // RESUME    |",
+            "+------------------------------------------------------+",
+        ),
+    ),
+    (
+        "TRACE",
+        "live evidence lanes streaming",
+        (
+            "+------------------------------------------------------+",
+            "|  %% EVENTS STREAMING  ## TIMELINE LIVE   __ PROOF     |",
+            "|  && MODEL ROUTED      @@ TOOL GATES      // REPLAY    |",
+            "+------------------------------------------------------+",
+        ),
+    ),
+    (
+        "ASCEND",
+        "operator command deck focused",
+        (
+            "+------------------------------------------------------+",
+            "|  // SLASH PALETTE    __ NESTED MENUS    && OPERATE   |",
+            "|  @@ GOVERN           ## BUILD           %% EXPLORE    |",
+            "+------------------------------------------------------+",
+        ),
+    ),
+)
 
 
 class AegisTui(cmd.Cmd):
@@ -123,24 +211,65 @@ class AegisTui(cmd.Cmd):
         )
         self.last_task_id: str | None = None
         self.browser_session_id: str | None = None
-        self.prompt = _paint("aegis> ", "36;1")
-        self.intro = self._render_dashboard()
+        self._shield_frame_index = 0
+        self._refresh_prompt()
+        self.intro = self._render_home()
 
     def preloop(self) -> None:
         _load_tui_history(self.history_path)
+        self._refresh_prompt()
 
     def postloop(self) -> None:
         _save_tui_history(self.history_path)
+
+    def postcmd(self, stop: bool | None, line: str) -> bool | None:
+        self._refresh_prompt()
+        return stop
+
+    def cmdloop(self, intro: str | None = None) -> None:
+        """Run the TUI with a live slash palette when attached to a terminal."""
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            super().cmdloop(intro=intro)
+            return
+        self.preloop()
+        try:
+            if intro is not None:
+                self.intro = intro
+            if self.intro:
+                print(self.intro)
+            stop: bool | None = None
+            while not stop:
+                try:
+                    line = self._read_live_line()
+                except KeyboardInterrupt:
+                    print("^C")
+                    self._refresh_prompt()
+                    continue
+                except EOFError:
+                    print()
+                    break
+                if line is None:
+                    break
+                if line.strip():
+                    _add_tui_history(line)
+                line = self.precmd(line)
+                stop = self.onecmd(line)
+                stop = self.postcmd(stop, line)
+        finally:
+            self.postloop()
+
+    def emptyline(self) -> None:
+        self._refresh_prompt()
+        return None
 
     def completenames(self, text: str, *ignored: Any) -> list[str]:
         return _complete_options(TOP_LEVEL_COMMANDS, text)
 
     def completedefault(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
-        stripped = line.lstrip()
-        if stripped.startswith("/"):
-            slash_text = stripped[1:] if begidx <= 1 else text
-            return [f"/{name}" for name in _complete_options(TOP_LEVEL_COMMANDS, slash_text)]
-        return []
+        return _complete_slash(text, line, begidx, endidx)
+
+    def complete_menu(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return _complete_options(_command_group_names(), text)
 
     def complete_memory(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return _complete_subcommand(MEMORY_COMMANDS, text, line, begidx)
@@ -810,6 +939,18 @@ class AegisTui(cmd.Cmd):
                 print("usage: memory search <query>")
                 return
             _print_json({"memories": self.orchestrator.memory.retrieve_relevant(query)})
+            return
+        if command == "health":
+            try:
+                _print_json(
+                    self.orchestrator.memory.health_report(
+                        limit=_flag_int(parts, "--limit", default=20) or 20,
+                        owner=_flag_joined_value(parts, "--owner") or "local-user",
+                        scope=_flag_joined_value(parts, "--scope") or str(self.workspace),
+                    )
+                )
+            except ValueError as exc:
+                print(f"memory health failed: {exc}")
             return
         if command == "session-preview":
             session_id = parts[1] if len(parts) > 1 else self.session["id"]
@@ -1793,9 +1934,11 @@ class AegisTui(cmd.Cmd):
         print(_command_reference())
 
     def do_menu(self, arg: str) -> None:
-        """menu -- show the grouped command menu."""
+        """menu [group] -- show the grouped command menu or one nested group."""
         width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
-        print(_command_menu(width))
+        dashboard = build_product_dashboard(self.orchestrator)
+        group = arg.strip().lower() or None
+        print(_command_menu(width, _dashboard_status_flags(dashboard["runtime"], self.session, workspace=self.workspace), group=group))
 
     def do_menus(self, arg: str) -> None:
         """menus -- show the grouped command menu."""
@@ -1819,14 +1962,20 @@ class AegisTui(cmd.Cmd):
             return
         if stripped.startswith("/"):
             command = stripped[1:].strip()
-            if not command:
+            if not command or command == "?":
+                print(self._render_slash_palette(""))
                 return
             name = command.split(maxsplit=1)[0]
             if name in {"q", "quit"}:
                 return self.do_quit("")
             if hasattr(self, f"do_{name}"):
                 return bool(self.onecmd(command))
+            matches = _slash_matches(name)
+            if matches:
+                print(self._render_slash_palette(name))
+                return
             print(f"unknown slash command: /{name}")
+            print(self._render_slash_palette(name))
             return
         self.do_submit(stripped)
 
@@ -1853,13 +2002,52 @@ class AegisTui(cmd.Cmd):
             metadata={"workspace": str(Path(workspace).expanduser().resolve())},
         )
 
+    def _render_home(self) -> str:
+        dashboard = build_product_dashboard(self.orchestrator)
+        runtime = dashboard["runtime"]
+        width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
+        return "\n".join(
+            [
+                _aegis_logo(width, self._next_shield_frame(), compact=True),
+                _section(
+                    "Live Flags",
+                    _dashboard_status_flags(runtime, self.session, workspace=self.workspace),
+                    width,
+                ),
+                _section(
+                    "Start",
+                    [
+                        "Type a plain request to submit a governed task.",
+                        "Type / and press Enter for the command palette; type /mem or /app to filter options.",
+                        "Use menu operate, menu govern, menu build, or menu explore for nested command groups.",
+                    ],
+                    width,
+                ),
+            ]
+        )
+
+    def _render_slash_palette(self, prefix: str) -> str:
+        dashboard = build_product_dashboard(self.orchestrator)
+        width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
+        flags = _dashboard_status_flags(dashboard["runtime"], self.session, workspace=self.workspace)
+        return _slash_palette(width, prefix=prefix, status_flags=flags)
+
     def _render_dashboard(self) -> str:
         dashboard = build_product_dashboard(self.orchestrator)
         runtime = dashboard["runtime"]
         width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
         lines = [
-            _aegis_logo(width),
-            _banner("Aegis Agent Command Deck", width),
+            _aegis_logo(width, self._next_shield_frame()),
+            _banner(
+                "Aegis Agent Control Plane",
+                width,
+                "governed local runtime :: evidence-first operations :: slash-command deck",
+            ),
+            _section(
+                "Active Status Flags",
+                _dashboard_status_flags(runtime, self.session, workspace=self.workspace),
+                width,
+            ),
             _stat_line(
                 (
                     ("audit", "ok" if runtime["audit_chain_ok"] else "failed"),
@@ -1936,6 +2124,100 @@ class AegisTui(cmd.Cmd):
             ),
         ]
         return "\n".join(lines)
+
+    def _next_shield_frame(self) -> int:
+        frame = self._shield_frame_index
+        self._shield_frame_index = (self._shield_frame_index + 1) % len(SHIELD_FRAMES)
+        return frame
+
+    def _refresh_prompt(self) -> None:
+        pending = len(self.orchestrator.approvals.list(status="pending"))
+        session_ref = _short_id(self.session.get("id", ""))
+        model = str(self.session.get("model") or "alias/smart").replace(" ", "_")
+        approval = "clear" if pending == 0 else f"wait{pending}"
+        self.prompt = _paint_prompt(f"aegis[{session_ref}|{model}|{approval}]> ", "36;1")
+
+    def _read_live_line(self) -> str | None:
+        try:
+            import select
+            import termios
+            import tty
+        except ImportError:
+            return input(_readline_prompt(self.prompt))
+
+        fd = sys.stdin.fileno()
+        old_attrs = termios.tcgetattr(fd)
+        buffer = ""
+        rendered_height = 0
+        history = _read_tui_history_lines(self.history_path)
+        history_index = len(history)
+
+        def redraw() -> None:
+            nonlocal rendered_height
+            width = min(max(shutil.get_terminal_size((100, 24)).columns, 60), 140)
+            block, height = _live_input_block(self.prompt, buffer, width)
+            if rendered_height:
+                sys.stdout.write("\r")
+                if rendered_height > 1:
+                    sys.stdout.write(f"\033[{rendered_height - 1}A")
+                sys.stdout.write("\033[J")
+            sys.stdout.write(block)
+            sys.stdout.flush()
+            rendered_height = height
+
+        try:
+            tty.setcbreak(fd)
+            redraw()
+            while True:
+                char = sys.stdin.read(1)
+                if char in {"\r", "\n"}:
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
+                    return buffer
+                if char == "\x04":
+                    if buffer:
+                        continue
+                    raise EOFError
+                if char == "\x03":
+                    buffer = ""
+                    raise KeyboardInterrupt
+                if char in {"\x7f", "\b"}:
+                    buffer = buffer[:-1]
+                    redraw()
+                    continue
+                if char == "\x15":
+                    buffer = ""
+                    redraw()
+                    continue
+                if char == "\x1b":
+                    sequence = ""
+                    while select.select([sys.stdin], [], [], 0.001)[0]:
+                        sequence += sys.stdin.read(1)
+                        if len(sequence) >= 4:
+                            break
+                    if sequence == "[A" and history:
+                        history_index = max(0, history_index - 1)
+                        buffer = history[history_index]
+                        redraw()
+                    elif sequence == "[B" and history:
+                        history_index = min(len(history), history_index + 1)
+                        buffer = history[history_index] if history_index < len(history) else ""
+                        redraw()
+                    continue
+                if char == "\t":
+                    completions = _complete_slash(buffer.lstrip("/"), buffer, 1, len(buffer)) if buffer.startswith("/") else self.completenames(buffer)
+                    if len(completions) == 1:
+                        buffer = completions[0]
+                    elif completions:
+                        sys.stdout.write("\n" + _inline_completion_line(completions, width=shutil.get_terminal_size((100, 24)).columns) + "\n")
+                        rendered_height = 0
+                    redraw()
+                    continue
+                if char.isprintable():
+                    buffer += char
+                    redraw()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
 
 
 def run_tui(
@@ -2458,7 +2740,7 @@ def _command_reference() -> str:
             "tools                  Governed tool catalog",
             "tools run <name> <json> Run a governed tool",
             "skills [hub query]     Governed skills and virtual Skill Hub",
-            "memory search|session-preview|create|update|merge|expire",
+            "memory health|search|session-preview|create|update|merge|expire",
             "mcp list|register|call Governed MCP registry",
             "repairs [status]       List self-repair proposals",
             "repair <id>            Inspect self-repair proposal evidence",
@@ -2488,27 +2770,32 @@ def _command_reference() -> str:
     )
 
 
-def _aegis_logo(width: int) -> str:
+def _aegis_logo(width: int, frame_index: int = 0, *, compact: bool = False) -> str:
+    frame_name, frame_detail, frame_art = SHIELD_FRAMES[frame_index % len(SHIELD_FRAMES)]
+    wordmark = _aegis_wordmark_lines(width)
     art = [
-        "                         /\\",
-        r"                    ____/  \____",
-        r"                 .-'            '-.",
-        r"               .'    A E G I S     '.",
-        "              /   .--------------.   \\",
-        "             /   /   ________     \\   \\",
-        r"            ;   |   /  ____  \     |   ;",
-        r"            |   |   | |____| |     |   |",
-        r"            |   |   |  ____  |     |   |",
-        r"            ;   |   |_|    |_|     |   ;",
-        r"             \   \       ||       /   /",
-        r"              '.  '--------------'  .'",
-        r"                '-.              .-'",
-        r"                   '--.      .--'",
-        r"                       \    /",
-        r"                        \__/",
-        r"        AEGIS SHIELD :: local-first governed runtime",
+        f"AEGIS SHIELD :: local-first governed runtime :: SHIELD FRAME {frame_index % len(SHIELD_FRAMES) + 1:02d}/{len(SHIELD_FRAMES):02d} [{frame_name}]",
+        f"FRAME STATUS :: {frame_detail}",
+        "SYMBOL BUS   :: && policy  %% risk  ## receipts  @@ approvals  __ memory",
+        "",
+        *wordmark,
+        "",
+        *frame_art,
+        "",
+        "COMMAND BUS  :: > plain request  //  / opens palette  //  /dashboard  /tasks  /approvals",
     ]
+    if compact:
+        art = [art[0], art[1], art[2], "", *wordmark, "", *frame_art, "", "COMMAND BUS  :: / palette  //  menu operate  //  dashboard for full posture"]
     return _boxed_lines("Aegis Shield Identity", art, width)
+
+
+def _aegis_wordmark_lines(width: int) -> list[str]:
+    inner = max(20, width - 4)
+    raw_lines = AEGIS_AGENT_WORDMARK
+    if max(len(line) for line in raw_lines) > inner:
+        raw_lines = AEGIS_COMPACT_WORDMARK
+    colors = AEGIS_WORDMARK_COLORS
+    return [_paint(line, colors[index % len(colors)]) for index, line in enumerate(raw_lines)]
 
 
 COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
@@ -2557,32 +2844,291 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
 def _command_palette_lines(*, compact: bool = False) -> list[str]:
     if compact:
         return [
-            "Operate  submit, dashboard, tasks, session, status, resume",
-            "Govern   approvals, approve, deny, security, audit, evidence",
-            "Build    models, tools, skills, memory, mcp, repair",
-            "Explore  capabilities, connectors, channels, browser, boards",
+            "Codex-style command surface: Plain text submits a governed task; /command dispatches directly.",
+            "Prompt   > summarize this repo safely  -> submit governed task",
+            "Slash    /dashboard /tasks /approvals /security /menu",
+            "Inspect  /status <id> /events <id> /timeline <id> /evidence <id>",
+            "Act      /approve <id> /deny <id> /resume <id> /pause <id> /cancel <id>",
+            "Complete Tab completes command and subcommand names; ? or help opens the reference.",
         ]
     lines: list[str] = []
     for group, commands in COMMAND_MENU_GROUPS:
-        command_names = ", ".join(command for command, _detail in commands)
+        command_names = ", ".join(_slash_command_label(command) for command, _detail in commands)
         lines.append(f"{group:<8} {command_names}")
     return lines
 
 
-def _command_menu(width: int) -> str:
-    lines: list[str] = [
-        "AEGIS SHIELD command groups",
-        "Pick an operation lane; every lane keeps policy, evidence, and context boundaries visible.",
-        "",
-    ]
-    for group, commands in COMMAND_MENU_GROUPS:
-        lines.append(f"[{group}] Shield lane")
-        for command, detail in commands:
-            lines.append(f"  {command:<34} {detail}")
+def _command_menu(width: int, status_flags: list[str] | None = None, *, group: str | None = None) -> str:
+    if group:
+        selected = _command_group(group)
+        if selected is None:
+            return _boxed_lines(
+                "Shield Command Menu",
+                [
+                    f"Unknown menu group: {group}",
+                    f"Available groups: {', '.join(_command_group_names())}",
+                    "Use menu with no argument for the command deck.",
+                ],
+                width,
+            )
+        group_name, commands = selected
+        lines = [
+            f"{group_name} command group",
+            "Slash dispatch works for every command below; Tab completes command and subcommand names.",
+        ]
+        if status_flags:
+            lines.extend(("", "Active flags:", *status_flags))
         lines.append("")
+        for command, detail in commands:
+            lines.append(f"{_slash_command_label(command):<38} {detail}")
+            lines.append(f"    next: {_next_command_hint(command)}")
+        return _boxed_lines(f"{group_name} Menu", lines, width)
+
+    lines: list[str] = [
+        "AEGIS SHIELD command deck",
+        "Minimal by default: pick a lane, then open the nested menu only when you need detail.",
+        "Codex-style affordances: plain text submits; / opens the palette; /command dispatches; Tab completes.",
+    ]
+    if status_flags:
+        lines.extend(("", "Active flags:", *status_flags))
+    lines.append("")
+    for group, commands in COMMAND_MENU_GROUPS:
+        command_lane = " ".join(_slash_command_label(command).split()[0] for command, _detail in commands[:4])
+        lines.append(f"[{group:<7}] {command_lane}")
+        lines.append(f"          open nested menu: menu {group.lower()}  |  slash filter: /{commands[0][0].split()[0]}")
     if lines and not lines[-1]:
         lines.pop()
     return _boxed_lines("Shield Command Menu", lines, width)
+
+
+def _slash_palette(width: int, *, prefix: str = "", status_flags: list[str] | None = None) -> str:
+    prefix = prefix.strip().lstrip("/")
+    matches = _slash_matches(prefix)
+    lines: list[str] = [
+        "Slash Command Palette",
+        "Type /<command> to run it, /<prefix> to filter, or menu <group> for nested command lanes.",
+    ]
+    if status_flags:
+        lines.extend(("", "Active flags:", *status_flags))
+    if prefix:
+        lines.append("")
+        lines.append(f"Filter: /{prefix}")
+    lines.append("")
+    if matches:
+        for command, detail in matches[:12]:
+            lines.append(f"{_slash_palette_label(command, prefix):<38} {detail}  -> {_next_command_hint(command)}")
+    else:
+        lines.append("No direct matches. Try /dashboard, /tasks, /memory, /approvals, or /menu.")
+    lines.extend(("", "Nested menus:", "  /menu operate   /menu govern   /menu build   /menu explore"))
+    return _boxed_lines("Slash Command Palette", lines, width)
+
+
+def _command_group_names() -> tuple[str, ...]:
+    return tuple(group.lower() for group, _commands in COMMAND_MENU_GROUPS)
+
+
+def _command_group(name: str) -> tuple[str, tuple[tuple[str, str], ...]] | None:
+    normalized = name.lower().strip()
+    for group, commands in COMMAND_MENU_GROUPS:
+        if group.lower().startswith(normalized):
+            return group, commands
+    return None
+
+
+def _slash_matches(prefix: str) -> list[tuple[str, str]]:
+    normalized = prefix.strip().lstrip("/").lower()
+    rows: list[tuple[str, str]] = []
+    for group, commands in COMMAND_MENU_GROUPS:
+        for command, detail in commands:
+            roots = command.split()[0].split("|")
+            labels = [command, group, *roots]
+            if not normalized or any(_fuzzy_match(normalized, label) for label in labels):
+                rows.append((command, f"{group.lower()} - {detail}"))
+    if not normalized or _fuzzy_match(normalized, "menu"):
+        rows.append(("menu [operate|govern|build|explore]", "open a nested command lane"))
+    if not normalized or _fuzzy_match(normalized, "help"):
+        rows.append(("help", "full command reference"))
+    if not normalized:
+        return rows
+    return sorted(rows, key=lambda row: _slash_match_rank(normalized, row))
+
+
+def _slash_completion_labels(prefix: str) -> list[str]:
+    normalized = prefix.strip().lstrip("/").lower()
+    labels: list[str] = []
+    seen: set[str] = set()
+    for command, detail in _slash_matches(normalized):
+        roots = command.split()[0].split("|")
+        for root in roots:
+            label = f"/{root}"
+            if label in seen:
+                continue
+            if not normalized or _fuzzy_match(normalized, root):
+                labels.append(label)
+                seen.add(label)
+    return labels
+
+
+def _fuzzy_match(needle: str, value: object) -> bool:
+    haystack = str(value).lower()
+    return haystack.startswith(needle) or needle in haystack
+
+
+def _slash_match_rank(prefix: str, row: tuple[str, str]) -> tuple[int, str]:
+    if not prefix:
+        return (0, row[0])
+    command, detail = row
+    roots = command.split()[0].split("|")
+    if any(root.lower().startswith(prefix) for root in roots):
+        return (0, command)
+    if command.lower().startswith(prefix):
+        return (1, command)
+    if any(prefix in root.lower() for root in roots):
+        return (2, command)
+    if prefix in command.lower():
+        return (3, command)
+    if prefix in detail.lower():
+        return (4, command)
+    return (5, command)
+
+
+def _dashboard_status_flags(runtime: dict[str, Any], session: dict[str, Any], *, workspace: Path | None = None) -> list[str]:
+    pending = int(runtime.get("pending_approvals") or 0)
+    approval_state = "CLEAR" if pending == 0 else f"WAIT:{pending}"
+    audit_state = "OK" if runtime.get("audit_chain_ok") else "FAILED"
+    session_id = _short_id(session.get("id", ""))
+    session_state = str(session.get("status") or "active").upper()
+    model = str(session.get("model") or "alias/smart")
+    personality = str(session.get("personality") or "default")
+    workspace_label = workspace.name if workspace is not None else "workspace"
+    return [
+        " ".join(
+            (
+                _status_flag("AUDIT", audit_state, "32;1" if audit_state == "OK" else "31;1"),
+                _status_flag("APPROVALS", approval_state, "32;1" if pending == 0 else "33;1"),
+                _status_flag("SESSION", f"{session_id}:{session_state}", "36;1"),
+                _status_flag("MODE", "LOCAL-FIRST", "32;1"),
+            )
+        ),
+        " ".join(
+            (
+                _status_flag("CHANNELS", runtime.get("channels", 0), "36;1"),
+                _status_flag("TOOLS", runtime.get("tools", 0), "36;1"),
+                _status_flag("GATED", runtime.get("approval_gated_tools", 0), "33;1"),
+                _status_flag("PROVIDERS", runtime.get("model_providers", 0), "36;1"),
+            )
+        ),
+        " ".join(
+            (
+                _status_flag("MODEL", model, "36;1"),
+                _status_flag("PERSONA", personality, "36;1"),
+                _status_flag("WORKSPACE", workspace_label, "36;1"),
+            )
+        ),
+    ]
+
+
+def _status_flag(label: str, value: object, color: str) -> str:
+    return _paint(f"[{label}:{value}]", color)
+
+
+def _slash_command_label(command: str) -> str:
+    first, separator, rest = command.partition(" ")
+    if "|" not in first:
+        return f"/{command}"
+    return f"{'|'.join('/' + part for part in first.split('|'))}{separator}{rest}"
+
+
+def _slash_palette_label(command: str, prefix: str) -> str:
+    normalized = prefix.strip().lstrip("/").lower()
+    if not normalized:
+        return _slash_command_label(command)
+    first, separator, rest = command.partition(" ")
+    roots = first.split("|")
+    matching = [root for root in roots if _fuzzy_match(normalized, root)]
+    if not matching:
+        return _slash_command_label(command)
+    return "|".join(f"/{root}" for root in matching) + separator + rest
+
+
+def _next_command_hint(command: str) -> str:
+    root = command.split()[0].split("|")[0]
+    hints = {
+        "submit": "/status <id>",
+        "dashboard": "/menu",
+        "tasks": "/events <id>",
+        "session": "/session history",
+        "status": "/timeline <id>",
+        "approvals": "/approval <id>",
+        "approval": "/approve <id>",
+        "approve": "/resume <id>",
+        "security": "/audit",
+        "audit": "/evidence <id>",
+        "models": "/models route <id>",
+        "tools": "/tools run <name> <json>",
+        "skills": "/skills hub <query>",
+        "memory": "/memory review-queue",
+        "mcp": "/repair readiness",
+        "capabilities": "/connectors",
+        "connectors": "/channels",
+        "browser": "/browser sessions",
+        "boards": "/backends",
+    }
+    return hints.get(root, "/help")
+
+
+SLASH_SUBCOMMANDS: dict[str, tuple[str, ...]] = {
+    "memory": MEMORY_COMMANDS,
+    "migrate": MIGRATE_COMMANDS,
+    "models": MODEL_COMMANDS,
+    "repair": REPAIR_COMMANDS,
+    "schedule": SCHEDULE_COMMANDS,
+    "browser": BROWSER_COMMANDS,
+    "mcp": MCP_COMMANDS,
+    "session": SESSION_COMMANDS,
+    "tasks": TASKS_COMMANDS,
+    "security": SECURITY_COMMANDS,
+    "channel": CHANNEL_COMMANDS,
+    "evaluation": EVALUATION_COMMANDS,
+    "tools": TOOLS_COMMANDS,
+    "skills": SKILLS_COMMANDS,
+    "menu": _command_group_names(),
+}
+
+SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("memory", "health"): ("--limit", "--owner", "--scope"),
+    ("memory", "session-commit"): ("--all", "--candidate-id", "--none", "--reviewer"),
+    ("memory", "review-queue"): ("--limit", "--owner", "--scope"),
+    ("memory", "review-digest"): ("--limit", "--owner", "--scope"),
+    ("memory", "recertify"): ("--max-age-days", "--limit", "--dry-run", "--owner", "--scope"),
+    ("task", "submit"): ("--path",),
+    ("session", "new"): ("--model", "--personality"),
+    ("schedule", "run-due"): ("--limit", "--now"),
+}
+
+
+def _complete_slash(text: str, line: str, begidx: int, endidx: int) -> list[str]:
+    stripped = line.lstrip()
+    if not stripped.startswith("/"):
+        return []
+    command_line = stripped[1:]
+    try:
+        parts = shlex.split(command_line[: max(0, endidx - (len(line) - len(stripped)) - 1)])
+    except ValueError:
+        return []
+    trailing_space = command_line.endswith(" ")
+    if not parts and not trailing_space:
+        return _slash_completion_labels("")
+    if len(parts) <= 1 and not trailing_space:
+        root_prefix = parts[0] if parts else text.lstrip("/")
+        return _slash_completion_labels(root_prefix)
+    root = parts[0]
+    current = "" if trailing_space else text
+    if current.startswith("--") or any(part.startswith("--") for part in parts[1:]):
+        subcommand = parts[1] if len(parts) > 1 else ""
+        return _complete_options(SLASH_FLAG_HINTS.get((root, subcommand), ()), current)
+    subcommands = SLASH_SUBCOMMANDS.get(root, ())
+    return _complete_options(subcommands, current)
 
 
 def _complete_options(options: tuple[str, ...], text: str) -> list[str]:
@@ -2597,6 +3143,63 @@ def _complete_subcommand(options: tuple[str, ...], text: str, line: str, begidx:
     if len(parts) <= 1:
         return _complete_options(options, text)
     return []
+
+
+def _live_input_block(prompt: str, buffer: str, width: int) -> tuple[str, int]:
+    prompt = _strip_readline_markers(prompt)
+    suggestion_lines = _live_slash_hint_lines(buffer, width)
+    input_lines = _wrapped_prompt_lines(prompt, buffer, width)
+    return "\n".join([*suggestion_lines, *input_lines]), len(suggestion_lines) + len(input_lines)
+
+
+def _live_slash_hint_lines(buffer: str, width: int) -> list[str]:
+    if not buffer.startswith("/"):
+        return []
+    prefix = buffer[1:].strip()
+    labels = _slash_completion_labels(prefix)
+    if not labels:
+        return [_paint("suggest  no slash matches", "2;33")]
+    line = "suggest  " + "  ".join(labels)
+    return [_paint(textwrap.shorten(line, width=max(20, width), placeholder=" ..."), "2;36")]
+
+
+def _wrapped_prompt_lines(prompt: str, buffer: str, width: int) -> list[str]:
+    width = max(20, width)
+    prompt_len = _visible_length(prompt)
+    first_width = max(8, width - prompt_len)
+    continuation = " " * min(prompt_len, max(0, width - 8))
+    if not buffer:
+        return [prompt]
+    lines: list[str] = []
+    remaining = buffer
+    first = True
+    while remaining:
+        chunk_width = first_width if first else max(8, width - len(continuation))
+        chunk, remaining = remaining[:chunk_width], remaining[chunk_width:]
+        lines.append((prompt if first else continuation) + chunk)
+        first = False
+    return lines
+
+
+def _inline_completion_line(completions: list[str], *, width: int) -> str:
+    return textwrap.shorten("complete " + "  ".join(completions[:12]), width=max(20, width), placeholder=" ...")
+
+
+def _read_tui_history_lines(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    try:
+        return [line.rstrip("\n") for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except OSError:
+        return []
+
+
+def _add_tui_history(line: str) -> bool:
+    readline = _readline_module()
+    if readline is None:
+        return False
+    readline.add_history(line)
+    return True
 
 
 def _load_tui_history(path: Path) -> bool:
@@ -2628,11 +3231,15 @@ def _readline_module() -> Any | None:
     return readline
 
 
-def _banner(title: str, width: int) -> str:
+def _banner(title: str, width: int, subtitle: str | None = None) -> str:
     inner = width - 4
     rule = "+" + "-" * (width - 2) + "+"
-    text = f"| {_paint(title.ljust(inner), '36;1')} |"
-    return "\n".join(("", rule, text, rule))
+    title_line = f"| {_paint(title.ljust(inner), '36;1')} |"
+    lines = ["", rule, title_line]
+    if subtitle:
+        lines.append(f"| {subtitle.ljust(inner)} |")
+    lines.append(rule)
+    return "\n".join(lines)
 
 
 def _boxed_lines(title: str, items: list[str], width: int) -> str:
@@ -2641,9 +3248,22 @@ def _boxed_lines(title: str, items: list[str], width: int) -> str:
     title_line = f"| {_paint(title.ljust(inner), '36;1')} |"
     body = []
     for item in items:
-        for line in textwrap.wrap(item, width=inner, replace_whitespace=False, drop_whitespace=False) or [""]:
-            body.append(f"| {line.ljust(inner)} |")
+        for line in _wrap_box_line(item, inner):
+            body.append(f"| {_pad_visible(line, inner)} |")
     return "\n".join(("", rule, title_line, rule, *body, rule))
+
+
+def _wrap_box_line(item: str, width: int) -> list[str]:
+    if not item:
+        return [""]
+    if _visible_length(item) <= width:
+        return [item]
+    plain = ANSI_PATTERN.sub("", _strip_readline_markers(item))
+    return textwrap.wrap(plain, width=width, replace_whitespace=False, drop_whitespace=False) or [""]
+
+
+def _pad_visible(line: str, width: int) -> str:
+    return line + " " * max(0, width - _visible_length(line))
 
 
 def _section(title: str, items: list[str], width: int) -> str:
@@ -2998,7 +3618,24 @@ def _short_id(value: object) -> str:
     return str(value)[:8]
 
 
+ANSI_PATTERN = re.compile(r"\x1b\[[0-9;]*m")
+
+
 def _paint(text: str, code: str) -> str:
     if os.environ.get("NO_COLOR") or not sys.stdout.isatty():
         return text
     return f"\033[{code}m{text}\033[0m"
+
+
+def _paint_prompt(text: str, code: str) -> str:
+    if os.environ.get("NO_COLOR") or not sys.stdout.isatty():
+        return text
+    return f"\001\033[{code}m\002{text}\001\033[0m\002"
+
+
+def _strip_readline_markers(text: str) -> str:
+    return text.replace("\001", "").replace("\002", "")
+
+
+def _visible_length(text: str) -> int:
+    return len(ANSI_PATTERN.sub("", _strip_readline_markers(text)))
