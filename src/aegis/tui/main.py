@@ -1441,13 +1441,15 @@ class AegisTui(cmd.Cmd):
             return
         if command == "register":
             if len(parts) < 3:
-                print("usage: mcp register <name> <command> <tool,tool>|--discover [--tool name] [--exclude-tool name] [--enable] [--no-approval]")
+                print("usage: mcp register <name> <command> <tool,tool>|--discover [--tool name] [--exclude-tool name] [--no-resources] [--no-prompts] [--enable] [--no-approval]")
                 return
             enabled = "--enable" in parts[3:]
             approval_required = "--no-approval" not in parts[3:]
             if "--discover" in parts[3:]:
                 include_tools = tuple(_option_values(parts, "--tool"))
                 exclude_tools = tuple(_option_values(parts, "--exclude-tool"))
+                include_resources = "--no-resources" not in parts[3:]
+                include_prompts = "--no-prompts" not in parts[3:]
                 try:
                     _print_json(
                         self.orchestrator.mcp.register_discovered_server(
@@ -1456,6 +1458,8 @@ class AegisTui(cmd.Cmd):
                             allowed_executables=self.orchestrator.config.allowed_shell_commands,
                             include_tools=include_tools,
                             exclude_tools=exclude_tools,
+                            include_resources=include_resources,
+                            include_prompts=include_prompts,
                             enabled=enabled,
                             approval_required=approval_required,
                             metadata={"source": "tui"},
@@ -1465,7 +1469,7 @@ class AegisTui(cmd.Cmd):
                     print(f"mcp discovery failed: {exc}")
                 return
             if len(parts) < 4:
-                print("usage: mcp register <name> <command> <tool,tool>|--discover [--tool name] [--exclude-tool name] [--enable] [--no-approval]")
+                print("usage: mcp register <name> <command> <tool,tool>|--discover [--tool name] [--exclude-tool name] [--no-resources] [--no-prompts] [--enable] [--no-approval]")
                 return
             tools = tuple(item.strip() for item in parts[3].split(",") if item.strip())
             _print_json(
@@ -1479,7 +1483,7 @@ class AegisTui(cmd.Cmd):
                 )
             )
             return
-        print("usage: mcp list | mcp register <name> <command> <tool,tool>|--discover [--tool name] [--exclude-tool name] [--enable] [--no-approval] | mcp call <server> <tool> <json-arguments> [--approved]")
+        print("usage: mcp list | mcp register <name> <command> <tool,tool>|--discover [--tool name] [--exclude-tool name] [--no-resources] [--no-prompts] [--enable] [--no-approval] | mcp call <server> <tool> <json-arguments> [--approved]")
 
     def do_repairs(self, arg: str) -> None:
         """repairs [status] -- list self-repair proposals."""
@@ -5321,7 +5325,7 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("hooks", "run"): ("--approved", "--context-json"),
     ("agents", "delegate"): ("--approved",),
     ("mcp", "call"): ("--approved",),
-    ("mcp", "register"): ("--discover", "--tool", "--exclude-tool", "--enable", "--no-approval"),
+    ("mcp", "register"): ("--discover", "--tool", "--exclude-tool", "--no-resources", "--no-prompts", "--enable", "--no-approval"),
     ("plugins", "fetch-manifest"): ("--catalog-path",),
     ("plugin", "fetch-manifest"): ("--catalog-path",),
     ("plugins", "fetch-bundle"): ("--catalog-path", "--key-name"),

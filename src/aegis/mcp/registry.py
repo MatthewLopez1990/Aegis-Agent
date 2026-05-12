@@ -78,6 +78,20 @@ class McpRegistry:
         )
         return tools
 
+    def discover_capabilities(
+        self,
+        *,
+        command: str,
+        allowed_executables: tuple[str, ...],
+    ) -> dict[str, Any]:
+        argv = _parse_allowed_command(command, allowed_executables)
+        capabilities = McpStdioClient(argv).capabilities()
+        self.audit_logger.append(
+            "mcp.capabilities_discovered",
+            {"executable": Path(argv[0]).name, "capabilities": sorted(str(key) for key in capabilities)},
+        )
+        return capabilities
+
     def register_discovered_server(
         self,
         *,
@@ -86,11 +100,18 @@ class McpRegistry:
         allowed_executables: tuple[str, ...],
         include_tools: tuple[str, ...] = (),
         exclude_tools: tuple[str, ...] = (),
+        include_resources: bool = True,
+        include_prompts: bool = True,
         enabled: bool = False,
         approval_required: bool = True,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        discovered = self.discover_tools(command=command, allowed_executables=allowed_executables)
+        capabilities = self.discover_capabilities(command=command, allowed_executables=allowed_executables)
+        discovered = (
+            self.discover_tools(command=command, allowed_executables=allowed_executables)
+            if "tools" in capabilities or not capabilities
+            else []
+        )
         by_name = {tool["name"]: tool for tool in discovered}
         includes = tuple(tool.strip() for tool in include_tools if tool.strip())
         excludes = {tool.strip() for tool in exclude_tools if tool.strip()}
@@ -101,12 +122,21 @@ class McpRegistry:
             selected = [by_name[tool] for tool in includes]
         else:
             selected = [tool for tool in discovered if tool["name"] not in excludes]
-        if not selected:
+        utility_tools = _utility_virtual_tools(
+            server_name=name,
+            capabilities=capabilities,
+            native_tool_names={str(tool["name"]) for tool in selected},
+            include_resources=include_resources,
+            include_prompts=include_prompts,
+        )
+        if not selected and not utility_tools:
             raise ValueError("MCP discovery produced no allowlisted tools")
         discovery_metadata = {
             "discovered": True,
             "tool_count": len(discovered),
             "selected_tool_count": len(selected),
+            "capabilities": sorted(str(key) for key in capabilities),
+            "utility_tool_count": len(utility_tools),
             "virtual_tools": [
                 {
                     "name": tool["name"],
@@ -115,12 +145,13 @@ class McpRegistry:
                     "input_schema": tool.get("input_schema", {}),
                 }
                 for tool in selected
-            ],
+            ]
+            + utility_tools,
         }
         return self.register_server(
             name=name,
             command=command,
-            allowed_tools=tuple(tool["name"] for tool in selected),
+            allowed_tools=tuple(str(tool["name"]) for tool in selected) + tuple(str(tool["name"]) for tool in utility_tools),
             enabled=enabled,
             approval_required=approval_required,
             metadata={**(metadata or {}), "discovery": discovery_metadata},
@@ -245,7 +276,8 @@ class McpRegistry:
             self.audit_logger.append("mcp.call_blocked", {"server": row["name"], "tool": tool, "decision": decision.decision.value, "reason": "; ".join(decision.reasons)}, task_id=task_id)
             raise PermissionError("; ".join(decision.reasons))
         argv = _parse_allowed_command(str(row["command"]), allowed_executables)
-        result = McpStdioClient(argv).call_tool(tool, arguments)
+        tool_metadata = _metadata_virtual_tools(row.get("metadata", {})).get(tool, {})
+        result = _call_mcp_utility(argv, str(tool_metadata.get("utility")), arguments) if tool_metadata.get("utility") else McpStdioClient(argv).call_tool(tool, arguments)
         context_item = ContextFirewall().label_content(
             json.dumps(result, sort_keys=True),
             source=f"mcp:{row['name']}:{tool}",
@@ -296,3 +328,89 @@ def _metadata_virtual_tools(metadata: dict[str, Any]) -> dict[str, dict[str, Any
         if isinstance(tool, dict) and tool.get("name"):
             by_name[str(tool["name"])] = tool
     return by_name
+
+
+def _utility_virtual_tools(
+    *,
+    server_name: str,
+    capabilities: dict[str, Any],
+    native_tool_names: set[str],
+    include_resources: bool,
+    include_prompts: bool,
+) -> list[dict[str, Any]]:
+    utility_tools: list[dict[str, Any]] = []
+    if include_resources and "resources" in capabilities:
+        utility_tools.extend(
+            [
+                _utility_tool_metadata(
+                    server_name=server_name,
+                    name="list_resources",
+                    utility="list_resources",
+                    description="List resources exposed by this MCP server.",
+                    input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                ),
+                _utility_tool_metadata(
+                    server_name=server_name,
+                    name="read_resource",
+                    utility="read_resource",
+                    description="Read one resource exposed by this MCP server by URI.",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"uri": {"type": "string"}},
+                        "required": ["uri"],
+                        "additionalProperties": False,
+                    },
+                ),
+            ]
+        )
+    if include_prompts and "prompts" in capabilities:
+        utility_tools.extend(
+            [
+                _utility_tool_metadata(
+                    server_name=server_name,
+                    name="list_prompts",
+                    utility="list_prompts",
+                    description="List prompts exposed by this MCP server.",
+                    input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+                ),
+                _utility_tool_metadata(
+                    server_name=server_name,
+                    name="get_prompt",
+                    utility="get_prompt",
+                    description="Get one prompt exposed by this MCP server.",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"name": {"type": "string"}, "arguments": {"type": "object"}},
+                        "required": ["name"],
+                        "additionalProperties": False,
+                    },
+                ),
+            ]
+        )
+    return [tool for tool in utility_tools if tool["name"] not in native_tool_names]
+
+
+def _utility_tool_metadata(*, server_name: str, name: str, utility: str, description: str, input_schema: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": name,
+        "virtual_name": mcp_virtual_tool_name(server_name, name),
+        "description": description,
+        "input_schema": input_schema,
+        "utility": utility,
+    }
+
+
+def _call_mcp_utility(argv: list[str], utility: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    client = McpStdioClient(argv)
+    if utility == "list_resources":
+        return client.list_resources()
+    if utility == "read_resource":
+        return client.read_resource(str(arguments["uri"]))
+    if utility == "list_prompts":
+        return client.list_prompts()
+    if utility == "get_prompt":
+        prompt_arguments = arguments.get("arguments", {})
+        if not isinstance(prompt_arguments, dict):
+            raise ValueError("MCP get_prompt arguments must be an object")
+        return client.get_prompt(str(arguments["name"]), prompt_arguments)
+    raise ValueError(f"unknown MCP utility wrapper {utility!r}")

@@ -656,6 +656,8 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_register.add_argument("--tool", action="append", default=[])
     mcp_register.add_argument("--exclude-tool", action="append", default=[])
     mcp_register.add_argument("--discover", action="store_true")
+    mcp_register.add_argument("--no-resources", action="store_true", help="Do not register MCP resource utility wrappers during discovery")
+    mcp_register.add_argument("--no-prompts", action="store_true", help="Do not register MCP prompt utility wrappers during discovery")
     mcp_register.add_argument("--enable", action="store_true")
     mcp_register.add_argument("--no-approval", action="store_true")
     mcp_call = mcp_sub.add_parser("call", help="Call an allowlisted MCP tool after approval")
@@ -1511,6 +1513,8 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                     allowed_executables=config.allowed_shell_commands,
                     include_tools=tuple(args.tool),
                     exclude_tools=tuple(args.exclude_tool),
+                    include_resources=not args.no_resources,
+                    include_prompts=not args.no_prompts,
                     enabled=args.enable,
                     approval_required=not args.no_approval,
                     metadata={"source": "cli"},

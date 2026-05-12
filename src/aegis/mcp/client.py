@@ -49,6 +49,14 @@ class McpStdioClient:
             raise McpProtocolError("MCP tools/list result is invalid")
         return [tool for tool in tools if isinstance(tool, dict)]
 
+    def capabilities(self) -> dict[str, Any]:
+        with _process(self.argv) as process:
+            result = self._initialize(process)
+        capabilities = result.get("capabilities", {}) if isinstance(result, dict) else {}
+        if not isinstance(capabilities, dict):
+            raise McpProtocolError("MCP initialize capabilities are invalid")
+        return capabilities
+
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         with _process(self.argv) as process:
             self._initialize(process)
@@ -57,8 +65,40 @@ class McpStdioClient:
             raise McpProtocolError("MCP tools/call result is invalid")
         return result
 
-    def _initialize(self, process: subprocess.Popen[bytes]) -> None:
-        self._request(
+    def list_resources(self) -> dict[str, Any]:
+        with _process(self.argv) as process:
+            self._initialize(process)
+            result = self._request(process, "resources/list", {})
+        if not isinstance(result.get("resources", []), list):
+            raise McpProtocolError("MCP resources/list result is invalid")
+        return result
+
+    def read_resource(self, uri: str) -> dict[str, Any]:
+        with _process(self.argv) as process:
+            self._initialize(process)
+            result = self._request(process, "resources/read", {"uri": uri})
+        if not isinstance(result.get("contents", []), list):
+            raise McpProtocolError("MCP resources/read result is invalid")
+        return result
+
+    def list_prompts(self) -> dict[str, Any]:
+        with _process(self.argv) as process:
+            self._initialize(process)
+            result = self._request(process, "prompts/list", {})
+        if not isinstance(result.get("prompts", []), list):
+            raise McpProtocolError("MCP prompts/list result is invalid")
+        return result
+
+    def get_prompt(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        with _process(self.argv) as process:
+            self._initialize(process)
+            result = self._request(process, "prompts/get", {"name": name, "arguments": arguments})
+        if not isinstance(result.get("messages", []), list):
+            raise McpProtocolError("MCP prompts/get result is invalid")
+        return result
+
+    def _initialize(self, process: subprocess.Popen[bytes]) -> dict[str, Any]:
+        return self._request(
             process,
             "initialize",
             {

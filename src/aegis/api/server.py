@@ -1275,9 +1275,28 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 return
             if path == "/mcp/servers":
                 payload = self._read_json()
-                tools = payload.get("allowed_tools", payload.get("tools", []))
+                tools = payload.get("allowed_tools", payload.get("tools", payload.get("include_tools", [])))
                 if not isinstance(tools, list):
                     raise ValueError("allowed_tools must be a JSON array")
+                exclude_tools = payload.get("exclude_tools", [])
+                if not isinstance(exclude_tools, list):
+                    raise ValueError("exclude_tools must be a JSON array")
+                if bool(payload.get("discover", False)):
+                    self._json(
+                        orchestrator.mcp.register_discovered_server(
+                            name=str(_required(payload, "name")),
+                            command=str(_required(payload, "command")),
+                            allowed_executables=orchestrator.config.allowed_shell_commands,
+                            include_tools=tuple(str(tool) for tool in tools),
+                            exclude_tools=tuple(str(tool) for tool in exclude_tools),
+                            include_resources=bool(payload.get("resources", True)),
+                            include_prompts=bool(payload.get("prompts", True)),
+                            enabled=bool(payload.get("enabled", False)),
+                            approval_required=bool(payload.get("approval_required", True)),
+                            metadata={"source": "web-console"},
+                        )
+                    )
+                    return
                 self._json(
                     orchestrator.mcp.register_server(
                         name=str(_required(payload, "name")),

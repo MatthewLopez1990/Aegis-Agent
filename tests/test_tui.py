@@ -306,6 +306,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn("append", tui.complete_session("ap", "session ap", len("session "), len("session ap")))
             self.assertIn("run", tui.complete_tools("ru", "tools ru", len("tools "), len("tools ru")))
             self.assertIn("--discover", tui.completedefault("--", "/mcp register fake python3 --", len("/mcp register fake python3 "), len("/mcp register fake python3 --")))
+            self.assertIn("--no-resources", tui.completedefault("--", "/mcp register fake python3 --", len("/mcp register fake python3 "), len("/mcp register fake python3 --")))
+            self.assertIn("--no-prompts", tui.completedefault("--", "/mcp register fake python3 --", len("/mcp register fake python3 "), len("/mcp register fake python3 --")))
             self.assertIn("schedule-bundle", tui.complete_security("schedule", "security schedule", len("security "), len("security schedule")))
             self.assertIn("activate-due", tui.complete_security("activate", "security activate", len("security "), len("security activate")))
             self.assertIn("rollouts", tui.complete_security("roll", "security roll", len("security "), len("security roll")))
