@@ -76,7 +76,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - Read-only filesystem connector, shell connector with allowlist, HTTP allowlist connector with opt-in live reads, GitHub and GitLab stubs, generic REST stub, mock Microsoft Graph, mock ServiceNow, and mock messaging connectors with optional governed live writes where configured.
 - Channel gateway registry with 50+ safe mock adapters plus opt-in signed webhook, chat webhook, and SMTP email delivery slices.
 - Model provider abstraction for cloud, local, and custom providers with aliases, fallbacks, secret handles, and usage tracking.
-- Live OpenAI, Anthropic, Google Gemini, Mistral, Cohere, OpenRouter, Nous, DeepSeek, xAI, Kimi, MiniMax, Z.AI, Qwen, Ollama, LM Studio, and custom OpenAI-compatible model invocation through the local secrets broker, plus model auth login and guarded provider-native handoff targets.
+- Live OpenAI, Anthropic, Google Gemini, Mistral, Cohere, OpenRouter, Nous, DeepSeek, xAI, Kimi, MiniMax, Z.AI, Qwen, Ollama, LM Studio, and custom OpenAI-compatible model invocation through the local secrets broker, plus model auth login, guarded provider-native handoff targets, and a verified OpenAI/Codex subscription CLI bridge that avoids token import.
 - Scheduler with review activation and governed run-due execution, session history, Kanban work boards, governed stdio MCP calls, SOUL/context-file loader, and dry-run migration inspection.
 - Built-in governed tool catalog with 69 policy-visible tools covering browser, web, files, shell, memory, media, voice, subagent, research, and MCP capabilities.
 - Enterprise readiness snapshots through `aegis enterprise-readiness`, dashboard `enterprise_readiness`, memory health scoring, self-improvement readiness blockers, and a TUI command deck with rotating five-frame shield animation plus active audit/session/approval/model/workspace flags.
@@ -96,6 +96,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 ## Important Limits
 
 - OpenAI, Anthropic, Google Gemini, Mistral, Cohere, OpenRouter, Nous, DeepSeek, xAI, Kimi, MiniMax, Z.AI, Qwen, Ollama, LM Studio, and configured custom OpenAI-compatible invocation are connected through governed model adapters.
+- OpenAI can use a verified local `codex login` subscription through isolated `codex exec` when no OpenAI API key is configured; other provider-native subscription/OAuth/cloud-identity flows remain guarded handoff/status surfaces until scoped bridges are implemented.
 - Model-provider egress, including local endpoints with a base URL, must pass the configured policy network allowlist.
 - Channel adapters are safe mock adapters until credentials and approval flows are configured; live webhook, chat webhook, and SMTP email slices are opt-in and store sanitized receipts when enabled.
 - HTTP is mock-mode by default and requires `live_http_reads = true` plus an allowlisted domain for live reads; redirects are not followed by the governed connector.

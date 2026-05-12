@@ -821,6 +821,7 @@ class AegisTui(cmd.Cmd):
                     "model": route.model,
                     "fallbacks": list(route.fallback_identifiers),
                     "secret_handle_id": route.secret_handle_id,
+                    "auth_method": route.auth_method,
                 }
             )
             return
@@ -860,7 +861,16 @@ class AegisTui(cmd.Cmd):
                     return
                 if len(parts) >= 3 and parts[1] == "login":
                     if len(parts) >= 4 and parts[3] in {"subscription", "oauth", "oauth-device", "cloud-identity"}:
-                        _print_json({"auth": self.orchestrator.models.login_provider_external(parts[2], method=parts[3], run_external="--run-external" in parts)})
+                        _print_json(
+                            {
+                                "auth": self.orchestrator.models.login_provider_external(
+                                    parts[2],
+                                    method=parts[3],
+                                    run_external="--run-external" in parts,
+                                    verify_external="--verify-external" in parts,
+                                )
+                            }
+                        )
                     else:
                         api_key = getpass.getpass(f"{parts[2]} API key: ")
                         _print_json({"auth": self.orchestrator.models.login_provider(parts[2], api_key)})
@@ -876,7 +886,7 @@ class AegisTui(cmd.Cmd):
                 print(f"model auth invalid: {exc}")
             return
         if command != "providers":
-            print("usage: models list|providers|route <identifier>|alias <alias> <identifier>|fallbacks <identifier> <fallback> [fallback...]|usage|auth [provider]|auth methods [provider]|auth targets|auth login <provider> [subscription|oauth|oauth-device|cloud-identity] [--run-external]|auth logout <provider>")
+            print("usage: models list|providers|route <identifier>|alias <alias> <identifier>|fallbacks <identifier> <fallback> [fallback...]|usage|auth [provider]|auth methods [provider]|auth targets|auth login <provider> [subscription|oauth|oauth-device|cloud-identity] [--run-external] [--verify-external]|auth logout <provider>")
             return
         print(
             _table(
@@ -2238,6 +2248,7 @@ class AegisTui(cmd.Cmd):
                 "model": identifier,
                 "provider": route.provider.provider,
                 "resolved_model": route.model,
+                "auth_method": route.auth_method,
             }
         )
 

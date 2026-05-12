@@ -1739,18 +1739,21 @@ class CliTests(unittest.TestCase):
             targets = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "targets"]))
             deepseek_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "deepseek", "--api-key", "sk-deepseek-test"]))
             login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "openai", "--subscription"]))
-            completed = subprocess.CompletedProcess(("codex", "login"), 0)
+            codex_login_completed = subprocess.CompletedProcess(("codex", "login"), 0)
+            codex_status_completed = subprocess.CompletedProcess(("codex", "login", "status"), 0, stdout="Logged in using ChatGPT\n", stderr="")
             with (
                 patch("aegis.models.registry.shutil.which", return_value="/usr/bin/codex"),
-                patch("aegis.models.registry.subprocess.run", return_value=completed) as run,
+                patch("aegis.models.registry.subprocess.run", side_effect=(codex_login_completed, codex_status_completed)) as run,
             ):
                 external_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "openai", "--subscription", "--run-external"]))
-            github_completed = subprocess.CompletedProcess(("gh", "auth", "login"), 0)
+            github_login_completed = subprocess.CompletedProcess(("gh", "auth", "login"), 0)
+            github_status_completed = subprocess.CompletedProcess(("gh", "auth", "status"), 0, stdout="Logged in to github.com\n", stderr="")
             with (
                 patch("aegis.models.registry.shutil.which", return_value="/usr/bin/gh"),
-                patch("aegis.models.registry.subprocess.run", return_value=github_completed) as github_run,
+                patch("aegis.models.registry.subprocess.run", side_effect=(github_login_completed, github_status_completed)) as github_run,
             ):
                 github_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "github-copilot", "--method", "oauth-device", "--run-external"]))
+            targets_after = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "targets"]))
 
             self.assertIn("subscription", methods["auth"]["auth_methods"])
             self.assertEqual(methods["auth"]["subscription_auth"]["external_command"], "codex login")
@@ -1763,17 +1766,22 @@ class CliTests(unittest.TestCase):
             self.assertEqual(login["auth"]["status"], "external_login_required")
             self.assertEqual(login["auth"]["external_command"], "codex login")
             self.assertFalse(login["auth"]["token_captured"])
-            run.assert_called_once_with(("codex", "login"), timeout=None, check=False)
-            self.assertEqual(external_login["auth"]["status"], "external_login_completed_unverified")
+            self.assertEqual(run.call_args_list[0].args[0], ("codex", "login"))
+            self.assertEqual(run.call_args_list[1].args[0], ("codex", "login", "status"))
+            self.assertEqual(external_login["auth"]["status"], "external_login_verified")
             self.assertTrue(external_login["auth"]["external_login_attempted"])
+            self.assertTrue(external_login["auth"]["subscription_auth_configured"])
             self.assertFalse(external_login["auth"]["token_captured"])
-            github_run.assert_called_once_with(("gh", "auth", "login"), timeout=None, check=False)
+            self.assertEqual(github_run.call_args_list[0].args[0], ("gh", "auth", "login"))
+            self.assertEqual(github_run.call_args_list[1].args[0], ("gh", "auth", "status"))
             self.assertEqual(github_login["auth"]["target"], "GitHub Copilot")
             self.assertEqual(github_login["auth"]["method"], "oauth_device")
-            self.assertEqual(github_login["auth"]["status"], "external_login_completed_unverified")
+            self.assertEqual(github_login["auth"]["status"], "external_login_verified")
             self.assertFalse(github_login["auth"]["token_captured"])
             target_rows = {row["target"]: row for row in targets["auth_targets"]["targets"]}
+            target_rows_after = {row["target"]: row for row in targets_after["auth_targets"]["targets"]}
             self.assertEqual(targets["auth_targets"]["status"], "auth_parity_gap_tracked")
+            self.assertEqual(target_rows_after["OpenAI Codex / ChatGPT subscription"]["status"], "subscription_cli_ready")
             self.assertEqual(target_rows["Claude Code subscription"]["status"], "official_cli_handoff_only")
             self.assertEqual(target_rows["GitHub Copilot"]["status"], "official_cli_handoff_only")
             self.assertEqual(target_rows["DeepSeek"]["status"], "api_key_ready")

@@ -546,7 +546,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 if method in {"subscription", "oauth", "oauth_device", "cloud_identity"}:
                     if payload.get("api_key"):
                         raise ValueError(f"{method} login does not accept API key input")
-                    auth = orchestrator.models.login_provider_external(provider, method=method)
+                    auth = orchestrator.models.login_provider_external(provider, method=method, verify_external=bool(payload.get("verify_external")) and not bool(payload.get("run_external")))
                     if payload.get("run_external"):
                         auth = {
                             **auth,
@@ -1632,6 +1632,7 @@ def _model_route_payload(route: Any) -> dict[str, Any]:
         "model": route.model,
         "fallbacks": list(route.fallback_identifiers),
         "secret_handle_id": route.secret_handle_id,
+        "auth_method": route.auth_method,
     }
 
 

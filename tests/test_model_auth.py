@@ -158,25 +158,93 @@ class ModelAuthTests(unittest.TestCase):
             audit_path = root / ".aegis" / "audit.jsonl"
             registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(audit_path), SecretsBroker(secret_path))
 
-            completed = subprocess.CompletedProcess(("codex", "login"), 0)
+            login_completed = subprocess.CompletedProcess(("codex", "login"), 0)
+            status_completed = subprocess.CompletedProcess(("codex", "login", "status"), 0, stdout="Logged in using ChatGPT\n", stderr="")
             with (
                 patch("aegis.models.registry.shutil.which", return_value="/usr/bin/codex"),
-                patch("aegis.models.registry.subprocess.run", return_value=completed) as run,
+                patch("aegis.models.registry.subprocess.run", side_effect=(login_completed, status_completed)) as run,
             ):
                 status = registry.login_provider_subscription("openai", run_external=True)
 
-            run.assert_called_once_with(("codex", "login"), timeout=None, check=False)
-            self.assertEqual(status["status"], "external_login_completed_unverified")
+            self.assertEqual(run.call_args_list[0].args[0], ("codex", "login"))
+            self.assertEqual(run.call_args_list[1].args[0], ("codex", "login", "status"))
+            self.assertEqual(status["status"], "external_login_verified")
             self.assertTrue(status["external_login_attempted"])
+            self.assertTrue(status["external_status_verified"])
             self.assertEqual(status["external_login_exit_code"], 0)
             self.assertEqual(status["external_command_argv"], ["codex", "login"])
-            self.assertFalse(status["auth_configured"])
+            self.assertTrue(status["auth_configured"])
+            self.assertTrue(status["subscription_auth_configured"])
             self.assertFalse(status["token_captured"])
             self.assertFalse(secret_path.exists())
 
             audit_text = audit_path.read_text(encoding="utf-8")
             self.assertIn("model.auth_subscription_login_requested", audit_text)
-            self.assertIn("external_login_completed_unverified", audit_text)
+            self.assertIn("external_login_verified", audit_text)
+            self.assertNotIn("CODEX_ACCESS_TOKEN", audit_text)
+            self.assertNotIn("session_cookie", audit_text)
+
+    def test_verified_codex_subscription_can_invoke_without_api_key_or_token_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            secret_path = root / ".aegis" / "secrets.json"
+            audit_path = root / ".aegis" / "audit.jsonl"
+            broker = SecretsBroker(secret_path)
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(audit_path), broker)
+
+            login_completed = subprocess.CompletedProcess(("codex", "login"), 0)
+            status_completed = subprocess.CompletedProcess(("codex", "login", "status"), 0, stdout="Logged in using ChatGPT\n", stderr="")
+            with (
+                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/codex"),
+                patch("aegis.models.registry.subprocess.run", side_effect=(login_completed, status_completed)),
+            ):
+                login = registry.login_provider_subscription("openai", run_external=True)
+
+            self.assertEqual(login["status"], "external_login_verified")
+            self.assertFalse(secret_path.exists())
+            self.assertTrue(registry.auth_status("openai")["auth_configured"])
+            self.assertTrue(registry.auth_status("openai")["subscription_auth_configured"])
+            self.assertEqual(registry.auth_status("openai")["auth_source"], "subscription_cli")
+            target_rows = {row["target"]: row for row in registry.auth_targets()["targets"]}
+            self.assertEqual(target_rows["OpenAI Codex / ChatGPT subscription"]["status"], "subscription_cli_ready")
+
+            reloaded = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(audit_path), broker)
+            route = reloaded.route("openai/gpt-4o-mini")
+            self.assertEqual(route.auth_method, "subscription_cli")
+            self.assertIsNone(route.secret_handle_id)
+
+            def fake_codex_exec(command, **kwargs):
+                self.assertEqual(command[1], "exec")
+                self.assertIn("--skip-git-repo-check", command)
+                self.assertIn("--ephemeral", command)
+                self.assertIn("--ignore-rules", command)
+                self.assertIn("read-only", command)
+                self.assertIn("never", command)
+                self.assertEqual(command[command.index("-m") + 1], "gpt-4o-mini")
+                self.assertIn("[USER]\nhello from aegis", kwargs["input"])
+                output_path = Path(command[command.index("--output-last-message") + 1])
+                output_path.write_text("subscription backed response\n", encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+            with (
+                patch("aegis.models.client.shutil.which", return_value="/usr/bin/codex"),
+                patch("aegis.models.client.subprocess.run", side_effect=fake_codex_exec) as run,
+            ):
+                result = LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello from aegis"}])
+
+            self.assertEqual(result.content, "subscription backed response")
+            self.assertEqual(result.raw_usage["source"], "subscription_cli")
+            self.assertEqual(result.raw_usage["bridge"], "codex_exec")
+            run.assert_called_once()
+
+            logout = reloaded.logout_provider("openai")
+            self.assertEqual(logout["removed_external_auth_links"], 1)
+            self.assertFalse(logout["auth_configured"])
+            self.assertFalse(logout["subscription_auth_configured"])
+            self.assertEqual(reloaded.route("openai/gpt-4o-mini").auth_method, "none")
+
+            audit_text = audit_path.read_text(encoding="utf-8")
+            self.assertIn("model.auth_subscription_login_requested", audit_text)
             self.assertNotIn("CODEX_ACCESS_TOKEN", audit_text)
             self.assertNotIn("session_cookie", audit_text)
 
@@ -207,21 +275,24 @@ class ModelAuthTests(unittest.TestCase):
             audit_path = root / ".aegis" / "audit.jsonl"
             registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(audit_path), SecretsBroker(secret_path))
 
-            completed = subprocess.CompletedProcess(("gh", "auth", "login"), 0)
+            login_completed = subprocess.CompletedProcess(("gh", "auth", "login"), 0)
+            status_completed = subprocess.CompletedProcess(("gh", "auth", "status"), 0, stdout="Logged in to github.com\n", stderr="")
             with (
                 patch("aegis.models.registry.shutil.which", return_value="/usr/bin/gh"),
-                patch("aegis.models.registry.subprocess.run", return_value=completed) as run,
+                patch("aegis.models.registry.subprocess.run", side_effect=(login_completed, status_completed)) as run,
             ):
                 status = registry.login_provider_external("github-copilot", method="oauth-device", run_external=True)
 
-            run.assert_called_once_with(("gh", "auth", "login"), timeout=None, check=False)
+            self.assertEqual(run.call_args_list[0].args[0], ("gh", "auth", "login"))
+            self.assertEqual(run.call_args_list[1].args[0], ("gh", "auth", "status"))
             self.assertEqual(status["provider"], "github-copilot")
             self.assertEqual(status["target"], "GitHub Copilot")
             self.assertEqual(status["method"], "oauth_device")
-            self.assertEqual(status["status"], "external_login_completed_unverified")
+            self.assertEqual(status["status"], "external_login_verified")
             self.assertTrue(status["external_login_attempted"])
+            self.assertTrue(status["external_status_verified"])
             self.assertEqual(status["external_command_argv"], ["gh", "auth", "login"])
-            self.assertFalse(status["auth_configured"])
+            self.assertTrue(status["auth_configured"])
             self.assertFalse(status["token_captured"])
             self.assertFalse(secret_path.exists())
 

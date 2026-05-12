@@ -395,13 +395,13 @@ def _live_gap_backlog(
             "operator_checklist": _model_auth_operator_checklist(model_auth_parity),
             "next_steps": [
                 "Implement provider-native OAuth/device/cloud-identity bridges one provider at a time with token refresh receipts.",
-                "Use official CLI subscription-login handoff only until Aegis can read provider-approved token stores without browser cookie import.",
+                "Use the verified OpenAI/Codex subscription CLI bridge where available; keep other subscription flows as official handoffs until scoped bridges exist.",
                 "Add denied, approved, refresh, logout, and receipt-redaction tests for every bridge before enabling live model calls through it.",
             ],
             "required_controls": model_auth_parity["required_controls"],
             "verification_gates": model_auth_parity["verification_gates"],
             "evaluation_scenarios": [
-                "model_auth.subscription_login_metadata_only",
+                "model_auth.subscription_cli_bridge",
                 "model_auth.raw_token_capture_rejected",
                 "model_auth.provider_native_oauth_disabled_until_bridge",
             ],
@@ -557,8 +557,8 @@ def _model_auth_operator_checklist(model_auth_parity: dict[str, Any]) -> list[di
         },
         {
             "control": "subscription_token_bridge",
-            "state": "official_cli_handoff_only" if model_auth_parity["subscription_bridge_targets"] else "not_required",
-            "detail": "Codex/ChatGPT and Claude Code subscription login can launch official CLI auth flows, but Aegis does not import provider tokens until a governed bridge exists.",
+            "state": "partial_official_cli_bridge" if model_auth_parity["subscription_bridge_targets"] else "ready_for_review",
+            "detail": "Verified Codex/ChatGPT subscription login can invoke through isolated codex exec without token import; remaining subscription providers stay on official handoff until scoped bridges exist.",
         },
         {
             "control": "oauth_device_flows",

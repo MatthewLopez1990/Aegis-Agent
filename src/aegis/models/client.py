@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import ipaddress
 import json
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -48,6 +52,8 @@ class LiveModelClient:
         self.timeout_seconds = timeout_seconds
 
     def chat(self, route: ModelRoute, messages: list[dict[str, str]], *, temperature: float = 0.2) -> ModelInvocationResult:
+        if route.auth_method == "subscription_cli":
+            return self._chat_subscription_cli(route, messages, temperature=temperature)
         if route.provider.provider in OPENAI_COMPATIBLE_PROVIDERS:
             return self._chat_openai_compatible(route, messages, temperature=temperature)
         if route.provider.provider == "anthropic":
@@ -59,6 +65,66 @@ class LiveModelClient:
         if route.provider.provider == "ollama":
             return self._chat_ollama(route, messages, temperature=temperature)
         raise ValueError(f"live invocation is not implemented for provider {route.provider.provider!r}")
+
+    def _chat_subscription_cli(
+        self,
+        route: ModelRoute,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+    ) -> ModelInvocationResult:
+        if route.provider.provider != "openai":
+            raise ValueError(f"subscription CLI invocation is not implemented for provider {route.provider.provider!r}")
+        executable_path = shutil.which("codex")
+        if executable_path is None:
+            raise RuntimeError("official Codex CLI is not installed")
+        prompt = _subscription_cli_prompt(messages, provider="codex", temperature=temperature)
+        with tempfile.TemporaryDirectory(prefix="aegis-codex-model-") as temp:
+            temp_dir = Path(temp)
+            output_path = temp_dir / "last-message.txt"
+            command = (
+                executable_path,
+                "exec",
+                "--skip-git-repo-check",
+                "--ephemeral",
+                "--ignore-rules",
+                "--sandbox",
+                "read-only",
+                "--ask-for-approval",
+                "never",
+                "-m",
+                route.model,
+                "--output-last-message",
+                str(output_path),
+                "-",
+            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    input=prompt,
+                    text=True,
+                    capture_output=True,
+                    timeout=self.timeout_seconds,
+                    check=False,
+                    cwd=temp_dir,
+                )  # noqa: S603 - argv is a fixed official provider CLI bridge.
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("official Codex CLI model invocation timed out") from exc
+            except OSError as exc:
+                raise RuntimeError(f"official Codex CLI model invocation failed: {exc}") from exc
+            if completed.returncode != 0:
+                raise RuntimeError(f"official Codex CLI model invocation exited with {completed.returncode}")
+            content = output_path.read_text(encoding="utf-8").strip() if output_path.exists() else completed.stdout.strip()
+        if not content:
+            raise RuntimeError("official Codex CLI model invocation returned no final message")
+        return ModelInvocationResult(
+            provider=route.provider.provider,
+            model=route.model,
+            content=content,
+            input_tokens=max(1, len(prompt) // 4),
+            output_tokens=max(1, len(content) // 4),
+            raw_usage={"source": "subscription_cli", "bridge": "codex_exec", "token_counts": "estimated"},
+        )
 
     def _chat_openai_compatible(
         self,
@@ -316,6 +382,26 @@ def _anthropic_messages(messages: list[dict[str, str]]) -> tuple[str, list[dict[
     if not routed:
         routed.append({"role": "user", "content": "[no user content]"})
     return "\n\n".join(system_parts), routed
+
+
+def _subscription_cli_prompt(messages: list[dict[str, str]], *, provider: str, temperature: float) -> str:
+    lines = [
+        "You are acting as the subscription-backed model provider for Aegis Agent.",
+        "Return only the final assistant answer. Do not inspect files, execute tools, or ask follow-up questions.",
+        f"Provider bridge: {provider}",
+        f"Requested temperature: {temperature}",
+        "",
+        "Conversation:",
+    ]
+    for message in messages:
+        role = str(message.get("role", "user")).upper()
+        content = str(message.get("content", "")).strip()
+        if not content:
+            continue
+        lines.append(f"[{role}]")
+        lines.append(content)
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
 
 
 def _anthropic_text(content: Any) -> str:
