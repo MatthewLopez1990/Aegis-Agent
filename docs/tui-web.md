@@ -224,6 +224,7 @@ The API is a local control plane and does not implement user authentication. Bin
 - `POST /remote-control/relay`
 - `POST /remote-control/relay/directory`
 - `POST /remote-control/relay/notify`
+- `POST /remote-control/push`
 - `POST /remote-control/relay/retry`
 - `POST /remote-control/relay/pull`
 - `POST /remote-control/relay/action`

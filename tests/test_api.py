@@ -558,6 +558,19 @@ class ApiServerSecurityTests(unittest.TestCase):
                             approved=True,
                         )
                 remote_relay_outbox_initial = _json_get(port, "/remote-control/relay/outbox", token=token)
+                with self.assertRaises(HTTPError) as remote_push_unapproved_error:
+                    _json_post(
+                        port,
+                        "/remote-control/push",
+                        {
+                            "pairing_id": remote_pair["pairing"]["id"],
+                            "provider": "fcm",
+                            "push_auth_secret": "AEGIS_REMOTE_PUSH_TOKEN",
+                            "device_token_secret": "AEGIS_REMOTE_DEVICE_TOKEN",
+                            "fcm_project_id": "aegis-project",
+                        },
+                        token=token,
+                    )
                 remote_relay_action = _json_post(
                     port,
                     "/remote-control/relay/action",
@@ -1136,6 +1149,7 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertFalse(relay_proxy_registration["pairing_token_relayed"])
                 self.assertEqual(remote_relay_outbox_initial["status"], "relay_notification_outbox")
                 self.assertEqual(remote_relay_outbox_initial["item_count"], 0)
+                self.assertEqual(remote_push_unapproved_error.exception.code, 403)
                 self.assertEqual(remote_relay_action["status"], "relay_action_proxied")
                 self.assertEqual(remote_relay_action["mode"], "approved_relay_action_proxy")
                 self.assertEqual(remote_relay_action["action"], "pause")

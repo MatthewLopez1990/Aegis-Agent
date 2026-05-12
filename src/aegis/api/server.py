@@ -576,7 +576,16 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
         def _do_POST(self) -> None:
             parsed = urlparse(self.path)
             path = parsed.path
-            if path in {"/remote-control/pair", "/remote-control/revoke", "/remote-control/relay", "/remote-control/relay/pull", "/remote-control/relay/directory", "/remote-control/relay/notify", "/remote-control/relay/retry"}:
+            if path in {
+                "/remote-control/pair",
+                "/remote-control/revoke",
+                "/remote-control/relay",
+                "/remote-control/relay/pull",
+                "/remote-control/relay/directory",
+                "/remote-control/relay/notify",
+                "/remote-control/push",
+                "/remote-control/relay/retry",
+            }:
                 self._authorize_local_mutation()
             elif path == "/remote-control/relay/action":
                 pass
@@ -823,6 +832,60 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                         "task_id": result["notification"].get("task_id"),
                         "pairing_token_relayed": False,
                         "relay_auth_token_captured": False,
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(result)
+                return
+            if path == "/remote-control/push":
+                payload = self._read_json()
+                if not bool(payload.get("approved", False)):
+                    raise PermissionError("remote-control native push requires explicit approval")
+                provider = str(_required(payload, "provider"))
+                auth_handle = orchestrator.secrets_broker.request_handle(
+                    name=str(_required(payload, "push_auth_secret")),
+                    requester="remote_control_push",
+                    reason=f"publish scoped remote-control {provider} notification",
+                    scopes=("remote_control:push",),
+                )
+                device_handle = orchestrator.secrets_broker.request_handle(
+                    name=str(_required(payload, "device_token_secret")),
+                    requester="remote_control_push",
+                    reason=f"resolve brokered remote-control {provider} device token",
+                    scopes=("remote_control:push",),
+                )
+                push_auth_token = orchestrator.secrets_broker.resolve_for_authorized_tool(auth_handle, requester="remote_control_push")
+                device_token = orchestrator.secrets_broker.resolve_for_authorized_tool(device_handle, requester="remote_control_push")
+                pairing = remote_control.public_pairing(str(_required(payload, "pairing_id")))
+                notification = build_remote_control_notification(
+                    pairing,
+                    store=orchestrator.store,
+                    event=str(payload.get("event") or "directory-updated"),
+                    task_id=str(payload["task_id"]) if payload.get("task_id") else None,
+                )
+                result = remote_control.publish_native_push_notification(
+                    str(_required(payload, "pairing_id")),
+                    notification=notification,
+                    provider=provider,
+                    push_auth_token=push_auth_token,
+                    device_token=device_token,
+                    allowlist=orchestrator.config.network_allowlist,
+                    approved=True,
+                    apns_topic=str(payload["apns_topic"]) if payload.get("apns_topic") else None,
+                    fcm_project_id=str(payload["fcm_project_id"]) if payload.get("fcm_project_id") else None,
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.native_push_published",
+                    {
+                        "pairing_id": result["pairing"]["id"],
+                        "provider": result["provider"],
+                        "push_target": result["push_target"],
+                        "event": result["notification_event"],
+                        "task_id": result["notification"].get("task_id"),
+                        "pairing_token_relayed": False,
+                        "push_auth_token_captured": False,
+                        "raw_device_token_captured": False,
                         "raw_secret_values_included": False,
                         "source": "api",
                     },
