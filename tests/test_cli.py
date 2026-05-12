@@ -236,6 +236,28 @@ class CliTests(unittest.TestCase):
             broker.store_secret(name="AEGIS_REMOTE_RELAY_TOKEN", value="relay-raw-secret")
             broker.store_secret(name="AEGIS_REMOTE_PUSH_TOKEN", value="push-raw-secret")
             broker.store_secret(name="AEGIS_REMOTE_DEVICE_TOKEN", value="device-raw-secret")
+            push_target = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "remote-control",
+                        "push-register",
+                        "--label",
+                        "phone fcm",
+                        "--provider",
+                        "fcm",
+                        "--push-auth-secret",
+                        "AEGIS_REMOTE_PUSH_TOKEN",
+                        "--device-token-secret",
+                        "AEGIS_REMOTE_DEVICE_TOKEN",
+                        "--fcm-project-id",
+                        "aegis-project",
+                        "--approved",
+                    ]
+                )
+            )
+            push_targets = dispatch(parser.parse_args(["--data-dir", str(data_dir), "remote-control", "push-targets"]))
 
             class FakeRelayResponse:
                 def __init__(self, payload: dict[str, object] | None = None) -> None:
@@ -332,14 +354,8 @@ class CliTests(unittest.TestCase):
                                 "push",
                                 "--pairing-id",
                                 pair["pairing"]["id"],
-                                "--provider",
-                                "fcm",
-                                "--push-auth-secret",
-                                "AEGIS_REMOTE_PUSH_TOKEN",
-                                "--device-token-secret",
-                                "AEGIS_REMOTE_DEVICE_TOKEN",
-                                "--fcm-project-id",
-                                "aegis-project",
+                                "--target-id",
+                                push_target["target"]["id"],
                                 "--event",
                                 "task-updated",
                                 "--task-id",
@@ -455,8 +471,14 @@ class CliTests(unittest.TestCase):
             self.assertFalse(relay_notify["relay_auth_token_captured"])
             self.assertNotIn("send message relay controlled", json.dumps(relay_notify, sort_keys=True))
             self.assertNotIn("relay-raw-secret", json.dumps(relay_notify, sort_keys=True))
+            self.assertEqual(push_target["status"], "native_push_target_registered")
+            self.assertEqual(push_targets["active_target_count"], 1)
+            self.assertFalse(push_targets["targets"][0]["secret_names_included"])
+            self.assertNotIn("AEGIS_REMOTE_PUSH_TOKEN", json.dumps(push_targets, sort_keys=True))
+            self.assertNotIn("AEGIS_REMOTE_DEVICE_TOKEN", json.dumps(push_targets, sort_keys=True))
             self.assertEqual(native_push["status"], "native_push_published")
             self.assertEqual(native_push["provider"], "fcm")
+            self.assertEqual(native_push["target_id"], push_target["target"]["id"])
             self.assertEqual(native_push["push_target"], "https://fcm.googleapis.com/v1/projects/aegis-project/messages:send")
             self.assertEqual(native_push["native_push_receipt"]["delivery_state"], "accepted")
             self.assertFalse(native_push["pairing_token_relayed"])

@@ -359,6 +359,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "approved relay directory publish",
                 "approved relay notification publish",
                 "approved brokered native APNS/FCM notification publish",
+                "brokered native push target lifecycle records",
                 "structured redacted relay notification receipts",
                 "approved relay action proxy",
                 "background task submission",
@@ -375,7 +376,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "approved PR autofix response posting",
             ],
             "security_delta": "Aegis exposes Claude-style controls through the governed local runtime and requires scoped pairings, approved relay registration, and redacted receipts before off-device access.",
-            "live_gap": "Unattended plugin bundle auto-install, unattended plugin auto-update, recursive subagent model-loop depth, native APNS/FCM provider-token lifecycle management, broad cloud relay delivery, and future provider OAuth bridges beyond the tracked target set remain explicit gaps instead of silent stubs; the HTTPS relay notification path now exposes a mobile/gateway delivery contract and the CLI/TUI can publish one approved brokered APNS/FCM notification without capturing raw device tokens.",
+            "live_gap": "Unattended plugin bundle auto-install, unattended plugin auto-update, recursive subagent model-loop depth, native APNS/FCM credential rotation, broad cloud relay delivery, and future provider OAuth bridges beyond the tracked target set remain explicit gaps instead of silent stubs; the HTTPS relay notification path now exposes a mobile/gateway delivery contract and CLI/TUI/API/web can publish approved brokered APNS/FCM notifications from registered target records without capturing raw device tokens.",
             "target_requirements": [
                 "unattended_remote_plugin_bundle_auto_install",
                 "unattended_plugin_auto_update",

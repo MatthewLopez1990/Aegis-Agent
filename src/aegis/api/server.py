@@ -286,6 +286,20 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 self._authorize_remote_control_status()
                 self._json(remote_control.relay_outbox(status=query.get("status", [None])[0], limit=_limit(query, default=20)))
                 return
+            if path == "/remote-control/push/targets":
+                self._authorize_read()
+                target_id = query.get("target_id", [None])[0]
+                if target_id:
+                    self._json(
+                        {
+                            "status": "native_push_target",
+                            "target": remote_control.native_push_target(target_id),
+                            "raw_secret_values_included": False,
+                        }
+                    )
+                else:
+                    self._json(remote_control.native_push_targets())
+                return
             match_remote_task = re.fullmatch(r"/remote-control/tasks/([^/]+)", path)
             if match_remote_task:
                 task_id = match_remote_task.group(1)
@@ -583,6 +597,8 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 "/remote-control/relay/pull",
                 "/remote-control/relay/directory",
                 "/remote-control/relay/notify",
+                "/remote-control/push/register",
+                "/remote-control/push/disable",
                 "/remote-control/push",
                 "/remote-control/relay/retry",
             }:
@@ -838,19 +854,73 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 )
                 self._json(result)
                 return
+            if path == "/remote-control/push/register":
+                payload = self._read_json()
+                result = remote_control.register_native_push_target(
+                    label=str(payload.get("label") or "native push"),
+                    provider=str(_required(payload, "provider")),
+                    push_auth_secret=str(_required(payload, "push_auth_secret")),
+                    device_token_secret=str(_required(payload, "device_token_secret")),
+                    approved=bool(payload.get("approved", False)),
+                    apns_topic=str(payload["apns_topic"]) if payload.get("apns_topic") else None,
+                    fcm_project_id=str(payload["fcm_project_id"]) if payload.get("fcm_project_id") else None,
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.native_push_target_registered",
+                    {
+                        "target_id": result["target"]["id"],
+                        "provider": result["target"]["provider"],
+                        "push_auth_secret_captured": False,
+                        "device_token_secret_captured": False,
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(result)
+                return
+            if path == "/remote-control/push/disable":
+                payload = self._read_json()
+                result = remote_control.disable_native_push_target(
+                    str(_required(payload, "target_id")),
+                    approved=bool(payload.get("approved", False)),
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.native_push_target_disabled",
+                    {
+                        "target_id": result["target"]["id"],
+                        "provider": result["target"]["provider"],
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(result)
+                return
             if path == "/remote-control/push":
                 payload = self._read_json()
                 if not bool(payload.get("approved", False)):
                     raise PermissionError("remote-control native push requires explicit approval")
-                provider = str(_required(payload, "provider"))
+                target_id = str(payload["target_id"]) if payload.get("target_id") else None
+                if target_id:
+                    target_refs = remote_control.native_push_target_secret_refs(target_id)
+                    provider = str(target_refs["provider"])
+                    push_auth_secret = str(target_refs["push_auth_secret"])
+                    device_token_secret = str(target_refs["device_token_secret"])
+                    apns_topic = str(payload["apns_topic"]) if payload.get("apns_topic") else target_refs.get("apns_topic")
+                    fcm_project_id = str(payload["fcm_project_id"]) if payload.get("fcm_project_id") else target_refs.get("fcm_project_id")
+                else:
+                    provider = str(_required(payload, "provider"))
+                    push_auth_secret = str(_required(payload, "push_auth_secret"))
+                    device_token_secret = str(_required(payload, "device_token_secret"))
+                    apns_topic = str(payload["apns_topic"]) if payload.get("apns_topic") else None
+                    fcm_project_id = str(payload["fcm_project_id"]) if payload.get("fcm_project_id") else None
                 auth_handle = orchestrator.secrets_broker.request_handle(
-                    name=str(_required(payload, "push_auth_secret")),
+                    name=push_auth_secret,
                     requester="remote_control_push",
                     reason=f"publish scoped remote-control {provider} notification",
                     scopes=("remote_control:push",),
                 )
                 device_handle = orchestrator.secrets_broker.request_handle(
-                    name=str(_required(payload, "device_token_secret")),
+                    name=device_token_secret,
                     requester="remote_control_push",
                     reason=f"resolve brokered remote-control {provider} device token",
                     scopes=("remote_control:push",),
@@ -872,14 +942,16 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     device_token=device_token,
                     allowlist=orchestrator.config.network_allowlist,
                     approved=True,
-                    apns_topic=str(payload["apns_topic"]) if payload.get("apns_topic") else None,
-                    fcm_project_id=str(payload["fcm_project_id"]) if payload.get("fcm_project_id") else None,
+                    apns_topic=apns_topic,
+                    fcm_project_id=fcm_project_id,
+                    target_id=target_id,
                 )
                 orchestrator.audit_logger.append(
                     "remote_control.native_push_published",
                     {
                         "pairing_id": result["pairing"]["id"],
                         "provider": result["provider"],
+                        "target_id": result.get("target_id"),
                         "push_target": result["push_target"],
                         "event": result["notification_event"],
                         "task_id": result["notification"].get("task_id"),

@@ -169,7 +169,7 @@ class RemoteControlPairingTests(unittest.TestCase):
         self.assertFalse(result["pairing_token_relayed"])
         self.assertEqual(result["relay_response_status"], 202)
         self.assertEqual(result["mobile_gateway_contract"]["status"], "configured")
-        self.assertEqual(result["remaining_controls"], ["native_push_provider_lifecycle", "broad_cloud_relay_service"])
+        self.assertEqual(result["remaining_controls"], ["native_push_target_registration", "broad_cloud_relay_service"])
         self.assertEqual(captured["request"].get_header("Authorization"), "Bearer relay-raw-secret")
         self.assertEqual(body["pairing"]["id"], created["pairing"]["id"])
         self.assertFalse(body["pairing_token_included"])
@@ -650,6 +650,97 @@ class RemoteControlPairingTests(unittest.TestCase):
                 self.assertNotIn(f"{case['provider']}-auth-secret", rendered)
                 self.assertNotIn("hidden prompt", rendered)
                 self.assertNotIn("token=secret", rendered)
+
+    def test_native_push_target_lifecycle_tracks_secret_refs_without_public_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store_path = Path(temp) / "remote_control_pairings.json"
+            registry = RemoteControlPairingRegistry(store_path)
+            now = datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
+            pairing = registry.create_pairing(label="phone", task_id="task-1", allowed_actions=("status",), now=now)
+            notification = {
+                "status": "remote_notification_available",
+                "event": "task-updated",
+                "task_id": "task-1",
+                "pairing_token_relayed": False,
+                "raw_secret_values_included": False,
+                "user_request_included": False,
+                "plan_receipt_included": False,
+            }
+
+            with self.assertRaises(PermissionError):
+                registry.register_native_push_target(
+                    label="phone fcm",
+                    provider="fcm",
+                    push_auth_secret="AEGIS_REMOTE_PUSH_TOKEN",
+                    device_token_secret="AEGIS_REMOTE_DEVICE_TOKEN",
+                    fcm_project_id="aegis-project",
+                    approved=False,
+                    now=now,
+                )
+            registered = registry.register_native_push_target(
+                label="phone fcm",
+                provider="fcm",
+                push_auth_secret="AEGIS_REMOTE_PUSH_TOKEN",
+                device_token_secret="AEGIS_REMOTE_DEVICE_TOKEN",
+                fcm_project_id="aegis-project",
+                approved=True,
+                now=now,
+            )
+            target_id = registered["target"]["id"]
+            refs = registry.native_push_target_secret_refs(target_id)
+
+            class FakeResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def getcode(self) -> int:
+                    return 200
+
+                def read(self, limit: int) -> bytes:
+                    return b'{"name":"provider-message-id","token":"device-raw-secret"}'
+
+            def fake_open(request, timeout: int):
+                return FakeResponse()
+
+            with patch("aegis.remote_control._private_network_error", return_value=None):
+                with patch("aegis.remote_control._open_without_redirects", side_effect=fake_open):
+                    published = registry.publish_native_push_notification(
+                        pairing["pairing"]["id"],
+                        notification=notification,
+                        provider=str(refs["provider"]),
+                        push_auth_token="push-raw-secret",
+                        device_token="device-raw-secret",
+                        allowlist=("fcm.googleapis.com",),
+                        approved=True,
+                        fcm_project_id=str(refs["fcm_project_id"]),
+                        target_id=target_id,
+                        now=now + timedelta(seconds=1),
+                    )
+            listed = registry.native_push_targets()
+            disabled = registry.disable_native_push_target(target_id, approved=True, now=now + timedelta(seconds=2))
+            rendered_public = json.dumps({"registered": registered, "published": published, "listed": listed, "disabled": disabled}, sort_keys=True)
+            rendered_store = store_path.read_text(encoding="utf-8")
+
+            self.assertEqual(registered["status"], "native_push_target_registered")
+            self.assertEqual(refs["push_auth_secret"], "AEGIS_REMOTE_PUSH_TOKEN")
+            self.assertEqual(refs["device_token_secret"], "AEGIS_REMOTE_DEVICE_TOKEN")
+            self.assertEqual(published["target_id"], target_id)
+            self.assertEqual(published["native_push_receipt"]["delivery_state"], "accepted")
+            self.assertEqual(listed["active_target_count"], 1)
+            self.assertEqual(listed["targets"][0]["last_push_delivery_state"], "accepted")
+            self.assertFalse(listed["targets"][0]["secret_names_included"])
+            self.assertEqual(disabled["target"]["status"], "disabled")
+            with self.assertRaises(ValueError):
+                registry.native_push_target_secret_refs(target_id)
+            self.assertNotIn("AEGIS_REMOTE_PUSH_TOKEN", rendered_public)
+            self.assertNotIn("AEGIS_REMOTE_DEVICE_TOKEN", rendered_public)
+            self.assertNotIn("push-raw-secret", rendered_public)
+            self.assertNotIn("device-raw-secret", rendered_public)
+            self.assertNotIn("push-raw-secret", rendered_store)
+            self.assertNotIn("device-raw-secret", rendered_store)
 
     def test_relay_preflight_rejects_non_https_targets(self) -> None:
         registry = RemoteControlPairingRegistry()

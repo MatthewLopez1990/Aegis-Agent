@@ -76,6 +76,7 @@ class RemoteControlPairingRegistry:
         self.store_path = Path(store_path).expanduser().resolve() if store_path else None
         self._pairings: dict[str, dict[str, Any]] = {}
         self._relay_outbox: list[dict[str, Any]] = []
+        self._native_push_targets: dict[str, dict[str, Any]] = {}
         self._load()
 
     def create_pairing(
@@ -147,6 +148,8 @@ class RemoteControlPairingRegistry:
             for pairing in pairings
             if pairing["status"] == "active" and pairing.get("relay_notification_enabled")
         )
+        native_push_targets = self.native_push_targets(now=checked_at)["targets"]
+        active_native_push_target_count = sum(1 for target in native_push_targets if target["status"] == "active")
         return {
             "status": "local_pairing_available",
             "mode": "local_or_trusted_access_layer",
@@ -156,7 +159,9 @@ class RemoteControlPairingRegistry:
             "active_pairing_count": active_count,
             "active_relay_action_proxy_count": relay_action_count,
             "active_mobile_gateway_count": mobile_gateway_count,
+            "active_native_push_target_count": active_native_push_target_count,
             "pairings": pairings,
+            "native_push_targets": native_push_targets,
             "relay_outbox": self.relay_outbox(limit=20)["items"],
             "mobile_gateway_contract": _mobile_gateway_contract(configured=mobile_gateway_count > 0),
             "control_surface": [
@@ -175,10 +180,125 @@ class RemoteControlPairingRegistry:
             ],
             "blocked_until_relay": ["mobile_gateway_registration"] if mobile_gateway_count == 0 else [],
             "remaining_live_delivery_gaps": [
-                "native_push_provider_lifecycle",
+                "native_push_provider_rotation" if active_native_push_target_count else "native_push_target_registration",
                 "broad_cloud_relay_service",
             ],
             "relay_preflight": self.relay_preflight(),
+        }
+
+    def register_native_push_target(
+        self,
+        *,
+        label: str = "",
+        provider: str,
+        push_auth_secret: str,
+        device_token_secret: str,
+        approved: bool = False,
+        apns_topic: str | None = None,
+        fcm_project_id: str | None = None,
+        target_id: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if not approved:
+            raise PermissionError("remote-control native push target registration requires explicit approval")
+        self._load()
+        registered_at = _utc_now(now)
+        normalized_provider = _normalize_native_push_provider(provider)
+        auth_secret = _required_brokered_secret_name(push_auth_secret, field_name="push_auth_secret")
+        device_secret = _required_brokered_secret_name(device_token_secret, field_name="device_token_secret")
+        topic = _optional_clean_string(apns_topic)
+        project_id = _optional_clean_string(fcm_project_id)
+        if normalized_provider == "apns" and not topic:
+            raise ValueError("remote-control APNS push target requires apns_topic")
+        if normalized_provider == "fcm":
+            project_id = _clean_fcm_project_id(project_id)
+        target_id = "push_" + secrets.token_hex(8)
+        target = {
+            "id": target_id,
+            "label": (label or f"{normalized_provider} native push").strip()[:80],
+            "provider": normalized_provider,
+            "push_auth_secret_name": auth_secret,
+            "device_token_secret_name": device_secret,
+            "apns_topic": topic if normalized_provider == "apns" else None,
+            "fcm_project_id": project_id if normalized_provider == "fcm" else None,
+            "created_at": registered_at.isoformat(),
+            "disabled_at": None,
+            "raw_secret_values_included": False,
+        }
+        self._native_push_targets[target_id] = target
+        self._save()
+        return {
+            "status": "native_push_target_registered",
+            "target": _public_native_push_target(target, now=registered_at),
+            "push_auth_secret_captured": False,
+            "device_token_secret_captured": False,
+            "raw_device_token_captured": False,
+            "raw_secret_values_included": False,
+        }
+
+    def native_push_targets(self, *, now: datetime | None = None) -> dict[str, Any]:
+        self._load()
+        checked_at = _utc_now(now)
+        rows = [_public_native_push_target(target, now=checked_at) for target in self._native_push_targets.values()]
+        return {
+            "status": "native_push_targets",
+            "target_count": len(rows),
+            "active_target_count": sum(1 for target in rows if target["status"] == "active"),
+            "targets": rows,
+            "push_auth_secret_captured": False,
+            "device_token_secret_captured": False,
+            "raw_device_token_captured": False,
+            "raw_secret_values_included": False,
+        }
+
+    def native_push_target(self, target_id: str, *, now: datetime | None = None) -> dict[str, Any]:
+        self._load()
+        target = self._native_push_targets.get(target_id)
+        if target is None:
+            raise KeyError(target_id)
+        return _public_native_push_target(target, now=_utc_now(now))
+
+    def native_push_target_secret_refs(self, target_id: str) -> dict[str, str | None]:
+        self._load()
+        target = self._native_push_targets.get(target_id)
+        if target is None:
+            raise KeyError(target_id)
+        if target.get("disabled_at"):
+            raise ValueError("remote-control native push target is disabled")
+        return {
+            "target_id": str(target["id"]),
+            "provider": str(target["provider"]),
+            "push_auth_secret": str(target["push_auth_secret_name"]),
+            "device_token_secret": str(target["device_token_secret_name"]),
+            "apns_topic": _optional_clean_string(target.get("apns_topic")),
+            "fcm_project_id": _optional_clean_string(target.get("fcm_project_id")),
+        }
+
+    def disable_native_push_target(
+        self,
+        target_id: str,
+        *,
+        approved: bool = False,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if not approved:
+            raise PermissionError("remote-control native push target disable requires explicit approval")
+        self._load()
+        target = self._native_push_targets.get(target_id)
+        if target is None:
+            raise KeyError(target_id)
+        disabled_at = _utc_now(now)
+        if target.get("disabled_at") is None:
+            target["disabled_at"] = disabled_at.isoformat()
+        target["raw_secret_values_included"] = False
+        self._save()
+        return {
+            "status": "native_push_target_disabled",
+            "target": _public_native_push_target(target, now=disabled_at),
+            "push_auth_secret_captured": False,
+            "device_token_secret_captured": False,
+            "raw_device_token_captured": False,
+            "raw_secret_values_included": False,
         }
 
     def relay_preflight(self, *, relay_url: str | None = None) -> dict[str, Any]:
@@ -346,7 +466,7 @@ class RemoteControlPairingRegistry:
                 "approved_brokered_native_apns_fcm_push",
             ],
             "remaining_controls": [
-                "native_push_provider_lifecycle",
+                "native_push_target_registration",
                 "broad_cloud_relay_service",
             ],
         }
@@ -587,6 +707,7 @@ class RemoteControlPairingRegistry:
         approved: bool = False,
         apns_topic: str | None = None,
         fcm_project_id: str | None = None,
+        target_id: str | None = None,
         now: datetime | None = None,
     ) -> dict[str, Any]:
         if not approved:
@@ -600,6 +721,15 @@ class RemoteControlPairingRegistry:
         if public_pairing["status"] != "active":
             raise ValueError("remote-control native push requires an active pairing")
         normalized_provider = _normalize_native_push_provider(provider)
+        clean_target_id = _optional_clean_string(target_id)
+        if clean_target_id:
+            target = self._native_push_targets.get(clean_target_id)
+            if target is None:
+                raise KeyError(clean_target_id)
+            if target.get("disabled_at"):
+                raise ValueError("remote-control native push target is disabled")
+            if str(target.get("provider") or "") != normalized_provider:
+                raise ValueError("remote-control native push target provider does not match request")
         if not push_auth_token.strip():
             raise ValueError("remote-control native push requires a brokered provider auth token")
         if not device_token.strip():
@@ -645,10 +775,19 @@ class RemoteControlPairingRegistry:
             device_token=device_token,
             target_url=target_url,
         )
+        if clean_target_id:
+            target = self._native_push_targets.get(clean_target_id)
+            target["last_push_at"] = checked_at.isoformat()
+            target["last_push_response_status"] = response_status
+            target["last_push_delivery_state"] = receipt["delivery_state"]
+            target["last_push_target"] = receipt["push_target"]
+            target["raw_secret_values_included"] = False
+            self._save()
         return {
             "status": "native_push_published",
             "mode": "approved_native_push_notification",
             "provider": normalized_provider,
+            "target_id": clean_target_id,
             "pairing": public_pairing,
             "push_target": receipt["push_target"],
             "push_response_status": response_status,
@@ -1104,6 +1243,7 @@ class RemoteControlPairingRegistry:
             }
         self._pairings = pairings
         self._relay_outbox = _normalize_relay_outbox(payload.get("relay_outbox") if isinstance(payload, dict) else None)
+        self._native_push_targets = _normalize_native_push_targets(payload.get("native_push_targets") if isinstance(payload, dict) else None)
 
     def _save(self) -> None:
         if self.store_path is None:
@@ -1113,6 +1253,7 @@ class RemoteControlPairingRegistry:
             "version": 1,
             "pairings": list(self._pairings.values()),
             "relay_outbox": self._relay_outbox[:MAX_RELAY_OUTBOX_ITEMS],
+            "native_push_targets": list(self._native_push_targets.values()),
             "raw_secret_values_included": False,
         }
         temp_path = self.store_path.with_suffix(self.store_path.suffix + ".tmp")
@@ -1544,6 +1685,15 @@ def _optional_clean_string(value: Any) -> str | None:
     return text or None
 
 
+def _required_brokered_secret_name(value: Any, *, field_name: str) -> str:
+    text = _optional_clean_string(value)
+    if not text:
+        raise ValueError(f"remote-control native push target requires {field_name}")
+    if len(text) > 160 or any(char.isspace() for char in text):
+        raise ValueError(f"remote-control native push target {field_name} contains unsupported characters")
+    return text
+
+
 def _normalize_relay_registration(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
@@ -1585,6 +1735,70 @@ def _normalize_relay_registration(value: Any) -> dict[str, Any] | None:
     if value.get("last_notification_retry_count") is not None:
         normalized["last_notification_retry_count"] = int(value["last_notification_retry_count"])
     return normalized
+
+
+def _normalize_native_push_targets(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, list):
+        return {}
+    targets: dict[str, dict[str, Any]] = {}
+    for row in value[:100]:
+        if not isinstance(row, dict):
+            continue
+        target_id = _optional_clean_string(row.get("id"))
+        provider = _optional_clean_string(row.get("provider"))
+        auth_secret = _optional_clean_string(row.get("push_auth_secret_name"))
+        device_secret = _optional_clean_string(row.get("device_token_secret_name"))
+        if not target_id or not provider or not auth_secret or not device_secret:
+            continue
+        try:
+            normalized_provider = _normalize_native_push_provider(provider)
+        except ValueError:
+            continue
+        target = {
+            "id": target_id[:80],
+            "label": str(row.get("label") or f"{normalized_provider} native push")[:80],
+            "provider": normalized_provider,
+            "push_auth_secret_name": auth_secret[:160],
+            "device_token_secret_name": device_secret[:160],
+            "apns_topic": _optional_clean_string(row.get("apns_topic")),
+            "fcm_project_id": _optional_clean_string(row.get("fcm_project_id")),
+            "created_at": str(row.get("created_at") or _utc_now(None).isoformat()),
+            "disabled_at": _optional_clean_string(row.get("disabled_at")),
+            "raw_secret_values_included": False,
+        }
+        if row.get("last_push_at"):
+            target["last_push_at"] = str(row["last_push_at"])
+        if row.get("last_push_response_status") is not None:
+            target["last_push_response_status"] = int(row["last_push_response_status"])
+        if row.get("last_push_delivery_state"):
+            target["last_push_delivery_state"] = str(row["last_push_delivery_state"])[:40]
+        if row.get("last_push_target"):
+            target["last_push_target"] = str(row["last_push_target"])[:240]
+        targets[target["id"]] = target
+    return targets
+
+
+def _public_native_push_target(target: dict[str, Any], *, now: datetime) -> dict[str, Any]:
+    disabled_at = _optional_clean_string(target.get("disabled_at"))
+    return {
+        "id": str(target.get("id") or ""),
+        "label": str(target.get("label") or "native push")[:80],
+        "provider": str(target.get("provider") or ""),
+        "status": "disabled" if disabled_at else "active",
+        "created_at": str(target.get("created_at") or now.isoformat()),
+        "disabled_at": disabled_at,
+        "apns_topic": _optional_clean_string(target.get("apns_topic")),
+        "fcm_project_id": _optional_clean_string(target.get("fcm_project_id")),
+        "push_auth_secret_configured": bool(_optional_clean_string(target.get("push_auth_secret_name"))),
+        "device_token_secret_configured": bool(_optional_clean_string(target.get("device_token_secret_name"))),
+        "secret_names_included": False,
+        "last_push_at": _optional_clean_string(target.get("last_push_at")),
+        "last_push_response_status": target.get("last_push_response_status"),
+        "last_push_delivery_state": _optional_clean_string(target.get("last_push_delivery_state")),
+        "last_push_target": _optional_clean_string(target.get("last_push_target")),
+        "raw_device_token_captured": False,
+        "raw_secret_values_included": False,
+    }
 
 
 def _normalize_relay_outbox(value: Any) -> list[dict[str, Any]]:

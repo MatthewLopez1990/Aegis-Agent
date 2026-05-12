@@ -360,6 +360,9 @@ class ApiServerSecurityTests(unittest.TestCase):
                 with self.assertRaises(HTTPError) as remote_relay_outbox_error:
                     _json_get(port, "/remote-control/relay/outbox")
                 self.assertEqual(remote_relay_outbox_error.exception.code, 403)
+                with self.assertRaises(HTTPError) as remote_push_targets_error:
+                    _json_get(port, "/remote-control/push/targets")
+                self.assertEqual(remote_push_targets_error.exception.code, 403)
                 with self.assertRaises(HTTPError) as remote_directory_error:
                     _json_get(port, "/remote-control/directory")
                 self.assertEqual(remote_directory_error.exception.code, 403)
@@ -558,19 +561,36 @@ class ApiServerSecurityTests(unittest.TestCase):
                             approved=True,
                         )
                 remote_relay_outbox_initial = _json_get(port, "/remote-control/relay/outbox", token=token)
+                remote_push_target = _json_post(
+                    port,
+                    "/remote-control/push/register",
+                    {
+                        "label": "API fcm",
+                        "provider": "fcm",
+                        "push_auth_secret": "AEGIS_REMOTE_PUSH_TOKEN",
+                        "device_token_secret": "AEGIS_REMOTE_DEVICE_TOKEN",
+                        "fcm_project_id": "aegis-project",
+                        "approved": True,
+                    },
+                    token=token,
+                )
+                remote_push_targets = _json_get(port, "/remote-control/push/targets", token=token)
                 with self.assertRaises(HTTPError) as remote_push_unapproved_error:
                     _json_post(
                         port,
                         "/remote-control/push",
                         {
                             "pairing_id": remote_pair["pairing"]["id"],
-                            "provider": "fcm",
-                            "push_auth_secret": "AEGIS_REMOTE_PUSH_TOKEN",
-                            "device_token_secret": "AEGIS_REMOTE_DEVICE_TOKEN",
-                            "fcm_project_id": "aegis-project",
+                            "target_id": remote_push_target["target"]["id"],
                         },
                         token=token,
                     )
+                remote_push_disabled = _json_post(
+                    port,
+                    "/remote-control/push/disable",
+                    {"target_id": remote_push_target["target"]["id"], "approved": True},
+                    token=token,
+                )
                 remote_relay_action = _json_post(
                     port,
                     "/remote-control/relay/action",
@@ -596,6 +616,8 @@ class ApiServerSecurityTests(unittest.TestCase):
                     )
                 with self.assertRaises(HTTPError) as remote_dashboard_error:
                     _json_get(port, "/dashboard", remote_token=remote_token)
+                with self.assertRaises(HTTPError) as remote_push_targets_token_error:
+                    _json_get(port, "/remote-control/push/targets", remote_token=remote_token)
                 with self.assertRaises(HTTPError) as remote_wrong_scope_error:
                     _json_get(port, f"/remote-control/tasks/{session_task['id']}", remote_token=remote_token)
                 remote_paused_task = _json_post(
@@ -1149,6 +1171,12 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertFalse(relay_proxy_registration["pairing_token_relayed"])
                 self.assertEqual(remote_relay_outbox_initial["status"], "relay_notification_outbox")
                 self.assertEqual(remote_relay_outbox_initial["item_count"], 0)
+                self.assertEqual(remote_push_target["status"], "native_push_target_registered")
+                self.assertEqual(remote_push_targets["active_target_count"], 1)
+                self.assertFalse(remote_push_targets["targets"][0]["secret_names_included"])
+                self.assertEqual(remote_push_disabled["target"]["status"], "disabled")
+                self.assertNotIn("AEGIS_REMOTE_PUSH_TOKEN", json.dumps(remote_push_targets, sort_keys=True))
+                self.assertNotIn("AEGIS_REMOTE_DEVICE_TOKEN", json.dumps(remote_push_targets, sort_keys=True))
                 self.assertEqual(remote_push_unapproved_error.exception.code, 403)
                 self.assertEqual(remote_relay_action["status"], "relay_action_proxied")
                 self.assertEqual(remote_relay_action["mode"], "approved_relay_action_proxy")
@@ -1158,6 +1186,7 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertFalse(remote_relay_action["relay_auth_token_captured"])
                 self.assertEqual(remote_relay_bad_secret_error.exception.code, 403)
                 self.assertEqual(remote_dashboard_error.exception.code, 403)
+                self.assertEqual(remote_push_targets_token_error.exception.code, 403)
                 self.assertEqual(remote_wrong_scope_error.exception.code, 403)
                 self.assertEqual(remote_paused_task["id"], remote_control_task["id"])
                 self.assertEqual(remote_paused_task["status"], "paused")

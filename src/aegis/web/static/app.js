@@ -407,6 +407,12 @@ const refresh = async () => {
     renderMetrics(dashboard);
     renderRemoteControlRelay(remoteControlRelay);
     renderRemoteControlOutbox(remoteControlOutbox);
+    setList("remote-control-push-targets", remoteControl.native_push_targets || [], (x) => ({
+      title: x.label || x.id,
+      detail: `${x.provider || "provider"} · auth ${x.push_auth_secret_configured ? "configured" : "missing"} · device ${x.device_token_secret_configured ? "configured" : "missing"}`,
+      meta: `${x.status} · ${x.last_push_delivery_state || "not pushed"}${x.last_push_at ? ` · ${x.last_push_at}` : ""}`,
+      tone: x.status === "active" ? "ready" : "attention",
+    }), "No native push targets");
     setList("remote-control-pairings", remoteControl.pairings || [], (x) => ({
       title: x.label || x.id,
       detail: `Session ${x.session_id || "any"} · task ${x.task_id || "any"} · actions ${(x.allowed_actions || []).join(", ") || "none"}`,
@@ -2696,6 +2702,17 @@ const remoteControlRelayBody = () => ({
   approved: document.getElementById("remote-control-relay-approved").checked,
 });
 
+const remoteControlPushBody = () => ({
+  label: document.getElementById("remote-control-push-label").value.trim() || "native push",
+  target_id: document.getElementById("remote-control-push-target-id").value.trim() || undefined,
+  provider: document.getElementById("remote-control-push-provider").value,
+  push_auth_secret: document.getElementById("remote-control-push-secret").value.trim(),
+  device_token_secret: document.getElementById("remote-control-device-secret").value.trim(),
+  approved: document.getElementById("remote-control-push-approved").checked,
+  apns_topic: document.getElementById("remote-control-apns-topic").value.trim() || undefined,
+  fcm_project_id: document.getElementById("remote-control-fcm-project").value.trim() || undefined,
+});
+
 document.getElementById("remote-control-relay-directory").addEventListener("click", async () => {
   const result = await api("/remote-control/relay/directory", {
     method: "POST",
@@ -2722,22 +2739,44 @@ document.getElementById("remote-control-relay-notify").addEventListener("click",
   await refresh();
 });
 
+document.getElementById("remote-control-push-register").addEventListener("click", async () => {
+  const result = await api("/remote-control/push/register", {
+    method: "POST",
+    body: JSON.stringify(remoteControlPushBody()),
+  });
+  document.getElementById("remote-control-push-target-id").value = result.target?.id || "";
+  renderRemoteControlOutput(result);
+  await refresh();
+});
+
+document.getElementById("remote-control-push-disable").addEventListener("click", async () => {
+  const result = await api("/remote-control/push/disable", {
+    method: "POST",
+    body: JSON.stringify({
+      target_id: document.getElementById("remote-control-push-target-id").value.trim(),
+      approved: document.getElementById("remote-control-push-approved").checked,
+    }),
+  });
+  renderRemoteControlOutput(result);
+  await refresh();
+});
+
 document.getElementById("remote-control-native-push").addEventListener("click", async () => {
   const taskId = document.getElementById("remote-control-relay-task-id").value.trim();
-  const apnsTopic = document.getElementById("remote-control-apns-topic").value.trim();
-  const fcmProject = document.getElementById("remote-control-fcm-project").value.trim();
+  const pushBody = remoteControlPushBody();
   const result = await api("/remote-control/push", {
     method: "POST",
     body: JSON.stringify({
       pairing_id: document.getElementById("remote-control-relay-pairing-id").value.trim(),
-      provider: document.getElementById("remote-control-push-provider").value,
-      push_auth_secret: document.getElementById("remote-control-push-secret").value.trim(),
-      device_token_secret: document.getElementById("remote-control-device-secret").value.trim(),
-      approved: document.getElementById("remote-control-push-approved").checked,
+      target_id: pushBody.target_id,
+      provider: pushBody.provider,
+      push_auth_secret: pushBody.push_auth_secret,
+      device_token_secret: pushBody.device_token_secret,
+      approved: pushBody.approved,
       event: document.getElementById("remote-control-relay-event").value.trim() || "directory-updated",
       task_id: taskId || undefined,
-      apns_topic: apnsTopic || undefined,
-      fcm_project_id: fcmProject || undefined,
+      apns_topic: pushBody.apns_topic,
+      fcm_project_id: pushBody.fcm_project_id,
     }),
   });
   renderRemoteControlOutput(result);

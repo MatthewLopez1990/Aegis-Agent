@@ -532,6 +532,8 @@
             <input id="remote-control-relay-secret" placeholder="relay auth secret">
             <input id="remote-control-relay-event" placeholder="notification event" value="directory-updated">
             <input id="remote-control-relay-task-id" placeholder="notification task id">
+            <input id="remote-control-push-target-id" placeholder="push target id">
+            <input id="remote-control-push-label" placeholder="push target label">
             <select id="remote-control-push-provider">
               <option value="fcm">FCM</option>
               <option value="apns">APNS</option>
@@ -547,6 +549,8 @@
             <button id="remote-control-directory" type="button" class="secondary">Show Directory</button>
             <button id="remote-control-relay-directory" type="button" class="secondary">Publish Directory</button>
             <button id="remote-control-relay-notify" type="button" class="secondary">Notify Relay</button>
+            <button id="remote-control-push-register" type="button" class="secondary">Register Push</button>
+            <button id="remote-control-push-disable" type="button" class="secondary">Disable Push</button>
             <button id="remote-control-native-push" type="button" class="secondary">Push Native</button>
             <button id="remote-control-relay-outbox-refresh" type="button" class="secondary">List Outbox</button>
             <button id="remote-control-relay-retry" type="button" class="secondary">Retry Outbox</button>
@@ -556,6 +560,7 @@
           <p id="remote-control-relay-summary" class="muted"></p>
           <div id="remote-control-relay" class="list compact-list"></div>
           <div id="remote-control-relay-outbox" class="list compact-list"></div>
+          <div id="remote-control-push-targets" class="list compact-list"></div>
           <div id="remote-control-pairings" class="list compact-list"></div>
           <div id="remote-control-output" class="evidence-block"></div>
         </section>

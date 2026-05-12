@@ -488,11 +488,25 @@ def build_parser() -> argparse.ArgumentParser:
     remote_control_relay_notify.add_argument("--event", default="directory-updated", help="Notification event, such as directory-updated or task-updated")
     remote_control_relay_notify.add_argument("--task-id", help="Optional task id to include as sanitized metadata")
     remote_control_relay_notify.add_argument("--approved", action="store_true", help="Approve one outbound relay notification")
+    remote_control_push_targets = remote_control_sub.add_parser("push-targets", help="List registered brokered native push targets")
+    remote_control_push_targets.add_argument("--target-id", help="Optional target id to show")
+    remote_control_push_register = remote_control_sub.add_parser("push-register", help="Register a brokered APNS/FCM push target")
+    remote_control_push_register.add_argument("--label", default="native push", help="Target label")
+    remote_control_push_register.add_argument("--provider", required=True, choices=["apns", "fcm"], help="Native push provider")
+    remote_control_push_register.add_argument("--push-auth-secret", required=True, help="Brokered provider auth token secret")
+    remote_control_push_register.add_argument("--device-token-secret", required=True, help="Brokered APNS/FCM device token secret")
+    remote_control_push_register.add_argument("--apns-topic", help="APNS topic/bundle id")
+    remote_control_push_register.add_argument("--fcm-project-id", help="Firebase project id for FCM HTTP v1")
+    remote_control_push_register.add_argument("--approved", action="store_true", help="Approve local push target registration")
+    remote_control_push_disable = remote_control_sub.add_parser("push-disable", help="Disable a registered native push target")
+    remote_control_push_disable.add_argument("--target-id", required=True, help="Registered native push target id")
+    remote_control_push_disable.add_argument("--approved", action="store_true", help="Approve native push target disable")
     remote_control_push = remote_control_sub.add_parser("push", help="Publish one approved native APNS/FCM notification")
     remote_control_push.add_argument("--pairing-id", required=True, help="Active pairing id")
-    remote_control_push.add_argument("--provider", required=True, choices=["apns", "fcm"], help="Native push provider")
-    remote_control_push.add_argument("--push-auth-secret", required=True, help="Brokered provider auth token secret")
-    remote_control_push.add_argument("--device-token-secret", required=True, help="Brokered APNS/FCM device token secret")
+    remote_control_push.add_argument("--target-id", help="Registered native push target id")
+    remote_control_push.add_argument("--provider", choices=["apns", "fcm"], help="Native push provider")
+    remote_control_push.add_argument("--push-auth-secret", help="Brokered provider auth token secret")
+    remote_control_push.add_argument("--device-token-secret", help="Brokered APNS/FCM device token secret")
     remote_control_push.add_argument("--apns-topic", help="APNS topic/bundle id")
     remote_control_push.add_argument("--fcm-project-id", help="Firebase project id for FCM HTTP v1")
     remote_control_push.add_argument("--event", default="directory-updated", help="Notification event, such as directory-updated or task-updated")
@@ -1490,18 +1504,75 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 },
             )
             return result
+        if args.remote_control_command == "push-targets":
+            if args.target_id:
+                return {
+                    "status": "native_push_target",
+                    "target": registry.native_push_target(args.target_id),
+                    "raw_secret_values_included": False,
+                }
+            return registry.native_push_targets()
+        if args.remote_control_command == "push-register":
+            result = registry.register_native_push_target(
+                label=args.label,
+                provider=args.provider,
+                push_auth_secret=args.push_auth_secret,
+                device_token_secret=args.device_token_secret,
+                approved=args.approved,
+                apns_topic=args.apns_topic,
+                fcm_project_id=args.fcm_project_id,
+            )
+            AuditLogger(config.audit_log_path).append(
+                "remote_control.native_push_target_registered",
+                {
+                    "target_id": result["target"]["id"],
+                    "provider": result["target"]["provider"],
+                    "push_auth_secret_captured": False,
+                    "device_token_secret_captured": False,
+                    "raw_secret_values_included": False,
+                    "source": "cli",
+                },
+            )
+            return result
+        if args.remote_control_command == "push-disable":
+            result = registry.disable_native_push_target(args.target_id, approved=args.approved)
+            AuditLogger(config.audit_log_path).append(
+                "remote_control.native_push_target_disabled",
+                {
+                    "target_id": result["target"]["id"],
+                    "provider": result["target"]["provider"],
+                    "raw_secret_values_included": False,
+                    "source": "cli",
+                },
+            )
+            return result
         if args.remote_control_command == "push":
             broker = SecretsBroker(config.secrets_path)
+            if args.target_id:
+                target_refs = registry.native_push_target_secret_refs(args.target_id)
+                provider = str(target_refs["provider"])
+                push_auth_secret = str(target_refs["push_auth_secret"])
+                device_token_secret = str(target_refs["device_token_secret"])
+                apns_topic = args.apns_topic or target_refs.get("apns_topic")
+                fcm_project_id = args.fcm_project_id or target_refs.get("fcm_project_id")
+            else:
+                if not args.provider or not args.push_auth_secret or not args.device_token_secret:
+                    raise ValueError("remote-control push requires either --target-id or --provider with --push-auth-secret and --device-token-secret")
+                provider = args.provider
+                push_auth_secret = args.push_auth_secret
+                device_token_secret = args.device_token_secret
+                apns_topic = args.apns_topic
+                fcm_project_id = args.fcm_project_id
             auth_handle = broker.request_handle(
-                name=args.push_auth_secret,
+                name=push_auth_secret,
                 requester="remote_control_push",
-                reason=f"publish scoped remote-control {args.provider} notification",
+                reason=f"publish scoped remote-control {provider} notification",
                 scopes=("remote_control:push",),
             )
             device_handle = broker.request_handle(
-                name=args.device_token_secret,
+                name=device_token_secret,
                 requester="remote_control_push",
-                reason=f"resolve brokered remote-control {args.provider} device token",
+                reason=f"resolve brokered remote-control {provider} device token",
                 scopes=("remote_control:push",),
             )
             push_auth_token = broker.resolve_for_authorized_tool(auth_handle, requester="remote_control_push")
@@ -1517,19 +1588,21 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             result = registry.publish_native_push_notification(
                 args.pairing_id,
                 notification=notification,
-                provider=args.provider,
+                provider=provider,
                 push_auth_token=push_auth_token,
                 device_token=device_token,
                 allowlist=config.network_allowlist,
                 approved=args.approved,
-                apns_topic=args.apns_topic,
-                fcm_project_id=args.fcm_project_id,
+                apns_topic=apns_topic,
+                fcm_project_id=fcm_project_id,
+                target_id=args.target_id,
             )
             orchestrator.audit_logger.append(
                 "remote_control.native_push_published",
                 {
                     "pairing_id": result["pairing"]["id"],
                     "provider": result["provider"],
+                    "target_id": result.get("target_id"),
                     "push_target": result["push_target"],
                     "event": result["notification_event"],
                     "task_id": result["notification"].get("task_id"),
