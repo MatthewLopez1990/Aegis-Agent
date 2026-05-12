@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import json
 import re
+import shutil
 
 from aegis.audit.logger import AuditLogger, redact
 from aegis.connectors.http import _open_without_redirects, _private_network_error, _validate_url
@@ -120,7 +121,7 @@ class PluginManager:
                 "next_actions": [
                     "review marketplace metadata",
                     "run plugins fetch-manifest <plugin_id> to verify the remote manifest",
-                    "run plugins install-marketplace <plugin_id> for an explicit governed install",
+                    "run plugins update-marketplace <plugin_id> for an explicit governed update",
                     "install through plugins install <plugin.json> using the existing governed lifecycle",
                 ],
             }
@@ -311,6 +312,76 @@ class PluginManager:
             ],
         }
         self.audit_logger.append("plugin.marketplace_installed", redact(result))
+        return result
+
+    def update_marketplace_plugin(
+        self,
+        plugin_id: str,
+        *,
+        catalog_path: str | Path | None = None,
+        allowlist: tuple[str, ...] = (),
+        enable: bool | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        store = self._read_store()
+        previous = store["plugins"].get(plugin_id)
+        if previous is None:
+            raise KeyError(plugin_id)
+        catalog = {str(entry.get("id") or ""): _public_marketplace_entry(entry) for entry in _read_plugin_catalog(catalog_path)}
+        entry = catalog.get(plugin_id)
+        if entry is None:
+            raise KeyError(plugin_id)
+        if not force and not _version_newer(entry["version"], previous["version"]):
+            raise ValueError("marketplace plugin update requires a newer catalog version or force=True")
+        rollback_manifest_path = self._backup_plugin_manifest(previous)
+        fetched = self.fetch_marketplace_manifest(plugin_id, catalog_path=catalog_path, allowlist=allowlist)
+        removed: dict[str, Any] | None = None
+        try:
+            removed = self.remove_plugin(plugin_id)
+            updated = self.install_plugin(
+                fetched["manifest_path"],
+                enable=bool(previous.get("enabled", False)) if enable is None else bool(enable),
+                unsigned_local=False,
+            )
+        except Exception:
+            if removed is not None and rollback_manifest_path is not None:
+                try:
+                    restored = self.install_plugin(
+                        rollback_manifest_path,
+                        enable=bool(previous.get("enabled", False)),
+                        unsigned_local=bool(previous.get("unsigned_local", False)),
+                    )
+                    self.audit_logger.append("plugin.marketplace_update_rolled_back", redact({"plugin_id": plugin_id, "restored": restored}))
+                except Exception as rollback_exc:  # pragma: no cover - preserve the original update failure if rollback also fails.
+                    self.audit_logger.append("plugin.marketplace_update_rollback_failed", redact({"plugin_id": plugin_id, "reason": str(rollback_exc)}))
+            raise
+        result = {
+            "status": "marketplace_plugin_updated",
+            "mode": "sha256_verified_manifest_update",
+            "id": plugin_id,
+            "previous_version": previous["version"],
+            "available_version": entry["version"],
+            "plugin": updated,
+            "enabled": bool(updated.get("enabled", False)),
+            "fetch": {
+                "id": fetched["id"],
+                "manifest_url": fetched["manifest_url"],
+                "manifest_sha256": fetched["manifest_sha256"],
+                "manifest_path": fetched["manifest_path"],
+            },
+            "removed_resources": removed.get("removed_resources", []) if removed else [],
+            "rollback_manifest_path": str(rollback_manifest_path) if rollback_manifest_path else "",
+            "auto_update_supported": False,
+            "provider_writes_performed": False,
+            "raw_secret_values_included": False,
+            "blocked_operations": [
+                "unattended_remote_plugin_auto_update",
+                "remote_bundle_auto_install",
+                "dynamic_plugin_import",
+                "marketplace_token_capture",
+            ],
+        }
+        self.audit_logger.append("plugin.marketplace_updated", redact(result))
         return result
 
     def install_plugin(
@@ -509,6 +580,16 @@ class PluginManager:
             except Exception as exc:  # pragma: no cover - best-effort cleanup should not hide the install error.
                 rolled_back.append({"kind": kind, "id": resource_id, "status": "cleanup_failed", "reason": str(exc)})
         self.audit_logger.append("plugin.install_rolled_back", redact({"resources": rolled_back}))
+
+    def _backup_plugin_manifest(self, plugin: dict[str, Any]) -> Path | None:
+        source_path = Path(str(plugin.get("source_path") or "")).expanduser()
+        if not source_path.exists() or not source_path.name.endswith(".json"):
+            return None
+        backup_dir = ensure_private_dir(self.path.parent / "plugin-marketplace" / "rollback")
+        backup_path = ensure_private_file(backup_dir / f"{plugin['id']}-{uuid4().hex}.plugin.json")
+        shutil.copyfile(source_path, backup_path)
+        ensure_private_file(backup_path)
+        return backup_path
 
     def _read_store(self) -> dict[str, Any]:
         if not self.path.exists():
@@ -735,6 +816,7 @@ def _public_marketplace_entry(raw: dict[str, Any], *, installed: dict[str, Any] 
             "review marketplace metadata",
             "run plugins fetch-manifest <plugin_id> to verify the remote manifest",
             "run plugins install-marketplace <plugin_id> for an explicit governed install",
+            "run plugins update-marketplace <plugin_id> for an explicit governed update",
             "install through the existing governed plugin lifecycle",
         ],
     }

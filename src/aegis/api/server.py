@@ -1210,6 +1210,18 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     )
                 )
                 return
+            if path == "/plugins/marketplace/update":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.plugins.update_marketplace_plugin(
+                        str(_required(payload, "plugin_id")),
+                        catalog_path=_optional_str(payload, "catalog_path"),
+                        allowlist=orchestrator.config.network_allowlist,
+                        enable=payload.get("enable") if "enable" in payload else None,
+                        force=bool(payload.get("force", False)),
+                    )
+                )
+                return
             if path == "/plugins/marketplace/fetch-bundle":
                 payload = self._read_json()
                 self._json(

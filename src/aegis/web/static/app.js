@@ -421,6 +421,7 @@ const refresh = async () => {
       detail: `${x.installed_version} -> ${x.available_version}. ${(x.next_actions || []).join(" ")}`,
       meta: `${x.status} · ${x.install_mode || "manual_manifest_review"} · review ${formatBool(x.requires_review)}`,
       tone: "attention",
+      actions: `<button type="button" class="secondary" data-plugin-marketplace-update="${escapeHtml(x.id)}">Apply Update</button>`,
     }), "No plugin updates");
     setList("mcp-servers", mcpServers.servers, (x) => ({
       title: x.name,
@@ -2490,6 +2491,20 @@ document.getElementById("plugin-marketplace").addEventListener("click", async (e
     return;
   }
   const result = await api("/plugins/marketplace/install", {
+    method: "POST",
+    body: JSON.stringify({
+      plugin_id: pluginId,
+      catalog_path: state.pluginMarketplaceCatalogPath || undefined,
+    }),
+  });
+  renderPluginOutput(result);
+  await refresh();
+});
+
+document.getElementById("plugin-updates").addEventListener("click", async (event) => {
+  const pluginId = event.target.dataset.pluginMarketplaceUpdate;
+  if (!pluginId) return;
+  const result = await api("/plugins/marketplace/update", {
     method: "POST",
     body: JSON.stringify({
       plugin_id: pluginId,

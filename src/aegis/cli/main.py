@@ -359,6 +359,12 @@ def build_parser() -> argparse.ArgumentParser:
         plugin_marketplace_install.add_argument("plugin_id")
         plugin_marketplace_install.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
         plugin_marketplace_install.add_argument("--enable", action="store_true", help="Enable default-enabled resources after install")
+        plugin_marketplace_update = plugin_sub.add_parser("update-marketplace", help="Fetch, verify, and apply one marketplace plugin update")
+        plugin_marketplace_update.add_argument("plugin_id")
+        plugin_marketplace_update.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
+        plugin_marketplace_update.add_argument("--enable", action="store_true", help="Enable default-enabled resources after update")
+        plugin_marketplace_update.add_argument("--disable", action="store_true", help="Keep updated resources disabled")
+        plugin_marketplace_update.add_argument("--force", action="store_true", help="Allow reinstalling the same or older catalog version")
 
     connector = subcommands.add_parser("connector", help="List connector status")
     connector_sub = connector.add_subparsers(dest="connector_command", required=True)
@@ -1052,6 +1058,16 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 catalog_path=args.catalog_path,
                 allowlist=config.network_allowlist,
                 enable=args.enable,
+            )
+        if args.plugin_command == "update-marketplace":
+            if args.enable and args.disable:
+                raise ValueError("use either --enable or --disable, not both")
+            return manager.update_marketplace_plugin(
+                args.plugin_id,
+                catalog_path=args.catalog_path,
+                allowlist=config.network_allowlist,
+                enable=True if args.enable else False if args.disable else None,
+                force=args.force,
             )
 
     if args.command == "connector":

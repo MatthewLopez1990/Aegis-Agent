@@ -246,6 +246,61 @@ class PluginManagerTests(unittest.TestCase):
                     manager.fetch_marketplace_manifest("bad.plugin", catalog_path=invalid_catalog_path, allowlist=("example.com",))
             open_without_redirects.assert_not_called()
 
+    def test_plugin_marketplace_update_replaces_installed_plugin_with_verified_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            plugin_path = _write_plugin_fixture(root)
+            manager = _plugin_manager(data_dir, workspace=root)
+            installed = manager.install_plugin(plugin_path, unsigned_local=True)
+            body = json.dumps({"id": "test.plugin", "name": "Test Plugin", "version": "0.2.0", "description": "Updated remotely."}).encode("utf-8")
+            digest = sha256(body).hexdigest()
+            catalog_path = root / "update-marketplace.json"
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "plugins": [
+                            {
+                                "id": "test.plugin",
+                                "name": "Test Plugin",
+                                "version": "0.2.0",
+                                "description": "Updated local catalog metadata.",
+                                "manifest_url": "https://example.com/plugins/test.plugin/plugin.json",
+                                "manifest_sha256": digest,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            class FakeResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return body
+
+            with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeResponse()):
+                updated = manager.update_marketplace_plugin("test.plugin", catalog_path=catalog_path, allowlist=("example.com",))
+
+            self.assertEqual(installed["version"], "0.1.0")
+            self.assertEqual(updated["status"], "marketplace_plugin_updated")
+            self.assertEqual(updated["mode"], "sha256_verified_manifest_update")
+            self.assertEqual(updated["previous_version"], "0.1.0")
+            self.assertEqual(updated["plugin"]["version"], "0.2.0")
+            self.assertEqual(updated["fetch"]["manifest_sha256"], digest)
+            self.assertFalse(updated["auto_update_supported"])
+            self.assertFalse(updated["provider_writes_performed"])
+            self.assertIn("unattended_remote_plugin_auto_update", updated["blocked_operations"])
+            self.assertTrue(Path(updated["rollback_manifest_path"]).exists())
+            self.assertEqual(manager.list_plugins()[0]["description"], "Updated remotely.")
+            with self.assertRaises(KeyError):
+                SkillRegistry(LocalStore(data_dir / "aegis.db"), AuditLogger(data_dir / "audit.jsonl"), SecretsBroker(data_dir / "secrets.json")).get("test.plugin_skill")
+
     @unittest.skipUnless(os.name == "posix", "POSIX mode assertions only apply on POSIX")
     def test_plugin_store_is_private(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
