@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+import hashlib
 import json
 import os
 import shlex
 import shutil
+import secrets
 import subprocess
 import tempfile
+import sys
+import time
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import uuid4
 
 from aegis.audit.logger import AuditLogger
@@ -44,6 +53,7 @@ class ModelRoute:
     fallback_identifiers: tuple[str, ...]
     secret_handle_id: str | None
     auth_method: str = "none"
+    auth_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class ModelRegistry:
@@ -176,13 +186,14 @@ class ModelRegistry:
                 target_row.update(
                     {
                         "status": "external_login_verified",
-                        "bridge_status": "official_cli_link_verified",
+                        "bridge_status": external_status.get("bridge_status") or "official_cli_link_verified",
                         "auth_configured": True,
                         "external_auth_configured": True,
                         "auth_source": external_status.get("auth_source"),
                         "last_verified_at": external_status.get("last_verified_at"),
                         "token_captured": False,
                         "token_capture_supported": False,
+                        "oauth_token_brokered": bool(external_status.get("oauth_token_brokered", False)),
                     }
                 )
                 verified_external.append(str(target["target"]))
@@ -374,6 +385,39 @@ class ModelRegistry:
         profile = _external_auth_handoff_profile_for_login(name, normalized_method)
         if profile is None:
             raise ValueError(f"{method} login is not supported for {name!r}")
+        if profile.get("oauth_device_flow") == "minimax_pkce_user_code":
+            status = _minimax_oauth_status_template(profile)
+            if run_external:
+                status.update(_run_minimax_oauth_login_flow(profile, self.secrets_broker, timeout_seconds=timeout_seconds))
+            elif verify_external:
+                status.update(_verify_minimax_oauth_link(profile, self.secrets_broker, self._external_auth_link(str(profile.get("provider") or name), normalized_method)))
+            if status.get("external_status_verified"):
+                status.update(
+                    {
+                        "status": "external_login_verified",
+                        "auth_configured": True,
+                        "auth_source": "oauth_device_flow",
+                        "aegis_bridge_status": "oauth_device_flow_ready",
+                        "token_captured": False,
+                        "token_capture_supported": False,
+                    }
+                )
+                self._remember_external_auth_link(str(status["provider"]), normalized_method, status)
+            self.audit_logger.append(
+                "model.auth_external_login_requested",
+                {
+                    "provider": status["provider"],
+                    "target": status["target"],
+                    "method": status["method"],
+                    "status": status["status"],
+                    "external_command": status.get("external_command"),
+                    "external_login_attempted": status["external_login_attempted"],
+                    "external_login_exit_code": status["external_login_exit_code"],
+                    "token_captured": False,
+                    "oauth_token_brokered": bool(status.get("oauth_token_brokered", False)),
+                },
+            )
+            return status
         command_argv = _external_command_argv(profile)
         executable_path = shutil.which(command_argv[0]) if command_argv else None
         status = {
@@ -470,6 +514,7 @@ class ModelRegistry:
         provider = self.providers[provider_name]
         secret_handle_id = None
         auth_method = "none"
+        auth_metadata: dict[str, Any] = {}
         if provider.auth_secret:
             if self._api_key_auth_configured(provider):
                 secret_handle = self.secrets_broker.request_handle(
@@ -482,9 +527,15 @@ class ModelRegistry:
                 auth_method = "api_key"
             elif self._subscription_auth_configured(provider):
                 auth_method = "subscription_cli"
-        if auth_method == "none" and provider.external_auth_method and self._external_auth_link(provider.provider, provider.external_auth_method) is not None:
-            auth_method = f"{provider.external_auth_method}_cli"
-        route = ModelRoute(resolved, provider, model, self.fallbacks.get(resolved, ()), secret_handle_id, auth_method)
+        if auth_method == "none" and provider.external_auth_method:
+            external_link = self._external_auth_link(provider.provider, provider.external_auth_method)
+            if external_link is not None:
+                auth_metadata = dict(external_link)
+                if external_link.get("auth_source") == "oauth_device_flow" or provider.metadata.get("auth_surface") == "oauth_device":
+                    auth_method = "oauth_token"
+                else:
+                    auth_method = f"{provider.external_auth_method}_cli"
+        route = ModelRoute(resolved, provider, model, self.fallbacks.get(resolved, ()), secret_handle_id, auth_method, auth_metadata)
         self.audit_logger.append("model.routed", {"identifier": resolved, "fallbacks": list(route.fallback_identifiers), "auth_method": auth_method})
         return route
 
@@ -635,7 +686,10 @@ class ModelRegistry:
                 return source
         if self._subscription_auth_configured(provider):
             return "subscription_cli"
-        if self._external_auth_configured(provider):
+        external_link = self._external_auth_link(provider.provider, provider.external_auth_method) if provider.external_auth_method else None
+        if external_link is not None:
+            if external_link.get("auth_source"):
+                return str(external_link["auth_source"])
             return "official_cli"
         return None
 
@@ -683,12 +737,15 @@ class ModelRegistry:
                     "auth_configured": True,
                     "external_auth_configured": True,
                     "auth_source": link.get("auth_source") or "official_cli",
-                    "bridge_status": "official_cli_link_verified",
+                    "bridge_status": link.get("bridge_status") or "official_cli_link_verified",
                     "external_command": link.get("external_command", status.get("external_command")),
                     "external_status_command": link.get("external_status_command", status.get("external_status_command")),
                     "last_verified_at": link.get("verified_at"),
                     "token_captured": False,
                     "token_capture_supported": False,
+                    "oauth_token_brokered": bool(link.get("oauth_token_brokered", False)),
+                    "access_token_secret": link.get("access_token_secret"),
+                    "refresh_token_secret": link.get("refresh_token_secret"),
                 }
             )
         return status
@@ -727,21 +784,39 @@ class ModelRegistry:
         return self.external_auth_links.get(_external_auth_link_key(provider_name, method))
 
     def _remember_external_auth_link(self, provider_name: str, method: str, status: dict[str, Any]) -> None:
+        auth_source = status.get("auth_source") or ("subscription_cli" if method == "subscription" else "official_cli")
+        bridge_status = status.get("aegis_bridge_status") if auth_source == "oauth_device_flow" else None
         link = {
             "provider": provider_name,
             "method": method,
             "target": status.get("target"),
             "status": "external_login_verified",
-            "auth_source": status.get("auth_source") or ("subscription_cli" if method == "subscription" else "official_cli"),
+            "auth_source": auth_source,
+            "bridge_status": bridge_status or "official_cli_link_verified",
             "external_command": status.get("external_command"),
             "external_status_command": status.get("external_status_command"),
             "verified_at": now_utc(),
             "token_captured": False,
             "token_capture_supported": False,
         }
-        invocation_bridge = status.get("invocation_bridge")
-        if isinstance(invocation_bridge, str) and invocation_bridge:
-            link["invocation_bridge"] = invocation_bridge
+        for key in (
+            "invocation_bridge",
+            "portal_base_url",
+            "inference_base_url",
+            "client_id",
+            "scope",
+            "token_type",
+            "expires_at",
+            "expires_in",
+            "access_token_secret",
+            "refresh_token_secret",
+            "refresh_skew_seconds",
+            "oauth_token_brokered",
+            "raw_browser_token_captured",
+        ):
+            value = status.get(key)
+            if value is not None:
+                link[key] = value
         self.external_auth_links[_external_auth_link_key(provider_name, method)] = link
         self._persist_external_auth_links()
 
@@ -801,6 +876,16 @@ def _metadata_keys(raw: Any) -> list[str]:
     if not isinstance(value, dict):
         return []
     return sorted(str(key) for key in value.keys())
+
+
+MINIMAX_OAUTH_CLIENT_ID = "78257093-7e40-4613-99e0-527b14b39113"
+MINIMAX_OAUTH_SCOPE = "group_id profile model.completion"
+MINIMAX_OAUTH_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:user_code"
+MINIMAX_OAUTH_PORTAL_BASE_URL = "https://api.minimax.io"
+MINIMAX_OAUTH_INFERENCE_BASE_URL = "https://api.minimax.io/anthropic/v1"
+MINIMAX_OAUTH_ACCESS_TOKEN_SECRET = "MINIMAX_OAUTH_ACCESS_TOKEN"
+MINIMAX_OAUTH_REFRESH_TOKEN_SECRET = "MINIMAX_OAUTH_REFRESH_TOKEN"
+MINIMAX_OAUTH_REFRESH_SKEW_SECONDS = 60
 
 
 EXTERNAL_AUTH_HANDOFF_PROFILES: dict[str, dict[str, Any]] = {
@@ -924,16 +1009,27 @@ EXTERNAL_AUTH_HANDOFF_PROFILES: dict[str, dict[str, Any]] = {
     },
     "minimax-oauth": {
         "target": "MiniMax OAuth",
-        "aliases": ("minimax-oauth",),
-        "provider": "minimax",
+        "aliases": ("minimax-oauth", "minimax-portal", "minimax-global"),
+        "provider": "minimax-oauth",
         "method": "oauth",
         "account_surface": "MiniMax",
-        "external_command": None,
-        "aegis_bridge_status": "manual_provider_handoff_only",
+        "external_command": "MiniMax browser OAuth",
+        "oauth_device_flow": "minimax_pkce_user_code",
+        "portal_base_url": MINIMAX_OAUTH_PORTAL_BASE_URL,
+        "inference_base_url": MINIMAX_OAUTH_INFERENCE_BASE_URL,
+        "client_id": MINIMAX_OAUTH_CLIENT_ID,
+        "scope": MINIMAX_OAUTH_SCOPE,
+        "access_token_secret": MINIMAX_OAUTH_ACCESS_TOKEN_SECRET,
+        "refresh_token_secret": MINIMAX_OAUTH_REFRESH_TOKEN_SECRET,
+        "refresh_skew_seconds": MINIMAX_OAUTH_REFRESH_SKEW_SECONDS,
+        "aegis_bridge_status": "oauth_device_flow_available",
+        "invocation_bridge": "minimax_oauth_anthropic_compatible",
+        "provider_token_source": "official MiniMax OAuth device-code flow",
         "interactive": True,
         "next_steps": [
-            "Sign in through MiniMax account surfaces and use MINIMAX_API_KEY for Aegis live model calls.",
-            "Aegis does not yet import MiniMax OAuth refresh tokens.",
+            "Run model auth login minimax-oauth --method oauth --run-external and approve the MiniMax browser/device-code prompt.",
+            "Route minimax-oauth/MiniMax-M2.7 after verification to use the brokered MiniMax OAuth bridge.",
+            "Do not paste MiniMax browser cookies, access tokens, refresh tokens, or portal session values into Aegis.",
         ],
     },
 }
@@ -1157,7 +1253,7 @@ MODEL_PROVIDER_AUTH_TARGETS: tuple[dict[str, Any], ...] = (
     {
         "target": "MiniMax OAuth",
         "platforms": ("Hermes Agent",),
-        "aegis_provider": "minimax",
+        "aegis_provider": "minimax-oauth",
         "required_auth": ("oauth",),
         "account_surface": "MiniMax",
     },
@@ -1251,6 +1347,233 @@ def _external_status_command_argv(profile: dict[str, Any]) -> tuple[str, ...]:
     if not command:
         return ()
     return tuple(shlex.split(command))
+
+
+def _minimax_oauth_status_template(profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "provider": profile.get("provider") or "minimax-oauth",
+        "target": profile["target"],
+        "method": profile["method"],
+        "status": "external_login_required",
+        "auth_configured": False,
+        "auth_source": None,
+        "token_captured": False,
+        "token_capture_supported": False,
+        "raw_browser_token_captured": False,
+        "oauth_token_brokered": False,
+        "external_command_argv": [],
+        "external_command_available": True,
+        "external_command_path": None,
+        "external_login_attempted": False,
+        "external_login_exit_code": None,
+        "external_login_error": None,
+        "external_status_checked": False,
+        "external_status_verified": False,
+        **_handoff_profile_public_fields(profile),
+    }
+
+
+def _run_minimax_oauth_login_flow(profile: dict[str, Any], secrets_broker: SecretsBroker, *, timeout_seconds: float | None) -> dict[str, Any]:
+    portal_base_url = str(profile.get("portal_base_url") or MINIMAX_OAUTH_PORTAL_BASE_URL).rstrip("/")
+    client_id = str(profile.get("client_id") or MINIMAX_OAUTH_CLIENT_ID)
+    verifier, challenge, state = _minimax_pkce_pair()
+    try:
+        code_payload = _minimax_request_user_code(portal_base_url=portal_base_url, client_id=client_id, code_challenge=challenge, state=state, timeout_seconds=timeout_seconds)
+        verification_uri = str(code_payload["verification_uri"])
+        user_code = str(code_payload["user_code"])
+        print(f"MiniMax OAuth: open {verification_uri} and enter code {user_code}", file=sys.stderr)
+        token_payload = _minimax_poll_token(
+            portal_base_url=portal_base_url,
+            client_id=client_id,
+            user_code=user_code,
+            code_verifier=verifier,
+            expired_in=int(code_payload["expired_in"]),
+            interval_ms=int(code_payload.get("interval") or 2000),
+            timeout_seconds=timeout_seconds,
+        )
+    except TimeoutError as exc:
+        return {
+            "status": "external_login_timeout",
+            "external_login_attempted": True,
+            "external_login_exit_code": None,
+            "external_login_error": str(exc),
+            "external_status_checked": False,
+            "external_status_verified": False,
+        }
+    except (RuntimeError, ValueError, OSError) as exc:
+        return {
+            "status": "external_login_failed",
+            "external_login_attempted": True,
+            "external_login_exit_code": None,
+            "external_login_error": str(exc),
+            "external_status_checked": True,
+            "external_status_verified": False,
+        }
+
+    access_token = str(token_payload.get("access_token") or "").strip()
+    refresh_token = str(token_payload.get("refresh_token") or "").strip()
+    if not access_token or not refresh_token:
+        return {
+            "status": "external_login_failed",
+            "external_login_attempted": True,
+            "external_login_exit_code": None,
+            "external_login_error": "MiniMax OAuth token response did not include brokerable tokens",
+            "external_status_checked": True,
+            "external_status_verified": False,
+        }
+    access_secret = str(profile.get("access_token_secret") or MINIMAX_OAUTH_ACCESS_TOKEN_SECRET)
+    refresh_secret = str(profile.get("refresh_token_secret") or MINIMAX_OAUTH_REFRESH_TOKEN_SECRET)
+    secrets_broker.store_secret(name=access_secret, value=access_token)
+    secrets_broker.store_secret(name=refresh_secret, value=refresh_token)
+    now = datetime.now(timezone.utc)
+    expires_at = _minimax_resolve_token_expiry(int(token_payload["expired_in"]), now=now)
+    return {
+        "status": "external_login_verified",
+        "auth_configured": True,
+        "auth_source": "oauth_device_flow",
+        "aegis_bridge_status": "oauth_device_flow_ready",
+        "external_login_attempted": True,
+        "external_login_exit_code": 0,
+        "external_login_error": None,
+        "external_status_checked": True,
+        "external_status_verified": True,
+        "token_captured": False,
+        "token_capture_supported": False,
+        "raw_browser_token_captured": False,
+        "oauth_token_brokered": True,
+        "access_token_secret": access_secret,
+        "refresh_token_secret": refresh_secret,
+        "portal_base_url": portal_base_url,
+        "inference_base_url": str(profile.get("inference_base_url") or MINIMAX_OAUTH_INFERENCE_BASE_URL).rstrip("/"),
+        "client_id": client_id,
+        "scope": str(profile.get("scope") or MINIMAX_OAUTH_SCOPE),
+        "token_type": str(token_payload.get("token_type") or "Bearer"),
+        "expires_at": expires_at.isoformat(),
+        "expires_in": max(0, int(expires_at.timestamp() - now.timestamp())),
+        "refresh_skew_seconds": int(profile.get("refresh_skew_seconds") or MINIMAX_OAUTH_REFRESH_SKEW_SECONDS),
+        "invocation_bridge": str(profile.get("invocation_bridge") or "minimax_oauth_anthropic_compatible"),
+    }
+
+
+def _verify_minimax_oauth_link(profile: dict[str, Any], secrets_broker: SecretsBroker, link: dict[str, Any] | None) -> dict[str, Any]:
+    access_secret = str((link or {}).get("access_token_secret") or profile.get("access_token_secret") or MINIMAX_OAUTH_ACCESS_TOKEN_SECRET)
+    refresh_secret = str((link or {}).get("refresh_token_secret") or profile.get("refresh_token_secret") or MINIMAX_OAUTH_REFRESH_TOKEN_SECRET)
+    verified = link is not None and secrets_broker.has_secret(access_secret) and secrets_broker.has_secret(refresh_secret)
+    return {
+        "external_status_checked": True,
+        "external_status_verified": verified,
+        "status": "external_login_verified" if verified else "external_login_required",
+        "auth_configured": verified,
+        "auth_source": "oauth_device_flow" if verified else None,
+        "aegis_bridge_status": "oauth_device_flow_ready" if verified else "oauth_device_flow_available",
+        "oauth_token_brokered": verified,
+        "access_token_secret": access_secret,
+        "refresh_token_secret": refresh_secret,
+        **{key: value for key, value in (link or {}).items() if key in {"portal_base_url", "inference_base_url", "client_id", "scope", "token_type", "expires_at", "expires_in", "refresh_skew_seconds", "invocation_bridge"}},
+    }
+
+
+def _minimax_pkce_pair() -> tuple[str, str, str]:
+    verifier = secrets.token_urlsafe(64)[:96]
+    digest = hashlib.sha256(verifier.encode("utf-8")).digest()
+    challenge = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    state = secrets.token_urlsafe(16)
+    return verifier, challenge, state
+
+
+def _minimax_request_user_code(*, portal_base_url: str, client_id: str, code_challenge: str, state: str, timeout_seconds: float | None) -> dict[str, Any]:
+    payload = _post_auth_form(
+        f"{portal_base_url}/oauth/code",
+        {
+            "response_type": "code",
+            "client_id": client_id,
+            "scope": MINIMAX_OAUTH_SCOPE,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+            "state": state,
+        },
+        timeout_seconds=timeout_seconds,
+    )
+    for field in ("user_code", "verification_uri", "expired_in"):
+        if field not in payload:
+            raise RuntimeError(f"MiniMax OAuth response missing field: {field}")
+    if payload.get("state") != state:
+        raise RuntimeError("MiniMax OAuth state mismatch")
+    return payload
+
+
+def _minimax_poll_token(
+    *,
+    portal_base_url: str,
+    client_id: str,
+    user_code: str,
+    code_verifier: str,
+    expired_in: int,
+    interval_ms: int,
+    timeout_seconds: float | None,
+) -> dict[str, Any]:
+    now = time.time()
+    deadline = min(_minimax_expiry_deadline(expired_in, now=now), now + (timeout_seconds or 300.0))
+    interval = max(2.0, interval_ms / 1000.0)
+    while time.time() < deadline:
+        payload = _post_auth_form(
+            f"{portal_base_url}/oauth/token",
+            {
+                "grant_type": MINIMAX_OAUTH_GRANT_TYPE,
+                "client_id": client_id,
+                "user_code": user_code,
+                "code_verifier": code_verifier,
+            },
+            timeout_seconds=timeout_seconds,
+        )
+        status = payload.get("status")
+        if status == "success":
+            return payload
+        if status == "error":
+            raise RuntimeError("MiniMax OAuth authorization was denied")
+        time.sleep(interval)
+    raise TimeoutError("MiniMax OAuth timed out before authorization completed")
+
+
+def _post_auth_form(url: str, data: dict[str, str], *, timeout_seconds: float | None) -> dict[str, Any]:
+    request = Request(
+        url,
+        data=urlencode(data).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+    )
+    try:
+        with _open_auth_request(request, timeout=timeout_seconds or 30.0) as response:  # noqa: S310 - URL is fixed provider OAuth metadata.
+            raw = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"MiniMax OAuth HTTP {exc.code}: {detail}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"MiniMax OAuth connection failed: {exc.reason}") from exc
+    decoded = json.loads(raw)
+    if not isinstance(decoded, dict):
+        raise RuntimeError("MiniMax OAuth returned invalid JSON")
+    return decoded
+
+
+def _minimax_expiry_deadline(expired_in: int, *, now: float) -> float:
+    raw = int(expired_in)
+    now_ms = int(now * 1000)
+    if raw > (now_ms // 2):
+        return raw / 1000.0
+    return now + max(1, raw)
+
+
+def _minimax_resolve_token_expiry(expired_in: int, *, now: datetime) -> datetime:
+    return datetime.fromtimestamp(_minimax_expiry_deadline(expired_in, now=now.timestamp()), tz=timezone.utc)
+
+
+def _open_auth_request(request: Request, *, timeout: float):
+    class NoRedirect(HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+            return None
+
+    return build_opener(NoRedirect).open(request, timeout=timeout)
 
 
 def _run_subscription_login_command(command_argv: tuple[str, ...], *, timeout_seconds: float | None) -> dict[str, Any]:
@@ -1420,6 +1743,15 @@ def _handoff_profile_public_fields(profile: dict[str, Any]) -> dict[str, Any]:
         "setup_required",
         "provider_token_source",
         "aegis_bridge_status",
+        "oauth_device_flow",
+        "portal_base_url",
+        "inference_base_url",
+        "client_id",
+        "scope",
+        "access_token_secret",
+        "refresh_token_secret",
+        "refresh_skew_seconds",
+        "invocation_bridge",
         "interactive",
         "next_steps",
     }
@@ -1427,6 +1759,9 @@ def _handoff_profile_public_fields(profile: dict[str, Any]) -> dict[str, Any]:
     command_argv = _external_command_argv(profile)
     result["external_command_argv"] = list(command_argv)
     result["external_command_available"] = shutil.which(command_argv[0]) is not None if command_argv else False
+    if profile.get("oauth_device_flow"):
+        result["external_command_argv"] = []
+        result["external_command_available"] = True
     return result
 
 
@@ -1472,6 +1807,31 @@ def default_providers(
         ModelProviderSpec("xai", ("grok-4.20-reasoning", "grok-4", "grok-4-fast"), "XAI_API_KEY", "https://api.x.ai/v1", False, True, True, False, 0.0, 0.0, 256000, "openai_compatible"),
         ModelProviderSpec("kimi", ("kimi-k2.5", "kimi-k2-turbo-preview", "kimi-k2-thinking"), "KIMI_API_KEY", "https://api.moonshot.ai/v1", False, True, True, False, 0.0, 0.0, 256000, "openai_compatible"),
         ModelProviderSpec("minimax", ("MiniMax-M2.7", "MiniMax-M2.5", "MiniMax-M2"), "MINIMAX_API_KEY", "https://api.minimax.io/v1", False, True, False, False, 0.0, 0.0, 128000, "openai_compatible"),
+        ModelProviderSpec(
+            "minimax-oauth",
+            ("MiniMax-M2.7", "MiniMax-M2.7-highspeed"),
+            None,
+            MINIMAX_OAUTH_INFERENCE_BASE_URL,
+            False,
+            True,
+            False,
+            False,
+            0.0,
+            0.0,
+            204800,
+            "anthropic",
+            "oauth",
+            {
+                "auth_surface": "oauth_device",
+                "compatibility": "anthropic_messages",
+                "portal_base_url": MINIMAX_OAUTH_PORTAL_BASE_URL,
+                "client_id": MINIMAX_OAUTH_CLIENT_ID,
+                "scope": MINIMAX_OAUTH_SCOPE,
+                "access_token_secret": MINIMAX_OAUTH_ACCESS_TOKEN_SECRET,
+                "refresh_token_secret": MINIMAX_OAUTH_REFRESH_TOKEN_SECRET,
+                "refresh_skew_seconds": MINIMAX_OAUTH_REFRESH_SKEW_SECONDS,
+            },
+        ),
         ModelProviderSpec(
             "minimax-token-plan",
             ("MiniMax-M2.7", "MiniMax-M2.7-highspeed", "MiniMax-M2.5", "MiniMax-M2.5-highspeed", "MiniMax-M2.1", "MiniMax-M2.1-highspeed", "MiniMax-M2"),

@@ -1060,7 +1060,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(auth_targets["GitHub Copilot"]["status"], "official_cli_bridge_available")
             self.assertEqual(auth_targets["DeepSeek"]["status"], "api_key_ready")
             self.assertEqual(auth_targets["MiniMax Token Plan"]["status"], "api_key_ready")
-            self.assertEqual(auth_targets["MiniMax OAuth"]["status"], "manual_provider_handoff_only")
+            self.assertEqual(auth_targets["MiniMax OAuth"]["status"], "oauth_device_flow_available")
             self.assertEqual(auth_targets["Qwen Code Coding Plan subscription"]["required_auth"], ["subscription"])
             self.assertEqual(auth_targets["Qwen Code Coding Plan subscription"]["status"], "official_cli_bridge_available")
             self.assertFalse(any(row["raw_tokens_captured"] for row in auth_parity["targets"]))

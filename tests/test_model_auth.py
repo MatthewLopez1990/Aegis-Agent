@@ -831,25 +831,55 @@ class ModelAuthTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello"}])
 
-    def test_manual_provider_native_auth_handoff_never_captures_tokens(self) -> None:
+    def test_minimax_oauth_login_brokers_tokens_without_raw_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
             root = Path(temp)
             secret_path = root / ".aegis" / "secrets.json"
             registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"), SecretsBroker(secret_path))
 
-            with (
-                patch("aegis.models.registry.shutil.which", return_value=None),
-                patch("aegis.models.registry.subprocess.run") as run,
-            ):
-                status = registry.login_provider_external("minimax", method="oauth", run_external=True)
+            class FakeResponse:
+                def __init__(self, payload: dict[str, object]) -> None:
+                    self.payload = payload
 
-            run.assert_not_called()
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps(self.payload).encode("utf-8")
+
+            captured: list[tuple[str, str]] = []
+
+            def fake_open(request, timeout):
+                body = request.data.decode("utf-8")
+                captured.append((request.full_url, body))
+                if request.full_url.endswith("/oauth/code"):
+                    return FakeResponse({"user_code": "ABCD-EFGH", "verification_uri": "https://api.minimax.io/oauth/verify", "expired_in": 60, "interval": 1, "state": "state-123"})
+                return FakeResponse({"status": "success", "access_token": "mx-access-secret", "refresh_token": "mx-refresh-secret", "expired_in": 3600, "token_type": "Bearer"})
+
+            with patch("aegis.models.registry._minimax_pkce_pair", return_value=("verifier", "challenge", "state-123")), patch("aegis.models.registry._open_auth_request", fake_open):
+                status = registry.login_provider_external("minimax-oauth", method="oauth", run_external=True, timeout_seconds=5)
+
             self.assertEqual(status["target"], "MiniMax OAuth")
-            self.assertEqual(status["status"], "external_login_manual_required")
-            self.assertFalse(status["external_command_available"])
-            self.assertFalse(status["external_login_attempted"])
+            self.assertEqual(status["status"], "external_login_verified")
+            self.assertEqual(status["auth_source"], "oauth_device_flow")
+            self.assertTrue(status["oauth_token_brokered"])
             self.assertFalse(status["token_captured"])
-            self.assertFalse(secret_path.exists())
+            self.assertNotIn("mx-access-secret", json.dumps(status))
+            self.assertNotIn("mx-refresh-secret", json.dumps(status))
+            self.assertTrue(secret_path.exists())
+            self.assertEqual(registry.secrets_broker.resolve_stored_secret("MINIMAX_OAUTH_ACCESS_TOKEN"), "mx-access-secret")
+            self.assertEqual(registry.secrets_broker.resolve_stored_secret("MINIMAX_OAUTH_REFRESH_TOKEN"), "mx-refresh-secret")
+            self.assertIn("code_challenge=challenge", captured[0][1])
+            self.assertIn("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Auser_code", captured[1][1])
+            targets = registry.auth_targets()
+            by_target = {row["target"]: row for row in targets["targets"]}
+            self.assertEqual(by_target["MiniMax OAuth"]["status"], "external_login_verified")
+            self.assertEqual(by_target["MiniMax OAuth"]["bridge_status"], "oauth_device_flow_ready")
+            self.assertTrue(by_target["MiniMax OAuth"]["oauth_token_brokered"])
+            self.assertNotIn("MiniMax OAuth", targets["subscription_bridge_targets"])
 
     def test_verified_provider_native_auth_links_update_targets_and_logout(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
@@ -935,7 +965,9 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(by_target["MiniMax Token Plan"]["status"], "api_key_ready")
             self.assertEqual(by_target["MiniMax Token Plan"]["required_auth"], ["api_key"])
             self.assertEqual(by_target["MiniMax Token Plan"]["account_surface"], "MiniMax Token Plan")
-            self.assertEqual(by_target["MiniMax OAuth"]["status"], "manual_provider_handoff_only")
+            self.assertEqual(by_target["MiniMax OAuth"]["status"], "oauth_device_flow_available")
+            self.assertEqual(by_target["MiniMax OAuth"]["provider_token_source"], "official MiniMax OAuth device-code flow")
+            self.assertEqual(by_target["MiniMax OAuth"]["invocation_bridge"], "minimax_oauth_anthropic_compatible")
             self.assertEqual(by_target["AWS Bedrock"]["status"], "official_cli_bridge_available")
             self.assertEqual(by_target["Azure Foundry API key"]["status"], "api_key_ready")
             self.assertEqual(by_target["Azure Foundry"]["status"], "official_cli_bridge_available")
@@ -1190,6 +1222,127 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(result.input_tokens, 11)
             self.assertEqual(result.output_tokens, 4)
             self.assertEqual(result.raw_usage["bridge"], "minimax_anthropic_compatible")
+
+    def test_minimax_oauth_live_client_uses_brokered_oauth_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            broker = SecretsBroker(root / ".aegis" / "secrets.json")
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"), broker)
+            broker.store_secret(name="MINIMAX_OAUTH_ACCESS_TOKEN", value="mx-access-secret")
+            broker.store_secret(name="MINIMAX_OAUTH_REFRESH_TOKEN", value="mx-refresh-secret")
+            registry._remember_external_auth_link(  # noqa: SLF001 - test seeds verified external auth metadata.
+                "minimax-oauth",
+                "oauth",
+                {
+                    "target": "MiniMax OAuth",
+                    "auth_source": "oauth_device_flow",
+                    "aegis_bridge_status": "oauth_device_flow_ready",
+                    "oauth_token_brokered": True,
+                    "access_token_secret": "MINIMAX_OAUTH_ACCESS_TOKEN",
+                    "refresh_token_secret": "MINIMAX_OAUTH_REFRESH_TOKEN",
+                    "portal_base_url": "https://api.minimax.io",
+                    "inference_base_url": "https://api.minimax.io/anthropic/v1",
+                    "client_id": "78257093-7e40-4613-99e0-527b14b39113",
+                    "scope": "group_id profile model.completion",
+                    "token_type": "Bearer",
+                    "expires_at": "2999-01-01T00:00:00+00:00",
+                    "expires_in": 3600,
+                    "refresh_skew_seconds": 60,
+                    "invocation_bridge": "minimax_oauth_anthropic_compatible",
+                },
+            )
+            route = registry.route("minimax-oauth/MiniMax-M2.7")
+
+            class FakeResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self) -> bytes:
+                    return b'{"content":[{"type":"text","text":"oauth response"}],"usage":{"input_tokens":7,"output_tokens":3}}'
+
+            captured: dict[str, object] = {}
+
+            def fake_urlopen(request, timeout):
+                captured["url"] = request.full_url
+                captured["headers"] = dict(request.header_items())
+                captured["payload"] = json.loads(request.data.decode("utf-8"))
+                self.assertNotIn("mx-access-secret", request.data.decode("utf-8"))
+                return FakeResponse()
+
+            with patch("aegis.models.client._open_model_request", fake_urlopen):
+                result = LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello"}])
+
+            self.assertEqual(route.auth_method, "oauth_token")
+            self.assertEqual(captured["url"], "https://api.minimax.io/anthropic/v1/messages")
+            self.assertEqual(captured["headers"]["X-api-key"], "mx-access-secret")
+            self.assertEqual(captured["headers"]["Anthropic-version"], "2023-06-01")
+            self.assertEqual(captured["payload"]["model"], "MiniMax-M2.7")
+            self.assertEqual(result.provider, "minimax-oauth")
+            self.assertEqual(result.content, "oauth response")
+            self.assertEqual(result.raw_usage["source"], "oauth_device_flow")
+            self.assertEqual(result.raw_usage["bridge"], "minimax_oauth_anthropic_compatible")
+
+    def test_minimax_oauth_live_client_refreshes_expired_brokered_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            broker = SecretsBroker(root / ".aegis" / "secrets.json")
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"), broker)
+            broker.store_secret(name="MINIMAX_OAUTH_ACCESS_TOKEN", value="mx-old-access")
+            broker.store_secret(name="MINIMAX_OAUTH_REFRESH_TOKEN", value="mx-refresh-secret")
+            registry._remember_external_auth_link(  # noqa: SLF001 - test seeds verified external auth metadata.
+                "minimax-oauth",
+                "oauth",
+                {
+                    "target": "MiniMax OAuth",
+                    "auth_source": "oauth_device_flow",
+                    "aegis_bridge_status": "oauth_device_flow_ready",
+                    "oauth_token_brokered": True,
+                    "access_token_secret": "MINIMAX_OAUTH_ACCESS_TOKEN",
+                    "refresh_token_secret": "MINIMAX_OAUTH_REFRESH_TOKEN",
+                    "portal_base_url": "https://api.minimax.io",
+                    "inference_base_url": "https://api.minimax.io/anthropic/v1",
+                    "client_id": "78257093-7e40-4613-99e0-527b14b39113",
+                    "expires_at": "2000-01-01T00:00:00+00:00",
+                    "refresh_skew_seconds": 60,
+                },
+            )
+            route = registry.route("minimax-oauth/MiniMax-M2.7")
+
+            class FakeResponse:
+                def __init__(self, payload: dict[str, object]) -> None:
+                    self.payload = payload
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps(self.payload).encode("utf-8")
+
+            captured: list[tuple[str, dict[str, str], str]] = []
+
+            def fake_urlopen(request, timeout):
+                body = request.data.decode("utf-8")
+                headers = dict(request.header_items())
+                captured.append((request.full_url, headers, body))
+                if request.full_url.endswith("/oauth/token"):
+                    return FakeResponse({"status": "success", "access_token": "mx-new-access", "refresh_token": "mx-new-refresh"})
+                self.assertEqual(headers["X-api-key"], "mx-new-access")
+                return FakeResponse({"content": [{"type": "text", "text": "refreshed response"}], "usage": {"input_tokens": 1, "output_tokens": 1}})
+
+            with patch("aegis.models.client._open_model_request", fake_urlopen):
+                result = LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello"}])
+
+            self.assertEqual(captured[0][0], "https://api.minimax.io/oauth/token")
+            self.assertIn("refresh_token=mx-refresh-secret", captured[0][2])
+            self.assertEqual(broker.resolve_stored_secret("MINIMAX_OAUTH_ACCESS_TOKEN"), "mx-new-access")
+            self.assertEqual(broker.resolve_stored_secret("MINIMAX_OAUTH_REFRESH_TOKEN"), "mx-new-refresh")
+            self.assertEqual(result.content, "refreshed response")
 
     def test_openrouter_live_client_uses_brokered_secret_and_records_usage(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):

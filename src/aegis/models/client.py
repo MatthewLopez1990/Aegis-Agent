@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import ipaddress
 import json
 import os
@@ -10,9 +11,10 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import time
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from aegis.models.registry import ModelRoute
@@ -87,6 +89,8 @@ class LiveModelClient:
             return self._chat_azure_foundry(route, messages, temperature=temperature)
         if route.provider.provider == "github-copilot":
             return self._chat_github_copilot_cli(route, messages, temperature=temperature)
+        if route.provider.provider == "minimax-oauth":
+            return self._chat_minimax_oauth(route, messages, temperature=temperature)
         if route.provider.provider == "minimax-token-plan":
             return self._chat_minimax_token_plan(route, messages, temperature=temperature)
         if route.provider.provider in OPENAI_COMPATIBLE_PROVIDERS:
@@ -673,6 +677,49 @@ class LiveModelClient:
             raw_usage=raw_usage,
         )
 
+    def _chat_minimax_oauth(
+        self,
+        route: ModelRoute,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+    ) -> ModelInvocationResult:
+        if route.auth_method != "oauth_token":
+            raise ValueError("minimax-oauth provider requires verified MiniMax OAuth login")
+        if route.provider.base_url is None:
+            raise ValueError("minimax-oauth provider has no base URL")
+        access_token = self._resolve_minimax_oauth_access_token(route)
+        system, anthropic_messages = _anthropic_messages(messages)
+        payload: dict[str, Any] = {
+            "model": route.model,
+            "messages": anthropic_messages,
+            "max_tokens": 4096,
+            "temperature": temperature,
+        }
+        if system:
+            payload["system"] = system
+        response = self._post_json(
+            f"{route.provider.base_url}/messages",
+            payload=payload,
+            headers={
+                "Content-Type": "application/json",
+                "x-api-key": access_token,
+                "anthropic-version": "2023-06-01",
+            },
+        )
+        content = _anthropic_text(response.get("content", []))
+        usage = response.get("usage", {}) if isinstance(response.get("usage", {}), dict) else {}
+        raw_usage = dict(usage)
+        raw_usage.update({"source": "oauth_device_flow", "bridge": "minimax_oauth_anthropic_compatible"})
+        return ModelInvocationResult(
+            provider=route.provider.provider,
+            model=route.model,
+            content=content,
+            input_tokens=int(usage.get("input_tokens", 0) or 0),
+            output_tokens=int(usage.get("output_tokens", 0) or 0),
+            raw_usage=raw_usage,
+        )
+
     def _chat_cohere(
         self,
         route: ModelRoute,
@@ -871,6 +918,34 @@ class LiveModelClient:
         )
         return self.secrets_broker.resolve_for_authorized_tool(handle, requester=f"model:{route.provider.provider}")
 
+    def _resolve_minimax_oauth_access_token(self, route: ModelRoute) -> str:
+        metadata = {**route.provider.metadata, **route.auth_metadata}
+        access_secret = str(metadata.get("access_token_secret") or "MINIMAX_OAUTH_ACCESS_TOKEN")
+        refresh_secret = str(metadata.get("refresh_token_secret") or "MINIMAX_OAUTH_REFRESH_TOKEN")
+        if not _oauth_expires_soon(str(metadata.get("expires_at") or ""), int(metadata.get("refresh_skew_seconds") or 60)):
+            return self.secrets_broker.resolve_stored_secret(access_secret)
+        refresh_token = self.secrets_broker.resolve_stored_secret(refresh_secret)
+        portal_base_url = str(metadata.get("portal_base_url") or "https://api.minimax.io").rstrip("/")
+        client_id = str(metadata.get("client_id") or "78257093-7e40-4613-99e0-527b14b39113")
+        payload = self._post_form(
+            f"{portal_base_url}/oauth/token",
+            {
+                "grant_type": "refresh_token",
+                "client_id": client_id,
+                "refresh_token": refresh_token,
+            },
+        )
+        if payload.get("status") != "success":
+            raise RuntimeError("MiniMax OAuth refresh did not return success")
+        access_token = str(payload.get("access_token") or "").strip()
+        if not access_token:
+            raise RuntimeError("MiniMax OAuth refresh response did not include access_token")
+        self.secrets_broker.store_secret(name=access_secret, value=access_token)
+        rotated_refresh = str(payload.get("refresh_token") or "").strip()
+        if rotated_refresh:
+            self.secrets_broker.store_secret(name=refresh_secret, value=rotated_refresh)
+        return access_token
+
     def _post_openai_compatible(self, url: str, *, api_key: str | None, payload: dict[str, Any]) -> dict[str, Any]:
         headers = {
             "Content-Type": "application/json",
@@ -905,6 +980,27 @@ class LiveModelClient:
             raise RuntimeError("model provider returned an invalid JSON payload")
         return decoded
 
+    def _post_form(self, url: str, data: dict[str, str]) -> dict[str, Any]:
+        body = urlencode(data).encode("utf-8")
+        request = Request(
+            url,
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+        )
+        try:
+            with _open_model_request(request, timeout=self.timeout_seconds) as response:  # noqa: S310 - URL is provider registry controlled.
+                raw = response.read().decode("utf-8")
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(f"model provider HTTP {exc.code}: {detail}") from exc
+        except URLError as exc:
+            raise RuntimeError(f"model provider connection failed: {exc.reason}") from exc
+        decoded = json.loads(raw)
+        if not isinstance(decoded, dict):
+            raise RuntimeError("model provider returned an invalid JSON payload")
+        return decoded
+
 
 def _anthropic_messages(messages: list[dict[str, str]]) -> tuple[str, list[dict[str, str]]]:
     system_parts: list[str] = []
@@ -925,6 +1021,18 @@ def _anthropic_messages(messages: list[dict[str, str]]) -> tuple[str, list[dict[
     if not routed:
         routed.append({"role": "user", "content": "[no user content]"})
     return "\n\n".join(system_parts), routed
+
+
+def _oauth_expires_soon(expires_at: str, skew_seconds: int) -> bool:
+    if not expires_at:
+        return True
+    try:
+        parsed = datetime.fromisoformat(expires_at)
+    except ValueError:
+        return True
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (parsed.timestamp() - time.time()) <= max(0, skew_seconds)
 
 
 def _subscription_cli_prompt(messages: list[dict[str, str]], *, provider: str, temperature: float) -> str:
