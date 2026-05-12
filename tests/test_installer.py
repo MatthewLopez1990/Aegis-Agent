@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -69,6 +70,14 @@ class InstallerTests(unittest.TestCase):
             self.assertIn("Aegis Agent local-first runtime", help_result.stdout)
             health_result = subprocess.run([str(shim), "--data-dir", str(state_dir), "health"], check=True, text=True, capture_output=True)
             self.assertIn('"ok": true', health_result.stdout)
+            doctor_result = subprocess.run([str(shim), "--data-dir", str(state_dir), "models", "auth", "doctor"], check=True, text=True, capture_output=True)
+            doctor = json.loads(doctor_result.stdout)["auth_doctor"]
+            self.assertEqual(doctor["status"], "operator_login_required")
+            self.assertEqual(doctor["checked_login_target_count"], 11)
+            self.assertEqual(doctor["implementation_gap_count"], 0)
+            self.assertFalse(doctor["raw_secret_values_included"])
+            self.assertNotIn("sk-", doctor_result.stdout)
+            self.assertNotIn("refresh_token", doctor_result.stdout.lower())
 
 
 if __name__ == "__main__":
