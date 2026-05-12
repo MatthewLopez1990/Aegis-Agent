@@ -161,6 +161,8 @@ class KanbanManager:
         tool_allowlist: list[str] | tuple[str, ...] | None = None,
         max_parallel_cards: int = 1,
         recursive_depth_limit: int = 0,
+        max_tool_calls: int = 0,
+        max_runtime_seconds: int = 0,
         network_policy: str = "disabled",
         workspace_scope: str = "current_workspace",
         actor: str = "operator",
@@ -171,6 +173,8 @@ class KanbanManager:
             tool_allowlist=tuple(tool_allowlist or ()),
             max_parallel_cards=max_parallel_cards,
             recursive_depth_limit=recursive_depth_limit,
+            max_tool_calls=max_tool_calls,
+            max_runtime_seconds=max_runtime_seconds,
             network_policy=network_policy,
             workspace_scope=workspace_scope,
         )
@@ -222,6 +226,23 @@ class KanbanManager:
         assert board is not None
         profiles = _profiles_from_board(board)
         profile = _select_profile_for_role(profiles, role)
+        existing_cards = self.list_cards(board["id"])
+        open_profile_cards = _open_profile_card_count(existing_cards, str(profile["id"]))
+        max_parallel_cards = _profile_int(profile, "max_parallel_cards", 1)
+        if open_profile_cards >= max_parallel_cards:
+            self.audit_logger.append(
+                "subagent.budget_denied",
+                {
+                    "profile_id": profile["id"],
+                    "open_profile_cards": open_profile_cards,
+                    "max_parallel_cards": max_parallel_cards,
+                    "raw_instruction_included": False,
+                    "autonomous_runtime": False,
+                },
+                task_id=task_id,
+            )
+            raise ValueError(f"subagent profile {profile['id']!r} has no available parallel card budget")
+        budget_snapshot = _profile_budget_snapshot(profile, open_profile_cards=open_profile_cards)
         return self.add_card(
             board["id"],
             title=f"{role}: {task[:80]}",
@@ -236,6 +257,8 @@ class KanbanManager:
                 "profile_id": profile["id"],
                 "profile_status": "matched" if _profile_id(role) == profile["id"] and profile.get("enabled", True) else "default_profile",
                 "profile_snapshot": _profile_summary(profile),
+                "budget_snapshot": budget_snapshot,
+                "budget_enforced": True,
                 "source_tool": "subagent_delegate",
                 "isolation": "durable_card",
                 "instructions_tainted": True,
@@ -299,10 +322,10 @@ class KanbanManager:
                 "operator_lane_control",
                 "handoff_receipts",
                 "agent_profile_lifecycle",
+                "recursive_budget_limits",
             ],
             "remaining_depth_work": [
                 "isolated_parallel_runtime",
-                "recursive_budget_limits",
             ],
             "raw_instruction_included": False,
         }
@@ -380,6 +403,8 @@ def _default_subagent_profile(timestamp: str) -> dict[str, Any]:
         "tool_allowlist": [],
         "max_parallel_cards": 1,
         "recursive_depth_limit": 0,
+        "max_tool_calls": 0,
+        "max_runtime_seconds": 0,
         "network_policy": "disabled",
         "workspace_scope": "current_workspace",
         "autonomous_runtime": False,
@@ -396,6 +421,8 @@ def _build_subagent_profile(
     tool_allowlist: tuple[str, ...],
     max_parallel_cards: int,
     recursive_depth_limit: int,
+    max_tool_calls: int = 0,
+    max_runtime_seconds: int = 0,
     network_policy: str,
     workspace_scope: str,
 ) -> dict[str, Any]:
@@ -404,6 +431,10 @@ def _build_subagent_profile(
         raise ValueError("subagent recursive depth must remain 0 until autonomous isolation is enabled")
     if max_parallel_cards < 1 or max_parallel_cards > 20:
         raise ValueError("subagent max_parallel_cards must be between 1 and 20")
+    if max_tool_calls < 0 or max_tool_calls > 1000:
+        raise ValueError("subagent max_tool_calls must be between 0 and 1000")
+    if max_runtime_seconds < 0 or max_runtime_seconds > 86400:
+        raise ValueError("subagent max_runtime_seconds must be between 0 and 86400")
     if network_policy not in {"disabled", "allowlisted"}:
         raise ValueError("subagent network_policy must be disabled or allowlisted")
     profile_name = _safe_label(name)
@@ -418,6 +449,8 @@ def _build_subagent_profile(
         "tool_allowlist": _safe_tool_allowlist(tool_allowlist),
         "max_parallel_cards": int(max_parallel_cards),
         "recursive_depth_limit": recursive_depth_limit,
+        "max_tool_calls": int(max_tool_calls),
+        "max_runtime_seconds": int(max_runtime_seconds),
         "network_policy": network_policy,
         "workspace_scope": _safe_label(workspace_scope, limit=160) or "current_workspace",
         "autonomous_runtime": False,
@@ -447,6 +480,40 @@ def _select_profile_for_role(profiles: dict[str, dict[str, Any]], role: str) -> 
     return _default_subagent_profile(now_utc())
 
 
+def _profile_int(profile: dict[str, Any], key: str, default: int) -> int:
+    try:
+        return int(profile.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _open_profile_card_count(cards: list[dict[str, Any]], profile_id: str) -> int:
+    count = 0
+    for card in cards:
+        if card.get("lane") == "done":
+            continue
+        metadata = card.get("metadata", {})
+        if metadata.get("profile_id") == profile_id:
+            count += 1
+    return count
+
+
+def _profile_budget_snapshot(profile: dict[str, Any], *, open_profile_cards: int) -> dict[str, Any]:
+    return {
+        "budget_schema": "aegis.subagent.budget.v1",
+        "profile_id": profile.get("id"),
+        "open_profile_cards_at_create": open_profile_cards,
+        "max_parallel_cards": _profile_int(profile, "max_parallel_cards", 1),
+        "recursive_depth_limit": _profile_int(profile, "recursive_depth_limit", 0),
+        "max_tool_calls": _profile_int(profile, "max_tool_calls", 0),
+        "max_runtime_seconds": _profile_int(profile, "max_runtime_seconds", 0),
+        "network_policy": profile.get("network_policy", "disabled"),
+        "workspace_scope": profile.get("workspace_scope", "current_workspace"),
+        "autonomous_runtime": False,
+        "enforcement": "delegation_queue_preflight",
+    }
+
+
 def _profile_summary(profile: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": profile.get("id"),
@@ -455,8 +522,10 @@ def _profile_summary(profile: dict[str, Any]) -> dict[str, Any]:
         "enabled": bool(profile.get("enabled", True)),
         "status": profile.get("status", "enabled" if profile.get("enabled", True) else "disabled"),
         "tool_allowlist": list(profile.get("tool_allowlist") or []),
-        "max_parallel_cards": int(profile.get("max_parallel_cards", 1)),
-        "recursive_depth_limit": int(profile.get("recursive_depth_limit", 0)),
+        "max_parallel_cards": _profile_int(profile, "max_parallel_cards", 1),
+        "recursive_depth_limit": _profile_int(profile, "recursive_depth_limit", 0),
+        "max_tool_calls": _profile_int(profile, "max_tool_calls", 0),
+        "max_runtime_seconds": _profile_int(profile, "max_runtime_seconds", 0),
         "network_policy": profile.get("network_policy", "disabled"),
         "workspace_scope": profile.get("workspace_scope", "current_workspace"),
         "autonomous_runtime": bool(profile.get("autonomous_runtime", False)),
@@ -496,6 +565,8 @@ def _subagent_card_summary(card: dict[str, Any]) -> dict[str, Any]:
         "profile_id": metadata.get("profile_id"),
         "profile_status": metadata.get("profile_status"),
         "profile_snapshot": metadata.get("profile_snapshot"),
+        "budget_snapshot": metadata.get("budget_snapshot"),
+        "budget_enforced": bool(metadata.get("budget_enforced", False)),
         "created_at": card.get("created_at"),
         "updated_at": card.get("updated_at"),
         "description_preview": _preview(str(card.get("description", ""))),

@@ -563,14 +563,14 @@ def _live_gap_backlog(
             "status": "delegation_queue_ready_runtime_gap",
             "detail": (
                 f"Approved subagent work is tracked through a durable, auditable delegation queue with "
-                f"{subagent_delegations['open_cards']} open card(s), {subagent_delegations.get('enabled_profile_count', 0)} enabled profile(s), and sanitized handoff receipts; recursive autonomous worker execution remains blocked until isolation and budgets are implemented."
+                f"{subagent_delegations['open_cards']} open card(s), {subagent_delegations.get('enabled_profile_count', 0)} enabled profile(s), enforced queue budgets, and sanitized handoff receipts; recursive autonomous worker execution remains blocked until isolation is implemented."
             ),
             "sample_tools": ["subagent_delegate"],
             "operator_checklist": _subagent_operator_checklist(subagent_delegations),
             "next_steps": [
                 "Add isolated worker profiles before running delegated tasks autonomously.",
                 "Bind delegated result receipts to parent task completion.",
-                "Enforce recursive budget, tool, workspace, and network limits before enabling nested agent loops.",
+                "Bind budgeted profiles to isolated worker execution before enabling nested agent loops.",
             ],
             "required_controls": ["human_approval", "tainted_instruction_metadata", "durable_queue", "recursive_budget_limits", "handoff_receipts"],
             "verification_gates": ["approval_required_delegation", "status_queue_visibility", "raw_instruction_redaction", "blocked_autonomous_runtime"],
@@ -639,9 +639,14 @@ def _subagent_operator_checklist(subagent_delegations: dict[str, Any]) -> list[d
             "detail": "Durable subagent profiles bind roles to approval-gated tool, workspace, network, and recursion metadata before any autonomous worker loop exists.",
         },
         {
+            "control": "recursive_budget_limits",
+            "state": "enforced" if "recursive_budget_limits" in subagent_delegations.get("implemented_controls", []) else "pending",
+            "detail": "Delegation creation enforces profile parallel-card ceilings and pins recursion, tool-call, runtime, workspace, and network budgets to every card.",
+        },
+        {
             "control": "isolated_parallel_runtime",
             "state": "blocked",
-            "detail": "Recursive autonomous subagents remain disabled until worker isolation and budgets are implemented.",
+            "detail": "Recursive autonomous subagents remain disabled until worker isolation is implemented.",
         },
     ]
 

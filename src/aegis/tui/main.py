@@ -4933,6 +4933,8 @@ def _parse_subagent_profile_options(parts: list[str]) -> dict[str, Any]:
         "tool_allowlist": [],
         "max_parallel_cards": 1,
         "recursive_depth_limit": 0,
+        "max_tool_calls": 0,
+        "max_runtime_seconds": 0,
         "network_policy": "disabled",
         "workspace_scope": "current_workspace",
     }
@@ -4953,6 +4955,14 @@ def _parse_subagent_profile_options(parts: list[str]) -> dict[str, Any]:
             continue
         if part == "--recursive-depth-limit":
             options["recursive_depth_limit"] = int(_next_required(parts, index, "--recursive-depth-limit"))
+            index += 2
+            continue
+        if part == "--max-tool-calls":
+            options["max_tool_calls"] = int(_next_required(parts, index, "--max-tool-calls"))
+            index += 2
+            continue
+        if part == "--max-runtime-seconds":
+            options["max_runtime_seconds"] = int(_next_required(parts, index, "--max-runtime-seconds"))
             index += 2
             continue
         if part == "--network-policy":

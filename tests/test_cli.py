@@ -354,6 +354,10 @@ class CliTests(unittest.TestCase):
                         "web_search",
                         "--max-parallel-cards",
                         "2",
+                        "--max-tool-calls",
+                        "4",
+                        "--max-runtime-seconds",
+                        "60",
                     ]
                 )
             )
@@ -362,9 +366,13 @@ class CliTests(unittest.TestCase):
             self.assertEqual(profile["profile"]["id"], "researcher")
             self.assertEqual(profile["profile"]["tool_allowlist"], ["web_search"])
             self.assertEqual(profile["profile"]["recursive_depth_limit"], 0)
+            self.assertEqual(profile["profile"]["max_tool_calls"], 4)
+            self.assertEqual(profile["profile"]["max_runtime_seconds"], 60)
             self.assertFalse(profile["profile"]["autonomous_runtime"])
             self.assertIn("agent_profile_lifecycle", profile["subagents"]["implemented_controls"])
+            self.assertIn("recursive_budget_limits", profile["subagents"]["implemented_controls"])
             self.assertNotIn("agent_profile_lifecycle", profile["subagents"]["remaining_depth_work"])
+            self.assertNotIn("recursive_budget_limits", profile["subagents"]["remaining_depth_work"])
 
             gated = dispatch(
                 parser.parse_args(
@@ -403,6 +411,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(delegated["subagents"]["cards"][0]["parent_task_id"], "parent-task")
             self.assertEqual(delegated["subagents"]["cards"][0]["profile_id"], "researcher")
             self.assertEqual(delegated["subagents"]["cards"][0]["profile_snapshot"]["tool_allowlist"], ["web_search"])
+            self.assertTrue(delegated["subagents"]["cards"][0]["budget_enforced"])
+            self.assertEqual(delegated["subagents"]["cards"][0]["budget_snapshot"]["max_parallel_cards"], 2)
+            self.assertEqual(delegated["subagents"]["cards"][0]["budget_snapshot"]["max_tool_calls"], 4)
             self.assertIn("handoff_receipts", delegated["subagents"]["implemented_controls"])
             self.assertNotIn("handoff_receipts", delegated["subagents"]["remaining_depth_work"])
 

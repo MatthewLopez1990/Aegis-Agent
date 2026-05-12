@@ -665,11 +665,12 @@ class ApiServerSecurityTests(unittest.TestCase):
                 subagent_profile = _json_post(
                     port,
                     "/subagents/profiles",
-                    {"name": "Researcher", "tool_allowlist": ["web_search"], "max_parallel_cards": 2},
+                    {"name": "Researcher", "tool_allowlist": ["web_search"], "max_parallel_cards": 2, "max_tool_calls": 4},
                     token=token,
                 )
                 self.assertTrue(subagent_profile["ok"])
                 self.assertEqual(subagent_profile["profile"]["id"], "researcher")
+                self.assertEqual(subagent_profile["profile"]["max_tool_calls"], 4)
                 listed_profiles = _json_get(port, "/subagents/profiles", token=token)
                 self.assertTrue(any(profile["id"] == "researcher" for profile in listed_profiles["profiles"]))
                 subagent_gated = _json_post(port, "/subagents/delegate", {"role": "Researcher", "task": "Compare provider auth gaps."}, token=token)
@@ -690,6 +691,8 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertTrue(subagent_replayed["ok"])
                 self.assertEqual(subagent_replayed["subagents"]["ready_cards"], 1)
                 self.assertEqual(subagent_replayed["subagents"]["cards"][0]["profile_id"], "researcher")
+                self.assertTrue(subagent_replayed["subagents"]["cards"][0]["budget_enforced"])
+                self.assertEqual(subagent_replayed["subagents"]["cards"][0]["budget_snapshot"]["max_tool_calls"], 4)
                 self.assertFalse(subagent_replayed["subagents"]["raw_instruction_included"])
                 subagent_handoff = _json_post(
                     port,

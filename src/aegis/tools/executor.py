@@ -607,7 +607,10 @@ class BuiltinToolExecutor:
         task = str(params["task"]).strip()
         if not role or not task:
             raise ToolExecutionError("subagent delegation requires non-empty role and task")
-        card = self.kanban.add_subagent_delegation(role=role, task=task, task_id=task_id)
+        try:
+            card = self.kanban.add_subagent_delegation(role=role, task=task, task_id=task_id)
+        except ValueError as exc:
+            raise ToolExecutionError(str(exc)) from exc
         return {
             "ok": True,
             "board_id": card["board_id"],

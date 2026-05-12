@@ -670,6 +670,8 @@ def build_parser() -> argparse.ArgumentParser:
     agents_profile_create.add_argument("--tool", action="append", default=[])
     agents_profile_create.add_argument("--max-parallel-cards", type=int, default=1)
     agents_profile_create.add_argument("--recursive-depth-limit", type=int, default=0)
+    agents_profile_create.add_argument("--max-tool-calls", type=int, default=0)
+    agents_profile_create.add_argument("--max-runtime-seconds", type=int, default=0)
     agents_profile_create.add_argument("--network-policy", choices=("disabled", "allowlisted"), default="disabled")
     agents_profile_create.add_argument("--workspace-scope", default="current_workspace")
     agents_profile_create.add_argument("--actor", default="operator")
@@ -1636,6 +1638,8 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 tool_allowlist=args.tool,
                 max_parallel_cards=args.max_parallel_cards,
                 recursive_depth_limit=args.recursive_depth_limit,
+                max_tool_calls=args.max_tool_calls,
+                max_runtime_seconds=args.max_runtime_seconds,
                 network_policy=args.network_policy,
                 workspace_scope=args.workspace_scope,
                 actor=args.actor,
