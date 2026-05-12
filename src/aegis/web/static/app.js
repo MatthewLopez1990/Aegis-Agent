@@ -2361,6 +2361,7 @@ document.getElementById("model-auth-form").addEventListener("submit", async (eve
     payload.api_key = apiKey;
   } else {
     payload.verify_external = document.getElementById("model-auth-verify-external").checked;
+    payload.run_external = document.getElementById("model-auth-run-external").checked;
   }
   const result = await api("/models/auth/login", { method: "POST", body: JSON.stringify(payload) });
   renderModelAuthOutput(result);
