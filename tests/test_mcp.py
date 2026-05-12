@@ -102,6 +102,45 @@ class McpTests(unittest.TestCase):
             self.assertIn("mcp.tool_called", audit_text)
             self.assertNotIn("abc123", audit_text)
 
+    def test_discovered_mcp_tools_register_virtual_tool_names(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            server_path = root / "fake_mcp.py"
+            server_path.write_text(FAKE_MCP_SERVER, encoding="utf-8")
+            orchestrator = build_orchestrator(data_dir=root / ".aegis", workspace=root)
+
+            row = orchestrator.mcp.register_discovered_server(
+                name="fake-api",
+                command=f"python3 {server_path}",
+                allowed_executables=("python3",),
+                include_tools=("echo",),
+                enabled=True,
+                metadata={"source": "test"},
+            )
+
+            self.assertEqual(row["allowed_tools"], ["echo"])
+            self.assertEqual(row["metadata"]["discovery"]["virtual_tools"][0]["virtual_name"], "mcp_fake_api_echo")
+            virtual_tools = orchestrator.mcp.virtual_tools()
+            self.assertEqual(virtual_tools[0]["name"], "mcp_fake_api_echo")
+            self.assertEqual(virtual_tools[0]["toolset"], "mcp-fake-api")
+            self.assertEqual(orchestrator.mcp.resolve_virtual_tool("mcp_fake_api_echo")["tool"], "echo")
+            specs = orchestrator.mcp.virtual_tool_specs()
+            self.assertEqual(specs[0]["name"], "mcp_fake_api_echo")
+            self.assertEqual(specs[0]["risk_level"], "high")
+
+            pending = orchestrator.tools.execute("mcp_fake_api_echo", {"text": "hello"}, approved=False)
+            self.assertEqual(pending["status"], "approval_required")
+            approved = orchestrator.tools.execute("mcp_fake_api_echo", {"text": "hello"}, approved=True)
+
+            self.assertEqual(approved["status"], "completed")
+            self.assertEqual(approved["server_name"], "fake-api")
+            self.assertEqual(approved["tool"], "echo")
+            self.assertIn("content", approved["result"])
+            self.assertIn("hello", approved["sanitized_context"])
+            audit_text = (root / ".aegis" / "audit.jsonl").read_text(encoding="utf-8")
+            self.assertIn("mcp.tools_discovered", audit_text)
+            self.assertIn("mcp.tool_called", audit_text)
+
     def test_mcp_call_denies_unallowlisted_executable(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

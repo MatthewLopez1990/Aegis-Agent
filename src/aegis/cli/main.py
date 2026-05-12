@@ -532,10 +532,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     model_sub.add_parser("usage", help="Show usage summary")
 
-    tools = subcommands.add_parser("tool", help="List or run built-in tools")
+    tools = subcommands.add_parser("tool", help="List or run governed tools")
     tool_sub = tools.add_subparsers(dest="tool_command", required=True)
     tool_sub.add_parser("list", help="List tools")
-    tool_run = tool_sub.add_parser("run", help="Run a governed built-in tool with JSON params")
+    tool_run = tool_sub.add_parser("run", help="Run a governed tool with JSON params")
     tool_run.add_argument("name")
     tool_run.add_argument("params", help="JSON object of tool params")
     tool_run.add_argument("--workspace", default=".")
@@ -652,6 +652,8 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_register.add_argument("name")
     mcp_register.add_argument("server_command")
     mcp_register.add_argument("--tool", action="append", default=[])
+    mcp_register.add_argument("--exclude-tool", action="append", default=[])
+    mcp_register.add_argument("--discover", action="store_true")
     mcp_register.add_argument("--enable", action="store_true")
     mcp_register.add_argument("--no-approval", action="store_true")
     mcp_call = mcp_sub.add_parser("call", help="Call an allowlisted MCP tool after approval")
@@ -1354,7 +1356,8 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
 
     if args.command == "tool":
         if args.tool_command == "list":
-            return {"tools": ToolCatalog().list()}
+            registry = _mcp_registry(config)
+            return {"tools": [*ToolCatalog().list(), *registry.virtual_tool_specs()]}
         if args.tool_command == "run":
             params = json.loads(args.params)
             if not isinstance(params, dict):
@@ -1486,6 +1489,17 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
     if args.command == "mcp":
         registry = _mcp_registry(config)
         if args.mcp_command == "register":
+            if args.discover:
+                return registry.register_discovered_server(
+                    name=args.name,
+                    command=args.server_command,
+                    allowed_executables=config.allowed_shell_commands,
+                    include_tools=tuple(args.tool),
+                    exclude_tools=tuple(args.exclude_tool),
+                    enabled=args.enable,
+                    approval_required=not args.no_approval,
+                    metadata={"source": "cli"},
+                )
             return registry.register_server(
                 name=args.name,
                 command=args.server_command,
@@ -1501,7 +1515,7 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 approved=args.approved,
             )
         if args.mcp_command == "list":
-            return {"servers": registry.list_servers()}
+            return {"servers": registry.list_servers(), "virtual_tools": registry.virtual_tools()}
 
     if args.command == "hooks":
         manager = _hook_manager(config, workspace=args.workspace)

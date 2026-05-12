@@ -238,7 +238,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 self._json(_model_route_payload(orchestrator.models.route(identifier)))
                 return
             if path == "/tools":
-                self._json({"tools": orchestrator.tool_catalog.list()})
+                self._json({"tools": [*orchestrator.tool_catalog.list(), *orchestrator.mcp.virtual_tool_specs()]})
                 return
             if path == "/backends":
                 self._json({"backends": orchestrator.execution_backends.list()})
@@ -2066,14 +2066,21 @@ def _tool_run_approval(orchestrator: Any, *, name: str, params: dict[str, Any], 
         decision = approval.get("decision") or {}
         return {"approved": True, "admin_approved": bool(decision.get("admin"))}
 
-    spec = orchestrator.tool_catalog.get(name)
-    if not spec.approval_required:
+    virtual_mcp_tool = orchestrator.mcp.resolve_virtual_tool(name)
+    if virtual_mcp_tool is not None:
+        approval_required = bool(virtual_mcp_tool.get("approval_required", True))
+        risk_level = RiskLevel.HIGH
+    else:
+        spec = orchestrator.tool_catalog.get(name)
+        approval_required = spec.approval_required
+        risk_level = spec.risk_level
+    if not approval_required:
         return {"approved": False, "response": {}}
     approval = orchestrator.approvals.request_approval(
         ApprovalRequest(
             task_id=None,
             reason=f"tool {name} requires approval",
-            risk_level=spec.risk_level,
+            risk_level=risk_level,
             payload=payload,
         )
     )

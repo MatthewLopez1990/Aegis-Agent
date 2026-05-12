@@ -84,6 +84,9 @@ class BuiltinToolExecutor:
         self.secrets_broker = secrets_broker or SecretsBroker()
 
     def execute(self, name: str, params: dict[str, Any], *, approved: bool = False, admin_approved: bool = False, task_id: str | None = None) -> dict[str, Any]:
+        virtual_mcp_tool = self.mcp_registry.resolve_virtual_tool(name) if self.mcp_registry is not None else None
+        if virtual_mcp_tool is not None:
+            return self._execute_virtual_mcp_tool(name, virtual_mcp_tool, params, approved=approved, task_id=task_id)
         spec = self.catalog.get(name)
         operation = _operation_for_tool(name, spec.permission)
         if spec.approval_required and not approved:
@@ -252,6 +255,44 @@ class BuiltinToolExecutor:
             result = self._execute_research_tool(name=name, params=params)
         else:
             result = {"status": "stubbed", "tool": name, "safe_mode": True, "params": sorted(params)}
+        self.audit_logger.append("tool.executed", {"tool": name, "result": result}, task_id=task_id)
+        return result
+
+    def _execute_virtual_mcp_tool(
+        self,
+        name: str,
+        virtual_tool: dict[str, Any],
+        params: dict[str, Any],
+        *,
+        approved: bool,
+        task_id: str | None,
+    ) -> dict[str, Any]:
+        if self.mcp_registry is None:
+            raise ToolExecutionError("MCP registry is not configured")
+        if bool(virtual_tool.get("approval_required", True)) and not approved:
+            result = {
+                "status": "approval_required",
+                "tool": name,
+                "server_name": virtual_tool.get("server_name"),
+                "mcp_tool": virtual_tool.get("tool"),
+                "reasons": ["MCP virtual tools require approval before execution"],
+            }
+            self.audit_logger.append("tool.approval_required", result, task_id=task_id)
+            return result
+        call = self.mcp_registry.call_tool(
+            server=str(virtual_tool["server_id"]),
+            tool=str(virtual_tool["tool"]),
+            arguments=params,
+            approved=approved,
+            task_id=task_id,
+            policy_engine=self.policy_engine,
+            allowed_executables=self.allowed_executables,
+        )
+        result = {
+            "status": "completed",
+            "virtual_tool": name,
+            **call.to_dict(),
+        }
         self.audit_logger.append("tool.executed", {"tool": name, "result": result}, task_id=task_id)
         return result
 

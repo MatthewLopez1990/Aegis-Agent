@@ -95,7 +95,8 @@ Commands:
 - `memory export [query]`
 - `memory delete <memory_id>`
 - `migrate openclaw|hermes|openclaw-memory-preview|hermes-memory-preview|openclaw-memory-commit|hermes-memory-commit <path> [--owner USER] [--scope SCOPE]`
-- `mcp list|register <name> <command> <tool,tool>|call <server> <tool> <json> [--approved]`
+- `mcp list|register <name> <command> <tool,tool>|register <name> <command> --discover [--tool name] [--exclude-tool name] [--enable] [--no-approval]|call <server> <tool> <json> [--approved]`
+- Discovered MCP servers expose Hermes-style virtual tools named `mcp_<server>_<tool>` in `tools`, `toolsets`, and `/tools/run`; calls still flow through the MCP allowlist, policy gate, and approval path.
 - `reload-mcp`
 - `session [new <title>|open <session_id>|rename <title>|set-model <model>|set-personality <name>|activate|archive|pause|append <content> [--role user|assistant] [--trust-class CLASS]|history [session_id] [--limit N]|tasks [--limit N]|compact [keep_last]]`
 - `sessions [--limit N]`
