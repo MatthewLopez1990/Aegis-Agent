@@ -73,8 +73,19 @@ class LiveModelClient:
         *,
         temperature: float,
     ) -> ModelInvocationResult:
-        if route.provider.provider != "openai":
-            raise ValueError(f"subscription CLI invocation is not implemented for provider {route.provider.provider!r}")
+        if route.provider.provider == "openai":
+            return self._chat_codex_subscription_cli(route, messages, temperature=temperature)
+        if route.provider.provider == "anthropic":
+            return self._chat_claude_subscription_cli(route, messages, temperature=temperature)
+        raise ValueError(f"subscription CLI invocation is not implemented for provider {route.provider.provider!r}")
+
+    def _chat_codex_subscription_cli(
+        self,
+        route: ModelRoute,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+    ) -> ModelInvocationResult:
         executable_path = shutil.which("codex")
         if executable_path is None:
             raise RuntimeError("official Codex CLI is not installed")
@@ -124,6 +135,59 @@ class LiveModelClient:
             input_tokens=max(1, len(prompt) // 4),
             output_tokens=max(1, len(content) // 4),
             raw_usage={"source": "subscription_cli", "bridge": "codex_exec", "token_counts": "estimated"},
+        )
+
+    def _chat_claude_subscription_cli(
+        self,
+        route: ModelRoute,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+    ) -> ModelInvocationResult:
+        executable_path = shutil.which("claude")
+        if executable_path is None:
+            raise RuntimeError("official Claude Code CLI is not installed")
+        prompt = _subscription_cli_prompt(messages, provider="claude", temperature=temperature)
+        with tempfile.TemporaryDirectory(prefix="aegis-claude-model-") as temp:
+            temp_dir = Path(temp)
+            command = (
+                executable_path,
+                "-p",
+                "--output-format",
+                "text",
+                "--max-turns",
+                "1",
+                "--permission-mode",
+                "plan",
+                "--model",
+                _claude_cli_model(route.model),
+                prompt,
+            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    text=True,
+                    capture_output=True,
+                    timeout=self.timeout_seconds,
+                    check=False,
+                    cwd=temp_dir,
+                )  # noqa: S603 - argv is a fixed official provider CLI bridge.
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("official Claude Code CLI model invocation timed out") from exc
+            except OSError as exc:
+                raise RuntimeError(f"official Claude Code CLI model invocation failed: {exc}") from exc
+            if completed.returncode != 0:
+                raise RuntimeError(f"official Claude Code CLI model invocation exited with {completed.returncode}")
+            content = completed.stdout.strip()
+        if not content:
+            raise RuntimeError("official Claude Code CLI model invocation returned no final message")
+        return ModelInvocationResult(
+            provider=route.provider.provider,
+            model=route.model,
+            content=content,
+            input_tokens=max(1, len(prompt) // 4),
+            output_tokens=max(1, len(content) // 4),
+            raw_usage={"source": "subscription_cli", "bridge": "claude_print", "token_counts": "estimated"},
         )
 
     def _chat_openai_compatible(
@@ -402,6 +466,15 @@ def _subscription_cli_prompt(messages: list[dict[str, str]], *, provider: str, t
         lines.append(content)
         lines.append("")
     return "\n".join(lines).strip() + "\n"
+
+
+def _claude_cli_model(model: str) -> str:
+    normalized = model.lower()
+    if "opus" in normalized:
+        return "opus"
+    if "sonnet" in normalized:
+        return "sonnet"
+    return model
 
 
 def _anthropic_text(content: Any) -> str:

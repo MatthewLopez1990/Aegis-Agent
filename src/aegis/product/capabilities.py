@@ -324,13 +324,13 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "background task submission",
             ],
             "security_delta": "Aegis exposes Claude-style controls through the governed local runtime and keeps off-device relay blocked until scoped transport, approval prompts, and audit receipts exist.",
-            "live_gap": "Claude Code subscription token import, outbound Remote Control relay, hooks, plugin install parity, subagent runtime depth, and PR automation remain tracked gaps instead of silent stubs.",
+            "live_gap": "Outbound Remote Control relay, hooks, plugin install parity, subagent runtime depth, PR automation, and broader provider OAuth bridges remain tracked gaps instead of silent stubs.",
             "target_requirements": [
-                "claude_subscription_token_bridge",
                 "remote_control_outbound_relay",
                 "hooks_and_plugin_lifecycle",
                 "subagent_runtime_depth",
                 "pr_review_and_autofix_workflows",
+                "broader_provider_oauth_bridges",
             ],
         },
     ]
@@ -395,7 +395,7 @@ def _live_gap_backlog(
             "operator_checklist": _model_auth_operator_checklist(model_auth_parity),
             "next_steps": [
                 "Implement provider-native OAuth/device/cloud-identity bridges one provider at a time with token refresh receipts.",
-                "Use the verified OpenAI/Codex subscription CLI bridge where available; keep other subscription flows as official handoffs until scoped bridges exist.",
+                "Use the verified Codex/Claude Code subscription CLI bridges where available; keep other subscription flows as official handoffs until scoped bridges exist.",
                 "Add denied, approved, refresh, logout, and receipt-redaction tests for every bridge before enabling live model calls through it.",
             ],
             "required_controls": model_auth_parity["required_controls"],
@@ -558,7 +558,7 @@ def _model_auth_operator_checklist(model_auth_parity: dict[str, Any]) -> list[di
         {
             "control": "subscription_token_bridge",
             "state": "partial_official_cli_bridge" if model_auth_parity["subscription_bridge_targets"] else "ready_for_review",
-            "detail": "Verified Codex/ChatGPT subscription login can invoke through isolated codex exec without token import; remaining subscription providers stay on official handoff until scoped bridges exist.",
+            "detail": "Verified Codex/ChatGPT and Claude Code subscription login can invoke through isolated official CLI bridges without token import; remaining subscription providers stay on official handoff until scoped bridges exist.",
         },
         {
             "control": "oauth_device_flows",

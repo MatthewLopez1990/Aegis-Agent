@@ -130,7 +130,7 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(openai["subscription_auth"]["external_command"], "codex login")
             self.assertEqual(openai["subscription_auth"]["aegis_bridge_status"], "official_cli_handoff_only")
             self.assertEqual(anthropic["auth_methods"], ["api_key", "subscription"])
-            self.assertEqual(anthropic["subscription_auth"]["external_command"], "claude")
+            self.assertEqual(anthropic["subscription_auth"]["external_command"], "claude auth login")
             self.assertEqual(anthropic["subscription_auth"]["external_login_instruction"], "/login")
             self.assertFalse(openrouter["subscription_auth_supported"])
             self.assertIsNone(openrouter["subscription_auth"])
@@ -248,6 +248,64 @@ class ModelAuthTests(unittest.TestCase):
             self.assertNotIn("CODEX_ACCESS_TOKEN", audit_text)
             self.assertNotIn("session_cookie", audit_text)
 
+    def test_verified_claude_subscription_can_invoke_without_api_key_or_token_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            secret_path = root / ".aegis" / "secrets.json"
+            audit_path = root / ".aegis" / "audit.jsonl"
+            broker = SecretsBroker(secret_path)
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(audit_path), broker)
+
+            login_completed = subprocess.CompletedProcess(("claude", "auth", "login"), 0)
+            status_completed = subprocess.CompletedProcess(("claude", "auth", "status"), 0, stdout="Logged in with Claude subscription\n", stderr="")
+            with (
+                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/claude"),
+                patch("aegis.models.registry.subprocess.run", side_effect=(login_completed, status_completed)),
+            ):
+                login = registry.login_provider_subscription("anthropic", run_external=True)
+
+            self.assertEqual(login["status"], "external_login_verified")
+            self.assertEqual(login["invocation_bridge"], "claude_print")
+            self.assertFalse(secret_path.exists())
+            self.assertTrue(registry.auth_status("anthropic")["auth_configured"])
+            self.assertTrue(registry.auth_status("anthropic")["subscription_auth_configured"])
+            self.assertEqual(registry.auth_status("anthropic")["auth_source"], "subscription_cli")
+            target_rows = {row["target"]: row for row in registry.auth_targets()["targets"]}
+            self.assertEqual(target_rows["Claude Code subscription"]["status"], "subscription_cli_ready")
+
+            route = registry.route("anthropic/claude-sonnet-4.6")
+            self.assertEqual(route.auth_method, "subscription_cli")
+            self.assertIsNone(route.secret_handle_id)
+
+            def fake_claude_print(command, **kwargs):
+                self.assertEqual(command[1], "-p")
+                self.assertIn("--output-format", command)
+                self.assertIn("text", command)
+                self.assertIn("--max-turns", command)
+                self.assertIn("1", command)
+                self.assertIn("--permission-mode", command)
+                self.assertIn("plan", command)
+                self.assertEqual(command[command.index("--model") + 1], "sonnet")
+                self.assertIn("[USER]\nhello from aegis", command[-1])
+                self.assertNotIn("input", kwargs)
+                return subprocess.CompletedProcess(command, 0, stdout="claude subscription response\n", stderr="")
+
+            with (
+                patch("aegis.models.client.shutil.which", return_value="/usr/bin/claude"),
+                patch("aegis.models.client.subprocess.run", side_effect=fake_claude_print) as run,
+            ):
+                result = LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello from aegis"}])
+
+            self.assertEqual(result.content, "claude subscription response")
+            self.assertEqual(result.raw_usage["source"], "subscription_cli")
+            self.assertEqual(result.raw_usage["bridge"], "claude_print")
+            run.assert_called_once()
+
+            audit_text = audit_path.read_text(encoding="utf-8")
+            self.assertIn("model.auth_subscription_login_requested", audit_text)
+            self.assertNotIn("ANTHROPIC_AUTH_TOKEN", audit_text)
+            self.assertNotIn("session_cookie", audit_text)
+
     def test_subscription_auth_reports_missing_official_cli_without_token_capture(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
             root = Path(temp)
@@ -339,7 +397,7 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(by_target["OpenAI Codex / ChatGPT subscription"]["status"], "official_cli_handoff_only")
             self.assertEqual(by_target["OpenAI Codex / ChatGPT subscription"]["external_command"], "codex login")
             self.assertEqual(by_target["Claude Code subscription"]["status"], "official_cli_handoff_only")
-            self.assertEqual(by_target["Claude Code subscription"]["external_command"], "claude")
+            self.assertEqual(by_target["Claude Code subscription"]["external_command"], "claude auth login")
             self.assertEqual(by_target["Claude Code subscription"]["external_login_instruction"], "/login")
             self.assertEqual(by_target["Nous Portal API key"]["status"], "api_key_ready")
             self.assertEqual(by_target["Nous Portal OAuth subscription"]["status"], "manual_provider_handoff_only")

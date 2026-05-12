@@ -302,6 +302,8 @@ class ModelRegistry:
                 )
                 if provider.provider == "openai":
                     status["invocation_bridge"] = "codex_exec"
+                if provider.provider == "anthropic":
+                    status["invocation_bridge"] = "claude_print"
                 self._remember_external_auth_link(provider.provider, "subscription", status)
         self.audit_logger.append(
             "model.auth_subscription_login_requested",
@@ -627,6 +629,8 @@ class ModelRegistry:
         }
         if provider_name == "openai" and method == "subscription":
             link["invocation_bridge"] = "codex_exec"
+        if provider_name == "anthropic" and method == "subscription":
+            link["invocation_bridge"] = "claude_print"
         self.external_auth_links[_external_auth_link_key(provider_name, method)] = link
         self._persist_external_auth_links()
 
@@ -808,16 +812,18 @@ SUBSCRIPTION_AUTH_PROFILES: dict[str, dict[str, Any]] = {
     },
     "anthropic": {
         "account_surface": "claude.ai / Claude Code",
-        "external_command": "claude",
-        "external_command_argv": ("claude",),
+        "external_command": "claude auth login",
+        "external_command_argv": ("claude", "auth", "login"),
+        "external_status_command": "claude auth status",
+        "external_status_command_argv": ("claude", "auth", "status"),
         "external_login_instruction": "/login",
         "requires": "claude.ai account with Claude Code access; Remote Control requires full-scope claude.ai login, not API key auth",
         "provider_token_source": "official Claude Code auth store",
         "aegis_bridge_status": "official_cli_handoff_only",
         "interactive": True,
         "next_steps": [
-            "Run model auth login anthropic --subscription --run-external, then use /login inside Claude Code if prompted.",
-            "Keep using model auth login anthropic --api-key-stdin for Aegis live Anthropic API calls until a governed token bridge is implemented.",
+            "Run model auth login anthropic --subscription --run-external or sign in with Claude Code directly, then use --verify-external to record the non-secret bridge link.",
+            "Use model auth login anthropic --api-key-stdin for direct Anthropic HTTP calls, or use the verified subscription bridge for isolated claude -p invocation.",
             "Do not paste claude.ai browser session tokens into Aegis.",
         ],
     },
@@ -852,7 +858,7 @@ MODEL_PROVIDER_AUTH_TARGETS: tuple[dict[str, Any], ...] = (
         "platforms": ("Claude Code", "Hermes Agent"),
         "aegis_provider": "anthropic",
         "required_auth": ("subscription",),
-        "external_command": "claude",
+        "external_command": "claude auth login",
         "external_login_instruction": "/login",
         "account_surface": "claude.ai / Claude Code",
     },
