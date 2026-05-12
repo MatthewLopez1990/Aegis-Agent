@@ -1310,6 +1310,24 @@ class BuiltinToolExecutor:
         requested = str(params.get("operation", "read")).lower()
         connector = self.connectors.get("github")
         if name == "github_pr":
+            if requested in {"autofix", "autofix_plan", "review_autofix", "fix_plan"}:
+                if params.get("provider_url") or params.get("api_url"):
+                    comments = self._execute_github_live_read(
+                        kind="pull_request_comments",
+                        operation="read_pull_request_comments",
+                        params=params,
+                    )
+                else:
+                    result = connector.read(ConnectorRequest(operation="read_pull_request_comments", params=params, scopes=("read",)))
+                    comments = {
+                        "ok": result.ok,
+                        "operation": "read_pull_request_comments",
+                        "connector": result.connector,
+                        "data": result.data.get("data", {}),
+                        "taint": "CONNECTOR_CONTENT",
+                        "error": result.error,
+                    }
+                return _github_pr_autofix_plan(comments)
             if requested in {"comments", "review_comments", "pull_request_comments", "read_comments"}:
                 if params.get("provider_url") or params.get("api_url"):
                     return self._execute_github_live_read(
@@ -2090,6 +2108,82 @@ def _normalize_github_pr_comment(decoded: dict[str, Any]) -> dict[str, Any]:
         "body_preview": str(decoded.get("body", ""))[:1000],
         "diff_hunk_preview": str(decoded.get("diff_hunk", ""))[:1000],
     }
+
+
+def _github_pr_autofix_plan(comments_result: dict[str, Any]) -> dict[str, Any]:
+    data = comments_result.get("data", {})
+    if not isinstance(data, dict):
+        data = {}
+    comments = data.get("comments")
+    if not isinstance(comments, list):
+        comments = data.get("pull_request_comments")
+    if not isinstance(comments, list):
+        comments = []
+    action_items = []
+    for item in comments[:50]:
+        if not isinstance(item, dict):
+            continue
+        body = str(item.get("body_preview") or item.get("body") or "")
+        action_items.append(
+            {
+                "comment_id": item.get("id"),
+                "path": str(item.get("path") or "")[:1000],
+                "line": item.get("line") or item.get("position"),
+                "reviewer": str(item.get("user") or item.get("author") or "")[:200],
+                "summary": _first_sentence(body),
+                "recommended_action": _github_autofix_action(body),
+                "status": "needs_human_review",
+            }
+        )
+    return {
+        "ok": bool(comments_result.get("ok")),
+        "operation": "pr_autofix_plan",
+        "source_operation": comments_result.get("operation"),
+        "connector": comments_result.get("connector"),
+        "mode": "review_comments_to_local_patch_plan",
+        "taint": comments_result.get("taint", "CONNECTOR_CONTENT"),
+        "status": "autofix_plan_ready" if action_items else "no_review_comments",
+        "comment_count": len(comments),
+        "action_items": action_items,
+        "auto_apply": False,
+        "provider_writes_performed": False,
+        "raw_secret_values_included": False,
+        "required_controls": [
+            "human_review_before_patch",
+            "workspace_diff_review",
+            "tests_before_commit",
+            "approval_before_provider_write",
+        ],
+        "next_actions": [
+            "Inspect each referenced file and line locally.",
+            "Apply patches through the governed workspace workflow.",
+            "Run targeted tests before posting any PR response.",
+        ],
+        "error": comments_result.get("error"),
+    }
+
+
+def _first_sentence(text: str) -> str:
+    compact = " ".join(str(text or "").split())
+    if not compact:
+        return ""
+    match = re.search(r"(?<=[.!?])\s+", compact)
+    if match:
+        compact = compact[: match.start()]
+    return compact[:300]
+
+
+def _github_autofix_action(text: str) -> str:
+    lowered = str(text or "").lower()
+    if "test" in lowered or "coverage" in lowered:
+        return "add_or_update_test_coverage"
+    if "security" in lowered or "secret" in lowered or "token" in lowered:
+        return "review_security_boundary_and_redaction"
+    if "doc" in lowered or "readme" in lowered:
+        return "update_documentation"
+    if "revocation" in lowered or "expiry" in lowered or "expire" in lowered:
+        return "check_lifecycle_and_state_transition"
+    return "inspect_and_patch_referenced_code"
 
 
 def _normalize_gitlab_record(decoded: dict[str, Any], *, kind: str) -> dict[str, Any]:

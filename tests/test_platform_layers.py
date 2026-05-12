@@ -652,6 +652,33 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(live_pr_comments["mode"], "allowlisted_live_read")
             self.assertEqual(live_pr_comments["data"]["comments"][0]["path"], "src/aegis/agent.py")
             self.assertEqual(github_pr_comments_read.call_args.args[0].params["url"], "https://api.github.com/repos/example/aegis/pulls/8/comments")
+            pr_autofix_plan = orchestrator.tools.execute("github_pr", {"operation": "autofix_plan"}, approved=True)
+            self.assertEqual(pr_autofix_plan["status"], "autofix_plan_ready")
+            self.assertEqual(pr_autofix_plan["operation"], "pr_autofix_plan")
+            self.assertFalse(pr_autofix_plan["auto_apply"])
+            self.assertFalse(pr_autofix_plan["provider_writes_performed"])
+            self.assertEqual(pr_autofix_plan["action_items"][0]["path"], "src/aegis/example.py")
+            with patch.object(
+                orchestrator.connectors.get("http"),
+                "read",
+                return_value=ConnectorResult(
+                    "http",
+                    "read",
+                    True,
+                    {
+                        "url": "https://api.github.com/repos/example/aegis/pulls/8/comments",
+                        "domain": "api.github.com",
+                        "content": '[{"id":102,"path":"src/aegis/relay.py","line":7,"user":{"login":"reviewer"},"body":"Please add a revocation test."}]',
+                    },
+                ),
+            ):
+                live_pr_autofix_plan = orchestrator.tools.execute(
+                    "github_pr",
+                    {"operation": "autofix_plan", "provider_url": "https://api.github.com/repos/example/aegis/pulls/8/comments"},
+                    approved=True,
+                )
+            self.assertEqual(live_pr_autofix_plan["status"], "autofix_plan_ready")
+            self.assertEqual(live_pr_autofix_plan["action_items"][0]["recommended_action"], "add_or_update_test_coverage")
             gitlab_issue = orchestrator.tools.execute("gitlab_issue", {"operation": "create", "title": "Track GitLab parity"})
             self.assertEqual(gitlab_issue["status"], "approval_required")
             approved_gitlab_issue = orchestrator.tools.execute("gitlab_issue", {"operation": "create", "title": "Track GitLab parity"}, approved=True)
