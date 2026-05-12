@@ -678,6 +678,80 @@ class ModelAuthTests(unittest.TestCase):
             self.assertNotIn("google-access-refreshed", audit_text)
             self.assertNotIn("google-refresh-rotated", audit_text)
 
+    def test_google_gemini_oauth_quota_uses_brokered_token_without_secret_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"AEGIS_GOOGLE_GEMINI_OAUTH_CLIENT_ID": "test-google-client-id", "AEGIS_GOOGLE_GEMINI_OAUTH_CLIENT_SECRET": "test-google-client-secret"}, clear=True):
+            root = Path(temp)
+            broker = SecretsBroker(root / ".aegis" / "secrets.json")
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"), broker)
+            broker.store_secret(name="GOOGLE_GEMINI_OAUTH_ACCESS_TOKEN", value="quota-access-secret")
+            broker.store_secret(name="GOOGLE_GEMINI_OAUTH_REFRESH_TOKEN", value="quota-refresh-secret")
+            registry._remember_external_auth_link(
+                "google-gemini-oauth",
+                "oauth",
+                {
+                    "target": "Google Gemini OAuth / Code Assist",
+                    "status": "external_login_verified",
+                    "auth_source": "oauth_device_flow",
+                    "aegis_bridge_status": "oauth_device_flow_ready",
+                    "invocation_bridge": "google_gemini_cloudcode_generate_content",
+                    "inference_base_url": "https://cloudcode-pa.googleapis.com",
+                    "access_token_secret": "GOOGLE_GEMINI_OAUTH_ACCESS_TOKEN",
+                    "refresh_token_secret": "GOOGLE_GEMINI_OAUTH_REFRESH_TOKEN",
+                    "expires_at": "2999-01-01T00:00:00+00:00",
+                    "oauth_token_brokered": True,
+                },
+            )
+            route = registry.route("google-gemini-oauth/gemini-2.5-flash")
+
+            class FakeResponse:
+                def __init__(self, payload: dict[str, object]) -> None:
+                    self.payload = payload
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps(self.payload).encode("utf-8")
+
+            captured_model: list[tuple[str, dict[str, str], dict[str, object]]] = []
+
+            def fake_model_open(request, timeout):
+                headers = {key.lower(): value for key, value in request.header_items()}
+                payload = json.loads(request.data.decode("utf-8")) if request.data else {}
+                captured_model.append((request.full_url, headers, payload))
+                self.assertEqual(headers["authorization"], "Bearer quota-access-secret")
+                if request.full_url.endswith("/v1internal:loadCodeAssist"):
+                    return FakeResponse({"response": {"currentTier": {"id": "free-tier"}, "cloudaicompanionProject": "quota-project-123"}})
+                self.assertEqual(request.full_url, "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota")
+                self.assertEqual(payload["project"], "quota-project-123")
+                return FakeResponse(
+                    {
+                        "buckets": [
+                            {"modelId": "gemini-2.5-flash", "tokenType": "RPM", "remainingFraction": 0.75, "resetTime": "2026-05-13T00:00:00Z"},
+                            {"modelId": "gemini-2.5-pro", "tokenType": "RPD", "remainingFraction": 1.2, "resetTime": ""},
+                        ]
+                    }
+                )
+
+            with patch("aegis.models.client._open_model_request", fake_model_open):
+                result = LiveModelClient(broker).google_gemini_oauth_quota(route)
+
+            self.assertEqual(result["status"], "quota_available")
+            self.assertEqual(result["provider"], "google-gemini-oauth")
+            self.assertEqual(result["model"], "gemini-2.5-flash")
+            self.assertEqual(result["project_id"], "quota-project-123")
+            self.assertEqual(result["project_source"], "discovered")
+            self.assertEqual(result["bucket_count"], 2)
+            self.assertEqual(result["buckets"][0]["remaining_percent"], 75.0)
+            self.assertEqual(result["buckets"][1]["remaining_percent"], 100.0)
+            serialized = json.dumps(result, sort_keys=True)
+            self.assertNotIn("quota-access-secret", serialized)
+            self.assertNotIn("quota-refresh-secret", serialized)
+            self.assertEqual([entry[0] for entry in captured_model], ["https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist", "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"])
+
     def test_subscription_auth_reports_missing_official_cli_without_token_capture(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
             root = Path(temp)

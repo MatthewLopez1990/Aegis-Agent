@@ -85,6 +85,7 @@ TOP_LEVEL_COMMANDS = (
     "fork",
     "gateway",
     "goal",
+    "gquota",
     "help",
     "hooks",
     "image",
@@ -2417,6 +2418,38 @@ class AegisTui(cmd.Cmd):
         """usage -- show model usage summary."""
         self.do_models("usage")
 
+    def do_gquota(self, arg: str) -> None:
+        """gquota [google-gemini-oauth/model] -- show Google Gemini Code Assist quota metadata."""
+        identifier = arg.strip() or str(self.session.get("model") or "")
+        if not identifier or not identifier.startswith("google-gemini-oauth/"):
+            _print_json(
+                {
+                    "status": "not_enabled",
+                    "provider_required": "google-gemini-oauth",
+                    "active_model": self.session.get("model") or "alias/smart",
+                    "detail": "Gemini Code Assist quota is available after selecting a google-gemini-oauth/<model-id> route.",
+                    "next_actions": [
+                        "models auth login google-gemini-oauth --method oauth --run-external",
+                        "model google-gemini-oauth/gemini-2.5-flash",
+                        "gquota google-gemini-oauth/gemini-2.5-flash",
+                    ],
+                }
+            )
+            return
+        try:
+            route = self.orchestrator.models.route(identifier)
+            _print_json(self.orchestrator.model_client.google_gemini_oauth_quota(route))
+        except (KeyError, ValueError, RuntimeError) as exc:
+            _print_json(
+                {
+                    "status": "quota_unavailable",
+                    "provider": "google-gemini-oauth",
+                    "error": str(exc),
+                    "raw_secret_values_included": False,
+                    "next_actions": ["models auth status google-gemini-oauth", "models auth login google-gemini-oauth --method oauth --run-external"],
+                }
+            )
+
     def do_stats(self, arg: str) -> None:
         """stats -- Hermes-style alias for usage."""
         self.do_usage(arg)
@@ -4404,6 +4437,7 @@ def _command_reference() -> str:
             "theme|skin|color       UI preference metadata",
             "commands|keybindings   Slash command and terminal keybinding surfaces",
             "provider|usage         Model provider and usage aliases",
+            "gquota [model]         Google Gemini Code Assist quota metadata",
             "models auth methods|targets|login|logout <provider>",
             "tools                  Governed tool catalog",
             "toolsets               Group tools by permission and risk",
@@ -4520,6 +4554,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         "Build",
         (
             ("model|models|provider|usage", "provider routes, auth, and usage"),
+            ("gquota [model]", "Google Gemini Code Assist quota metadata"),
             ("login|logout <provider>", "model auth login/logout aliases"),
             ("effort|cost", "guarded reasoning-effort metadata and usage cost"),
             ("statusbar|statusline|sb|theme|skin|color|verbose", "UI preference and status metadata"),
@@ -4790,6 +4825,7 @@ def _next_command_hint(command: str) -> str:
         "audit": "/evidence <id>",
         "model": "/models auth targets",
         "models": "/models route <id>",
+        "gquota": "/models auth status google-gemini-oauth",
         "login": "/models auth targets",
         "logout": "/models auth methods",
         "effort": "/model",

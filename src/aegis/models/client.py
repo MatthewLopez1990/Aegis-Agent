@@ -143,6 +143,32 @@ class LiveModelClient:
             return self._chat_ollama(route, messages, temperature=temperature)
         raise ValueError(f"live invocation is not implemented for provider {route.provider.provider!r}")
 
+    def google_gemini_oauth_quota(self, route: ModelRoute) -> dict[str, Any]:
+        """Return sanitized Gemini Code Assist quota buckets for a verified OAuth route."""
+        if route.provider.provider != "google-gemini-oauth" or route.auth_method != "oauth_token":
+            raise ValueError("google-gemini-oauth quota requires a verified Google Gemini OAuth route")
+        if route.provider.base_url is None:
+            raise ValueError("google-gemini-oauth provider has no base URL")
+        access_token = self._resolve_google_gemini_oauth_access_token(route)
+        project_id, project_source = self._google_gemini_project_context(route, access_token)
+        base_url = str(route.provider.base_url).rstrip("/")
+        response = self._post_json(
+            f"{base_url}/v1internal:retrieveUserQuota",
+            payload={"project": project_id},
+            headers=_google_gemini_cloudcode_headers(access_token, model=route.model),
+        )
+        buckets = _google_gemini_quota_buckets(response)
+        return {
+            "status": "quota_available",
+            "provider": route.provider.provider,
+            "model": route.model,
+            "project_id": project_id,
+            "project_source": project_source,
+            "bucket_count": len(buckets),
+            "buckets": buckets,
+            "raw_secret_values_included": False,
+        }
+
     def _chat_subscription_cli(
         self,
         route: ModelRoute,
@@ -1632,6 +1658,35 @@ def _google_gemini_tier_id(response: dict[str, Any]) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+def _google_gemini_quota_buckets(response: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = _google_gemini_response_payload(response)
+    raw_buckets = payload.get("buckets", [])
+    if not isinstance(raw_buckets, list):
+        return []
+    buckets: list[dict[str, Any]] = []
+    for bucket in raw_buckets:
+        if not isinstance(bucket, dict):
+            continue
+        model_id = str(bucket.get("modelId") or "").strip()
+        token_type = str(bucket.get("tokenType") or "").strip()
+        reset_time = str(bucket.get("resetTime") or "").strip()
+        try:
+            remaining_fraction = float(bucket.get("remainingFraction") or 0.0)
+        except (TypeError, ValueError):
+            remaining_fraction = 0.0
+        remaining_fraction = max(0.0, min(1.0, remaining_fraction))
+        buckets.append(
+            {
+                "model_id": model_id,
+                "token_type": token_type,
+                "remaining_fraction": round(remaining_fraction, 4),
+                "remaining_percent": round(remaining_fraction * 100, 2),
+                "reset_time": reset_time,
+            }
+        )
+    return buckets
 
 
 def _google_vertex_generate_content_url(*, project: str, location: str, model: str) -> str:
