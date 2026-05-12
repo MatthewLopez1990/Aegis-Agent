@@ -125,7 +125,7 @@ class AgentOrchestrator:
         self.schedules = ScheduleManager(store, audit_logger)
         self.kanban = KanbanManager(store, audit_logger)
         self.mcp = McpRegistry(store, audit_logger)
-        self.plugins = PluginManager(config.data_dir / "plugins.json", audit_logger, skills=self.skills, mcp=self.mcp, hooks=self.hooks)
+        self.plugins = PluginManager(config.data_dir / "plugins.json", audit_logger, skills=self.skills, mcp=self.mcp, hooks=self.hooks, secrets_broker=self.secrets_broker)
         self.execution_backends = ExecutionBackendRegistry(
             enabled_backends=config.execution.enabled_backends,
             docker_executable=config.execution.docker_executable,

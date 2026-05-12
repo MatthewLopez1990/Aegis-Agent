@@ -27,6 +27,7 @@ from aegis.scheduler.worker import ScheduleWorker
 from aegis.security.policy_engine import PolicyDecision, PolicyRequest
 from aegis.security.policy_profile import activate_due_policy_rollouts, apply_policy_bundle, apply_policy_bundle_text, diff_policy_bundle, diff_policy_bundle_text, import_policy_bundle_text, list_policy_bundles, list_policy_promotions, list_policy_rollouts, policy_profile_to_dict, promote_policy_bundle, rollback_policy_bundle, schedule_policy_bundle
 from aegis.security.taint import RiskLevel, Sensitivity, TrustClass
+from aegis.skills.signing import DEFAULT_SKILL_SIGNING_KEY
 from aegis.tools.executor import ToolExecutionError
 
 
@@ -1206,6 +1207,17 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                         catalog_path=_optional_str(payload, "catalog_path"),
                         allowlist=orchestrator.config.network_allowlist,
                         enable=bool(payload.get("enable", False)),
+                    )
+                )
+                return
+            if path == "/plugins/marketplace/fetch-bundle":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.plugins.fetch_marketplace_bundle(
+                        str(_required(payload, "plugin_id")),
+                        catalog_path=_optional_str(payload, "catalog_path"),
+                        allowlist=orchestrator.config.network_allowlist,
+                        key_name=str(payload.get("key_name") or DEFAULT_SKILL_SIGNING_KEY),
                     )
                 )
                 return

@@ -39,7 +39,7 @@ from aegis.sessions.manager import SessionManager
 from aegis.skills.manifest import SkillManifest
 from aegis.skills.hub import SkillHubCatalog
 from aegis.skills.registry import SkillRegistry
-from aegis.skills.signing import ensure_signing_key, sign_manifest, verify_manifest_signature
+from aegis.skills.signing import DEFAULT_SKILL_SIGNING_KEY, ensure_signing_key, sign_manifest, verify_manifest_signature
 from aegis.tools.catalog import ToolCatalog
 from aegis.tui.main import SHIELD_FRAMES, run_tui
 
@@ -351,6 +351,10 @@ def build_parser() -> argparse.ArgumentParser:
         plugin_fetch = plugin_sub.add_parser("fetch-manifest", help="Download and verify one marketplace plugin manifest for review")
         plugin_fetch.add_argument("plugin_id")
         plugin_fetch.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
+        plugin_bundle = plugin_sub.add_parser("fetch-bundle", help="Download and verify one signed marketplace plugin bundle for review")
+        plugin_bundle.add_argument("plugin_id")
+        plugin_bundle.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
+        plugin_bundle.add_argument("--key-name", default=DEFAULT_SKILL_SIGNING_KEY, help="Brokered HMAC signing key name")
         plugin_marketplace_install = plugin_sub.add_parser("install-marketplace", help="Fetch, verify, and install one marketplace plugin manifest")
         plugin_marketplace_install.add_argument("plugin_id")
         plugin_marketplace_install.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
@@ -1034,6 +1038,13 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 args.plugin_id,
                 catalog_path=args.catalog_path,
                 allowlist=config.network_allowlist,
+            )
+        if args.plugin_command == "fetch-bundle":
+            return manager.fetch_marketplace_bundle(
+                args.plugin_id,
+                catalog_path=args.catalog_path,
+                allowlist=config.network_allowlist,
+                key_name=args.key_name,
             )
         if args.plugin_command == "install-marketplace":
             return manager.install_marketplace_plugin(
@@ -1788,7 +1799,7 @@ def _plugin_manager(config: Any) -> PluginManager:
     skills = SkillRegistry(store, audit, SecretsBroker(config.secrets_path))
     mcp = McpRegistry(store, audit)
     hooks = HookManager(config.data_dir / "hooks.json", audit, allowed_executables=config.allowed_shell_commands, workspace=Path.cwd())
-    return PluginManager(config.data_dir / "plugins.json", audit, skills=skills, mcp=mcp, hooks=hooks)
+    return PluginManager(config.data_dir / "plugins.json", audit, skills=skills, mcp=mcp, hooks=hooks, secrets_broker=SecretsBroker(config.secrets_path))
 
 
 def _hook_manager(config: Any, *, workspace: str | Path) -> HookManager:

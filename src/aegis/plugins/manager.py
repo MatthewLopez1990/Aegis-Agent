@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from urllib.request import Request
 from uuid import uuid4
 import hashlib
+import hmac
 import json
 import re
 
@@ -23,6 +24,8 @@ from aegis.mcp.registry import McpRegistry
 from aegis.security.taint import now_utc
 from aegis.skills.manifest import SkillManifest
 from aegis.skills.registry import SkillRegistry
+from aegis.skills.signing import DEFAULT_SKILL_SIGNING_KEY, SIGNATURE_ALGORITHM
+from aegis.security.secrets_broker import SecretsBroker
 from aegis.storage.state import ensure_private_dir, ensure_private_file
 
 
@@ -40,12 +43,14 @@ class PluginManager:
         skills: SkillRegistry,
         mcp: McpRegistry,
         hooks: HookManager,
+        secrets_broker: SecretsBroker | None = None,
     ) -> None:
         self.path = Path(path)
         self.audit_logger = audit_logger
         self.skills = skills
         self.mcp = mcp
         self.hooks = hooks
+        self.secrets_broker = secrets_broker or SecretsBroker()
 
     def list_plugins(self) -> list[dict[str, Any]]:
         return sorted(self._read_store()["plugins"].values(), key=lambda plugin: str(plugin["id"]))
@@ -77,7 +82,7 @@ class PluginManager:
             "entries": sorted(entries, key=lambda entry: entry["id"]),
             "raw_secret_values_included": False,
             "blocked_operations": [
-                "remote_code_download",
+                "remote_code_auto_install",
                 "dynamic_plugin_import",
                 "marketplace_token_capture",
                 "unsigned_auto_update",
@@ -132,7 +137,7 @@ class PluginManager:
             "missing_from_catalog": sorted(missing_from_catalog, key=lambda entry: entry["id"]),
             "raw_secret_values_included": False,
             "blocked_operations": [
-                "remote_code_download",
+                "remote_code_auto_install",
                 "dynamic_plugin_import",
                 "marketplace_token_capture",
                 "unsigned_auto_update",
@@ -146,10 +151,11 @@ class PluginManager:
         catalog_path: str | Path | None = None,
         allowlist: tuple[str, ...] = (),
     ) -> dict[str, Any]:
-        catalog = {str(entry.get("id") or ""): _public_marketplace_entry(entry) for entry in _read_plugin_catalog(catalog_path)}
-        entry = catalog.get(plugin_id)
-        if entry is None:
+        raw_catalog = {str(entry.get("id") or ""): entry for entry in _read_plugin_catalog(catalog_path)}
+        raw_entry = raw_catalog.get(plugin_id)
+        if raw_entry is None:
             raise KeyError(plugin_id)
+        entry = _public_marketplace_entry(raw_entry)
         manifest_url = str(entry.get("manifest_url") or "")
         expected_sha256 = _normalize_sha256(str(entry.get("manifest_sha256") or ""))
         if not expected_sha256:
@@ -168,7 +174,7 @@ class PluginManager:
         private_error = _private_network_error(domain)
         if private_error:
             raise ValueError(private_error)
-        body = _download_manifest_bytes(manifest_url)
+        body = _download_marketplace_bytes(manifest_url, max_bytes=262_144, label="marketplace manifest")
         digest = hashlib.sha256(body).hexdigest()
         if digest != expected_sha256:
             raise ValueError("marketplace manifest SHA-256 does not match catalog metadata")
@@ -203,6 +209,78 @@ class PluginManager:
         self.audit_logger.append("plugin.marketplace_manifest_downloaded", redact(result))
         return result
 
+    def fetch_marketplace_bundle(
+        self,
+        plugin_id: str,
+        *,
+        catalog_path: str | Path | None = None,
+        allowlist: tuple[str, ...] = (),
+        key_name: str = DEFAULT_SKILL_SIGNING_KEY,
+    ) -> dict[str, Any]:
+        raw_catalog = {str(entry.get("id") or ""): entry for entry in _read_plugin_catalog(catalog_path)}
+        raw_entry = raw_catalog.get(plugin_id)
+        if raw_entry is None:
+            raise KeyError(plugin_id)
+        entry = _public_marketplace_entry(raw_entry)
+        bundle_url = str(entry.get("bundle_url") or "")
+        expected_sha256 = _normalize_sha256(str(entry.get("bundle_sha256") or ""))
+        if not bundle_url:
+            raise ValueError("marketplace bundle download requires bundle_url")
+        if not expected_sha256:
+            raise ValueError("marketplace bundle download requires bundle_sha256")
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+            raise ValueError("marketplace bundle_sha256 must be a 64-character hex digest")
+        parsed = urlparse(bundle_url)
+        domain = parsed.hostname or ""
+        validation_error = _validate_url(parsed)
+        if validation_error:
+            raise ValueError(validation_error)
+        if parsed.scheme != "https":
+            raise ValueError("marketplace bundle download requires https")
+        if not _allowed_domain(domain, allowlist):
+            raise ValueError(f"domain {domain!r} is not allowlisted")
+        private_error = _private_network_error(domain)
+        if private_error:
+            raise ValueError(private_error)
+        body = _download_marketplace_bytes(bundle_url, max_bytes=1_048_576, label="marketplace bundle")
+        digest = hashlib.sha256(body).hexdigest()
+        if digest != expected_sha256:
+            raise ValueError("marketplace bundle SHA-256 does not match catalog metadata")
+        signature = _verify_bundle_signature(
+            body,
+            raw_entry.get("bundle_signature"),
+            self.secrets_broker,
+            key_name=key_name,
+            expected_digest=digest,
+        )
+        output_dir = ensure_private_dir(self.path.parent / "plugin-marketplace")
+        output_path = ensure_private_file(output_dir / f"{plugin_id}.bundle")
+        with output_path.open("wb") as handle:
+            handle.write(body)
+        ensure_private_file(output_path)
+        result = {
+            "status": "bundle_downloaded_for_review",
+            "mode": "sha256_and_signature_verified_bundle_review_only",
+            "id": plugin_id,
+            "name": entry["name"],
+            "version": entry["version"],
+            "bundle_url": bundle_url,
+            "bundle_sha256": digest,
+            "bundle_path": str(output_path),
+            "signature": signature,
+            "auto_install_supported": False,
+            "dynamic_code_import_supported": False,
+            "raw_secret_values_included": False,
+            "blocked_operations": [
+                "remote_bundle_auto_install",
+                "dynamic_plugin_import",
+                "marketplace_token_capture",
+                "unsigned_auto_update",
+            ],
+        }
+        self.audit_logger.append("plugin.marketplace_bundle_downloaded", redact(result))
+        return result
+
     def install_marketplace_plugin(
         self,
         plugin_id: str,
@@ -226,7 +304,7 @@ class PluginManager:
             "enabled": bool(plugin.get("enabled", False)),
             "raw_secret_values_included": False,
             "blocked_operations": [
-                "remote_bundle_download",
+                "remote_bundle_auto_install",
                 "dynamic_plugin_import",
                 "marketplace_token_capture",
                 "unsigned_auto_update",
@@ -563,28 +641,71 @@ def _normalize_sha256(value: str) -> str:
     return text
 
 
-def _download_manifest_bytes(url: str) -> bytes:
+def _download_marketplace_bytes(url: str, *, max_bytes: int, label: str) -> bytes:
     request = Request(url, headers={"User-Agent": "Aegis-Agent/0.1"})
     try:
         response_context = _open_without_redirects(request, timeout=10)
     except HTTPError as exc:
         if 300 <= exc.code < 400:
-            raise ValueError("HTTP redirects are not followed for marketplace manifests") from exc
-        raise ValueError(f"marketplace manifest download failed with status {exc.code}") from exc
+            raise ValueError(f"HTTP redirects are not followed for {label}s") from exc
+        raise ValueError(f"{label} download failed with status {exc.code}") from exc
     except URLError as exc:
-        raise ValueError(f"marketplace manifest download failed: {exc.reason}") from exc
+        raise ValueError(f"{label} download failed: {exc.reason}") from exc
     with response_context as response:
-        body = response.read(262_145)
-    if len(body) > 262_144:
-        raise ValueError("marketplace manifest exceeds 262144 byte limit")
+        body = response.read(max_bytes + 1)
+    if len(body) > max_bytes:
+        raise ValueError(f"{label} exceeds {max_bytes} byte limit")
     return body
+
+
+def _verify_bundle_signature(
+    body: bytes,
+    signature: Any,
+    broker: SecretsBroker,
+    *,
+    key_name: str,
+    expected_digest: str,
+) -> dict[str, Any]:
+    if isinstance(signature, dict):
+        if signature.get("algorithm") != SIGNATURE_ALGORITHM:
+            raise ValueError("marketplace bundle signature uses unsupported algorithm")
+        actual_key_name = str(signature.get("key_id") or key_name)
+        if actual_key_name != key_name:
+            raise ValueError("marketplace bundle signature key_id does not match requested key")
+        signature_digest = str(signature.get("digest") or "")
+        if signature_digest and signature_digest != expected_digest:
+            raise ValueError("marketplace bundle signature digest does not match bundle")
+        signature_hex = str(signature.get("signature") or "")
+    else:
+        actual_key_name = key_name
+        signature_hex = str(signature or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", signature_hex):
+        raise ValueError("marketplace bundle signature must be a 64-character hex HMAC")
+    try:
+        key = broker.resolve_stored_secret(actual_key_name)
+    except KeyError as exc:
+        raise ValueError("marketplace bundle signing key is not configured") from exc
+    expected_signature = hmac.new(key.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature_hex, expected_signature):
+        raise ValueError("marketplace bundle signature mismatch")
+    return {
+        "ok": True,
+        "algorithm": SIGNATURE_ALGORITHM,
+        "key_id": actual_key_name,
+        "digest": expected_digest,
+        "signature_verified": True,
+        "raw_secret_values_included": False,
+    }
 
 
 def _public_marketplace_entry(raw: dict[str, Any], *, installed: dict[str, Any] | None = None) -> dict[str, Any]:
     resource_kinds = _string_list(raw.get("resource_kinds", raw.get("resources", [])))
     manifest_url = str(raw.get("manifest_url") or "")
     manifest_sha256 = str(raw.get("manifest_sha256") or "")
+    bundle_url = str(raw.get("bundle_url") or "")
+    bundle_sha256 = str(raw.get("bundle_sha256") or "")
     verified_manifest_available = bool(manifest_url and _normalize_sha256(manifest_sha256))
+    verified_bundle_available = bool(bundle_url and _normalize_sha256(bundle_sha256) and raw.get("bundle_signature"))
     entry = {
         "id": str(raw.get("id") or ""),
         "name": str(raw.get("name") or raw.get("id") or ""),
@@ -596,9 +717,14 @@ def _public_marketplace_entry(raw: dict[str, Any], *, installed: dict[str, Any] 
         "install_mode": str(raw.get("install_mode") or "manual_manifest_review"),
         "manifest_url": manifest_url,
         "manifest_sha256": manifest_sha256,
+        "bundle_url": bundle_url,
+        "bundle_sha256": bundle_sha256,
+        "bundle_signature": raw.get("bundle_signature"),
+        "bundle_signature_required": bool(bundle_url),
         "requires_review": bool(raw.get("requires_review", True)),
         "download_supported": False,
         "manifest_fetch_supported": verified_manifest_available,
+        "bundle_fetch_supported": verified_bundle_available,
         "marketplace_install_supported": verified_manifest_available,
         "dynamic_code_import_supported": False,
         "token_capture_supported": False,

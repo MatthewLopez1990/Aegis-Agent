@@ -105,7 +105,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - Filesystem writes and shell execution are intentionally constrained.
 - Browser rendering is limited to sanitized HTTP-content snapshots with private, redacted evidence artifacts and explicit cookie, storage, script, subresource, network, and mutation boundary receipts; explicit live browser automation requests fail closed with activation blockers, and Aegis still does not execute arbitrary page JavaScript or preserve cookies.
 - Relayed remote-control action proxy, mobile push delivery, and cloud session directory remain blocked until explicit relay transport, brokered relay auth, origin allowlists, revocation propagation, and redacted relay receipts cover end-to-end remote actions.
-- Marketplace plugin install is explicit and SHA-verified from allowlisted HTTPS manifests. Remote bundle download, dynamic plugin imports, marketplace token capture, unsigned auto-update, and trusting a marketplace signing chain remain blocked.
+- Marketplace plugin install is explicit and SHA-verified from allowlisted HTTPS manifests. Signed bundle fetch is available for private review only with SHA-256 plus brokered HMAC verification. Remote bundle auto-install, dynamic plugin imports, marketplace token capture, unsigned auto-update, and trusting a marketplace signing chain remain blocked.
 - Hosted remote execution uses a guarded generic submission adapter today; deeper provider-specific lifecycle controls and rollback APIs still need to be implemented before broad production rollout.
 - Live third-party integrations still need per-provider credential flows, rate limiting, sandbox hardening, rollback logic, and tests before they should be enabled broadly.
 

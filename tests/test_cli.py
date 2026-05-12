@@ -6,6 +6,7 @@ import stat
 import subprocess
 import unittest
 import tempfile
+import hmac
 from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
@@ -20,6 +21,7 @@ from aegis.config.loader import load_config
 from aegis.memory.store import LocalStore
 from aegis.research.harness import ResearchHarness
 from aegis.security.secrets_broker import SecretsBroker
+from aegis.skills.signing import DEFAULT_SKILL_SIGNING_KEY, SIGNATURE_ALGORITHM
 from tests.test_plugins import _write_plugin_catalog, _write_plugin_fixture
 
 
@@ -2060,6 +2062,10 @@ class CliTests(unittest.TestCase):
             catalog_path = _write_plugin_catalog(root)
             manifest_body = json.dumps({"id": "remote.plugin", "name": "Remote Plugin", "version": "1.0.0"}).encode("utf-8")
             manifest_digest = sha256(manifest_body).hexdigest()
+            bundle_body = b"cli remote plugin bundle"
+            bundle_digest = sha256(bundle_body).hexdigest()
+            SecretsBroker(data_dir / "secrets.json").store_secret(name=DEFAULT_SKILL_SIGNING_KEY, value="cli-bundle-key")
+            bundle_signature = hmac.new(b"cli-bundle-key", bundle_body, digestmod="sha256").hexdigest()
             fetch_catalog = root / "fetch-marketplace.json"
             fetch_catalog.write_text(
                 json.dumps(
@@ -2072,6 +2078,14 @@ class CliTests(unittest.TestCase):
                                 "description": "CLI fetch fixture.",
                                 "manifest_url": "https://example.com/plugins/remote.plugin/plugin.json",
                                 "manifest_sha256": manifest_digest,
+                                "bundle_url": "https://example.com/plugins/remote.plugin/plugin.bundle",
+                                "bundle_sha256": bundle_digest,
+                                "bundle_signature": {
+                                    "algorithm": SIGNATURE_ALGORITHM,
+                                    "key_id": DEFAULT_SKILL_SIGNING_KEY,
+                                    "digest": bundle_digest,
+                                    "signature": bundle_signature,
+                                },
                             }
                         ]
                     }
@@ -2089,12 +2103,24 @@ class CliTests(unittest.TestCase):
                 def read(self, limit: int) -> bytes:
                     return manifest_body
 
+            class FakeBundleResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return bundle_body
+
             installed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugin", "install", str(plugin_path), "--unsigned-local"]))
             listed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "list"]))
             marketplace = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "marketplace", "--query", "test", "--catalog-path", str(catalog_path)]))
             updates = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "updates", "--catalog-path", str(catalog_path)]))
             with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeResponse()):
                 fetched = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "fetch-manifest", "remote.plugin", "--catalog-path", str(fetch_catalog)]))
+            with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeBundleResponse()):
+                fetched_bundle = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "fetch-bundle", "remote.plugin", "--catalog-path", str(fetch_catalog)]))
             with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeResponse()):
                 installed_marketplace = dispatch(
                     parser.parse_args(["--data-dir", str(data_dir), "plugins", "install-marketplace", "remote.plugin", "--catalog-path", str(fetch_catalog)])
@@ -2110,6 +2136,15 @@ class CliTests(unittest.TestCase):
             self.assertEqual(updates["updates"][0]["status"], "update_available")
             self.assertEqual(fetched["status"], "manifest_downloaded_for_review")
             self.assertEqual(Path(fetched["manifest_path"]).read_bytes(), manifest_body)
+            self.assertEqual(fetched_bundle["status"], "bundle_downloaded_for_review")
+            self.assertEqual(fetched_bundle["mode"], "sha256_and_signature_verified_bundle_review_only")
+            self.assertEqual(fetched_bundle["bundle_sha256"], bundle_digest)
+            self.assertEqual(fetched_bundle["signature"]["algorithm"], SIGNATURE_ALGORITHM)
+            self.assertTrue(fetched_bundle["signature"]["signature_verified"])
+            self.assertFalse(fetched_bundle["auto_install_supported"])
+            self.assertFalse(fetched_bundle["dynamic_code_import_supported"])
+            self.assertEqual(Path(fetched_bundle["bundle_path"]).read_bytes(), bundle_body)
+            self.assertNotIn("cli-bundle-key", json.dumps(fetched_bundle, sort_keys=True))
             self.assertEqual(installed_marketplace["status"], "marketplace_plugin_installed")
             self.assertEqual(installed_marketplace["plugin"]["id"], "remote.plugin")
             self.assertTrue(enabled["plugin"]["enabled"])

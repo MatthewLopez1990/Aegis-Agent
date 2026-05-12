@@ -5,6 +5,7 @@ import os
 import stat
 import tempfile
 import unittest
+import hmac
 from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
@@ -15,6 +16,7 @@ from aegis.mcp.registry import McpRegistry
 from aegis.memory.store import LocalStore
 from aegis.plugins.manager import PluginManager
 from aegis.security.secrets_broker import SecretsBroker
+from aegis.skills.signing import DEFAULT_SKILL_SIGNING_KEY, SIGNATURE_ALGORITHM
 from aegis.skills.registry import SkillRegistry
 from aegis.skills.runtime import builtin_project_summary_manifest
 
@@ -128,7 +130,7 @@ class PluginManagerTests(unittest.TestCase):
             self.assertEqual(updates["updates"][0]["id"], "test.plugin")
             self.assertEqual(updates["updates"][0]["installed_version"], "0.1.0")
             self.assertEqual(updates["updates"][0]["available_version"], "0.2.0")
-            self.assertIn("remote_code_download", updates["blocked_operations"])
+            self.assertIn("remote_code_auto_install", updates["blocked_operations"])
             self.assertFalse(updates["raw_secret_values_included"])
             self.assertNotIn("token=", serialized)
 
@@ -138,6 +140,10 @@ class PluginManagerTests(unittest.TestCase):
             data_dir = root / ".aegis"
             body = json.dumps({"id": "remote.plugin", "name": "Remote Plugin", "version": "1.2.0"}).encode("utf-8")
             digest = sha256(body).hexdigest()
+            bundle_body = b"remote plugin bundle bytes"
+            bundle_digest = sha256(bundle_body).hexdigest()
+            SecretsBroker(data_dir / "secrets.json").store_secret(name=DEFAULT_SKILL_SIGNING_KEY, value="bundle-signing-key")
+            bundle_signature = hmac.new(b"bundle-signing-key", bundle_body, digestmod="sha256").hexdigest()
             catalog_path = root / "marketplace.json"
             catalog_path.write_text(
                 json.dumps(
@@ -150,6 +156,14 @@ class PluginManagerTests(unittest.TestCase):
                                 "description": "Verified manifest fetch fixture.",
                                 "manifest_url": "https://example.com/remote.plugin/plugin.json",
                                 "manifest_sha256": f"sha256:{digest}",
+                                "bundle_url": "https://example.com/remote.plugin/plugin.bundle",
+                                "bundle_sha256": f"sha256:{bundle_digest}",
+                                "bundle_signature": {
+                                    "algorithm": SIGNATURE_ALGORITHM,
+                                    "key_id": DEFAULT_SKILL_SIGNING_KEY,
+                                    "digest": bundle_digest,
+                                    "signature": bundle_signature,
+                                },
                             }
                         ]
                     }
@@ -167,24 +181,48 @@ class PluginManagerTests(unittest.TestCase):
                 def read(self, limit: int) -> bytes:
                     return body
 
+            class FakeBundleResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return bundle_body
+
             manager = _plugin_manager(data_dir, workspace=root)
             with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeResponse()):
                 fetched = manager.fetch_marketplace_manifest("remote.plugin", catalog_path=catalog_path, allowlist=("example.com",))
+            with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeBundleResponse()):
+                fetched_bundle = manager.fetch_marketplace_bundle("remote.plugin", catalog_path=catalog_path, allowlist=("example.com",))
             with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeResponse()):
                 installed = manager.install_marketplace_plugin("remote.plugin", catalog_path=catalog_path, allowlist=("example.com",))
 
             manifest_path = Path(fetched["manifest_path"])
+            bundle_path = Path(fetched_bundle["bundle_path"])
             self.assertEqual(fetched["status"], "manifest_downloaded_for_review")
             self.assertEqual(fetched["manifest_sha256"], digest)
             self.assertFalse(fetched["auto_install_supported"])
             self.assertEqual(manifest_path.read_bytes(), body)
             self.assertEqual(stat.S_IMODE(manifest_path.stat().st_mode), 0o600)
+            self.assertEqual(fetched_bundle["status"], "bundle_downloaded_for_review")
+            self.assertEqual(fetched_bundle["mode"], "sha256_and_signature_verified_bundle_review_only")
+            self.assertEqual(fetched_bundle["bundle_sha256"], bundle_digest)
+            self.assertEqual(fetched_bundle["signature"]["algorithm"], SIGNATURE_ALGORITHM)
+            self.assertTrue(fetched_bundle["signature"]["signature_verified"])
+            self.assertFalse(fetched_bundle["auto_install_supported"])
+            self.assertFalse(fetched_bundle["dynamic_code_import_supported"])
+            self.assertEqual(bundle_path.read_bytes(), bundle_body)
+            self.assertEqual(stat.S_IMODE(bundle_path.stat().st_mode), 0o600)
+            self.assertNotIn("bundle-signing-key", json.dumps(fetched_bundle, sort_keys=True))
             self.assertIn("plugins install", fetched["install_command"])
             self.assertEqual(installed["status"], "marketplace_plugin_installed")
             self.assertEqual(installed["plugin"]["id"], "remote.plugin")
             self.assertEqual(installed["fetch"]["manifest_sha256"], digest)
-            self.assertIn("remote_bundle_download", installed["blocked_operations"])
+            self.assertIn("remote_bundle_auto_install", installed["blocked_operations"])
             self.assertEqual(manager.list_plugins()[0]["id"], "remote.plugin")
+            self.assertNotIn("bundle-signing-key", (data_dir / "audit.jsonl").read_text(encoding="utf-8"))
 
             invalid_catalog_path = root / "invalid-marketplace.json"
             invalid_catalog_path.write_text(
@@ -224,7 +262,7 @@ def _plugin_manager(data_dir: Path, *, workspace: Path) -> PluginManager:
     skills = SkillRegistry(store, audit, SecretsBroker(data_dir / "secrets.json"))
     mcp = McpRegistry(store, audit)
     hooks = HookManager(data_dir / "hooks.json", audit, allowed_executables=("python3",), workspace=workspace)
-    return PluginManager(data_dir / "plugins.json", audit, skills=skills, mcp=mcp, hooks=hooks)
+    return PluginManager(data_dir / "plugins.json", audit, skills=skills, mcp=mcp, hooks=hooks, secrets_broker=SecretsBroker(data_dir / "secrets.json"))
 
 
 def _write_plugin_fixture(root: Path) -> Path:
