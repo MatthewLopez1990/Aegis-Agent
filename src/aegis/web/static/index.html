@@ -497,6 +497,12 @@
             <input id="remote-control-ttl" type="number" min="60" max="3600" value="600" placeholder="ttl seconds">
             <button type="submit">Create Pairing</button>
           </form>
+          <form id="remote-control-relay-form" class="inline-form two-col">
+            <input id="remote-control-relay-url" placeholder="https://relay.example/aegis">
+            <button id="remote-control-relay-check" type="submit">Check Relay</button>
+          </form>
+          <p id="remote-control-relay-summary" class="muted"></p>
+          <div id="remote-control-relay" class="list compact-list"></div>
           <div id="remote-control-pairings" class="list compact-list"></div>
           <div id="remote-control-output" class="evidence-block"></div>
         </section>

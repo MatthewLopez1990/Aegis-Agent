@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 import unittest
 
 from aegis.remote_control import RemoteControlPairingRegistry
@@ -29,7 +30,35 @@ class RemoteControlPairingTests(unittest.TestCase):
 
         status = registry.status(now=now)
         self.assertEqual(status["active_pairing_count"], 1)
+        self.assertEqual(status["relay_preflight"]["status"], "relay_blocked_preflight")
+        self.assertFalse(status["relay_preflight"]["outbound_relay_enabled"])
+        self.assertFalse(status["relay_preflight"]["pairing_token_relayed"])
         self.assertNotIn(created["token"], str(status))
+
+    def test_relay_preflight_redacts_url_secrets_and_blocks_transport(self) -> None:
+        registry = RemoteControlPairingRegistry()
+
+        result = registry.relay_preflight(relay_url="https://relay.example/aegis?token=secret#frag")
+
+        rendered = json.dumps(result, sort_keys=True)
+        self.assertEqual(result["status"], "relay_blocked_preflight")
+        self.assertEqual(result["mode"], "preflight_only")
+        self.assertEqual(result["relay_target"], "https://relay.example/aegis")
+        self.assertTrue(result["relay_url_redacted"])
+        self.assertFalse(result["outbound_relay_enabled"])
+        self.assertFalse(result["raw_secret_values_included"])
+        self.assertFalse(result["pairing_token_relayed"])
+        self.assertNotIn("token=secret", rendered)
+        self.assertNotIn("#frag", rendered)
+
+    def test_relay_preflight_rejects_non_https_targets(self) -> None:
+        registry = RemoteControlPairingRegistry()
+
+        result = registry.relay_preflight(relay_url="http://relay.example/aegis")
+
+        self.assertIsNone(result["relay_target"])
+        self.assertFalse(result["relay_configured"])
+        self.assertEqual(result["blockers"][0]["control"], "relay_url_validation")
 
     def test_pairing_expires_and_can_be_revoked(self) -> None:
         registry = RemoteControlPairingRegistry()

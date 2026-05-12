@@ -349,9 +349,17 @@ class ApiServerSecurityTests(unittest.TestCase):
                 with self.assertRaises(HTTPError) as remote_status_error:
                     _json_get(port, "/remote-control/status")
                 self.assertEqual(remote_status_error.exception.code, 403)
+                with self.assertRaises(HTTPError) as remote_relay_error:
+                    _json_get(port, "/remote-control/relay")
+                self.assertEqual(remote_relay_error.exception.code, 403)
 
                 token = _json_get(port, "/auth")["token"]
                 remote_status_initial = _json_get(port, "/remote-control/status", token=token)
+                remote_relay_preflight = _json_get(
+                    port,
+                    f"/remote-control/relay?relay_url={quote('https://relay.example/aegis?token=secret', safe='')}",
+                    token=token,
+                )
                 artifact_dir = workspace / ".aegis" / "tool-artifacts"
                 artifact_dir.mkdir(parents=True)
                 (artifact_dir / "fixture.txt").write_text("preview artifact", encoding="utf-8")
@@ -953,6 +961,10 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(invalid_role.exception.code, 400)
                 self.assertEqual(remote_status_initial["status"], "local_pairing_available")
                 self.assertEqual(remote_status_initial["active_pairing_count"], 0)
+                self.assertEqual(remote_relay_preflight["status"], "relay_blocked_preflight")
+                self.assertEqual(remote_relay_preflight["relay_target"], "https://relay.example/aegis")
+                self.assertFalse(remote_relay_preflight["outbound_relay_enabled"])
+                self.assertNotIn("token=secret", json.dumps(remote_relay_preflight, sort_keys=True))
                 self.assertEqual(remote_pair["token_header"], "X-Aegis-Remote-Token")
                 self.assertEqual(remote_pair["pairing"]["status"], "active")
                 self.assertEqual(remote_pair["pairing"]["task_id"], remote_control_task["id"])

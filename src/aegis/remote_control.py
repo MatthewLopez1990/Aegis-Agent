@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 import hashlib
 import secrets
+from urllib.parse import urlparse
 
 
 REMOTE_CONTROL_TOKEN_HEADER = "X-Aegis-Remote-Token"
@@ -13,6 +14,22 @@ DEFAULT_PAIRING_TTL_SECONDS = 600
 MIN_PAIRING_TTL_SECONDS = 60
 MAX_PAIRING_TTL_SECONDS = 3600
 DEFAULT_ALLOWED_TASK_ACTIONS = ("status", "events", "resume", "pause", "cancel")
+REMOTE_CONTROL_RELAY_REQUIRED_CONTROLS = (
+    "explicit_operator_enablement",
+    "brokered_relay_auth",
+    "relay_origin_allowlist",
+    "scoped_pairing_token_exchange",
+    "push_delivery_approval",
+    "audit_receipts_without_tokens",
+    "revocation_and_expiry_propagation",
+)
+REMOTE_CONTROL_RELAY_VERIFICATION_GATES = (
+    "disabled_relay_denial",
+    "relay_token_redaction",
+    "origin_allowlist_enforced",
+    "pairing_scope_preserved",
+    "revocation_blocks_relayed_actions",
+)
 
 
 class RemoteControlPairingRegistry:
@@ -86,6 +103,56 @@ class RemoteControlPairingRegistry:
                 "off_device_outbound_relay",
                 "mobile_push_delivery",
                 "cloud_session_directory",
+            ],
+            "relay_preflight": self.relay_preflight(),
+        }
+
+    def relay_preflight(self, *, relay_url: str | None = None) -> dict[str, Any]:
+        relay_target = _redacted_relay_target(relay_url)
+        blockers = [
+            {"control": "explicit_operator_enablement", "detail": "no outbound relay transport is enabled"},
+            {"control": "brokered_relay_auth", "detail": "relay credentials must use brokered handles and must not expose raw tokens"},
+            {"control": "relay_origin_allowlist", "detail": "remote origins must be allowlisted before off-device access"},
+            {"control": "push_delivery_approval", "detail": "mobile push delivery requires an approved channel adapter"},
+            {"control": "revocation_and_expiry_propagation", "detail": "remote relays must honor local pairing expiry and revocation"},
+        ]
+        if relay_target is None and relay_url:
+            blockers.insert(0, {"control": "relay_url_validation", "detail": "relay URL must use https"})
+        return {
+            "status": "relay_blocked_preflight",
+            "mode": "preflight_only",
+            "outbound_relay_enabled": False,
+            "relay_configured": relay_target is not None,
+            "relay_target": relay_target,
+            "relay_url_redacted": bool(relay_url),
+            "mobile_push_delivery": "blocked",
+            "cloud_session_directory": "blocked",
+            "token_capture_supported": False,
+            "token_captured": False,
+            "pairing_token_relayed": False,
+            "raw_secret_values_included": False,
+            "required_controls": list(REMOTE_CONTROL_RELAY_REQUIRED_CONTROLS),
+            "configured_controls": [
+                "local_short_lived_pairing_tokens",
+                "token_hash_storage_only",
+                "host_and_origin_checks",
+                "scoped_task_actions",
+                "local_revocation",
+            ],
+            "blockers": blockers,
+            "verification_gates": list(REMOTE_CONTROL_RELAY_VERIFICATION_GATES),
+            "allowed_local_endpoints": [
+                "GET /remote-control/status",
+                "POST /remote-control/pair",
+                "POST /remote-control/revoke",
+                "GET /remote-control/tasks/:id",
+                "GET /remote-control/tasks/:id/events",
+                "POST /remote-control/tasks/:id/resume|pause|cancel",
+            ],
+            "next_steps": [
+                "Add an explicitly enabled relay transport with a brokered credential handle.",
+                "Preserve local pairing scope, expiry, revocation, host checks, and audit receipts through the relay.",
+                "Add denied, approved, revoked, expired, and token-redaction tests before enabling off-device delivery.",
             ],
         }
 
@@ -169,3 +236,14 @@ def _utc_now(now: datetime | None) -> datetime:
     if now.tzinfo is None:
         return now.replace(tzinfo=timezone.utc)
     return now.astimezone(timezone.utc)
+
+
+def _redacted_relay_target(relay_url: str | None) -> str | None:
+    raw = str(relay_url or "").strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    if parsed.scheme != "https" or not parsed.netloc:
+        return None
+    path = parsed.path or ""
+    return f"{parsed.scheme}://{parsed.netloc}{path}"

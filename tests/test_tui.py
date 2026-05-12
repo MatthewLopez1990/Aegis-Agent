@@ -250,6 +250,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("readiness", tui.complete_evaluation("rea", "evaluation rea", len("evaluation "), len("evaluation rea")))
             self.assertIn("inspect", tui.complete_browser("in", "browser in", len("browser "), len("browser in")))
             self.assertIn("screenshot", tui.complete_browser("sc", "browser sc", len("browser "), len("browser sc")))
+            self.assertIn("relay", tui.complete_remote_control("re", "remote_control re", len("remote_control "), len("remote_control re")))
             self.assertIn("append", tui.complete_session("ap", "session ap", len("session "), len("session ap")))
             self.assertIn("run", tui.complete_tools("ru", "tools ru", len("tools "), len("tools ru")))
             self.assertIn("schedule-bundle", tui.complete_security("schedule", "security schedule", len("security "), len("security schedule")))
@@ -274,6 +275,12 @@ class TuiTests(unittest.TestCase):
             with redirect_stdout(pair_output):
                 tui.onecmd("/remote-control pair")
             self.assertIn('"create_pairing": "POST /remote-control/pair"', pair_output.getvalue())
+            relay_output = io.StringIO()
+            with redirect_stdout(relay_output):
+                tui.onecmd("/remote-control relay --relay-url https://relay.example/aegis?token=secret")
+            self.assertIn('"status": "relay_blocked_preflight"', relay_output.getvalue())
+            self.assertIn('"relay_target": "https://relay.example/aegis"', relay_output.getvalue())
+            self.assertNotIn("token=secret", relay_output.getvalue())
             self.assertIn("Build Menu", slash_rendered)
             self.assertIn("next: /memory review-queue", slash_rendered)
             fuzzy_rendered = tui._render_slash_palette("su")

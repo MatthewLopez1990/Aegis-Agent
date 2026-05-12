@@ -23,6 +23,7 @@ from aegis.hooks.manager import HOOK_EVENTS
 from aegis.memory.models import MemoryType
 from aegis.migration.openclaw import inspect_hermes_home, inspect_openclaw_home, preview_hermes_memory_import, preview_openclaw_memory_import
 from aegis.product.capabilities import build_product_dashboard
+from aegis.remote_control import RemoteControlPairingRegistry
 from aegis.research.harness import ResearchHarness
 from aegis.security.policy_engine import PolicyRequest
 from aegis.security.policy_profile import activate_due_policy_rollouts, apply_policy_bundle, diff_policy_bundle, import_policy_bundle, list_policy_bundles, list_policy_promotions, list_policy_rollouts, policy_profile_to_dict, promote_policy_bundle, rollback_policy_bundle, schedule_policy_bundle
@@ -183,6 +184,7 @@ BROWSER_COMMANDS = ("session", "sessions", "close", "navigate", "extract", "insp
 MCP_COMMANDS = ("list", "register", "call")
 HOOK_COMMANDS = ("list", "add", "enable", "disable", "remove", "run")
 AGENTS_COMMANDS = ("status", "delegate")
+REMOTE_CONTROL_COMMANDS = ("pair", "relay")
 SESSION_COMMANDS = ("new", "open", "rename", "set-model", "set-personality", "activate", "archive", "pause", "append", "history", "tasks", "compact")
 TASKS_COMMANDS = ("all", "session")
 SECURITY_COMMANDS = (
@@ -439,6 +441,9 @@ class AegisTui(cmd.Cmd):
 
     def complete_agents(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return _complete_subcommand(AGENTS_COMMANDS, text, line, begidx)
+
+    def complete_remote_control(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return _complete_subcommand(REMOTE_CONTROL_COMMANDS, text, line, begidx)
 
     def complete_session(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return _complete_subcommand(SESSION_COMMANDS, text, line, begidx)
@@ -2192,8 +2197,14 @@ class AegisTui(cmd.Cmd):
         self.do_rollback(arg)
 
     def do_remote_control(self, arg: str) -> None:
-        """remote_control [name|pair] -- show guarded remote-control readiness."""
+        """remote_control [name|pair|relay] -- show guarded remote-control readiness."""
         parts = shlex.split(arg) if arg else []
+        if parts and parts[0] == "relay":
+            relay_url = _option_value(parts, "--relay-url")
+            if relay_url is None and len(parts) > 1 and not parts[1].startswith("--"):
+                relay_url = parts[1]
+            _print_json(RemoteControlPairingRegistry().relay_preflight(relay_url=relay_url))
+            return
         if parts and parts[0] == "pair":
             _print_json(
                 {
@@ -2201,6 +2212,7 @@ class AegisTui(cmd.Cmd):
                     "command": "PYTHONPATH=src python3 -m aegis.cli.main serve --workspace . --host 127.0.0.1 --port 8765",
                     "create_pairing": "POST /remote-control/pair",
                     "status_endpoint": "GET /remote-control/status",
+                    "relay_preflight": "GET /remote-control/relay",
                     "token_header": "X-Aegis-Remote-Token",
                     "auth_required": "local API token required to create or revoke pairings",
                     "scope": "scoped_remote_task_control",
@@ -2218,6 +2230,7 @@ class AegisTui(cmd.Cmd):
                     "Status: local control plane available with short-lived pairing tokens.",
                     "Current secure surface: aegis serve --host 127.0.0.1 --port 8765",
                     "Pairing endpoint: POST /remote-control/pair returns one token for X-Aegis-Remote-Token.",
+                    "Relay preflight: remote-control relay shows blocked off-device transport controls.",
                     "Security posture: host/origin checks still apply; no subscription token capture; pairing creation needs the local API token.",
                     "Remaining live gap: outbound relay, mobile push delivery, and cloud session directory.",
                 ],
@@ -4503,6 +4516,9 @@ SLASH_SUBCOMMANDS: dict[str, tuple[str, ...]] = {
     "mcp": MCP_COMMANDS,
     "hooks": HOOK_COMMANDS,
     "agents": AGENTS_COMMANDS,
+    "remote-control": REMOTE_CONTROL_COMMANDS,
+    "remote_control": REMOTE_CONTROL_COMMANDS,
+    "rc": REMOTE_CONTROL_COMMANDS,
     "session": SESSION_COMMANDS,
     "tasks": TASKS_COMMANDS,
     "security": SECURITY_COMMANDS,
@@ -4527,6 +4543,9 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("hooks", "add"): ("--id", "--enabled", "--approval-required", "--no-approval-required", "--timeout", "--max-output-bytes"),
     ("hooks", "run"): ("--approved", "--context-json"),
     ("agents", "delegate"): ("--approved",),
+    ("remote-control", "relay"): ("--relay-url",),
+    ("remote_control", "relay"): ("--relay-url",),
+    ("rc", "relay"): ("--relay-url",),
 }
 
 

@@ -119,6 +119,31 @@ class CliTests(unittest.TestCase):
             self.assertEqual(backend_checklist["rollback_receipts"]["state"], "enforced")
             self.assertEqual(backend_checklist["provider_lifecycle_depth"]["state"], "not_started")
 
+    def test_remote_control_relay_command_reports_blocked_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            data_dir = Path(temp) / ".aegis"
+
+            status = dispatch(parser.parse_args(["--data-dir", str(data_dir), "remote-control", "status"]))
+            relay = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "remote-control",
+                        "relay",
+                        "--relay-url",
+                        "https://relay.example/aegis?token=secret",
+                    ]
+                )
+            )
+
+            self.assertEqual(status["relay_preflight"]["status"], "relay_blocked_preflight")
+            self.assertEqual(relay["status"], "relay_blocked_preflight")
+            self.assertEqual(relay["relay_target"], "https://relay.example/aegis")
+            self.assertFalse(relay["outbound_relay_enabled"])
+            self.assertNotIn("token=secret", json.dumps(relay, sort_keys=True))
+
     def test_agents_cli_status_and_delegate_use_governed_queue(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             parser = build_parser()

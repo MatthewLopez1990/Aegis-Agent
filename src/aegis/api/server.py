@@ -171,6 +171,10 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 else:
                     self._json(remote_control.status())
                 return
+            if path == "/remote-control/relay":
+                self._authorize_remote_control_status()
+                self._json(remote_control.relay_preflight(relay_url=query.get("relay_url", [None])[0]))
+                return
             match_remote_task = re.fullmatch(r"/remote-control/tasks/([^/]+)", path)
             if match_remote_task:
                 task_id = match_remote_task.group(1)

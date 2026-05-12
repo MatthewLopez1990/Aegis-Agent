@@ -29,6 +29,7 @@ from aegis.models.registry import ModelRegistry
 from aegis.personality.context import ContextFileLoader, PERSONALITY_NAMES
 from aegis.plugins.manager import PluginManager
 from aegis.product.capabilities import build_product_dashboard
+from aegis.remote_control import RemoteControlPairingRegistry
 from aegis.research.harness import ResearchHarness
 from aegis.scheduler.manager import ScheduleManager
 from aegis.security.policy_profile import activate_due_policy_rollouts, apply_policy_bundle, diff_policy_bundle, export_policy_bundle, import_policy_bundle, list_policy_bundles, list_policy_promotions, list_policy_rollouts, promote_policy_bundle, rollback_policy_bundle, schedule_policy_bundle
@@ -386,6 +387,12 @@ def build_parser() -> argparse.ArgumentParser:
     channel_send_chat_webhook.add_argument("text")
     channel_send_chat_webhook.add_argument("--session-id")
     channel_send_chat_webhook.add_argument("--approved", action="store_true")
+
+    remote_control = subcommands.add_parser("remote-control", help="Inspect local remote-control and relay readiness")
+    remote_control_sub = remote_control.add_subparsers(dest="remote_control_command", required=True)
+    remote_control_sub.add_parser("status", help="Show local remote-control pairing readiness")
+    remote_control_relay = remote_control_sub.add_parser("relay", help="Show outbound relay preflight blockers")
+    remote_control_relay.add_argument("--relay-url")
 
     models = subcommands.add_parser("model", help="Manage model routes and usage")
     model_sub = models.add_subparsers(dest="model_command", required=True)
@@ -1028,6 +1035,13 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return build_orchestrator(data_dir=config.data_dir).send_email(subject=args.subject, text=args.text, approved=args.approved, session_id=args.session_id, metadata={"source": "cli"})
         if args.channel_command == "send-chat-webhook":
             return build_orchestrator(data_dir=config.data_dir).send_chat_webhook(text=args.text, approved=args.approved, session_id=args.session_id, metadata={"source": "cli"})
+
+    if args.command == "remote-control":
+        registry = RemoteControlPairingRegistry()
+        if args.remote_control_command == "status":
+            return registry.status()
+        if args.remote_control_command == "relay":
+            return registry.relay_preflight(relay_url=args.relay_url)
 
     if args.command == "model":
         registry = _model_registry(config)

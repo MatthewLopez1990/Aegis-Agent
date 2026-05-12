@@ -187,6 +187,7 @@ const refresh = async () => {
     const [
       dashboard,
       remoteControl,
+      remoteControlRelay,
       connectors,
       policy,
       policyBundles,
@@ -224,6 +225,7 @@ const refresh = async () => {
     ] = await Promise.all([
       api("/dashboard"),
       api("/remote-control/status"),
+      api("/remote-control/relay"),
       api("/connectors"),
       api("/policy"),
       api("/policy/bundles"),
@@ -262,6 +264,7 @@ const refresh = async () => {
 
     syncPendingSkillEnableApprovals([...(approvedApprovals.approvals || []), ...(approvals.approvals || [])]);
     renderMetrics(dashboard);
+    renderRemoteControlRelay(remoteControlRelay);
     setList("remote-control-pairings", remoteControl.pairings || [], (x) => ({
       title: x.label || x.id,
       detail: `Session ${x.session_id || "any"} · task ${x.task_id || "any"} · actions ${(x.allowed_actions || []).join(", ") || "none"}`,
@@ -1567,6 +1570,17 @@ const renderRemoteControlOutput = (payload) => {
   `;
 };
 
+const renderRemoteControlRelay = (payload = {}) => {
+  const summary = document.getElementById("remote-control-relay-summary");
+  summary.textContent = `${payload.status || "relay_preflight"} · outbound ${payload.outbound_relay_enabled ? "enabled" : "blocked"} · target ${payload.relay_target || "not configured"}`;
+  setList("remote-control-relay", payload.blockers || [], (x) => ({
+    title: x.control,
+    detail: x.detail,
+    meta: payload.mode || "preflight_only",
+    tone: "attention",
+  }), "Relay preflight has no blockers");
+};
+
 const renderChannelOutput = (payload) => {
   const node = document.getElementById("channel-render-output");
   node.innerHTML = `
@@ -2350,6 +2364,14 @@ document.getElementById("remote-control-form").addEventListener("submit", async 
   });
   renderRemoteControlOutput(result);
   await refresh();
+});
+
+document.getElementById("remote-control-relay-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const relayUrl = document.getElementById("remote-control-relay-url").value.trim();
+  const result = await api(`/remote-control/relay${relayUrl ? `?relay_url=${encodeURIComponent(relayUrl)}` : ""}`);
+  renderRemoteControlRelay(result);
+  renderRemoteControlOutput(result);
 });
 
 document.getElementById("remote-control-pairings").addEventListener("click", async (event) => {
