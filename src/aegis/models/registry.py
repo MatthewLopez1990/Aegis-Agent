@@ -805,13 +805,16 @@ EXTERNAL_AUTH_HANDOFF_PROFILES: dict[str, dict[str, Any]] = {
         "account_surface": "AWS IAM Identity Center / Bedrock",
         "external_command": "aws sso login",
         "external_command_argv": ("aws", "sso", "login"),
+        "external_status_command": "aws sts get-caller-identity",
+        "external_status_command_argv": ("aws", "sts", "get-caller-identity"),
         "setup_required": "aws configure sso",
         "provider_token_source": "official AWS CLI SSO cache",
         "aegis_bridge_status": "official_cli_handoff_only",
         "interactive": True,
         "next_steps": [
             "Configure an AWS SSO profile with aws configure sso before running the handoff.",
-            "Use model auth login aws-bedrock --method cloud-identity --run-external from a local terminal.",
+            "Use model auth login aws-bedrock --method cloud-identity --run-external from a local terminal, then verify with the non-secret AWS CLI identity status check.",
+            "Do not paste AWS SSO cache entries, access keys, or session tokens into Aegis.",
         ],
     },
     "azure-foundry": {

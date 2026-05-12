@@ -358,6 +358,44 @@ class ModelAuthTests(unittest.TestCase):
             self.assertIn("model.auth_external_login_requested", audit_text)
             self.assertNotIn("GH_TOKEN", audit_text)
 
+    def test_aws_cloud_identity_handoff_verifies_official_cli_without_token_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            secret_path = root / ".aegis" / "secrets.json"
+            audit_path = root / ".aegis" / "audit.jsonl"
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(audit_path), SecretsBroker(secret_path))
+
+            login_completed = subprocess.CompletedProcess(("aws", "sso", "login"), 0)
+            status_completed = subprocess.CompletedProcess(
+                ("aws", "sts", "get-caller-identity"),
+                0,
+                stdout='{"Account":"123456789012","Arn":"arn:aws:sts::123456789012:assumed-role/Test/User"}\n',
+                stderr="",
+            )
+            with (
+                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/aws"),
+                patch("aegis.models.registry.subprocess.run", side_effect=(login_completed, status_completed)) as run,
+            ):
+                status = registry.login_provider_external("aws-bedrock", method="cloud-identity", run_external=True)
+
+            self.assertEqual(run.call_args_list[0].args[0], ("aws", "sso", "login"))
+            self.assertEqual(run.call_args_list[1].args[0], ("aws", "sts", "get-caller-identity"))
+            self.assertEqual(status["provider"], "aws-bedrock")
+            self.assertEqual(status["target"], "AWS Bedrock")
+            self.assertEqual(status["method"], "cloud_identity")
+            self.assertEqual(status["status"], "external_login_verified")
+            self.assertTrue(status["external_status_verified"])
+            self.assertEqual(status["external_status_command_argv"], ["aws", "sts", "get-caller-identity"])
+            self.assertTrue(status["auth_configured"])
+            self.assertFalse(status["token_captured"])
+            self.assertFalse(secret_path.exists())
+
+            target_rows = {row["target"]: row for row in registry.auth_targets()["targets"]}
+            self.assertEqual(target_rows["AWS Bedrock"]["status"], "external_login_verified")
+            self.assertEqual(target_rows["AWS Bedrock"]["bridge_status"], "official_cli_link_verified")
+            self.assertTrue(target_rows["AWS Bedrock"]["external_auth_configured"])
+            self.assertNotIn("123456789012", audit_path.read_text(encoding="utf-8"))
+
     def test_manual_provider_native_auth_handoff_never_captures_tokens(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
             root = Path(temp)

@@ -1805,6 +1805,13 @@ class CliTests(unittest.TestCase):
                 patch("aegis.models.registry.subprocess.run", side_effect=(github_login_completed, github_status_completed)) as github_run,
             ):
                 github_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "github-copilot", "--method", "oauth-device", "--run-external"]))
+            aws_login_completed = subprocess.CompletedProcess(("aws", "sso", "login"), 0)
+            aws_status_completed = subprocess.CompletedProcess(("aws", "sts", "get-caller-identity"), 0, stdout='{"Account":"123456789012"}\n', stderr="")
+            with (
+                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/aws"),
+                patch("aegis.models.registry.subprocess.run", side_effect=(aws_login_completed, aws_status_completed)) as aws_run,
+            ):
+                aws_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "aws-bedrock", "--method", "cloud-identity", "--run-external"]))
             targets_after = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "targets"]))
             github_status = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "status", "github-copilot"]))
             github_logout = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "logout", "github-copilot"]))
@@ -1833,6 +1840,12 @@ class CliTests(unittest.TestCase):
             self.assertEqual(github_login["auth"]["method"], "oauth_device")
             self.assertEqual(github_login["auth"]["status"], "external_login_verified")
             self.assertFalse(github_login["auth"]["token_captured"])
+            self.assertEqual(aws_run.call_args_list[0].args[0], ("aws", "sso", "login"))
+            self.assertEqual(aws_run.call_args_list[1].args[0], ("aws", "sts", "get-caller-identity"))
+            self.assertEqual(aws_login["auth"]["target"], "AWS Bedrock")
+            self.assertEqual(aws_login["auth"]["method"], "cloud_identity")
+            self.assertEqual(aws_login["auth"]["status"], "external_login_verified")
+            self.assertFalse(aws_login["auth"]["token_captured"])
             self.assertEqual(github_status["auth"]["status"], "external_login_verified")
             self.assertTrue(github_status["auth"]["external_auth_configured"])
             self.assertEqual(github_logout["auth"]["removed_external_auth_links"], 1)
@@ -1844,7 +1857,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(target_rows_after["OpenAI Codex / ChatGPT subscription"]["status"], "subscription_cli_ready")
             self.assertEqual(target_rows_after["GitHub Copilot"]["status"], "external_login_verified")
             self.assertEqual(target_rows_after["GitHub Copilot"]["bridge_status"], "official_cli_link_verified")
+            self.assertEqual(target_rows_after["AWS Bedrock"]["status"], "external_login_verified")
+            self.assertEqual(target_rows_after["AWS Bedrock"]["bridge_status"], "official_cli_link_verified")
             self.assertIn("GitHub Copilot", targets_after["auth_targets"]["verified_external_auth_targets"])
+            self.assertIn("AWS Bedrock", targets_after["auth_targets"]["verified_external_auth_targets"])
             self.assertEqual(target_rows_after_logout["GitHub Copilot"]["status"], "official_cli_handoff_only")
             self.assertEqual(target_rows["Claude Code subscription"]["status"], "official_cli_handoff_only")
             self.assertEqual(target_rows["GitHub Copilot"]["status"], "official_cli_handoff_only")
