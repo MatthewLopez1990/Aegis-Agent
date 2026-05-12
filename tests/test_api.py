@@ -711,6 +711,24 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertTrue(subagent_handoff["receipt"]["reason_included"])
                 self.assertFalse(subagent_handoff["receipt"]["raw_reason_included"])
                 self.assertEqual(subagent_handoff["subagents"]["in_progress_cards"], 1)
+                subagent_run_gated = _json_post(port, "/subagents/run", {"card_id": subagent_replayed["card_id"]}, token=token)
+                self.assertEqual(subagent_run_gated["status"], "approval_required")
+                self.assertFalse(subagent_run_gated["subagents"]["autonomous_runtime"])
+                subagent_run_string_approval = _json_post(port, "/subagents/run", {"card_id": subagent_replayed["card_id"], "approved": "true"}, token=token)
+                self.assertEqual(subagent_run_string_approval["status"], "approval_required")
+                subagent_run = _json_post(
+                    port,
+                    "/subagents/run",
+                    {"card_id": subagent_replayed["card_id"], "actor": "api-admin", "approved": True},
+                    token=token,
+                )
+                self.assertTrue(subagent_run["ok"])
+                self.assertEqual(subagent_run["status"], "completed")
+                self.assertEqual(subagent_run["lane"], "review")
+                self.assertEqual(subagent_run["receipt"]["worker_process"], "python_isolated_subprocess")
+                self.assertFalse(subagent_run["receipt"]["worker_result"]["raw_instruction_included"])
+                self.assertEqual(subagent_run["subagents"]["review_cards"], 1)
+                self.assertTrue(subagent_run["subagents"]["cards"][0]["isolated_parallel_runtime"])
                 disabled_subagent_profile = _json_post(port, "/subagents/profiles/researcher/disable", {"actor": "api-admin"}, token=token)
                 self.assertTrue(disabled_subagent_profile["ok"])
                 self.assertFalse(disabled_subagent_profile["profile"]["enabled"])

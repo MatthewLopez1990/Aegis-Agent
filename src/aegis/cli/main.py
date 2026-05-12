@@ -662,6 +662,11 @@ def build_parser() -> argparse.ArgumentParser:
     agents_handoff.add_argument("--actor", default="operator")
     agents_handoff.add_argument("--reason", default="")
     agents_handoff.add_argument("--limit", type=int, default=20)
+    agents_run = agents_sub.add_parser("run", help="Run an approved isolated subagent worker for a delegation card")
+    agents_run.add_argument("card_id")
+    agents_run.add_argument("--approved", action="store_true")
+    agents_run.add_argument("--actor", default="operator")
+    agents_run.add_argument("--limit", type=int, default=20)
     agents_profiles = agents_sub.add_parser("profiles", help="List durable subagent profiles")
     agents_profiles.add_argument("--limit", type=int, default=20)
     agents_profile_create = agents_sub.add_parser("profile-create", help="Create or update a governed subagent profile")
@@ -1628,6 +1633,9 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
         if args.agents_command == "handoff":
             result = orchestrator.kanban.move_subagent_delegation(args.card_id, args.lane, actor=args.actor, reason=args.reason)
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
+        if args.agents_command == "run":
+            result = orchestrator.kanban.run_subagent_delegation(args.card_id, actor=args.actor, approved=args.approved)
             return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
         if args.agents_command == "profiles":
             return {"profiles": orchestrator.kanban.list_subagent_profiles(), "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}

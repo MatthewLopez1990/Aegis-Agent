@@ -3176,7 +3176,7 @@ class AegisTui(cmd.Cmd):
         self.do_models("route alias/fast")
 
     def do_agents(self, arg: str) -> None:
-        """agents [status|profiles|profile-create|delegate|handoff] -- manage subagent delegations."""
+        """agents [status|profiles|profile-create|delegate|handoff|run] -- manage subagent delegations."""
         parts = shlex.split(arg)
         if parts and parts[0] == "profiles":
             _print_json({"profiles": self.orchestrator.kanban.list_subagent_profiles(), "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
@@ -3219,6 +3219,17 @@ class AegisTui(cmd.Cmd):
                 parts[2],
                 actor="tui-operator",
                 reason=" ".join(parts[3:]),
+            )
+            _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
+            return
+        if parts and parts[0] == "run":
+            if len(parts) < 2:
+                print("usage: agents run <card-id> [--approved]")
+                return
+            result = self.orchestrator.kanban.run_subagent_delegation(
+                parts[1],
+                actor="tui-operator",
+                approved="--approved" in parts[2:],
             )
             _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
             return

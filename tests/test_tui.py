@@ -941,6 +941,8 @@ class TuiTests(unittest.TestCase):
                 tui.onecmd("agents delegate Researcher Compare provider auth gaps --approved")
                 card_id = tui.orchestrator.kanban.subagent_status()["cards"][0]["id"]
                 tui.onecmd(f"agents handoff {card_id} in_progress reviewed")
+                tui.onecmd(f"agents run {card_id}")
+                tui.onecmd(f"agents run {card_id} --approved")
                 tui.onecmd("approvals")
 
             rendered = output.getvalue()
@@ -957,6 +959,10 @@ class TuiTests(unittest.TestCase):
             self.assertIn('"budget_enforced": true', rendered)
             self.assertIn('"in_progress_cards": 1', rendered)
             self.assertIn('"handoff_receipts_recorded": 2', rendered)
+            self.assertIn('"worker_process": "python_isolated_subprocess"', rendered)
+            self.assertIn('"isolated_parallel_runtime": true', rendered)
+            self.assertIn('"subagent_runs_recorded": 1', rendered)
+            self.assertIn('"review_cards": 1', rendered)
             self.assertIn(tui.session["id"][:8], rendered)
             self.assertIn(f"session open {tui.session['id']}", rendered)
             self.assertIn(tui.session["title"], rendered)

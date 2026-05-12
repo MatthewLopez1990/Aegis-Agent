@@ -560,21 +560,21 @@ def _live_gap_backlog(
         {
             "area": "subagent_runtime_depth",
             "platforms": ["Hermes Agent", "Claude Code"],
-            "status": "delegation_queue_ready_runtime_gap",
+            "status": "isolated_worker_ready_autonomous_recursion_blocked",
             "detail": (
                 f"Approved subagent work is tracked through a durable, auditable delegation queue with "
-                f"{subagent_delegations['open_cards']} open card(s), {subagent_delegations.get('enabled_profile_count', 0)} enabled profile(s), enforced queue budgets, and sanitized handoff receipts; recursive autonomous worker execution remains blocked until isolation is implemented."
+                f"{subagent_delegations['open_cards']} open card(s), {subagent_delegations.get('enabled_profile_count', 0)} enabled profile(s), enforced queue budgets, sanitized handoff receipts, and approved isolated worker-run receipts; recursive autonomous model-loop execution remains blocked."
             ),
             "sample_tools": ["subagent_delegate"],
             "operator_checklist": _subagent_operator_checklist(subagent_delegations),
             "next_steps": [
-                "Add isolated worker profiles before running delegated tasks autonomously.",
-                "Bind delegated result receipts to parent task completion.",
-                "Bind budgeted profiles to isolated worker execution before enabling nested agent loops.",
+                "Bind isolated worker output receipts to parent task completion and review workflows.",
+                "Add richer result artifacts while preserving tainted-instruction boundaries.",
+                "Only consider recursive autonomous model loops after deeper isolation, budget, and review controls land.",
             ],
-            "required_controls": ["human_approval", "tainted_instruction_metadata", "durable_queue", "recursive_budget_limits", "handoff_receipts"],
-            "verification_gates": ["approval_required_delegation", "status_queue_visibility", "raw_instruction_redaction", "blocked_autonomous_runtime"],
-            "evaluation_scenarios": ["subagent.delegation_queue_visibility", "subagent.autonomous_runtime_blocked"],
+            "required_controls": ["human_approval", "tainted_instruction_metadata", "durable_queue", "recursive_budget_limits", "handoff_receipts", "isolated_worker_receipts"],
+            "verification_gates": ["approval_required_delegation", "status_queue_visibility", "raw_instruction_redaction", "isolated_worker_receipts", "blocked_autonomous_runtime"],
+            "evaluation_scenarios": ["subagent.delegation_queue_visibility", "subagent.isolated_worker_receipts", "subagent.autonomous_runtime_blocked"],
             "configured_provider_count": len(configured_providers),
         },
         {
@@ -645,8 +645,8 @@ def _subagent_operator_checklist(subagent_delegations: dict[str, Any]) -> list[d
         },
         {
             "control": "isolated_parallel_runtime",
-            "state": "blocked",
-            "detail": "Recursive autonomous subagents remain disabled until worker isolation is implemented.",
+            "state": "enforced" if "isolated_parallel_runtime" in subagent_delegations.get("implemented_controls", []) else "blocked",
+            "detail": "Approved subagent runs execute as isolated deterministic worker subprocesses without model, tool, or network access; recursive autonomous subagents remain disabled.",
         },
     ]
 

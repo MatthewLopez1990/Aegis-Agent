@@ -444,8 +444,38 @@ class CliTests(unittest.TestCase):
             self.assertEqual(handed_off["subagents"]["in_progress_cards"], 1)
             self.assertEqual(handed_off["subagents"]["cards"][0]["handoff_receipt"], "subagent.handoff_recorded")
             self.assertEqual(handed_off["subagents"]["cards"][0]["handoff_receipts_recorded"], 2)
+            run_gated = dispatch(parser.parse_args(["--data-dir", str(data_dir), "agents", "run", delegated["card_id"]]))
+            self.assertEqual(run_gated["status"], "approval_required")
+            self.assertFalse(run_gated["subagents"]["autonomous_runtime"])
+            run = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "run",
+                        delegated["card_id"],
+                        "--approved",
+                        "--actor",
+                        "cli-operator",
+                    ]
+                )
+            )
+            self.assertTrue(run["ok"])
+            self.assertEqual(run["status"], "completed")
+            self.assertEqual(run["lane"], "review")
+            self.assertEqual(run["receipt"]["worker_process"], "python_isolated_subprocess")
+            self.assertEqual(run["receipt"]["worker_result"]["profile_id"], "researcher")
+            self.assertEqual(run["receipt"]["worker_result"]["network_access"], "disabled")
+            self.assertFalse(run["receipt"]["worker_result"]["model_invocation"])
+            self.assertFalse(run["receipt"]["worker_result"]["raw_instruction_included"])
+            self.assertEqual(run["subagents"]["review_cards"], 1)
+            self.assertTrue(run["subagents"]["cards"][0]["isolated_parallel_runtime"])
+            self.assertEqual(run["subagents"]["cards"][0]["subagent_runs_recorded"], 1)
+            self.assertIn("task_sha256", run["subagents"]["cards"][0]["last_worker_result"])
             audit_text = (data_dir / "audit.jsonl").read_text(encoding="utf-8")
             self.assertIn("subagent.handoff_recorded", audit_text)
+            self.assertIn("subagent.worker_completed", audit_text)
             self.assertNotIn("reviewed raw private handoff reason", audit_text)
             disabled_profile = dispatch(parser.parse_args(["--data-dir", str(data_dir), "agents", "profile-disable", "researcher"]))
             self.assertTrue(disabled_profile["ok"])

@@ -700,7 +700,7 @@ const renderSubagents = (payload) => {
   setList("subagent-cards", payload.cards || [], (x) => ({
     title: x.title,
     detail: x.description_preview || "No preview",
-    meta: `${x.lane} · ${x.owner || "unassigned"} · tainted ${x.instructions_tainted ? "yes" : "no"} · receipts ${x.handoff_receipts_recorded || 0}`,
+    meta: `${x.lane} · ${x.owner || "unassigned"} · tainted ${x.instructions_tainted ? "yes" : "no"} · handoffs ${x.handoff_receipts_recorded || 0} · runs ${x.subagent_runs_recorded || 0}`,
     actions: subagentLaneActions(x),
     tone: x.lane === "done" ? "ready" : x.lane === "blocked" ? "attention" : "",
   }), "No subagent delegation cards");
@@ -715,6 +715,9 @@ const subagentLaneActions = (card) => {
     blocked: "ready",
   }[card.lane];
   const actions = [];
+  if (["ready", "in_progress"].includes(card.lane)) {
+    actions.push(`<button type="button" data-subagent-run="${escapeHtml(card.id)}">Run</button>`);
+  }
   if (nextLane) {
     actions.push(`<button type="button" class="secondary" data-subagent-card="${escapeHtml(card.id)}" data-subagent-lane="${escapeHtml(nextLane)}">${text(nextLane.replaceAll("_", " "))}</button>`);
   }
@@ -3603,6 +3606,17 @@ document.getElementById("subagent-output").addEventListener("click", async (even
 });
 
 document.getElementById("subagent-cards").addEventListener("click", async (event) => {
+  const runCard = event.target.dataset.subagentRun;
+  if (runCard) {
+    const result = await api("/subagents/run", {
+      method: "POST",
+      body: JSON.stringify({ card_id: runCard, actor: "web-operator", approved: true }),
+    });
+    renderSubagentOutput(result);
+    renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
+    await refresh();
+    return;
+  }
   const card = event.target.dataset.subagentCard;
   const lane = event.target.dataset.subagentLane;
   if (!card || !lane) return;

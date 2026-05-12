@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 from typing import Any
 from uuid import uuid4
 
@@ -16,6 +18,34 @@ DEFAULT_LANES = ("backlog", "ready", "in_progress", "review", "blocked", "done")
 SUBAGENT_DELEGATION_BOARD_PURPOSE = "subagent_delegations"
 SUBAGENT_DELEGATION_BOARD_NAME = "Subagent Delegations"
 SUBAGENT_DEFAULT_PROFILE_ID = "operator-default"
+SUBAGENT_WORKER_CODE = r"""
+import hashlib
+import json
+import sys
+
+payload = json.loads(sys.stdin.read() or "{}")
+task = str(payload.get("task", ""))
+profile = payload.get("profile", {}) if isinstance(payload.get("profile"), dict) else {}
+budget = payload.get("budget", {}) if isinstance(payload.get("budget"), dict) else {}
+words = [part for part in task.replace("\n", " ").split(" ") if part]
+result = {
+    "worker_schema": "aegis.subagent.isolated_worker.v1",
+    "status": "completed",
+    "profile_id": profile.get("id"),
+    "budget_schema": budget.get("budget_schema"),
+    "task_sha256": hashlib.sha256(task.encode("utf-8")).hexdigest(),
+    "task_character_count": len(task),
+    "task_word_count": len(words),
+    "task_line_count": len(task.splitlines()) if task else 0,
+    "tool_calls_used": 0,
+    "network_access": "disabled",
+    "model_invocation": False,
+    "raw_instruction_included": False,
+    "raw_instruction_forwarded_to_model": False,
+    "summary": "Isolated subagent work packet prepared for operator review.",
+}
+print(json.dumps(result, sort_keys=True))
+"""
 
 
 class KanbanManager:
@@ -118,6 +148,100 @@ class KanbanManager:
             "lane": lane,
             "receipt": receipt,
             "receipt_count": receipt_count,
+            "audit_event_hash": audit_entry["event_hash"],
+            "card": _subagent_card_summary(updated_card),
+        }
+
+    def run_subagent_delegation(self, card_id: str, *, actor: str = "operator", approved: bool = False) -> dict[str, Any]:
+        card, board, metadata = self._require_subagent_card(card_id)
+        if not approved:
+            return {
+                "status": "approval_required",
+                "card_id": card_id,
+                "reason": "isolated subagent worker runs require explicit approval",
+                "approval_required": True,
+                "autonomous_runtime": False,
+            }
+        if card.get("lane") == "done":
+            raise ValueError("done subagent cards cannot be run")
+        profile = metadata.get("profile_snapshot") if isinstance(metadata.get("profile_snapshot"), dict) else {}
+        budget = metadata.get("budget_snapshot") if isinstance(metadata.get("budget_snapshot"), dict) else {}
+        run_id = str(uuid4())
+        started_at = now_utc()
+        start_receipt = {
+            "receipt_schema": "aegis.subagent.run.v1",
+            "run_id": run_id,
+            "card_id": card_id,
+            "board_id": board["id"],
+            "actor": _safe_actor(actor),
+            "profile_id": metadata.get("profile_id"),
+            "worker_process": "python_isolated_subprocess",
+            "python_isolated_mode": True,
+            "minimal_environment": True,
+            "network_access": "disabled",
+            "tool_calls_allowed": budget.get("max_tool_calls", 0),
+            "tool_calls_used": 0,
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+            "autonomous_runtime": False,
+            "started_at": started_at,
+        }
+        self.store.move_kanban_card(card_id, "in_progress")
+        self.audit_logger.append("subagent.worker_started", start_receipt, task_id=str(card.get("task_id")) if card.get("task_id") else None)
+        payload = {
+            "card_id": card_id,
+            "profile": profile,
+            "budget": budget,
+            "task": str(card.get("description", "")),
+        }
+        timeout_seconds = _worker_timeout_seconds(budget)
+        completed = _run_subagent_worker(payload, timeout_seconds=timeout_seconds)
+        completed_at = now_utc()
+        worker_result = _decode_worker_result(completed.stdout)
+        if completed.returncode != 0:
+            worker_result = {
+                "worker_schema": "aegis.subagent.isolated_worker.v1",
+                "status": "failed",
+                "returncode": completed.returncode,
+                "stderr_sha256": hashlib.sha256((completed.stderr or "").encode("utf-8")).hexdigest(),
+                "raw_instruction_included": False,
+                "raw_instruction_forwarded_to_model": False,
+            }
+        run_count = _subagent_run_count(metadata) + 1
+        result_status = "completed" if worker_result.get("status") == "completed" and completed.returncode == 0 else "failed"
+        result_lane = "review" if result_status == "completed" else "blocked"
+        result_receipt = {
+            **start_receipt,
+            "status": result_status,
+            "returncode": completed.returncode,
+            "timeout_seconds": timeout_seconds,
+            "completed_at": completed_at,
+            "stdout_bytes": len(completed.stdout.encode("utf-8")) if completed.stdout else 0,
+            "stderr_bytes": len(completed.stderr.encode("utf-8")) if completed.stderr else 0,
+            "raw_stdout_included": False,
+            "raw_stderr_included": False,
+            "worker_result": worker_result,
+        }
+        self.store.move_kanban_card(card_id, result_lane)
+        self.store.update_kanban_card_metadata(
+            card_id,
+            {
+                "isolated_parallel_runtime": True,
+                "subagent_runs_recorded": run_count,
+                "last_run_receipt": result_receipt,
+                "last_worker_result": worker_result,
+                "raw_instruction_forwarded_to_model": False,
+            },
+        )
+        audit_entry = self.audit_logger.append("subagent.worker_completed", result_receipt, task_id=str(card.get("task_id")) if card.get("task_id") else None)
+        updated_card = self._require_card(card_id)
+        return {
+            "ok": result_status == "completed",
+            "status": result_status,
+            "card_id": card_id,
+            "lane": result_lane,
+            "run_id": run_id,
+            "receipt": result_receipt,
             "audit_event_hash": audit_entry["event_hash"],
             "card": _subagent_card_summary(updated_card),
         }
@@ -280,6 +404,14 @@ class KanbanManager:
             },
         )
 
+    def _require_subagent_card(self, card_id: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        card = self._require_card(card_id)
+        board = self.subagent_delegation_board(create=False)
+        metadata = card.get("metadata", {})
+        if board is None or card.get("board_id") != board.get("id") or metadata.get("delegation_type") != "subagent":
+            raise ValueError("card is not a subagent delegation")
+        return card, board, metadata
+
     def subagent_status(self, *, limit: int = 20) -> dict[str, Any]:
         board = self.subagent_delegation_board(create=False)
         lanes = {lane: 0 for lane in DEFAULT_LANES}
@@ -323,10 +455,9 @@ class KanbanManager:
                 "handoff_receipts",
                 "agent_profile_lifecycle",
                 "recursive_budget_limits",
-            ],
-            "remaining_depth_work": [
                 "isolated_parallel_runtime",
             ],
+            "remaining_depth_work": [],
             "raw_instruction_included": False,
         }
 
@@ -372,6 +503,64 @@ def _handoff_receipt_count(metadata: dict[str, Any], *, default: int = 0) -> int
         return int(metadata.get("handoff_receipts_recorded", default))
     except (TypeError, ValueError):
         return default
+
+
+def _subagent_run_count(metadata: dict[str, Any]) -> int:
+    try:
+        return int(metadata.get("subagent_runs_recorded", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _worker_timeout_seconds(budget: dict[str, Any]) -> float:
+    try:
+        configured = int(budget.get("max_runtime_seconds", 0))
+    except (TypeError, ValueError):
+        configured = 0
+    if configured <= 0:
+        return 5.0
+    return float(max(1, min(configured, 30)))
+
+
+def _run_subagent_worker(payload: dict[str, Any], *, timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+    args = (sys.executable, "-I", "-c", SUBAGENT_WORKER_CODE)
+    try:
+        return subprocess.run(  # noqa: S603 - argv is fixed to the current Python in isolated mode.
+            args,
+            input=json.dumps(payload, sort_keys=True),
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+            env={"PYTHONIOENCODING": "utf-8"},
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else str(exc.stdout or "")
+        stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr or "")
+        return subprocess.CompletedProcess(args=args, returncode=124, stdout=stdout, stderr=stderr or "timeout")
+
+
+def _decode_worker_result(stdout: str) -> dict[str, Any]:
+    try:
+        decoded = json.loads(stdout or "{}")
+    except json.JSONDecodeError:
+        return {
+            "worker_schema": "aegis.subagent.isolated_worker.v1",
+            "status": "failed",
+            "stdout_sha256": hashlib.sha256((stdout or "").encode("utf-8")).hexdigest(),
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+        }
+    if not isinstance(decoded, dict):
+        return {
+            "worker_schema": "aegis.subagent.isolated_worker.v1",
+            "status": "failed",
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+        }
+    decoded["raw_instruction_included"] = False
+    decoded["raw_instruction_forwarded_to_model"] = False
+    return decoded
 
 
 def _profile_id(name: str) -> str:
@@ -576,5 +765,9 @@ def _subagent_card_summary(card: dict[str, Any]) -> dict[str, Any]:
         "handoff_receipt": metadata.get("handoff_receipt"),
         "handoff_receipts_recorded": _handoff_receipt_count(metadata),
         "last_handoff_receipt": metadata.get("last_handoff_receipt"),
+        "isolated_parallel_runtime": bool(metadata.get("isolated_parallel_runtime", False)),
+        "subagent_runs_recorded": _subagent_run_count(metadata),
+        "last_run_receipt": metadata.get("last_run_receipt"),
+        "last_worker_result": metadata.get("last_worker_result"),
         "raw_instruction_forwarded_to_model": bool(metadata.get("raw_instruction_forwarded_to_model", False)),
     }
