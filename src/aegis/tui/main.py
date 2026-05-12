@@ -190,7 +190,7 @@ TOP_LEVEL_COMMANDS = (
 MEMORY_COMMANDS = ("search", "health", "session-preview", "session-commit", "create", "review-queue", "review-digest", "review-action", "review-batch", "recertify", "update", "merge", "resolve-conflict", "expire", "cleanup-expired", "explain", "export", "delete")
 MIGRATE_COMMANDS = ("openclaw", "hermes", "openclaw-memory-preview", "hermes-memory-preview", "openclaw-memory-commit", "hermes-memory-commit")
 MODEL_COMMANDS = ("list", "route", "alias", "fallbacks", "usage", "auth", "providers")
-MODEL_AUTH_COMMANDS = ("login", "logout", "methods", "targets")
+MODEL_AUTH_COMMANDS = ("login", "logout", "methods", "targets", "doctor")
 TOOLS_COMMANDS = ("run",)
 SKILLS_COMMANDS = ("hub", "disable", "enable")
 PLUGIN_COMMANDS = ("list", "install", "enable", "disable", "remove", "reload", "marketplace", "updates", "fetch-manifest", "fetch-bundle", "install-bundle", "install-marketplace", "update-marketplace", "prepare-update", "apply-prepared-update")
@@ -964,6 +964,9 @@ class AegisTui(cmd.Cmd):
             return
         if command == "auth":
             try:
+                if len(parts) >= 2 and parts[1] == "doctor":
+                    _print_json({"auth_doctor": self.orchestrator.models.auth_doctor()})
+                    return
                 if len(parts) >= 2 and parts[1] == "targets":
                     _print_json({"auth_targets": self.orchestrator.models.auth_targets()})
                     return
@@ -998,7 +1001,7 @@ class AegisTui(cmd.Cmd):
                 print(f"model auth invalid: {exc}")
             return
         if command != "providers":
-            print("usage: models list|providers|route <identifier>|alias <alias> <identifier>|fallbacks <identifier> <fallback> [fallback...]|usage|auth [provider]|auth methods [provider]|auth targets|auth login <provider> [subscription|oauth|oauth-device|cloud-identity] [--run-external] [--verify-external]|auth logout <provider>")
+            print("usage: models list|providers|route <identifier>|alias <alias> <identifier>|fallbacks <identifier> <fallback> [fallback...]|usage|auth [provider]|auth methods [provider]|auth targets|auth doctor|auth login <provider> [subscription|oauth|oauth-device|cloud-identity] [--run-external] [--verify-external]|auth logout <provider>")
             return
         print(
             _table(

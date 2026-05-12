@@ -31,6 +31,7 @@ PYTHONPATH=src python3 -m aegis.cli.main dashboard
 PYTHONPATH=src python3 -m aegis.cli.main capabilities
 PYTHONPATH=src python3 -m aegis.cli.main task submit "Summarize my project safely" --path .
 PYTHONPATH=src python3 -m aegis.cli.main models auth targets
+PYTHONPATH=src python3 -m aegis.cli.main models auth doctor
 PYTHONPATH=src python3 -m aegis.cli.main connector list
 PYTHONPATH=src python3 -m aegis.cli.main audit verify
 ```

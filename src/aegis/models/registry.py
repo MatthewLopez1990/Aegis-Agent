@@ -339,6 +339,73 @@ class ModelRegistry:
             "targets": targets,
         }
 
+    def auth_doctor(self) -> dict[str, Any]:
+        targets = self.auth_targets()
+        checks: list[dict[str, Any]] = []
+        missing_commands: list[str] = []
+        verified_targets = set(targets.get("verified_external_auth_targets") or [])
+        for row in targets["targets"]:
+            required = list(row.get("required_auth") or [])
+            method = next(
+                (
+                    candidate
+                    for candidate in ("subscription", "oauth_device", "oauth", "cloud_identity")
+                    if candidate in required
+                ),
+                None,
+            )
+            if method is None:
+                continue
+            target = str(row.get("target") or "")
+            login_name = str(row.get("aegis_provider") or row.get("provider") or _normalize_auth_key(target))
+            command_argv = row.get("external_command_argv") if isinstance(row.get("external_command_argv"), list) else []
+            if not command_argv and row.get("status") == "official_cli_bridge_available":
+                command = str(row.get("external_command") or "").strip()
+                if command:
+                    command_argv = shlex.split(command)
+            executable = command_argv[0] if command_argv else None
+            command_available = bool(row.get("external_command_available", False))
+            if executable:
+                command_available = shutil.which(str(executable)) is not None
+            login_flag = "--subscription" if method == "subscription" else f"--method {method.replace('_', '-')}"
+            verified = target in verified_targets or bool(row.get("auth_configured") and row.get("external_auth_configured"))
+            check = {
+                "target": target,
+                "provider": login_name,
+                "method": method,
+                "status": row.get("status"),
+                "verified": verified,
+                "external_command": row.get("external_command"),
+                "external_command_argv": command_argv,
+                "external_command_available": command_available,
+                "setup_required": row.get("setup_required"),
+                "login_command": f"PYTHONPATH=src python3 -m aegis.cli.main model auth login {login_name} {login_flag} --run-external",
+                "verify_command": f"PYTHONPATH=src python3 -m aegis.cli.main model auth login {login_name} {login_flag} --verify-external",
+                "token_captured": False,
+                "raw_secret_values_included": False,
+            }
+            if not verified and executable and not command_available:
+                missing_commands.append(str(executable))
+            checks.append(check)
+        pending = [check["target"] for check in checks if not check["verified"]]
+        return {
+            "status": "ready" if not pending else "operator_login_required",
+            "target_provider_count": targets["target_provider_count"],
+            "checked_login_target_count": len(checks),
+            "verified_external_auth_count": targets["verified_external_auth_count"],
+            "operator_login_required_count": len(pending),
+            "operator_login_required_targets": pending,
+            "missing_external_commands": sorted(set(missing_commands)),
+            "implementation_gap_count": targets["implementation_gap_count"],
+            "raw_secret_values_included": False,
+            "checks": checks,
+            "next_steps": [
+                "Run the listed login_command entries from a local terminal for providers you want active on this PC.",
+                "Use verify_command after signing in directly with an official provider CLI.",
+                "Do not paste browser cookies, OAuth tokens, refresh tokens, CLI credential files, or subscription session values into Aegis.",
+            ],
+        }
+
     def login_provider(self, provider_name: str, api_key: str) -> dict[str, Any]:
         provider = self._provider(provider_name)
         if provider.auth_secret is None:
@@ -2867,6 +2934,7 @@ def _external_auth_handoff_profile_for_login(name: str, method: str) -> dict[str
 def _handoff_profile_public_fields(profile: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "account_surface",
+        "provider",
         "external_command",
         "external_status_command",
         "external_login_instruction",

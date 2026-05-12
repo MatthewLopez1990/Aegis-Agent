@@ -287,6 +287,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("login", tui.complete_models("lo", "models auth lo", len("models auth "), len("models auth lo")))
             self.assertIn("methods", tui.complete_models("me", "models auth me", len("models auth "), len("models auth me")))
             self.assertIn("targets", tui.complete_models("ta", "models auth ta", len("models auth "), len("models auth ta")))
+            self.assertIn("doctor", tui.complete_models("do", "models auth do", len("models auth "), len("models auth do")))
             self.assertIn("send-chat-webhook", tui.complete_channel("send-c", "channel send-c", len("channel "), len("channel send-c")))
             self.assertIn("resolve-approval", tui.complete_channel("resolve", "channel resolve", len("channel "), len("channel resolve")))
             self.assertIn("run-due", tui.complete_schedule("run", "schedule run", len("schedule "), len("schedule run")))

@@ -501,6 +501,7 @@ def build_parser() -> argparse.ArgumentParser:
     model_auth_methods = model_auth_sub.add_parser("methods", help="Show supported auth methods and subscription login status")
     model_auth_methods.add_argument("provider", nargs="?")
     model_auth_sub.add_parser("targets", help="Show Hermes/Claude provider auth parity targets")
+    model_auth_sub.add_parser("doctor", help="Show local provider-login readiness and next commands")
     model_auth_login = model_auth_sub.add_parser("login", help="Store an API key or start a guarded provider-native login handoff")
     model_auth_login.add_argument(
         "provider",
@@ -1588,6 +1589,8 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 return {"auth": registry.auth_status(args.provider)}
             if args.auth_command == "targets":
                 return {"auth_targets": registry.auth_targets()}
+            if args.auth_command == "doctor":
+                return {"auth_doctor": registry.auth_doctor()}
             if args.auth_command == "login":
                 method = "subscription" if getattr(args, "subscription", False) else str(args.method)
                 if method in {"subscription", "oauth", "oauth-device", "cloud-identity"}:
