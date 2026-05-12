@@ -2611,13 +2611,43 @@ document.getElementById("remote-control-relay-form").addEventListener("submit", 
   renderRemoteControlOutput(result);
 });
 
+const remoteControlRelayBody = () => ({
+  pairing_id: document.getElementById("remote-control-relay-pairing-id").value.trim(),
+  relay_auth_secret: document.getElementById("remote-control-relay-secret").value.trim(),
+  approved: document.getElementById("remote-control-relay-approved").checked,
+});
+
+document.getElementById("remote-control-relay-directory").addEventListener("click", async () => {
+  const result = await api("/remote-control/relay/directory", {
+    method: "POST",
+    body: JSON.stringify({
+      ...remoteControlRelayBody(),
+      limit: 12,
+    }),
+  });
+  renderRemoteControlOutput(result);
+  await refresh();
+});
+
+document.getElementById("remote-control-relay-notify").addEventListener("click", async () => {
+  const taskId = document.getElementById("remote-control-relay-task-id").value.trim();
+  const result = await api("/remote-control/relay/notify", {
+    method: "POST",
+    body: JSON.stringify({
+      ...remoteControlRelayBody(),
+      event: document.getElementById("remote-control-relay-event").value.trim() || "directory-updated",
+      task_id: taskId || undefined,
+    }),
+  });
+  renderRemoteControlOutput(result);
+  await refresh();
+});
+
 document.getElementById("remote-control-relay-pull").addEventListener("click", async () => {
   const result = await api("/remote-control/relay/pull", {
     method: "POST",
     body: JSON.stringify({
-      pairing_id: document.getElementById("remote-control-relay-pairing-id").value.trim(),
-      relay_auth_secret: document.getElementById("remote-control-relay-secret").value.trim(),
-      approved: document.getElementById("remote-control-relay-approved").checked,
+      ...remoteControlRelayBody(),
       dry_run: document.getElementById("remote-control-relay-dry-run").checked,
       limit: 10,
     }),

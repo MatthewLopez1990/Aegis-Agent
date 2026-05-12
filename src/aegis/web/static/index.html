@@ -528,10 +528,14 @@
             <input id="remote-control-relay-url" placeholder="https://relay.example/aegis">
             <input id="remote-control-relay-pairing-id" placeholder="pairing id">
             <input id="remote-control-relay-secret" placeholder="relay auth secret">
+            <input id="remote-control-relay-event" placeholder="notification event" value="directory-updated">
+            <input id="remote-control-relay-task-id" placeholder="notification task id">
             <label class="inline-check"><input id="remote-control-relay-approved" type="checkbox"> Approved registration</label>
             <label class="inline-check"><input id="remote-control-relay-dry-run" type="checkbox" checked> Dry run</label>
             <button id="remote-control-relay-check" type="submit">Check Relay</button>
             <button id="remote-control-directory" type="button" class="secondary">Show Directory</button>
+            <button id="remote-control-relay-directory" type="button" class="secondary">Publish Directory</button>
+            <button id="remote-control-relay-notify" type="button" class="secondary">Notify Relay</button>
             <button id="remote-control-relay-pull" type="button">Pull Actions</button>
           </form>
           <p id="remote-control-relay-summary" class="muted"></p>
