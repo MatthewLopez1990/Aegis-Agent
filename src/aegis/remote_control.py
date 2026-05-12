@@ -51,6 +51,19 @@ REMOTE_CONTROL_RELAY_VERIFICATION_GATES = (
     "relay_action_proxy_authorized",
     "revocation_blocks_relayed_actions",
 )
+REMOTE_CONTROL_MOBILE_GATEWAY_CONTRACT = {
+    "contract_schema": "aegis.remote_control.mobile_gateway.v1",
+    "transport": "https_relay_gateway",
+    "payload_type": "aegis.remote_control.notification",
+    "receipt_schema": "relay_delivery_receipt",
+    "accepted_states": list(RELAY_RECEIPT_ACCEPTED_STATES),
+    "native_push_provider": "gateway_managed_external",
+    "device_token_capture_supported": False,
+    "raw_device_tokens_supported": False,
+    "pairing_token_relayed": False,
+    "relay_auth_token_included": False,
+    "raw_secret_values_included": False,
+}
 
 
 class RemoteControlPairingRegistry:
@@ -126,6 +139,11 @@ class RemoteControlPairingRegistry:
             for pairing in pairings
             if pairing["status"] == "active" and pairing.get("relay_action_proxy_enabled")
         )
+        mobile_gateway_count = sum(
+            1
+            for pairing in pairings
+            if pairing["status"] == "active" and pairing.get("relay_notification_enabled")
+        )
         return {
             "status": "local_pairing_available",
             "mode": "local_or_trusted_access_layer",
@@ -134,8 +152,10 @@ class RemoteControlPairingRegistry:
             "max_expires_in_seconds": MAX_PAIRING_TTL_SECONDS,
             "active_pairing_count": active_count,
             "active_relay_action_proxy_count": relay_action_count,
+            "active_mobile_gateway_count": mobile_gateway_count,
             "pairings": pairings,
             "relay_outbox": self.relay_outbox(limit=20)["items"],
+            "mobile_gateway_contract": _mobile_gateway_contract(configured=mobile_gateway_count > 0),
             "control_surface": [
                 "scoped task directory",
                 "remote task status",
@@ -150,7 +170,8 @@ class RemoteControlPairingRegistry:
                 "durable relay notification outbox",
             ],
             "blocked_until_relay": [
-                "mobile_push_delivery",
+                "mobile_gateway_registration" if mobile_gateway_count == 0 else "native_push_provider_adapter",
+                "broad_cloud_relay_service",
             ],
             "relay_preflight": self.relay_preflight(),
         }
@@ -172,7 +193,8 @@ class RemoteControlPairingRegistry:
             "relay_configured": relay_target is not None,
             "relay_target": relay_target,
             "relay_url_redacted": bool(relay_url),
-            "mobile_push_delivery": "blocked",
+            "mobile_push_delivery": "gateway_contract_available_native_provider_external" if relay_target else "blocked_until_relay_registration",
+            "mobile_gateway_contract": _mobile_gateway_contract(configured=relay_target is not None),
             "cloud_session_directory": "scoped_local_directory_available",
             "token_capture_supported": False,
             "token_captured": False,
@@ -191,6 +213,7 @@ class RemoteControlPairingRegistry:
                 "durable_relay_notification_outbox",
                 "approved_relay_directory_publish",
                 "scoped_remote_directory",
+                "mobile_gateway_delivery_contract",
             ],
             "blockers": blockers,
             "verification_gates": list(REMOTE_CONTROL_RELAY_VERIFICATION_GATES),
@@ -206,7 +229,7 @@ class RemoteControlPairingRegistry:
             "next_steps": [
                 "Register an active pairing with an allowlisted relay using a brokered credential handle.",
                 "Preserve local pairing scope, expiry, revocation, host checks, and audit receipts through relayed actions.",
-                "Add mobile push delivery tests before broad off-device delivery.",
+                "Use the gateway contract for mobile/gateway notification tests before adding native APNS/FCM adapters.",
             ],
         }
 
@@ -299,6 +322,7 @@ class RemoteControlPairingRegistry:
             "relay_auth_secret_used": True,
             "relay_response_status": response_status,
             "relay_response_bytes": len(response_body),
+            "mobile_gateway_contract": _mobile_gateway_contract(configured=True),
             "raw_secret_values_included": False,
             "configured_controls": [
                 "explicit_operator_enablement",
@@ -312,9 +336,11 @@ class RemoteControlPairingRegistry:
                 "approved_relay_action_pull",
                 "approved_relay_directory_publish",
                 "approved_relay_notification_publish",
+                "mobile_gateway_delivery_contract",
             ],
             "remaining_controls": [
-                "mobile_push_delivery_approval",
+                "native_push_provider_adapter",
+                "broad_cloud_relay_service",
             ],
         }
 
@@ -485,6 +511,7 @@ class RemoteControlPairingRegistry:
             "pairing_id": pairing["id"],
             "pairing": public_pairing,
             "notification": sanitized_notification,
+            "delivery_contract": _mobile_gateway_contract(configured=True),
             "pairing_token_included": False,
             "relay_auth_token_included": False,
             "user_request_included": False,
@@ -527,6 +554,7 @@ class RemoteControlPairingRegistry:
             "relay_response_status": response_status,
             "relay_response_bytes": len(response_body),
             "relay_receipt": self._relay_outbox_item(outbox_id).get("relay_receipt"),
+            "mobile_gateway_contract": _mobile_gateway_contract(configured=True),
             "outbox_id": outbox_id,
             "outbox_status": self._relay_outbox_item(outbox_id).get("status"),
             "relay_acknowledged": self._relay_outbox_item(outbox_id).get("status") == "acknowledged",
@@ -1582,6 +1610,15 @@ def _relay_registered(pairing: dict[str, Any]) -> bool:
 
 def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _mobile_gateway_contract(*, configured: bool) -> dict[str, Any]:
+    return {
+        **REMOTE_CONTROL_MOBILE_GATEWAY_CONTRACT,
+        "status": "configured" if configured else "available_after_relay_registration",
+        "native_push_delivery": "external_gateway_managed" if configured else "blocked_until_gateway_registration",
+        "broad_cloud_relay_delivery": "not_a_cloud_relay_service",
+    }
 
 
 def _utc_now(now: datetime | None) -> datetime:
