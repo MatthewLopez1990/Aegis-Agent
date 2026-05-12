@@ -18,6 +18,7 @@ import textwrap
 from aegis.agent.orchestrator import build_orchestrator
 from aegis.approvals.actions import approval_action_hints
 from aegis.approvals.models import ApprovalRequest
+from aegis.audit.logger import redact
 from aegis.channels.base import ChannelResponse
 from aegis.hooks.manager import HOOK_EVENTS
 from aegis.memory.models import MemoryType
@@ -28,6 +29,7 @@ from aegis.research.harness import ResearchHarness
 from aegis.security.policy_engine import PolicyRequest
 from aegis.security.policy_profile import activate_due_policy_rollouts, apply_policy_bundle, diff_policy_bundle, import_policy_bundle, list_policy_bundles, list_policy_promotions, list_policy_rollouts, policy_profile_to_dict, promote_policy_bundle, rollback_policy_bundle, schedule_policy_bundle
 from aegis.security.taint import RiskLevel, Sensitivity, TrustClass
+from aegis.skills.runtime import SkillRuntime
 from aegis.skills.signing import DEFAULT_SKILL_SIGNING_KEY
 
 
@@ -419,10 +421,17 @@ class AegisTui(cmd.Cmd):
         return None
 
     def completenames(self, text: str, *ignored: Any) -> list[str]:
-        return _complete_options(TOP_LEVEL_COMMANDS, text)
+        labels = tuple([*TOP_LEVEL_COMMANDS, *self._skill_slash_commands().keys()])
+        return _complete_options(labels, text)
 
     def completedefault(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
-        return _complete_slash(text, line, begidx, endidx)
+        labels = _complete_slash(text, line, begidx, endidx)
+        stripped = line.lstrip()
+        if stripped.startswith("/") and " " not in stripped[:endidx].strip():
+            for label in self._complete_skill_slash_labels(text.lstrip("/")):
+                if label not in labels:
+                    labels.append(label)
+        return labels
 
     def complete_menu(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return _complete_options(_command_group_names(), text)
@@ -3627,6 +3636,9 @@ class AegisTui(cmd.Cmd):
             if hasattr(self, f"do_{canonical}"):
                 rest = command[len(name) :].strip()
                 return bool(self.onecmd(f"{canonical} {rest}".strip()))
+            rest = command[len(name) :].strip()
+            if self._dispatch_skill_slash(name, rest):
+                return
             matches = _slash_matches(name)
             if matches:
                 print(self._render_slash_palette(name))
@@ -3695,7 +3707,65 @@ class AegisTui(cmd.Cmd):
         dashboard = build_product_dashboard(self.orchestrator)
         width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
         flags = _dashboard_status_flags(dashboard["runtime"], self.session, workspace=self.workspace)
-        return _slash_palette(width, prefix=prefix, status_flags=flags)
+        return _slash_palette(width, prefix=prefix, status_flags=flags, dynamic_matches=self._dynamic_skill_palette_matches(prefix))
+
+    def _skill_slash_commands(self) -> dict[str, str]:
+        commands: dict[str, str] = {}
+        reserved = {command.replace("_", "-") for command in TOP_LEVEL_COMMANDS}
+        reserved.update(SLASH_COMMAND_ALIASES.keys())
+        for row in self.orchestrator.skills.list_public():
+            if not row.get("enabled"):
+                continue
+            skill_id = str(row.get("id") or "")
+            for label in _skill_slash_labels(skill_id):
+                if not label or label in reserved:
+                    continue
+                commands.setdefault(label, skill_id)
+        return dict(sorted(commands.items()))
+
+    def _complete_skill_slash_labels(self, prefix: str) -> list[str]:
+        normalized = prefix.strip().lstrip("/").lower()
+        labels: list[str] = []
+        for label in self._skill_slash_commands():
+            if not normalized or _fuzzy_match(normalized, label):
+                labels.append(f"/{label}")
+        return labels
+
+    def _dynamic_skill_palette_matches(self, prefix: str) -> list[tuple[str, str]]:
+        normalized = prefix.strip().lstrip("/").lower()
+        rows: list[tuple[str, str]] = []
+        command_to_skill = self._skill_slash_commands()
+        public = {str(row.get("id") or ""): row for row in self.orchestrator.skills.list_public()}
+        for label, skill_id in command_to_skill.items():
+            row = public.get(skill_id, {})
+            haystack = " ".join([label, skill_id, str(row.get("name", "")), str(row.get("description", ""))])
+            if normalized and not _fuzzy_match(normalized, haystack):
+                continue
+            detail = f"skill - {row.get('name') or skill_id}"
+            rows.append((label, detail))
+        return sorted(rows, key=lambda row: (0 if row[0].startswith(normalized) else 1, row[0]))[:6]
+
+    def _dispatch_skill_slash(self, command_name: str, arg: str) -> bool:
+        skill_id = self._skill_slash_commands().get(command_name.lower())
+        if skill_id is None:
+            return False
+        try:
+            inputs = _parse_skill_slash_inputs(self.orchestrator.skills.get(skill_id)[0].input_schema, arg)
+            result = SkillRuntime(self.orchestrator.skills, self.orchestrator.connectors, self.orchestrator.audit_logger).invoke(skill_id, inputs)
+        except (KeyError, PermissionError, ValueError, RuntimeError, TimeoutError) as exc:
+            print(f"skill slash error: {exc}")
+            return True
+        _print_json(
+            {
+                "status": "skill_slash_invoked",
+                "command": f"/{command_name}",
+                "skill_id": skill_id,
+                "inputs_schema_mode": "json_object_or_single_string_property",
+                "result": redact(result),
+                "raw_secret_values_included": False,
+            }
+        )
+        return True
 
     def _render_dashboard(self) -> str:
         dashboard = build_product_dashboard(self.orchestrator)
@@ -4751,9 +4821,16 @@ def _command_menu(width: int, status_flags: list[str] | None = None, *, group: s
     return _boxed_lines("Shield Command Menu", lines, width)
 
 
-def _slash_palette(width: int, *, prefix: str = "", status_flags: list[str] | None = None) -> str:
+def _slash_palette(
+    width: int,
+    *,
+    prefix: str = "",
+    status_flags: list[str] | None = None,
+    dynamic_matches: list[tuple[str, str]] | None = None,
+) -> str:
     prefix = prefix.strip().lstrip("/")
     matches = _slash_matches(prefix)
+    dynamic_matches = dynamic_matches or []
     lines: list[str] = [
         "Slash Command Palette",
         "Type /<command> to run it, /<prefix> to filter, or menu <group> for nested command lanes.",
@@ -4767,8 +4844,15 @@ def _slash_palette(width: int, *, prefix: str = "", status_flags: list[str] | No
     if matches:
         for command, detail in matches[:12]:
             lines.append(f"{_slash_palette_label(command, prefix):<38} {detail}  -> {_next_command_hint(command)}")
+    if dynamic_matches:
+        if matches:
+            lines.append("")
+        lines.append("Enabled skill commands:")
+        for command, detail in dynamic_matches:
+            lines.append(f"/{command:<37} {detail}  -> /skills")
     else:
-        lines.append("No direct matches. Try /dashboard, /tasks, /memory, /approvals, or /menu.")
+        if not matches:
+            lines.append("No direct matches. Try /dashboard, /tasks, /memory, /approvals, or /menu.")
     lines.extend(("", "Nested menus:", "  /menu operate   /menu govern   /menu build   /menu explore"))
     return _boxed_lines("Slash Command Palette", lines, width)
 
@@ -5066,6 +5150,43 @@ def _complete_slash(text: str, line: str, begidx: int, endidx: int) -> list[str]
 
 def _complete_options(options: tuple[str, ...], text: str) -> list[str]:
     return [option for option in options if option.startswith(text)]
+
+
+def _skill_slash_labels(skill_id: str) -> tuple[str, ...]:
+    normalized = re.sub(r"[^a-z0-9]+", "-", skill_id.lower()).strip("-")
+    labels = [normalized]
+    if skill_id and all(part.isalnum() or part in "._-" for part in skill_id):
+        labels.append(skill_id)
+    seen: list[str] = []
+    for label in labels:
+        if label and label not in seen:
+            seen.append(label)
+    return tuple(seen)
+
+
+def _parse_skill_slash_inputs(schema: dict[str, Any], raw: str) -> dict[str, Any]:
+    text = raw.strip()
+    if not text:
+        return {}
+    if text.startswith("{"):
+        decoded = json.loads(text)
+        if not isinstance(decoded, dict):
+            raise ValueError("skill slash JSON input must be an object")
+        return decoded
+    properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
+    if not isinstance(properties, dict):
+        raise ValueError("skill slash text input requires a JSON object")
+    string_properties = [
+        str(name)
+        for name, spec in properties.items()
+        if isinstance(spec, dict) and spec.get("type") in {"string", None}
+    ]
+    if len(string_properties) == 1:
+        return {string_properties[0]: text}
+    for preferred in ("input", "query", "prompt", "task", "path"):
+        if preferred in string_properties:
+            return {preferred: text}
+    raise ValueError("skill slash text input is ambiguous; pass a JSON object")
 
 
 def _complete_subcommand(options: tuple[str, ...], text: str, line: str, begidx: int) -> list[str]:

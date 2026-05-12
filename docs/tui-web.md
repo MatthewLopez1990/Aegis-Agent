@@ -73,6 +73,7 @@ Commands:
 - `tools`, `allowed-tools`, `bashes`
 - `toolsets`
 - `skills [hub query|disable skill_id|enable skill_id]`
+- Enabled installed skills are also exposed as dynamic slash commands such as `/aegis-project-summary`; pass a JSON object for structured inputs.
 - `curator [status|run [--dry-run]|pin <skill_id>|unpin <skill_id>|archive <skill_id>|restore <skill_id>|pause|resume]`
 - `plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-bundle|install-marketplace|update-marketplace`, `plugin`, `reload`, `reload-plugins`, `reload-skills`
 - `memory search <query>`
