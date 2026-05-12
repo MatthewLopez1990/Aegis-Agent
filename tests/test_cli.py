@@ -86,7 +86,8 @@ class CliTests(unittest.TestCase):
             self.assertTrue(any(group["name"] == "Session continuity" for group in result["capability_groups"]))
             self.assertTrue(all(target["security_delta"] for target in result["competitive_targets"]))
             self.assertTrue(all(target["live_gap"] for target in result["competitive_targets"]))
-            self.assertEqual(result["model_provider_auth_parity"]["status"], "auth_parity_gap_tracked")
+            self.assertEqual(result["model_provider_auth_parity"]["status"], "target_surface_ready")
+            self.assertEqual(result["model_provider_auth_parity"]["implementation_gap_count"], 0)
             auth_targets = {row["target"]: row for row in result["model_provider_auth_parity"]["targets"]}
             self.assertEqual(auth_targets["Claude Code subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(auth_targets["Google Gemini CLI subscription"]["status"], "official_cli_bridge_available")
@@ -2260,7 +2261,8 @@ class CliTests(unittest.TestCase):
             target_rows = {row["target"]: row for row in targets["auth_targets"]["targets"]}
             target_rows_after = {row["target"]: row for row in targets_after["auth_targets"]["targets"]}
             target_rows_after_logout = {row["target"]: row for row in targets_after_logout["auth_targets"]["targets"]}
-            self.assertEqual(targets["auth_targets"]["status"], "auth_parity_gap_tracked")
+            self.assertEqual(targets["auth_targets"]["status"], "target_surface_ready")
+            self.assertEqual(targets["auth_targets"]["implementation_gap_count"], 0)
             self.assertEqual(target_rows_after["OpenAI Codex / ChatGPT subscription"]["status"], "subscription_cli_ready")
             self.assertEqual(target_rows_after["GitHub Copilot"]["status"], "external_login_verified")
             self.assertEqual(target_rows_after["GitHub Copilot"]["bridge_status"], "oauth_device_flow_ready")

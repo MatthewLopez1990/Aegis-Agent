@@ -1280,7 +1280,10 @@ class ModelAuthTests(unittest.TestCase):
             targets = registry.auth_targets()
             by_target = {row["target"]: row for row in targets["targets"]}
 
-            self.assertEqual(targets["status"], "auth_parity_gap_tracked")
+            self.assertEqual(targets["status"], "target_surface_ready")
+            self.assertGreater(targets["operator_login_required_count"], 0)
+            self.assertEqual(targets["implementation_gap_count"], 0)
+            self.assertEqual(targets["not_started_targets"], [])
             self.assertGreaterEqual(targets["target_provider_count"], 40)
             self.assertIn("api_key", targets["implemented_auth_methods"])
             self.assertIn("subscription", targets["implemented_auth_methods"])

@@ -1131,7 +1131,8 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertTrue(any(row["provider"] == "openai" and row["auth_configured"] for row in model_providers_after_login["providers"]))
                 self.assertTrue(any(row["provider"] == "openai" and not row["auth_configured"] for row in model_providers_after_logout["providers"]))
                 model_auth_target_rows = {row["target"]: row for row in model_auth_targets["targets"]}
-                self.assertEqual(model_auth_targets["status"], "auth_parity_gap_tracked")
+                self.assertEqual(model_auth_targets["status"], "target_surface_ready")
+                self.assertEqual(model_auth_targets["implementation_gap_count"], 0)
                 self.assertEqual(model_auth_target_rows["Claude Code subscription"]["status"], "official_cli_bridge_available")
                 self.assertEqual(model_auth_target_rows["Qwen Code Coding Plan subscription"]["status"], "official_cli_bridge_available")
                 self.assertEqual(model_auth_target_rows["Google Gemini OAuth / Code Assist"]["status"], "oauth_device_flow_available")

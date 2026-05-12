@@ -310,7 +310,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "allowlisted brokered-bearer Streamable HTTP MCP",
             ],
             "security_delta": "Aegis treats all external outputs as tainted data and requires approval for high-impact actions by default.",
-            "live_gap": "API-key-ready Hermes providers including Hugging Face, NVIDIA NIM, Vercel AI Gateway, OpenCode, Kilo Code, Ollama Cloud, Arcee, GMI, StepFun, Xiaomi, Tencent TokenHub, Kimi China, and MiniMax China are routable alongside brokered Nous Portal OAuth, MiniMax Token Plan, brokered MiniMax OAuth, brokered Google Gemini OAuth / Code Assist, verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, Google Vertex AI, AWS Bedrock, and Azure Foundry cloud-identity bridges; remaining provider-native gaps are broader OAuth/account bridges beyond the implemented targets.",
+            "live_gap": "API-key-ready Hermes providers including Hugging Face, NVIDIA NIM, Vercel AI Gateway, OpenCode, Kilo Code, Ollama Cloud, Arcee, GMI, StepFun, Xiaomi, Tencent TokenHub, Kimi China, and MiniMax China are routable alongside brokered Nous Portal OAuth, MiniMax Token Plan, brokered MiniMax OAuth, brokered Google Gemini OAuth / Code Assist, verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, Google Vertex AI, AWS Bedrock, and Azure Foundry cloud-identity bridges; remaining work is local operator sign-in/configuration for unverified accounts and future provider-native bridges beyond the tracked target set.",
             "target_requirements": [
                 "provider_native_oauth_and_device_flows",
                 "subscription_login_bridge",
@@ -366,13 +366,13 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "approved PR autofix response posting",
             ],
             "security_delta": "Aegis exposes Claude-style controls through the governed local runtime and requires scoped pairings, approved relay registration, and redacted receipts before off-device access.",
-            "live_gap": "Unattended plugin bundle auto-install, unattended plugin auto-update, subagent runtime depth, mobile push delivery, broad cloud relay delivery, and broader provider OAuth bridges remain tracked gaps instead of silent stubs.",
+            "live_gap": "Unattended plugin bundle auto-install, unattended plugin auto-update, recursive subagent model-loop depth, mobile push delivery, broad cloud relay delivery, and future provider OAuth bridges beyond the tracked target set remain explicit gaps instead of silent stubs.",
             "target_requirements": [
                 "unattended_remote_plugin_bundle_auto_install",
                 "unattended_plugin_auto_update",
                 "subagent_runtime_depth",
                 "mobile_push_and_broad_cloud_relay_delivery",
-                "broader_provider_oauth_bridges",
+                "future_provider_oauth_bridge_targets",
             ],
         },
     ]
@@ -426,20 +426,23 @@ def _live_gap_backlog(
             "detail": (
                 f"{model_auth_parity['target_provider_count']} provider/auth targets are tracked; "
                 f"{model_auth_parity['api_key_ready_count']} API-key targets and {model_auth_parity['local_ready_count']} local targets are ready, "
-                f"{model_auth_parity['metadata_or_bridge_pending_count']} provider-native subscription/OAuth/cloud-identity bridges remain gated."
+                f"{model_auth_parity['operator_login_required_count']} provider-native subscription/OAuth/cloud-identity login surface(s) are implemented and awaiting local operator sign-in, "
+                f"with {model_auth_parity['implementation_gap_count']} implementation gap(s)."
             ),
             "target_provider_count": model_auth_parity["target_provider_count"],
             "aegis_provider_count": model_auth_parity["aegis_provider_count"],
             "sample_tools": [],
             "target_providers": model_auth_parity["targets"],
             "subscription_bridge_targets": model_auth_parity["subscription_bridge_targets"],
+            "operator_login_required_targets": model_auth_parity["operator_login_required_targets"],
+            "implementation_gap_targets": model_auth_parity["implementation_gap_targets"],
             "not_started_targets": model_auth_parity["not_started_targets"],
             "implemented_auth_methods": model_auth_parity["implemented_auth_methods"],
             "operator_checklist": _model_auth_operator_checklist(model_auth_parity),
             "next_steps": [
-                "Implement provider-native OAuth/device/cloud-identity bridges one provider at a time with token refresh receipts.",
-                "Use the expanded Hermes API-key providers plus verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, brokered Nous Portal OAuth, brokered MiniMax OAuth, brokered Google Gemini OAuth / Code Assist, MiniMax Token Plan, Google Vertex AI, AWS Bedrock, and Azure Foundry bridges where available; keep other subscription and provider-native flows as official handoffs until scoped bridges exist.",
-                "Add denied, approved, refresh, logout, and receipt-redaction tests for every bridge before enabling live model calls through it.",
+                "Run the local provider login handoff for each unconfigured subscription, OAuth, OAuth-device, or cloud-identity target that should be active on this machine.",
+                "Use the expanded Hermes API-key providers plus verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, brokered Nous Portal OAuth, brokered MiniMax OAuth, brokered Google Gemini OAuth / Code Assist, MiniMax Token Plan, Google Vertex AI, AWS Bedrock, and Azure Foundry bridges where available.",
+                "For any future provider target that appears in implementation_gap_targets, add denied, approved, refresh, logout, and receipt-redaction tests before enabling live model calls through it.",
             ],
             "required_controls": model_auth_parity["required_controls"],
             "verification_gates": model_auth_parity["verification_gates"],
@@ -660,13 +663,13 @@ def _model_auth_operator_checklist(model_auth_parity: dict[str, Any]) -> list[di
         },
         {
             "control": "subscription_token_bridge",
-            "state": "partial_official_cli_bridge" if model_auth_parity["subscription_bridge_targets"] else "ready_for_review",
-            "detail": "Verified Codex/ChatGPT, Claude Code, Qwen Code, Gemini CLI, brokered Google Gemini OAuth / Code Assist, brokered GitHub Copilot OAuth, brokered Nous Portal OAuth, brokered MiniMax OAuth, and MiniMax Token Plan can invoke through governed bridges without browser-token import; remaining subscription providers stay on official handoff until scoped bridges exist.",
+            "state": "available_login_required" if model_auth_parity["operator_login_required_targets"] else "ready_for_review",
+            "detail": "Codex/ChatGPT, Claude Code, Qwen Code, Gemini CLI, brokered Google Gemini OAuth / Code Assist, brokered GitHub Copilot OAuth, brokered Nous Portal OAuth, brokered MiniMax OAuth, and MiniMax Token Plan have governed login or invocation bridges without browser-token import; unconfigured targets require local operator sign-in.",
         },
         {
             "control": "oauth_device_flows",
-            "state": "partial_brokered_flow" if model_auth_parity["subscription_bridge_targets"] else "ready_for_review",
-            "detail": "Nous Portal OAuth, MiniMax OAuth, Google Gemini OAuth / Code Assist, Google Vertex AI, AWS Bedrock, Azure Foundry, and Copilot have governed bridge paths; other provider-native OAuth/device flows remain explicit local handoff targets until governed bridges exist.",
+            "state": "available_login_required" if model_auth_parity["operator_login_required_targets"] else "ready_for_review",
+            "detail": "Nous Portal OAuth, MiniMax OAuth, Google Gemini OAuth / Code Assist, Google Vertex AI, AWS Bedrock, Azure Foundry, and Copilot have governed bridge paths; unconfigured targets require local operator sign-in.",
         },
         {
             "control": "raw_browser_token_capture",
@@ -675,8 +678,8 @@ def _model_auth_operator_checklist(model_auth_parity: dict[str, Any]) -> list[di
         },
         {
             "control": "provider_catalog_depth",
-            "state": "partial" if model_auth_parity["status"] != "target_surface_ready" else "complete",
-            "detail": f"{model_auth_parity['target_provider_count']} target providers tracked against {model_auth_parity['aegis_provider_count']} current provider routes.",
+            "state": "complete" if model_auth_parity["status"] == "target_surface_ready" else "partial",
+            "detail": f"{model_auth_parity['target_provider_count']} target providers tracked against {model_auth_parity['aegis_provider_count']} current provider routes; implementation gaps: {model_auth_parity.get('implementation_gap_count', 0)}.",
         },
         {
             "control": "provider_allowlist_before_live_call",

@@ -185,7 +185,8 @@ class ModelRegistry:
     def auth_targets(self) -> dict[str, Any]:
         targets: list[dict[str, Any]] = []
         provider_rows = {row["provider"]: row for row in self.list_providers()}
-        bridge_pending: list[str] = []
+        login_required: list[str] = []
+        implementation_gaps: list[str] = []
         not_started: list[str] = []
         api_key_ready: list[str] = []
         local_ready: list[str] = []
@@ -242,7 +243,7 @@ class ModelRegistry:
             if provider is None:
                 if handoff_profile is not None:
                     target_row["status"] = target_row["bridge_status"]
-                    bridge_pending.append(str(target["target"]))
+                    login_required.append(str(target["target"]))
                 else:
                     target_row["status"] = "not_started"
                     not_started.append(str(target["target"]))
@@ -275,13 +276,13 @@ class ModelRegistry:
                         target_row["token_capture_supported"] = False
                     elif "subscription" in required_auth and target_row["subscription_auth_supported"]:
                         target_row["status"] = target_row["bridge_status"]
-                        bridge_pending.append(str(target["target"]))
+                        login_required.append(str(target["target"]))
                     elif handoff_profile is not None:
                         target_row["status"] = target_row["bridge_status"]
-                        bridge_pending.append(str(target["target"]))
+                        login_required.append(str(target["target"]))
                     else:
                         target_row["status"] = "provider_native_auth_bridge_required"
-                        bridge_pending.append(str(target["target"]))
+                        implementation_gaps.append(str(target["target"]))
                 elif provider.get("local") or "none" in methods:
                     target_row["status"] = "local_ready"
                     local_ready.append(str(target["target"]))
@@ -290,10 +291,10 @@ class ModelRegistry:
                     api_key_ready.append(str(target["target"]))
                 else:
                     target_row["status"] = "auth_surface_incomplete"
-                    not_started.append(str(target["target"]))
+                    implementation_gaps.append(str(target["target"]))
             targets.append(target_row)
 
-        missing_or_pending = len(bridge_pending) + len(not_started)
+        missing_or_pending = len(implementation_gaps) + len(not_started)
         return {
             "status": "target_surface_ready" if missing_or_pending == 0 else "auth_parity_gap_tracked",
             "target_provider_count": len(targets),
@@ -301,13 +302,17 @@ class ModelRegistry:
             "api_key_ready_count": len(api_key_ready),
             "local_ready_count": len(local_ready),
             "verified_external_auth_count": len(verified_external),
-            "metadata_or_bridge_pending_count": len(bridge_pending),
+            "metadata_or_bridge_pending_count": len(login_required),
+            "operator_login_required_count": len(login_required),
+            "implementation_gap_count": len(implementation_gaps),
             "not_started_count": len(not_started),
             "api_key_ready_targets": api_key_ready,
             "local_ready_targets": local_ready,
             "verified_external_auth_targets": verified_external,
-            "subscription_bridge_targets": bridge_pending,
-            "provider_auth_bridge_targets": bridge_pending,
+            "subscription_bridge_targets": login_required,
+            "provider_auth_bridge_targets": implementation_gaps,
+            "operator_login_required_targets": login_required,
+            "implementation_gap_targets": implementation_gaps,
             "not_started_targets": not_started,
             "implemented_auth_methods": sorted(
                 {
