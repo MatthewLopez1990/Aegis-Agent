@@ -831,6 +831,82 @@ class ModelAuthTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello"}])
 
+    def test_nous_oauth_login_brokers_tokens_and_agent_key_without_raw_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            secret_path = root / ".aegis" / "secrets.json"
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"), SecretsBroker(secret_path))
+
+            class FakeResponse:
+                def __init__(self, payload: dict[str, object]) -> None:
+                    self.payload = payload
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps(self.payload).encode("utf-8")
+
+            captured: list[tuple[str, dict[str, str], str]] = []
+
+            def fake_open(request, timeout):
+                body = request.data.decode("utf-8")
+                headers = dict(request.header_items())
+                captured.append((request.full_url, headers, body))
+                if request.full_url.endswith("/api/oauth/device/code"):
+                    return FakeResponse(
+                        {
+                            "device_code": "device-123",
+                            "user_code": "NOUS-1234",
+                            "verification_uri": "https://portal.nousresearch.com/device",
+                            "verification_uri_complete": "https://portal.nousresearch.com/device?user_code=NOUS-1234",
+                            "expires_in": 60,
+                            "interval": 1,
+                        }
+                    )
+                if request.full_url.endswith("/api/oauth/token"):
+                    return FakeResponse(
+                        {
+                            "access_token": "nous-access-secret",
+                            "refresh_token": "nous-refresh-secret",
+                            "expires_in": 3600,
+                            "token_type": "Bearer",
+                            "scope": "inference:mint_agent_key",
+                        }
+                    )
+                return FakeResponse({"api_key": "nous-agent-key-secret", "key_id": "key-123", "expires_at": "2999-01-01T00:00:00+00:00", "expires_in": 86400})
+
+            with patch("aegis.models.registry._open_auth_request", fake_open):
+                status = registry.login_provider_external("nous", method="oauth", run_external=True, timeout_seconds=5)
+
+            self.assertEqual(status["target"], "Nous Portal OAuth subscription")
+            self.assertEqual(status["status"], "external_login_verified")
+            self.assertEqual(status["auth_source"], "oauth_device_flow")
+            self.assertTrue(status["oauth_token_brokered"])
+            self.assertTrue(status["agent_key_brokered"])
+            self.assertFalse(status["token_captured"])
+            self.assertNotIn("nous-access-secret", json.dumps(status))
+            self.assertNotIn("nous-refresh-secret", json.dumps(status))
+            self.assertNotIn("nous-agent-key-secret", json.dumps(status))
+            self.assertTrue(secret_path.exists())
+            self.assertEqual(registry.secrets_broker.resolve_stored_secret("NOUS_OAUTH_ACCESS_TOKEN"), "nous-access-secret")
+            self.assertEqual(registry.secrets_broker.resolve_stored_secret("NOUS_OAUTH_REFRESH_TOKEN"), "nous-refresh-secret")
+            self.assertEqual(registry.secrets_broker.resolve_stored_secret("NOUS_OAUTH_AGENT_KEY"), "nous-agent-key-secret")
+            self.assertIn("client_id=hermes-cli", captured[0][2])
+            self.assertIn("scope=inference%3Amint_agent_key", captured[0][2])
+            self.assertIn("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code", captured[1][2])
+            self.assertEqual(captured[2][0], "https://portal.nousresearch.com/api/oauth/agent-key")
+            self.assertEqual(captured[2][1]["Authorization"], "Bearer nous-access-secret")
+            targets = registry.auth_targets()
+            by_target = {row["target"]: row for row in targets["targets"]}
+            self.assertEqual(by_target["Nous Portal OAuth subscription"]["status"], "external_login_verified")
+            self.assertEqual(by_target["Nous Portal OAuth subscription"]["bridge_status"], "oauth_device_flow_ready")
+            self.assertTrue(by_target["Nous Portal OAuth subscription"]["agent_key_brokered"])
+            self.assertNotIn("Nous Portal OAuth subscription", targets["subscription_bridge_targets"])
+
     def test_minimax_oauth_login_brokers_tokens_without_raw_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
             root = Path(temp)
@@ -949,7 +1025,9 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(by_target["Claude Code subscription"]["external_command"], "claude auth login")
             self.assertEqual(by_target["Claude Code subscription"]["external_login_instruction"], "/login")
             self.assertEqual(by_target["Nous Portal API key"]["status"], "api_key_ready")
-            self.assertEqual(by_target["Nous Portal OAuth subscription"]["status"], "manual_provider_handoff_only")
+            self.assertEqual(by_target["Nous Portal OAuth subscription"]["status"], "oauth_device_flow_available")
+            self.assertEqual(by_target["Nous Portal OAuth subscription"]["provider_token_source"], "official Nous Portal OAuth device-code flow")
+            self.assertEqual(by_target["Nous Portal OAuth subscription"]["invocation_bridge"], "nous_oauth_agent_key")
             self.assertEqual(by_target["GitHub Copilot"]["status"], "official_cli_bridge_available")
             self.assertEqual(by_target["GitHub Copilot"]["external_command"], "copilot login")
             self.assertEqual(by_target["Google Gemini"]["status"], "api_key_ready")
@@ -1284,6 +1362,143 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(result.content, "oauth response")
             self.assertEqual(result.raw_usage["source"], "oauth_device_flow")
             self.assertEqual(result.raw_usage["bridge"], "minimax_oauth_anthropic_compatible")
+
+    def test_nous_oauth_live_client_uses_brokered_agent_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            broker = SecretsBroker(root / ".aegis" / "secrets.json")
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"), broker)
+            broker.store_secret(name="NOUS_OAUTH_ACCESS_TOKEN", value="nous-access-secret")
+            broker.store_secret(name="NOUS_OAUTH_REFRESH_TOKEN", value="nous-refresh-secret")
+            broker.store_secret(name="NOUS_OAUTH_AGENT_KEY", value="nous-agent-key-secret")
+            registry._remember_external_auth_link(  # noqa: SLF001 - test seeds verified external auth metadata.
+                "nous",
+                "oauth",
+                {
+                    "target": "Nous Portal OAuth subscription",
+                    "auth_source": "oauth_device_flow",
+                    "aegis_bridge_status": "oauth_device_flow_ready",
+                    "oauth_token_brokered": True,
+                    "agent_key_brokered": True,
+                    "access_token_secret": "NOUS_OAUTH_ACCESS_TOKEN",
+                    "refresh_token_secret": "NOUS_OAUTH_REFRESH_TOKEN",
+                    "agent_key_secret": "NOUS_OAUTH_AGENT_KEY",
+                    "portal_base_url": "https://portal.nousresearch.com",
+                    "inference_base_url": "https://inference-api.nousresearch.com/v1",
+                    "client_id": "hermes-cli",
+                    "scope": "inference:mint_agent_key",
+                    "token_type": "Bearer",
+                    "expires_at": "2999-01-01T00:00:00+00:00",
+                    "agent_key_expires_at": "2999-01-01T00:00:00+00:00",
+                    "refresh_skew_seconds": 120,
+                    "agent_key_min_ttl_seconds": 1800,
+                    "invocation_bridge": "nous_oauth_agent_key",
+                },
+            )
+            route = registry.route("nous/Hermes-4-405B")
+
+            class FakeResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self) -> bytes:
+                    return b'{"choices":[{"message":{"content":"nous oauth response"}}],"usage":{"prompt_tokens":9,"completion_tokens":4}}'
+
+            captured: dict[str, object] = {}
+
+            def fake_urlopen(request, timeout):
+                captured["url"] = request.full_url
+                captured["headers"] = dict(request.header_items())
+                captured["payload"] = json.loads(request.data.decode("utf-8"))
+                self.assertNotIn("nous-access-secret", request.data.decode("utf-8"))
+                self.assertNotIn("nous-agent-key-secret", request.data.decode("utf-8"))
+                return FakeResponse()
+
+            with patch("aegis.models.client._open_model_request", fake_urlopen):
+                result = LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello"}])
+
+            self.assertEqual(route.auth_method, "oauth_token")
+            self.assertEqual(captured["url"], "https://inference-api.nousresearch.com/v1/chat/completions")
+            self.assertEqual(captured["headers"]["Authorization"], "Bearer nous-agent-key-secret")
+            self.assertEqual(captured["payload"]["model"], "Hermes-4-405B")
+            self.assertEqual(result.provider, "nous")
+            self.assertEqual(result.content, "nous oauth response")
+            self.assertEqual(result.raw_usage["source"], "oauth_device_flow")
+            self.assertEqual(result.raw_usage["bridge"], "nous_oauth_agent_key")
+
+    def test_nous_oauth_live_client_refreshes_and_mints_agent_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            broker = SecretsBroker(root / ".aegis" / "secrets.json")
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"), broker)
+            broker.store_secret(name="NOUS_OAUTH_ACCESS_TOKEN", value="nous-old-access")
+            broker.store_secret(name="NOUS_OAUTH_REFRESH_TOKEN", value="nous-refresh-secret")
+            broker.store_secret(name="NOUS_OAUTH_AGENT_KEY", value="nous-old-agent-key")
+            registry._remember_external_auth_link(  # noqa: SLF001 - test seeds verified external auth metadata.
+                "nous",
+                "oauth",
+                {
+                    "target": "Nous Portal OAuth subscription",
+                    "auth_source": "oauth_device_flow",
+                    "aegis_bridge_status": "oauth_device_flow_ready",
+                    "oauth_token_brokered": True,
+                    "agent_key_brokered": True,
+                    "access_token_secret": "NOUS_OAUTH_ACCESS_TOKEN",
+                    "refresh_token_secret": "NOUS_OAUTH_REFRESH_TOKEN",
+                    "agent_key_secret": "NOUS_OAUTH_AGENT_KEY",
+                    "portal_base_url": "https://portal.nousresearch.com",
+                    "inference_base_url": "https://inference-api.nousresearch.com/v1",
+                    "client_id": "hermes-cli",
+                    "expires_at": "2000-01-01T00:00:00+00:00",
+                    "agent_key_expires_at": "2000-01-01T00:00:00+00:00",
+                    "refresh_skew_seconds": 120,
+                    "agent_key_min_ttl_seconds": 1800,
+                },
+            )
+            route = registry.route("nous/Hermes-4-405B")
+
+            class FakeResponse:
+                def __init__(self, payload: dict[str, object]) -> None:
+                    self.payload = payload
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps(self.payload).encode("utf-8")
+
+            captured: list[tuple[str, dict[str, str], str]] = []
+
+            def fake_urlopen(request, timeout):
+                body = request.data.decode("utf-8")
+                headers = dict(request.header_items())
+                captured.append((request.full_url, headers, body))
+                if request.full_url.endswith("/api/oauth/token"):
+                    return FakeResponse({"access_token": "nous-new-access", "refresh_token": "nous-new-refresh", "expires_in": 3600})
+                if request.full_url.endswith("/api/oauth/agent-key"):
+                    self.assertEqual(headers["Authorization"], "Bearer nous-new-access")
+                    return FakeResponse({"api_key": "nous-new-agent-key", "expires_at": "2999-01-01T00:00:00+00:00", "expires_in": 86400})
+                self.assertEqual(headers["Authorization"], "Bearer nous-new-agent-key")
+                return FakeResponse({"choices": [{"message": {"content": "refreshed nous response"}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}})
+
+            with patch("aegis.models.client._open_model_request", fake_urlopen):
+                result = LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello"}])
+
+            self.assertEqual(captured[0][0], "https://portal.nousresearch.com/api/oauth/token")
+            self.assertIn("grant_type=refresh_token", captured[0][2])
+            self.assertEqual(captured[0][1]["X-nous-refresh-token"], "nous-refresh-secret")
+            self.assertEqual(captured[1][0], "https://portal.nousresearch.com/api/oauth/agent-key")
+            self.assertEqual(captured[2][0], "https://inference-api.nousresearch.com/v1/chat/completions")
+            self.assertEqual(broker.resolve_stored_secret("NOUS_OAUTH_ACCESS_TOKEN"), "nous-new-access")
+            self.assertEqual(broker.resolve_stored_secret("NOUS_OAUTH_REFRESH_TOKEN"), "nous-new-refresh")
+            self.assertEqual(broker.resolve_stored_secret("NOUS_OAUTH_AGENT_KEY"), "nous-new-agent-key")
+            self.assertEqual(result.content, "refreshed nous response")
 
     def test_minimax_oauth_live_client_refreshes_expired_brokered_token(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):

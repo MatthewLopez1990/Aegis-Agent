@@ -286,7 +286,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "approved remote-control relay action proxy",
             ],
             "security_delta": "Aegis treats all external outputs as tainted data and requires approval for high-impact actions by default.",
-            "live_gap": "API-key-ready Hermes providers, MiniMax Token Plan, brokered MiniMax OAuth, verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, Google Vertex AI, AWS Bedrock, and Azure Foundry cloud-identity bridges are routable; remaining provider-native gaps are account bridges such as Nous Portal OAuth.",
+            "live_gap": "API-key-ready Hermes providers, brokered Nous Portal OAuth, MiniMax Token Plan, brokered MiniMax OAuth, verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, Google Vertex AI, AWS Bedrock, and Azure Foundry cloud-identity bridges are routable; remaining provider-native gaps are broader OAuth/account bridges beyond the implemented targets.",
             "target_requirements": [
                 "provider_native_oauth_and_device_flows",
                 "subscription_login_bridge",
@@ -413,7 +413,7 @@ def _live_gap_backlog(
             "operator_checklist": _model_auth_operator_checklist(model_auth_parity),
             "next_steps": [
                 "Implement provider-native OAuth/device/cloud-identity bridges one provider at a time with token refresh receipts.",
-                "Use the verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, brokered MiniMax OAuth, MiniMax Token Plan, Google Vertex AI, AWS Bedrock, and Azure Foundry bridges where available; keep other subscription and provider-native flows as official handoffs until scoped bridges exist.",
+                "Use the verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, brokered Nous Portal OAuth, brokered MiniMax OAuth, MiniMax Token Plan, Google Vertex AI, AWS Bedrock, and Azure Foundry bridges where available; keep other subscription and provider-native flows as official handoffs until scoped bridges exist.",
                 "Add denied, approved, refresh, logout, and receipt-redaction tests for every bridge before enabling live model calls through it.",
             ],
             "required_controls": model_auth_parity["required_controls"],
@@ -621,12 +621,12 @@ def _model_auth_operator_checklist(model_auth_parity: dict[str, Any]) -> list[di
         {
             "control": "subscription_token_bridge",
             "state": "partial_official_cli_bridge" if model_auth_parity["subscription_bridge_targets"] else "ready_for_review",
-            "detail": "Verified Codex/ChatGPT, Claude Code, Qwen Code, Gemini CLI, Copilot CLI, brokered MiniMax OAuth, and MiniMax Token Plan can invoke through governed bridges without browser-token import; remaining subscription providers stay on official handoff until scoped bridges exist.",
+            "detail": "Verified Codex/ChatGPT, Claude Code, Qwen Code, Gemini CLI, Copilot CLI, brokered Nous Portal OAuth, brokered MiniMax OAuth, and MiniMax Token Plan can invoke through governed bridges without browser-token import; remaining subscription providers stay on official handoff until scoped bridges exist.",
         },
         {
             "control": "oauth_device_flows",
             "state": "official_cli_handoff_only" if model_auth_parity["subscription_bridge_targets"] else "ready_for_review",
-            "detail": "MiniMax OAuth, Google Vertex AI, AWS Bedrock, Azure Foundry, and Copilot have governed bridge paths; Nous Portal and other provider-native OAuth/device flows remain explicit local handoff targets until governed bridges exist.",
+            "detail": "Nous Portal OAuth, MiniMax OAuth, Google Vertex AI, AWS Bedrock, Azure Foundry, and Copilot have governed bridge paths; other provider-native OAuth/device flows remain explicit local handoff targets until governed bridges exist.",
         },
         {
             "control": "raw_browser_token_capture",

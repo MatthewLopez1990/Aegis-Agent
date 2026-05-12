@@ -17,7 +17,16 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from aegis.models.registry import ModelRoute
+from aegis.models.registry import (
+    ModelRoute,
+    NOUS_OAUTH_ACCESS_TOKEN_SECRET,
+    NOUS_OAUTH_AGENT_KEY_MIN_TTL_SECONDS,
+    NOUS_OAUTH_AGENT_KEY_SECRET,
+    NOUS_OAUTH_CLIENT_ID,
+    NOUS_OAUTH_PORTAL_BASE_URL,
+    NOUS_OAUTH_REFRESH_SKEW_SECONDS,
+    NOUS_OAUTH_REFRESH_TOKEN_SECRET,
+)
 from aegis.security.secrets_broker import SecretsBroker
 
 
@@ -455,7 +464,10 @@ class LiveModelClient:
             raise ValueError(f"provider {route.provider.provider!r} has no base URL")
         if route.provider.provider == "custom":
             _validate_custom_base_url(route.provider.base_url)
-        api_key = self._resolve_api_key(route)
+        if route.provider.provider == "nous" and route.auth_method == "oauth_token":
+            api_key = self._resolve_nous_oauth_agent_key(route)
+        else:
+            api_key = self._resolve_api_key(route)
         payload = {
             "model": route.model,
             "messages": messages,
@@ -472,13 +484,16 @@ class LiveModelClient:
         message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
         content = str(message.get("content", "")).strip()
         usage = response.get("usage", {}) if isinstance(response.get("usage", {}), dict) else {}
+        raw_usage = dict(usage)
+        if route.provider.provider == "nous" and route.auth_method == "oauth_token":
+            raw_usage.update({"source": "oauth_device_flow", "bridge": "nous_oauth_agent_key"})
         return ModelInvocationResult(
             provider=route.provider.provider,
             model=route.model,
             content=content,
             input_tokens=int(usage.get("prompt_tokens", 0) or 0),
             output_tokens=int(usage.get("completion_tokens", 0) or 0),
-            raw_usage=dict(usage),
+            raw_usage=raw_usage,
         )
 
     def _chat_azure_foundry(
@@ -918,6 +933,57 @@ class LiveModelClient:
         )
         return self.secrets_broker.resolve_for_authorized_tool(handle, requester=f"model:{route.provider.provider}")
 
+    def _resolve_nous_oauth_agent_key(self, route: ModelRoute) -> str:
+        metadata = {**route.provider.metadata, **route.auth_metadata}
+        access_secret = str(metadata.get("access_token_secret") or NOUS_OAUTH_ACCESS_TOKEN_SECRET)
+        refresh_secret = str(metadata.get("refresh_token_secret") or NOUS_OAUTH_REFRESH_TOKEN_SECRET)
+        agent_key_secret = str(metadata.get("agent_key_secret") or NOUS_OAUTH_AGENT_KEY_SECRET)
+        min_ttl = int(metadata.get("agent_key_min_ttl_seconds") or NOUS_OAUTH_AGENT_KEY_MIN_TTL_SECONDS)
+        if not _oauth_expires_soon(str(metadata.get("agent_key_expires_at") or ""), min_ttl):
+            try:
+                return self.secrets_broker.resolve_stored_secret(agent_key_secret)
+            except KeyError:
+                pass
+
+        portal_base_url = str(metadata.get("portal_base_url") or NOUS_OAUTH_PORTAL_BASE_URL).rstrip("/")
+        client_id = str(metadata.get("client_id") or NOUS_OAUTH_CLIENT_ID)
+        access_token = self.secrets_broker.resolve_stored_secret(access_secret)
+        if _oauth_expires_soon(str(metadata.get("expires_at") or ""), int(metadata.get("refresh_skew_seconds") or NOUS_OAUTH_REFRESH_SKEW_SECONDS)):
+            refresh_token = self.secrets_broker.resolve_stored_secret(refresh_secret)
+            refreshed = self._post_form(
+                f"{portal_base_url}/api/oauth/token",
+                {
+                    "grant_type": "refresh_token",
+                    "client_id": client_id,
+                },
+                headers={"x-nous-refresh-token": refresh_token},
+            )
+            access_token = str(refreshed.get("access_token") or "").strip()
+            if not access_token:
+                raise RuntimeError("Nous OAuth refresh response did not include access_token")
+            self.secrets_broker.store_secret(name=access_secret, value=access_token)
+            rotated_refresh = str(refreshed.get("refresh_token") or "").strip()
+            if rotated_refresh:
+                self.secrets_broker.store_secret(name=refresh_secret, value=rotated_refresh)
+            route.auth_metadata["expires_at"] = _expires_at_from_ttl(refreshed.get("expires_in"))
+
+        minted = self._post_json(
+            f"{portal_base_url}/api/oauth/agent-key",
+            payload={"min_ttl_seconds": max(60, min_ttl)},
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Authorization": f"Bearer {access_token}",
+            },
+        )
+        agent_key = str(minted.get("api_key") or "").strip()
+        if not agent_key:
+            raise RuntimeError("Nous OAuth agent-key response did not include api_key")
+        self.secrets_broker.store_secret(name=agent_key_secret, value=agent_key)
+        route.auth_metadata["agent_key_expires_at"] = str(minted.get("expires_at") or _expires_at_from_ttl(minted.get("expires_in"))).strip()
+        route.auth_metadata["agent_key_expires_in"] = minted.get("expires_in")
+        return agent_key
+
     def _resolve_minimax_oauth_access_token(self, route: ModelRoute) -> str:
         metadata = {**route.provider.metadata, **route.auth_metadata}
         access_secret = str(metadata.get("access_token_secret") or "MINIMAX_OAUTH_ACCESS_TOKEN")
@@ -980,13 +1046,16 @@ class LiveModelClient:
             raise RuntimeError("model provider returned an invalid JSON payload")
         return decoded
 
-    def _post_form(self, url: str, data: dict[str, str]) -> dict[str, Any]:
+    def _post_form(self, url: str, data: dict[str, str], *, headers: dict[str, str] | None = None) -> dict[str, Any]:
         body = urlencode(data).encode("utf-8")
+        request_headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
+        if headers:
+            request_headers.update(headers)
         request = Request(
             url,
             data=body,
             method="POST",
-            headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+            headers=request_headers,
         )
         try:
             with _open_model_request(request, timeout=self.timeout_seconds) as response:  # noqa: S310 - URL is provider registry controlled.
@@ -1033,6 +1102,14 @@ def _oauth_expires_soon(expires_at: str, skew_seconds: int) -> bool:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return (parsed.timestamp() - time.time()) <= max(0, skew_seconds)
+
+
+def _expires_at_from_ttl(expires_in: Any) -> str:
+    try:
+        ttl = int(expires_in)
+    except (TypeError, ValueError):
+        ttl = 0
+    return datetime.fromtimestamp(time.time() + max(0, ttl), tz=timezone.utc).isoformat()
 
 
 def _subscription_cli_prompt(messages: list[dict[str, str]], *, provider: str, temperature: float) -> str:

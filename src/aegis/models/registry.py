@@ -194,8 +194,21 @@ class ModelRegistry:
                         "token_captured": False,
                         "token_capture_supported": False,
                         "oauth_token_brokered": bool(external_status.get("oauth_token_brokered", False)),
+                        "agent_key_brokered": bool(external_status.get("agent_key_brokered", False)),
                     }
                 )
+                for key in (
+                    "access_token_secret",
+                    "refresh_token_secret",
+                    "agent_key_secret",
+                    "agent_key_expires_at",
+                    "agent_key_min_ttl_seconds",
+                    "portal_base_url",
+                    "inference_base_url",
+                    "invocation_bridge",
+                ):
+                    if external_status.get(key) is not None:
+                        target_row[key] = external_status[key]
                 verified_external.append(str(target["target"]))
                 targets.append(target_row)
                 continue
@@ -385,6 +398,40 @@ class ModelRegistry:
         profile = _external_auth_handoff_profile_for_login(name, normalized_method)
         if profile is None:
             raise ValueError(f"{method} login is not supported for {name!r}")
+        if profile.get("oauth_device_flow") == "nous_device_code":
+            status = _nous_oauth_status_template(profile)
+            if run_external:
+                status.update(_run_nous_oauth_login_flow(profile, self.secrets_broker, timeout_seconds=timeout_seconds))
+            elif verify_external:
+                status.update(_verify_nous_oauth_link(profile, self.secrets_broker, self._external_auth_link(str(profile.get("provider") or name), normalized_method)))
+            if status.get("external_status_verified"):
+                status.update(
+                    {
+                        "status": "external_login_verified",
+                        "auth_configured": True,
+                        "auth_source": "oauth_device_flow",
+                        "aegis_bridge_status": "oauth_device_flow_ready",
+                        "token_captured": False,
+                        "token_capture_supported": False,
+                    }
+                )
+                self._remember_external_auth_link(str(status["provider"]), normalized_method, status)
+            self.audit_logger.append(
+                "model.auth_external_login_requested",
+                {
+                    "provider": status["provider"],
+                    "target": status["target"],
+                    "method": status["method"],
+                    "status": status["status"],
+                    "external_command": status.get("external_command"),
+                    "external_login_attempted": status["external_login_attempted"],
+                    "external_login_exit_code": status["external_login_exit_code"],
+                    "token_captured": False,
+                    "oauth_token_brokered": bool(status.get("oauth_token_brokered", False)),
+                    "agent_key_brokered": bool(status.get("agent_key_brokered", False)),
+                },
+            )
+            return status
         if profile.get("oauth_device_flow") == "minimax_pkce_user_code":
             status = _minimax_oauth_status_template(profile)
             if run_external:
@@ -744,8 +791,11 @@ class ModelRegistry:
                     "token_captured": False,
                     "token_capture_supported": False,
                     "oauth_token_brokered": bool(link.get("oauth_token_brokered", False)),
+                    "agent_key_brokered": bool(link.get("agent_key_brokered", False)),
                     "access_token_secret": link.get("access_token_secret"),
                     "refresh_token_secret": link.get("refresh_token_secret"),
+                    "agent_key_secret": link.get("agent_key_secret"),
+                    "agent_key_expires_at": link.get("agent_key_expires_at"),
                 }
             )
         return status
@@ -810,8 +860,13 @@ class ModelRegistry:
             "expires_in",
             "access_token_secret",
             "refresh_token_secret",
+            "agent_key_secret",
+            "agent_key_expires_at",
+            "agent_key_expires_in",
+            "agent_key_min_ttl_seconds",
             "refresh_skew_seconds",
             "oauth_token_brokered",
+            "agent_key_brokered",
             "raw_browser_token_captured",
         ):
             value = status.get(key)
@@ -877,6 +932,18 @@ def _metadata_keys(raw: Any) -> list[str]:
         return []
     return sorted(str(key) for key in value.keys())
 
+
+NOUS_OAUTH_PORTAL_BASE_URL = "https://portal.nousresearch.com"
+NOUS_OAUTH_INFERENCE_BASE_URL = "https://inference-api.nousresearch.com/v1"
+NOUS_OAUTH_CLIENT_ID = "hermes-cli"
+NOUS_OAUTH_SCOPE = "inference:mint_agent_key"
+NOUS_OAUTH_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+NOUS_OAUTH_ACCESS_TOKEN_SECRET = "NOUS_OAUTH_ACCESS_TOKEN"
+NOUS_OAUTH_REFRESH_TOKEN_SECRET = "NOUS_OAUTH_REFRESH_TOKEN"
+NOUS_OAUTH_AGENT_KEY_SECRET = "NOUS_OAUTH_AGENT_KEY"
+NOUS_OAUTH_REFRESH_SKEW_SECONDS = 120
+NOUS_OAUTH_AGENT_KEY_MIN_TTL_SECONDS = 30 * 60
+NOUS_DEVICE_AUTH_POLL_INTERVAL_CAP_SECONDS = 1
 
 MINIMAX_OAUTH_CLIENT_ID = "78257093-7e40-4613-99e0-527b14b39113"
 MINIMAX_OAUTH_SCOPE = "group_id profile model.completion"
@@ -999,12 +1066,25 @@ EXTERNAL_AUTH_HANDOFF_PROFILES: dict[str, dict[str, Any]] = {
         "provider": "nous",
         "method": "oauth",
         "account_surface": "Nous Portal",
-        "external_command": None,
-        "aegis_bridge_status": "manual_provider_handoff_only",
+        "external_command": "Nous Portal browser OAuth",
+        "oauth_device_flow": "nous_device_code",
+        "portal_base_url": NOUS_OAUTH_PORTAL_BASE_URL,
+        "inference_base_url": NOUS_OAUTH_INFERENCE_BASE_URL,
+        "client_id": NOUS_OAUTH_CLIENT_ID,
+        "scope": NOUS_OAUTH_SCOPE,
+        "access_token_secret": NOUS_OAUTH_ACCESS_TOKEN_SECRET,
+        "refresh_token_secret": NOUS_OAUTH_REFRESH_TOKEN_SECRET,
+        "agent_key_secret": NOUS_OAUTH_AGENT_KEY_SECRET,
+        "refresh_skew_seconds": NOUS_OAUTH_REFRESH_SKEW_SECONDS,
+        "agent_key_min_ttl_seconds": NOUS_OAUTH_AGENT_KEY_MIN_TTL_SECONDS,
+        "aegis_bridge_status": "oauth_device_flow_available",
+        "invocation_bridge": "nous_oauth_agent_key",
+        "provider_token_source": "official Nous Portal OAuth device-code flow",
         "interactive": True,
         "next_steps": [
-            "Sign in through the Nous Portal and use NOUS_API_KEY for Aegis live model calls.",
-            "Aegis does not yet import Nous OAuth refresh tokens.",
+            "Run model auth login nous --method oauth --run-external and approve the Nous Portal device-code prompt.",
+            "Route nous/<model-id> after verification to use the brokered Nous OAuth agent-key bridge.",
+            "Do not paste Nous browser cookies, access tokens, refresh tokens, portal session values, or minted agent keys into Aegis.",
         ],
     },
     "minimax-oauth": {
@@ -1349,6 +1429,255 @@ def _external_status_command_argv(profile: dict[str, Any]) -> tuple[str, ...]:
     return tuple(shlex.split(command))
 
 
+def _nous_oauth_status_template(profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "provider": profile.get("provider") or "nous",
+        "target": profile["target"],
+        "method": profile["method"],
+        "status": "external_login_required",
+        "auth_configured": False,
+        "auth_source": None,
+        "token_captured": False,
+        "token_capture_supported": False,
+        "raw_browser_token_captured": False,
+        "oauth_token_brokered": False,
+        "agent_key_brokered": False,
+        "external_command_argv": [],
+        "external_command_available": True,
+        "external_command_path": None,
+        "external_login_attempted": False,
+        "external_login_exit_code": None,
+        "external_login_error": None,
+        "external_status_checked": False,
+        "external_status_verified": False,
+        **_handoff_profile_public_fields(profile),
+    }
+
+
+def _run_nous_oauth_login_flow(profile: dict[str, Any], secrets_broker: SecretsBroker, *, timeout_seconds: float | None) -> dict[str, Any]:
+    portal_base_url = str(profile.get("portal_base_url") or NOUS_OAUTH_PORTAL_BASE_URL).rstrip("/")
+    inference_base_url = str(profile.get("inference_base_url") or NOUS_OAUTH_INFERENCE_BASE_URL).rstrip("/")
+    client_id = str(profile.get("client_id") or NOUS_OAUTH_CLIENT_ID)
+    scope = str(profile.get("scope") or NOUS_OAUTH_SCOPE)
+    try:
+        device_payload = _nous_request_device_code(
+            portal_base_url=portal_base_url,
+            client_id=client_id,
+            scope=scope,
+            timeout_seconds=timeout_seconds,
+        )
+        verification_uri = str(device_payload.get("verification_uri_complete") or device_payload["verification_uri"])
+        user_code = str(device_payload["user_code"])
+        print(f"Nous Portal OAuth: open {verification_uri} and enter code {user_code}", file=sys.stderr)
+        token_payload = _nous_poll_token(
+            portal_base_url=portal_base_url,
+            client_id=client_id,
+            device_code=str(device_payload["device_code"]),
+            expires_in=int(device_payload["expires_in"]),
+            poll_interval=int(device_payload.get("interval") or 1),
+            timeout_seconds=timeout_seconds,
+        )
+        access_token = _required_oauth_value(token_payload, "access_token", "Nous OAuth token response")
+        refresh_token = _required_oauth_value(token_payload, "refresh_token", "Nous OAuth token response")
+        resolved_inference_url = str(token_payload.get("inference_base_url") or inference_base_url).strip().rstrip("/") or inference_base_url
+        min_ttl = int(profile.get("agent_key_min_ttl_seconds") or NOUS_OAUTH_AGENT_KEY_MIN_TTL_SECONDS)
+        agent_payload = _nous_mint_agent_key(
+            portal_base_url=portal_base_url,
+            access_token=access_token,
+            min_ttl_seconds=min_ttl,
+            timeout_seconds=timeout_seconds,
+        )
+        agent_key = _required_oauth_value(agent_payload, "api_key", "Nous OAuth agent-key response")
+    except TimeoutError as exc:
+        return {
+            "status": "external_login_timeout",
+            "external_login_attempted": True,
+            "external_login_exit_code": None,
+            "external_login_error": str(exc),
+            "external_status_checked": False,
+            "external_status_verified": False,
+        }
+    except (RuntimeError, ValueError, OSError) as exc:
+        return {
+            "status": "external_login_failed",
+            "external_login_attempted": True,
+            "external_login_exit_code": None,
+            "external_login_error": str(exc),
+            "external_status_checked": True,
+            "external_status_verified": False,
+        }
+
+    access_secret = str(profile.get("access_token_secret") or NOUS_OAUTH_ACCESS_TOKEN_SECRET)
+    refresh_secret = str(profile.get("refresh_token_secret") or NOUS_OAUTH_REFRESH_TOKEN_SECRET)
+    agent_key_secret = str(profile.get("agent_key_secret") or NOUS_OAUTH_AGENT_KEY_SECRET)
+    secrets_broker.store_secret(name=access_secret, value=access_token)
+    secrets_broker.store_secret(name=refresh_secret, value=refresh_token)
+    secrets_broker.store_secret(name=agent_key_secret, value=agent_key)
+    now = datetime.now(timezone.utc)
+    expires_at = _oauth_ttl_expiry(token_payload.get("expires_in"), now=now)
+    agent_key_expires_at = _oauth_payload_expiry(agent_payload, now=now)
+    return {
+        "status": "external_login_verified",
+        "auth_configured": True,
+        "auth_source": "oauth_device_flow",
+        "aegis_bridge_status": "oauth_device_flow_ready",
+        "external_login_attempted": True,
+        "external_login_exit_code": 0,
+        "external_login_error": None,
+        "external_status_checked": True,
+        "external_status_verified": True,
+        "token_captured": False,
+        "token_capture_supported": False,
+        "raw_browser_token_captured": False,
+        "oauth_token_brokered": True,
+        "agent_key_brokered": True,
+        "access_token_secret": access_secret,
+        "refresh_token_secret": refresh_secret,
+        "agent_key_secret": agent_key_secret,
+        "portal_base_url": portal_base_url,
+        "inference_base_url": resolved_inference_url,
+        "client_id": client_id,
+        "scope": str(token_payload.get("scope") or scope),
+        "token_type": str(token_payload.get("token_type") or "Bearer"),
+        "expires_at": expires_at.isoformat(),
+        "expires_in": max(0, int(expires_at.timestamp() - now.timestamp())),
+        "refresh_skew_seconds": int(profile.get("refresh_skew_seconds") or NOUS_OAUTH_REFRESH_SKEW_SECONDS),
+        "agent_key_expires_at": agent_key_expires_at,
+        "agent_key_expires_in": agent_payload.get("expires_in"),
+        "agent_key_min_ttl_seconds": min_ttl,
+        "invocation_bridge": str(profile.get("invocation_bridge") or "nous_oauth_agent_key"),
+    }
+
+
+def _verify_nous_oauth_link(profile: dict[str, Any], secrets_broker: SecretsBroker, link: dict[str, Any] | None) -> dict[str, Any]:
+    access_secret = str((link or {}).get("access_token_secret") or profile.get("access_token_secret") or NOUS_OAUTH_ACCESS_TOKEN_SECRET)
+    refresh_secret = str((link or {}).get("refresh_token_secret") or profile.get("refresh_token_secret") or NOUS_OAUTH_REFRESH_TOKEN_SECRET)
+    agent_key_secret = str((link or {}).get("agent_key_secret") or profile.get("agent_key_secret") or NOUS_OAUTH_AGENT_KEY_SECRET)
+    verified = link is not None and secrets_broker.has_secret(access_secret) and secrets_broker.has_secret(refresh_secret) and secrets_broker.has_secret(agent_key_secret)
+    return {
+        "external_status_checked": True,
+        "external_status_verified": verified,
+        "status": "external_login_verified" if verified else "external_login_required",
+        "auth_configured": verified,
+        "auth_source": "oauth_device_flow" if verified else None,
+        "aegis_bridge_status": "oauth_device_flow_ready" if verified else "oauth_device_flow_available",
+        "oauth_token_brokered": verified,
+        "agent_key_brokered": verified,
+        "access_token_secret": access_secret,
+        "refresh_token_secret": refresh_secret,
+        "agent_key_secret": agent_key_secret,
+        **{
+            key: value
+            for key, value in (link or {}).items()
+            if key
+            in {
+                "portal_base_url",
+                "inference_base_url",
+                "client_id",
+                "scope",
+                "token_type",
+                "expires_at",
+                "expires_in",
+                "refresh_skew_seconds",
+                "agent_key_expires_at",
+                "agent_key_expires_in",
+                "agent_key_min_ttl_seconds",
+                "invocation_bridge",
+            }
+        },
+    }
+
+
+def _nous_request_device_code(*, portal_base_url: str, client_id: str, scope: str, timeout_seconds: float | None) -> dict[str, Any]:
+    data = {"client_id": client_id}
+    if scope:
+        data["scope"] = scope
+    payload = _post_auth_form(
+        f"{portal_base_url}/api/oauth/device/code",
+        data,
+        timeout_seconds=timeout_seconds,
+        label="Nous OAuth",
+    )
+    for field in ("device_code", "user_code", "verification_uri", "verification_uri_complete", "expires_in", "interval"):
+        if field not in payload:
+            raise RuntimeError(f"Nous OAuth device-code response missing field: {field}")
+    return payload
+
+
+def _nous_poll_token(
+    *,
+    portal_base_url: str,
+    client_id: str,
+    device_code: str,
+    expires_in: int,
+    poll_interval: int,
+    timeout_seconds: float | None,
+) -> dict[str, Any]:
+    deadline = min(time.monotonic() + max(1, expires_in), time.monotonic() + (timeout_seconds or max(1, expires_in)))
+    interval = max(1, min(poll_interval, NOUS_DEVICE_AUTH_POLL_INTERVAL_CAP_SECONDS))
+    while time.monotonic() < deadline:
+        status_code, payload = _post_auth_form_status(
+            f"{portal_base_url}/api/oauth/token",
+            {
+                "grant_type": NOUS_OAUTH_GRANT_TYPE,
+                "client_id": client_id,
+                "device_code": device_code,
+            },
+            timeout_seconds=timeout_seconds,
+            label="Nous OAuth",
+        )
+        if status_code == 200:
+            if "access_token" not in payload:
+                raise RuntimeError("Nous OAuth token response did not include access_token")
+            return payload
+        error_code = str(payload.get("error") or "")
+        if error_code == "authorization_pending":
+            time.sleep(interval)
+            continue
+        if error_code == "slow_down":
+            interval = min(interval + 1, 30)
+            time.sleep(interval)
+            continue
+        description = str(payload.get("error_description") or "unknown authentication error")
+        raise RuntimeError(f"Nous OAuth {error_code or status_code}: {description}")
+    raise TimeoutError("Nous OAuth timed out before authorization completed")
+
+
+def _nous_mint_agent_key(*, portal_base_url: str, access_token: str, min_ttl_seconds: int, timeout_seconds: float | None) -> dict[str, Any]:
+    payload = _post_auth_json(
+        f"{portal_base_url}/api/oauth/agent-key",
+        {"min_ttl_seconds": max(60, int(min_ttl_seconds))},
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout_seconds=timeout_seconds,
+        label="Nous OAuth",
+    )
+    if "api_key" not in payload:
+        raise RuntimeError("Nous OAuth agent-key response did not include api_key")
+    return payload
+
+
+def _required_oauth_value(payload: dict[str, Any], field: str, label: str) -> str:
+    value = str(payload.get(field) or "").strip()
+    if not value:
+        raise RuntimeError(f"{label} did not include {field}")
+    return value
+
+
+def _oauth_ttl_expiry(expires_in: Any, *, now: datetime) -> datetime:
+    try:
+        ttl = int(expires_in)
+    except (TypeError, ValueError):
+        ttl = 0
+    return datetime.fromtimestamp(now.timestamp() + max(0, ttl), tz=timezone.utc)
+
+
+def _oauth_payload_expiry(payload: dict[str, Any], *, now: datetime) -> str:
+    raw = str(payload.get("expires_at") or "").strip()
+    if raw:
+        return raw
+    return _oauth_ttl_expiry(payload.get("expires_in"), now=now).isoformat()
+
+
 def _minimax_oauth_status_template(profile: dict[str, Any]) -> dict[str, Any]:
     return {
         "provider": profile.get("provider") or "minimax-oauth",
@@ -1535,24 +1864,79 @@ def _minimax_poll_token(
     raise TimeoutError("MiniMax OAuth timed out before authorization completed")
 
 
-def _post_auth_form(url: str, data: dict[str, str], *, timeout_seconds: float | None) -> dict[str, Any]:
+def _post_auth_form(url: str, data: dict[str, str], *, timeout_seconds: float | None, headers: dict[str, str] | None = None, label: str = "MiniMax OAuth") -> dict[str, Any]:
+    status_code, payload = _post_auth_form_status(url, data, timeout_seconds=timeout_seconds, headers=headers, label=label)
+    if status_code >= 400:
+        raise RuntimeError(f"{label} HTTP {status_code}: {json.dumps(payload, sort_keys=True)[:500]}")
+    return payload
+
+
+def _post_auth_form_status(
+    url: str,
+    data: dict[str, str],
+    *,
+    timeout_seconds: float | None,
+    headers: dict[str, str] | None = None,
+    label: str = "MiniMax OAuth",
+) -> tuple[int, dict[str, Any]]:
+    request_headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
+    if headers:
+        request_headers.update(headers)
     request = Request(
         url,
         data=urlencode(data).encode("utf-8"),
         method="POST",
-        headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+        headers=request_headers,
+    )
+    try:
+        with _open_auth_request(request, timeout=timeout_seconds or 30.0) as response:  # noqa: S310 - URL is fixed provider OAuth metadata.
+            raw = response.read().decode("utf-8")
+            status_code = int(getattr(response, "status", 200) or 200)
+    except HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        status_code = exc.code
+    except URLError as exc:
+        raise RuntimeError(f"{label} connection failed: {exc.reason}") from exc
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{label} returned invalid JSON") from exc
+    if not isinstance(decoded, dict):
+        raise RuntimeError(f"{label} returned invalid JSON")
+    return status_code, decoded
+
+
+def _post_auth_json(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    headers: dict[str, str] | None = None,
+    timeout_seconds: float | None,
+    label: str,
+) -> dict[str, Any]:
+    request_headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if headers:
+        request_headers.update(headers)
+    request = Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers=request_headers,
     )
     try:
         with _open_auth_request(request, timeout=timeout_seconds or 30.0) as response:  # noqa: S310 - URL is fixed provider OAuth metadata.
             raw = response.read().decode("utf-8")
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"MiniMax OAuth HTTP {exc.code}: {detail}") from exc
+        raise RuntimeError(f"{label} HTTP {exc.code}: {detail}") from exc
     except URLError as exc:
-        raise RuntimeError(f"MiniMax OAuth connection failed: {exc.reason}") from exc
-    decoded = json.loads(raw)
+        raise RuntimeError(f"{label} connection failed: {exc.reason}") from exc
+    try:
+        decoded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{label} returned invalid JSON") from exc
     if not isinstance(decoded, dict):
-        raise RuntimeError("MiniMax OAuth returned invalid JSON")
+        raise RuntimeError(f"{label} returned invalid JSON")
     return decoded
 
 
@@ -1750,6 +2134,8 @@ def _handoff_profile_public_fields(profile: dict[str, Any]) -> dict[str, Any]:
         "scope",
         "access_token_secret",
         "refresh_token_secret",
+        "agent_key_secret",
+        "agent_key_min_ttl_seconds",
         "refresh_skew_seconds",
         "invocation_bridge",
         "interactive",
@@ -1802,7 +2188,33 @@ def default_providers(
         ModelProviderSpec("mistral", ("mistral-large", "mistral-medium", "mistral-small", "codestral"), "MISTRAL_API_KEY", "https://api.mistral.ai/v1", False, True, False, False, 2.0, 6.0, 32000, "mistral"),
         ModelProviderSpec("cohere", ("command-r-plus", "command-r"), "COHERE_API_KEY", "https://api.cohere.com/v2", False, True, False, False, 3.0, 15.0, 128000, "cohere"),
         ModelProviderSpec("openrouter", ("anthropic/claude-sonnet-4.6", "openai/gpt-4o", "meta-llama/llama-3.1-70b"), "OPENROUTER_API_KEY", "https://openrouter.ai/api/v1", False, True, True, True, 0.0, 0.0, 128000, "openrouter"),
-        ModelProviderSpec("nous", ("Hermes-4-405B", "Hermes-4-70B"), "NOUS_API_KEY", "https://inference-api.nousresearch.com/v1", False, True, False, False, 0.0, 0.0, 128000, "openai_compatible"),
+        ModelProviderSpec(
+            "nous",
+            ("Hermes-4-405B", "Hermes-4-70B"),
+            "NOUS_API_KEY",
+            NOUS_OAUTH_INFERENCE_BASE_URL,
+            False,
+            True,
+            False,
+            False,
+            0.0,
+            0.0,
+            128000,
+            "openai_compatible",
+            "oauth",
+            {
+                "auth_surface": "oauth_device",
+                "compatibility": "openai_chat_completions",
+                "portal_base_url": NOUS_OAUTH_PORTAL_BASE_URL,
+                "client_id": NOUS_OAUTH_CLIENT_ID,
+                "scope": NOUS_OAUTH_SCOPE,
+                "access_token_secret": NOUS_OAUTH_ACCESS_TOKEN_SECRET,
+                "refresh_token_secret": NOUS_OAUTH_REFRESH_TOKEN_SECRET,
+                "agent_key_secret": NOUS_OAUTH_AGENT_KEY_SECRET,
+                "refresh_skew_seconds": NOUS_OAUTH_REFRESH_SKEW_SECONDS,
+                "agent_key_min_ttl_seconds": NOUS_OAUTH_AGENT_KEY_MIN_TTL_SECONDS,
+            },
+        ),
         ModelProviderSpec("deepseek", ("deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"), "DEEPSEEK_API_KEY", "https://api.deepseek.com", False, True, False, False, 0.0, 0.0, 128000, "openai_compatible"),
         ModelProviderSpec("xai", ("grok-4.20-reasoning", "grok-4", "grok-4-fast"), "XAI_API_KEY", "https://api.x.ai/v1", False, True, True, False, 0.0, 0.0, 256000, "openai_compatible"),
         ModelProviderSpec("kimi", ("kimi-k2.5", "kimi-k2-turbo-preview", "kimi-k2-thinking"), "KIMI_API_KEY", "https://api.moonshot.ai/v1", False, True, True, False, 0.0, 0.0, 256000, "openai_compatible"),
