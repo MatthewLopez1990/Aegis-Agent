@@ -963,7 +963,7 @@ class PlatformLayerTests(unittest.TestCase):
             auth_targets = {row["target"]: row for row in auth_parity["targets"]}
             self.assertEqual(auth_targets["OpenAI API"]["status"], "api_key_ready")
             self.assertEqual(auth_targets["Claude Code subscription"]["status"], "official_cli_bridge_available")
-            self.assertEqual(auth_targets["GitHub Copilot"]["status"], "official_cli_handoff_only")
+            self.assertEqual(auth_targets["GitHub Copilot"]["status"], "official_cli_bridge_available")
             self.assertEqual(auth_targets["DeepSeek"]["status"], "api_key_ready")
             self.assertEqual(auth_targets["MiniMax OAuth"]["status"], "manual_provider_handoff_only")
             self.assertEqual(auth_targets["Qwen Code Coding Plan subscription"]["required_auth"], ["subscription"])

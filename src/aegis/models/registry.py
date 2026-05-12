@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import os
 import shlex
 import shutil
 import subprocess
@@ -541,7 +542,7 @@ class ModelRegistry:
         provider_name, model = identifier.split("/", 1)
         if provider_name not in self.providers:
             raise KeyError(f"unknown model provider {provider_name!r}")
-        if model not in self.providers[provider_name].models and provider_name not in {"custom", "lmstudio", "azure-foundry", "aws-bedrock", "google", "qwen"}:
+        if model not in self.providers[provider_name].models and provider_name not in {"custom", "lmstudio", "azure-foundry", "aws-bedrock", "google", "qwen", "github-copilot"}:
             raise KeyError(f"unknown model {model!r} for provider {provider_name!r}")
         return provider_name, model
 
@@ -805,15 +806,29 @@ EXTERNAL_AUTH_HANDOFF_PROFILES: dict[str, dict[str, Any]] = {
         "provider": "github-copilot",
         "method": "oauth_device",
         "account_surface": "GitHub Copilot subscription",
-        "external_command": "gh auth login",
-        "external_command_argv": ("gh", "auth", "login"),
-        "external_status_command": "gh auth status",
-        "external_status_command_argv": ("gh", "auth", "status"),
-        "provider_token_source": "official GitHub CLI credential store",
-        "aegis_bridge_status": "official_cli_handoff_only",
+        "external_command": "copilot login",
+        "external_command_argv": ("copilot", "login"),
+        "external_status_command": "copilot -p \"Respond with OK only.\" --output-format=json --mode=plan --no-remote --no-custom-instructions --disable-builtin-mcps --no-ask-user --silent --stream=off --log-level=none",
+        "external_status_command_argv": (
+            "copilot",
+            "-p",
+            "Respond with OK only.",
+            "--output-format=json",
+            "--mode=plan",
+            "--no-remote",
+            "--no-custom-instructions",
+            "--disable-builtin-mcps",
+            "--no-ask-user",
+            "--silent",
+            "--stream=off",
+            "--log-level=none",
+        ),
+        "provider_token_source": "official GitHub Copilot CLI credential store or GitHub CLI fallback token",
+        "aegis_bridge_status": "official_cli_bridge_available",
         "interactive": True,
         "next_steps": [
-            "Run model auth login github-copilot --method oauth-device --run-external or sign in with gh auth login directly.",
+            "Run model auth login github-copilot --method oauth-device --run-external or sign in with copilot login directly.",
+            "Route github-copilot/<model-id> after verification to use isolated copilot -p JSON invocation.",
             "Do not paste GitHub OAuth tokens or Copilot session tokens into Aegis.",
         ],
     },
@@ -1026,7 +1041,7 @@ MODEL_PROVIDER_AUTH_TARGETS: tuple[dict[str, Any], ...] = (
     {
         "target": "GitHub Copilot",
         "platforms": ("Hermes Agent",),
-        "aegis_provider": None,
+        "aegis_provider": "github-copilot",
         "required_auth": ("oauth_device",),
         "account_surface": "GitHub Copilot subscription",
     },
@@ -1269,7 +1284,14 @@ def _run_external_status_command(profile: dict[str, Any], *, timeout_seconds: fl
             "external_status_error": f"executable not found: {command_argv[0]}",
         }
     try:
-        completed = subprocess.run(command_argv, timeout=timeout_seconds, check=False, capture_output=True, text=True)  # noqa: S603 - argv is a hardcoded provider status command.
+        completed = subprocess.run(
+            command_argv,
+            timeout=timeout_seconds,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=_external_status_env(command_argv),
+        )  # noqa: S603 - argv is a hardcoded provider status command.
     except subprocess.TimeoutExpired:
         return {
             "external_status_checked": True,
@@ -1296,6 +1318,18 @@ def _run_external_status_command(profile: dict[str, Any], *, timeout_seconds: fl
         "external_status_exit_code": completed.returncode,
         "external_status_error": None if completed.returncode == 0 else f"external status command exited with {completed.returncode}",
     }
+
+
+def _external_status_env(command_argv: tuple[str, ...]) -> dict[str, str] | None:
+    if not command_argv or command_argv[0] != "copilot":
+        return None
+    env = os.environ.copy()
+    env["COPILOT_AUTO_UPDATE"] = "false"
+    env["COPILOT_ALLOW_ALL"] = "false"
+    env["GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS"] = "false"
+    env["GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS"] = "false"
+    env["GITHUB_COPILOT_PROMPT_MODE_WORKSPACE_MCP"] = "false"
+    return env
 
 
 def _external_auth_handoff_profile(target: str) -> dict[str, Any] | None:
@@ -1387,6 +1421,7 @@ def default_providers(
         ModelProviderSpec("qwen", ("qwen-plus", "qwen-max", "qwen-turbo"), "DASHSCOPE_API_KEY", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", False, True, True, False, 0.0, 0.0, 128000, "openai_compatible"),
         ModelProviderSpec("azure-foundry", ("*",), "AZURE_OPENAI_API_KEY", azure_foundry_base_url, False, True, True, True, 0.0, 0.0, 128000, "openai_compatible", "cloud_identity"),
         ModelProviderSpec("aws-bedrock", ("*",), None, None, False, True, True, False, 0.0, 0.0, 200000, "bedrock_converse", "cloud_identity"),
+        ModelProviderSpec("github-copilot", ("gpt-5.1-codex", "gpt-5.1", "gpt-4.1"), None, None, False, True, False, False, 0.0, 0.0, 200000, "openai_compatible", "oauth_device"),
         ModelProviderSpec("ollama", ("llama3", "llama3.1", "mistral", "mixtral", "phi3", "gemma2", "codellama", "deepseek-coder"), None, "http://localhost:11434", True, False, context_window_tokens=8192, tokenizer_profile="llama"),
         ModelProviderSpec("lmstudio", ("local",), None, "http://localhost:1234/v1", True, False, context_window_tokens=8192, tokenizer_profile="openai_compatible"),
         ModelProviderSpec("custom", ("*",), "CUSTOM_API_KEY", custom_base_url, False, True, context_window_tokens=8192, tokenizer_profile="openai_compatible"),

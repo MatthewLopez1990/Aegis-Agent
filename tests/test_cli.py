@@ -76,7 +76,7 @@ class CliTests(unittest.TestCase):
             auth_targets = {row["target"]: row for row in result["model_provider_auth_parity"]["targets"]}
             self.assertEqual(auth_targets["Claude Code subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(auth_targets["Qwen Code Coding Plan subscription"]["status"], "official_cli_bridge_available")
-            self.assertEqual(auth_targets["GitHub Copilot"]["status"], "official_cli_handoff_only")
+            self.assertEqual(auth_targets["GitHub Copilot"]["status"], "official_cli_bridge_available")
             self.assertTrue(any(item["area"] == "model_provider_auth_login_parity" for item in result["live_gap_backlog"]))
             self.assertTrue(any(item["area"] == "provider_and_channel_live_connectors" for item in result["live_gap_backlog"]))
             self.assertTrue(any(item["area"] == "subagent_runtime_depth" for item in result["live_gap_backlog"]))
@@ -1830,10 +1830,10 @@ class CliTests(unittest.TestCase):
                 patch("aegis.models.registry.subprocess.run", side_effect=(codex_login_completed, codex_status_completed)) as run,
             ):
                 external_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "openai", "--subscription", "--run-external"]))
-            github_login_completed = subprocess.CompletedProcess(("gh", "auth", "login"), 0)
-            github_status_completed = subprocess.CompletedProcess(("gh", "auth", "status"), 0, stdout="Logged in to github.com\n", stderr="")
+            github_login_completed = subprocess.CompletedProcess(("copilot", "login"), 0)
+            github_status_completed = subprocess.CompletedProcess(("copilot", "-p", "Respond with OK only."), 0, stdout='{"type":"result","result":"OK"}\n', stderr="")
             with (
-                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/gh"),
+                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/copilot"),
                 patch("aegis.models.registry.subprocess.run", side_effect=(github_login_completed, github_status_completed)) as github_run,
             ):
                 github_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "github-copilot", "--method", "oauth-device", "--run-external"]))
@@ -1878,8 +1878,8 @@ class CliTests(unittest.TestCase):
             self.assertTrue(external_login["auth"]["external_login_attempted"])
             self.assertTrue(external_login["auth"]["subscription_auth_configured"])
             self.assertFalse(external_login["auth"]["token_captured"])
-            self.assertEqual(github_run.call_args_list[0].args[0], ("gh", "auth", "login"))
-            self.assertEqual(github_run.call_args_list[1].args[0], ("gh", "auth", "status"))
+            self.assertEqual(github_run.call_args_list[0].args[0], ("copilot", "login"))
+            self.assertEqual(github_run.call_args_list[1].args[0][:3], ("copilot", "-p", "Respond with OK only."))
             self.assertEqual(github_login["auth"]["target"], "GitHub Copilot")
             self.assertEqual(github_login["auth"]["method"], "oauth_device")
             self.assertEqual(github_login["auth"]["status"], "external_login_verified")
@@ -1896,8 +1896,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(google_login["auth"]["method"], "cloud_identity")
             self.assertEqual(google_login["auth"]["status"], "external_login_verified")
             self.assertFalse(google_login["auth"]["token_captured"])
-            self.assertEqual(github_status["auth"]["status"], "external_login_verified")
+            self.assertTrue(github_status["auth"]["auth_configured"])
             self.assertTrue(github_status["auth"]["external_auth_configured"])
+            self.assertEqual(github_status["auth"]["provider_native_auth"][0]["status"], "external_login_verified")
             self.assertEqual(github_logout["auth"]["removed_external_auth_links"], 1)
             self.assertFalse(github_logout["auth"]["external_auth_configured"])
             target_rows = {row["target"]: row for row in targets["auth_targets"]["targets"]}
@@ -1914,10 +1915,10 @@ class CliTests(unittest.TestCase):
             self.assertIn("GitHub Copilot", targets_after["auth_targets"]["verified_external_auth_targets"])
             self.assertIn("AWS Bedrock", targets_after["auth_targets"]["verified_external_auth_targets"])
             self.assertIn("Google Vertex AI / Gemini cloud identity", targets_after["auth_targets"]["verified_external_auth_targets"])
-            self.assertEqual(target_rows_after_logout["GitHub Copilot"]["status"], "official_cli_handoff_only")
+            self.assertEqual(target_rows_after_logout["GitHub Copilot"]["status"], "official_cli_bridge_available")
             self.assertEqual(target_rows["Claude Code subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(target_rows["Qwen Code Coding Plan subscription"]["status"], "official_cli_bridge_available")
-            self.assertEqual(target_rows["GitHub Copilot"]["status"], "official_cli_handoff_only")
+            self.assertEqual(target_rows["GitHub Copilot"]["status"], "official_cli_bridge_available")
             self.assertEqual(target_rows["DeepSeek"]["status"], "api_key_ready")
             self.assertNotIn("sk-deepseek-test", json.dumps(deepseek_login, sort_keys=True))
 

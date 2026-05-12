@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import ipaddress
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -44,6 +45,32 @@ OPENAI_COMPATIBLE_PROVIDERS = {
 }
 
 
+COPILOT_DENIED_TOOLS = (
+    "bash",
+    "powershell",
+    "list_bash",
+    "list_powershell",
+    "read_bash",
+    "read_powershell",
+    "stop_bash",
+    "stop_powershell",
+    "write_bash",
+    "write_powershell",
+    "apply_patch",
+    "create",
+    "edit",
+    "view",
+    "list_agents",
+    "read_agent",
+    "task",
+    "ask_user",
+    "glob",
+    "grep",
+    "skill",
+    "web_fetch",
+)
+
+
 class LiveModelClient:
     """Invokes configured live providers without exposing raw secrets to callers."""
 
@@ -58,6 +85,8 @@ class LiveModelClient:
             return self._chat_aws_bedrock_cli(route, messages, temperature=temperature)
         if route.provider.provider == "azure-foundry":
             return self._chat_azure_foundry(route, messages, temperature=temperature)
+        if route.provider.provider == "github-copilot":
+            return self._chat_github_copilot_cli(route, messages, temperature=temperature)
         if route.provider.provider in OPENAI_COMPATIBLE_PROVIDERS:
             return self._chat_openai_compatible(route, messages, temperature=temperature)
         if route.provider.provider == "anthropic":
@@ -244,6 +273,50 @@ class LiveModelClient:
             input_tokens=max(1, len(prompt) // 4),
             output_tokens=max(1, len(content) // 4),
             raw_usage={"source": "subscription_cli", "bridge": "qwen_headless_json", "token_counts": "estimated"},
+        )
+
+    def _chat_github_copilot_cli(
+        self,
+        route: ModelRoute,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+    ) -> ModelInvocationResult:
+        if route.auth_method != "oauth_device_cli":
+            raise ValueError("github-copilot provider requires verified Copilot CLI login")
+        executable_path = shutil.which("copilot")
+        if executable_path is None:
+            raise RuntimeError("official GitHub Copilot CLI is not installed")
+        prompt = _subscription_cli_prompt(messages, provider="github-copilot", temperature=temperature)
+        with tempfile.TemporaryDirectory(prefix="aegis-copilot-model-") as temp:
+            temp_dir = Path(temp)
+            command = _copilot_prompt_command(executable_path, prompt=prompt, model=route.model)
+            try:
+                completed = subprocess.run(
+                    command,
+                    text=True,
+                    capture_output=True,
+                    timeout=self.timeout_seconds,
+                    check=False,
+                    cwd=temp_dir,
+                    env=_copilot_safe_env(),
+                )  # noqa: S603 - argv is a fixed official provider CLI bridge.
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("official GitHub Copilot CLI model invocation timed out") from exc
+            except OSError as exc:
+                raise RuntimeError(f"official GitHub Copilot CLI model invocation failed: {exc}") from exc
+        if completed.returncode != 0:
+            raise RuntimeError(f"official GitHub Copilot CLI model invocation exited with {completed.returncode}")
+        content = _copilot_jsonl_result_text(completed.stdout)
+        if not content:
+            raise RuntimeError("official GitHub Copilot CLI model invocation returned no final message")
+        return ModelInvocationResult(
+            provider=route.provider.provider,
+            model=route.model,
+            content=content,
+            input_tokens=max(1, len(prompt) // 4),
+            output_tokens=max(1, len(content) // 4),
+            raw_usage={"source": "official_cli", "bridge": "copilot_prompt_json", "token_counts": "estimated"},
         )
 
     def _chat_aws_bedrock_cli(
@@ -819,6 +892,77 @@ def _qwen_message_text(message: Any) -> str:
         elif isinstance(part, str) and part.strip():
             parts.append(part.strip())
     return "\n".join(parts).strip()
+
+
+def _copilot_prompt_command(executable_path: str, *, prompt: str, model: str) -> tuple[str, ...]:
+    return (
+        executable_path,
+        "-p",
+        prompt,
+        "--output-format=json",
+        "--mode=plan",
+        "--no-remote",
+        "--no-custom-instructions",
+        "--disable-builtin-mcps",
+        "--no-ask-user",
+        "--no-auto-update",
+        "--no-bash-env",
+        "--no-experimental",
+        "--silent",
+        "--stream=off",
+        "--log-level=none",
+        f"--model={model}",
+        f"--excluded-tools={','.join(COPILOT_DENIED_TOOLS)}",
+    )
+
+
+def _copilot_safe_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["COPILOT_AUTO_UPDATE"] = "false"
+    env["COPILOT_ALLOW_ALL"] = "false"
+    env["GITHUB_COPILOT_PROMPT_MODE_EXTENSIONS"] = "false"
+    env["GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS"] = "false"
+    env["GITHUB_COPILOT_PROMPT_MODE_WORKSPACE_MCP"] = "false"
+    return env
+
+
+def _copilot_jsonl_result_text(raw: str) -> str:
+    if not raw.strip():
+        return ""
+    messages: list[dict[str, Any]] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            item = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("official GitHub Copilot CLI model invocation returned invalid JSONL") from exc
+        if isinstance(item, dict):
+            messages.append(item)
+    for item in reversed(messages):
+        content = _copilot_event_text(item)
+        if content:
+            return content
+    return ""
+
+
+def _copilot_event_text(item: dict[str, Any]) -> str:
+    for key in ("result", "response", "text", "content"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    message = item.get("message")
+    if isinstance(message, str) and message.strip():
+        return message.strip()
+    if isinstance(message, dict):
+        qwen_style = _qwen_message_text(message)
+        if qwen_style:
+            return qwen_style
+    delta = item.get("delta")
+    if isinstance(delta, dict):
+        return _copilot_event_text(delta)
+    return ""
 
 
 def _claude_cli_model(model: str) -> str:

@@ -1005,7 +1005,7 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(model_auth_targets["status"], "auth_parity_gap_tracked")
                 self.assertEqual(model_auth_target_rows["Claude Code subscription"]["status"], "official_cli_bridge_available")
                 self.assertEqual(model_auth_target_rows["Qwen Code Coding Plan subscription"]["status"], "official_cli_bridge_available")
-                self.assertEqual(model_auth_target_rows["GitHub Copilot"]["status"], "official_cli_handoff_only")
+                self.assertEqual(model_auth_target_rows["GitHub Copilot"]["status"], "official_cli_bridge_available")
                 self.assertEqual(model_auth_target_rows["DeepSeek"]["status"], "api_key_ready")
                 self.assertNotIn("sk-api-secret", json.dumps(model_auth_login, sort_keys=True))
                 self.assertNotIn("sk-api-secret", json.dumps(model_auth_logout, sort_keys=True))
