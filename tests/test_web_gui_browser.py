@@ -244,6 +244,7 @@ renderBrowserOutput({
   metadata_url: "/browser-artifacts/snapshot.json",
   session: {
     interactive_elements: [
+      { tag: "a", label: "Docs", selector_hint: "#docs", supported_virtual_actions: ["navigate"] },
       { tag: "button", label: "Save", selector_hint: "#save" },
       { tag: "input", label: "Email", form_hint: "input[name=email]" },
     ],
@@ -252,7 +253,7 @@ renderBrowserOutput({
 if (state.pendingBrowserAction.approval_id !== "approval-123") {
   throw new Error("approval id was not stored for replay");
 }
-for (const expected of ["Open Snapshot", "Open Metadata", 'data-browser-selector="#save"', 'data-browser-label="Save"', 'data-browser-run-approved="approval-123"']) {
+for (const expected of ["Open Snapshot", "Open Metadata", 'data-browser-selector="#docs"', '"navigate"', 'data-browser-selector="#save"', 'data-browser-label="Save"', 'data-browser-run-approved="approval-123"']) {
   if (!node.innerHTML.includes(expected)) {
     throw new Error(`missing browser renderer output ${expected}: ${node.innerHTML}`);
   }

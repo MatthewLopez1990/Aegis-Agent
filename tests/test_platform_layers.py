@@ -172,6 +172,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(browser_inspect["interactive_element_count"], 3)
             self.assertEqual(browser_inspect["selector_inventory"][0]["selector"], "#docs-link")
             self.assertEqual(browser_inspect["selector_inventory"][0]["action"], "navigate")
+            self.assertEqual(browser_inspect["selector_inventory"][0]["supported_virtual_actions"], ["navigate"])
             self.assertEqual(browser_inspect["selector_inventory"][1]["supported_virtual_actions"], ["click"])
             self.assertEqual(browser_inspect["selector_inventory"][2]["supported_virtual_actions"], ["fill"])
             self.assertTrue(browser_inspect["selector_inventory"][2]["requires_approval"])
@@ -1179,6 +1180,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("os_level_media_worker_limits", browser_hardening_controls)
             self.assertIn("provider_backed_media_artifacts", browser_hardening_controls)
             self.assertIn("browser_automation_boundary_receipts", browser_hardening_controls)
+            self.assertIn("approved_static_anchor_navigation", browser_hardening_controls)
             self.assertIn("disabled_live_browser_denial", browser_hardening_controls)
             self.assertIn("live_browser_automation_adapter", backlog["browser_and_media_depth"]["remaining_depth_work"])
             self.assertIn("stricter_platform_media_sandbox_profiles", backlog["browser_and_media_depth"]["remaining_depth_work"])
@@ -1216,6 +1218,91 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(backend_checklist["rollback_receipts"]["state"], "enforced")
             self.assertEqual(backend_checklist["disabled_backend_denial"]["state"], "enforced")
             self.assertEqual(backend_checklist["provider_lifecycle_depth"]["state"], "not_started")
+
+    def test_browser_static_anchor_navigation_uses_http_connector_without_js(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            read_urls: list[str] = []
+
+            def fake_http_read(request):
+                url = request.params["url"]
+                read_urls.append(url)
+                if url == "https://example.com":
+                    return ConnectorResult(
+                        "http",
+                        "read",
+                        True,
+                        {
+                            "url": url,
+                            "domain": "example.com",
+                            "content": (
+                                "<html><title>Start</title>"
+                                '<a id="docs-link" href="/docs">Docs</a>'
+                                '<a id="js-link" href="javascript:alert(1)">Bad JS</a>'
+                                '<a id="fragment-link" href="#local">Fragment</a>'
+                                '<a id="evil-link" href="https://evil.test/path">Evil</a>'
+                                '<a href="/one">One</a><a href="/two">Two</a>'
+                                '<button id="submit">Submit</button>'
+                                "</html>"
+                            ),
+                        },
+                    )
+                if url == "https://example.com/docs":
+                    return ConnectorResult(
+                        "http",
+                        "read",
+                        True,
+                        {
+                            "url": url,
+                            "domain": "example.com",
+                            "content": "<html><title>Docs</title><p>Docs page</p></html>",
+                        },
+                    )
+                return ConnectorResult("http", "read", False, {}, error=f"domain for {url!r} is not allowlisted")
+
+            with patch.object(orchestrator.connectors.get("http"), "read", side_effect=fake_http_read):
+                browser_nav = orchestrator.tools.execute("browser", {"action": "navigate", "url": "https://example.com"}, approved=True)
+                browser_session_id = browser_nav["session"]["id"]
+                browser_inspect = orchestrator.tools.execute("browser", {"action": "inspect", "session_id": browser_session_id}, approved=True)
+                approval_payload = orchestrator.browser.action_approval_payload(action="click", session_id=browser_session_id, selector="#docs-link")
+                browser_js = orchestrator.tools.execute("browser_click", {"session_id": browser_session_id, "selector": "#js-link"}, approved=True)
+                browser_fragment = orchestrator.tools.execute("browser_click", {"session_id": browser_session_id, "selector": "#fragment-link"}, approved=True)
+                browser_ambiguous = orchestrator.tools.execute("browser_click", {"session_id": browser_session_id, "selector": "a"}, approved=True)
+                browser_evil = orchestrator.tools.execute("browser_click", {"session_id": browser_session_id, "selector": "#evil-link"}, approved=True)
+                browser_docs = orchestrator.tools.execute("browser_click", {"session_id": browser_session_id, "selector": "#docs-link"}, approved=True)
+
+            self.assertEqual(browser_inspect["selector_inventory"][0]["selector"], "#docs-link")
+            self.assertEqual(browser_inspect["selector_inventory"][0]["action"], "navigate")
+            self.assertEqual(browser_inspect["selector_inventory"][0]["supported_virtual_actions"], ["navigate"])
+            self.assertEqual(approval_payload["click_effect"], "static_anchor_navigation")
+            self.assertEqual(approval_payload["target_url"], "https://example.com/docs")
+            self.assertFalse(browser_js["ok"])
+            self.assertEqual(browser_js["status"], "static_anchor_navigation_blocked")
+            self.assertEqual(browser_js["reason"], "unsupported_scheme")
+            self.assertFalse(browser_js["javascript_executed"])
+            self.assertFalse(browser_fragment["ok"])
+            self.assertEqual(browser_fragment["reason"], "fragment_only_href")
+            self.assertFalse(browser_ambiguous["ok"])
+            self.assertEqual(browser_ambiguous["reason"], "ambiguous_anchor_selector")
+            self.assertFalse(browser_evil["ok"])
+            self.assertEqual(browser_evil["status"], "static_anchor_navigation_failed")
+            self.assertIn("not allowlisted", browser_evil["error"])
+            self.assertTrue(browser_docs["ok"])
+            self.assertEqual(browser_docs["effect"], "static_anchor_navigation")
+            self.assertEqual(browser_docs["mode"], "approved_static_anchor_navigation_no_js")
+            self.assertEqual(browser_docs["url"], "https://example.com/docs")
+            self.assertEqual(browser_docs["title"], "Docs")
+            self.assertFalse(browser_docs["javascript_executed"])
+            self.assertFalse(browser_docs["dom_mutated"])
+            self.assertFalse(browser_docs["real_selector_events_dispatched"])
+            self.assertEqual(browser_docs["evidence"]["action"], "static_anchor_navigation")
+            self.assertEqual(browser_docs["evidence"]["url_before"], "https://example.com")
+            self.assertEqual(browser_docs["evidence"]["url_after"], "https://example.com/docs")
+            self.assertTrue(browser_docs["evidence"]["content_changed"])
+            self.assertEqual(read_urls, ["https://example.com", "https://evil.test/path", "https://example.com/docs"])
 
     def test_provider_backed_media_artifact_uses_allowlisted_brokered_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -12,6 +12,7 @@ import struct
 import subprocess
 import tempfile
 from typing import Any
+from urllib.parse import urljoin, urlparse
 from uuid import uuid4
 import zlib
 
@@ -192,6 +193,42 @@ class BrowserController:
         )
         return response
 
+    def action_approval_payload(
+        self,
+        *,
+        action: str,
+        session_id: str,
+        selector: str | None = None,
+        fields: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"kind": "browser_action", "action": action, "session_id": session_id}
+        if action == "click":
+            session = self._require_session(session_id)
+            payload["selector"] = selector or ""
+            anchor_match = _matching_static_anchor_elements(session, selector or "")
+            if anchor_match["status"] == "ambiguous":
+                payload["click_effect"] = "blocked_static_anchor_navigation"
+                payload["blocked_reason"] = "ambiguous_anchor_selector"
+                return payload
+            if anchor_match["status"] == "matched":
+                target = _static_anchor_navigation_target(session, anchor_match["element"])
+                payload["click_effect"] = "static_anchor_navigation"
+                payload["href"] = _redacted_string(anchor_match["element"].get("href"), limit=500)
+                if target["ok"]:
+                    payload["target_url"] = _redacted_string(target["url"], limit=2000)
+                else:
+                    payload["blocked_reason"] = str(target["reason"])
+                return payload
+            payload["click_effect"] = "virtual_click_recorded"
+            return payload
+        if action == "fill":
+            safe_fields = {str(key): str(value) for key, value in (fields or {}).items()}
+            encoded = json.dumps(safe_fields, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            payload["field_selectors"] = sorted(safe_fields)
+            payload["fields_sha256"] = hashlib.sha256(encoded).hexdigest()
+            return payload
+        raise ValueError(f"unsupported browser approval action: {action}")
+
     def deny_live_automation(self, *, action: str, session_id: str | None = None, selector: str | None = None) -> dict[str, Any]:
         session = self._require_session(session_id) if session_id else None
         activation = _live_browser_activation_preflight()
@@ -344,6 +381,62 @@ class BrowserController:
             return {"status": "approval_required", "session_id": session_id, "selector": selector, "reason": "browser click requires approval"}
         url_before = _session_url(session)
         content_hash_before = _content_hash(session)
+        anchor_match = _matching_static_anchor_elements(session, selector)
+        if anchor_match["status"] == "ambiguous":
+            response = _static_anchor_navigation_blocked(
+                session,
+                session_id=session_id,
+                selector=selector,
+                reason="ambiguous_anchor_selector",
+                detail="selector matched multiple static anchors",
+            )
+            self.audit_logger.append("browser.static_anchor_navigation_blocked", response)
+            return response
+        if anchor_match["status"] == "matched":
+            target = _static_anchor_navigation_target(session, anchor_match["element"])
+            if not target["ok"]:
+                response = _static_anchor_navigation_blocked(
+                    session,
+                    session_id=session_id,
+                    selector=selector,
+                    reason=str(target["reason"]),
+                    detail=str(target["detail"]),
+                    href=str(anchor_match["element"].get("href") or ""),
+                )
+                self.audit_logger.append("browser.static_anchor_navigation_blocked", response)
+                return response
+            navigation = self.navigate(session_id=session_id, url=str(target["url"]))
+            if not navigation.get("ok"):
+                response = {
+                    **navigation,
+                    "status": "static_anchor_navigation_failed",
+                    "effect": "static_anchor_navigation_failed",
+                    "selector": _redacted_string(selector, limit=500),
+                    "href": _redacted_string(anchor_match["element"].get("href"), limit=500),
+                    "target_url": _redacted_string(target["url"], limit=2000),
+                    "mode": "approved_static_anchor_navigation_no_js",
+                    "javascript_executed": False,
+                    "dom_mutated": False,
+                    "real_selector_events_dispatched": False,
+                }
+                self.audit_logger.append("browser.static_anchor_navigation_failed", response)
+                return response
+            current = self._require_session(session_id)
+            evidence = _browser_evidence(current, action="static_anchor_navigation", url_before=url_before, content_hash_before=content_hash_before)
+            response = {
+                **navigation,
+                "effect": "static_anchor_navigation",
+                "selector": _redacted_string(selector, limit=500),
+                "href": _redacted_string(anchor_match["element"].get("href"), limit=500),
+                "target_url": _redacted_string(target["url"], limit=2000),
+                "mode": "approved_static_anchor_navigation_no_js",
+                "javascript_executed": False,
+                "dom_mutated": False,
+                "real_selector_events_dispatched": False,
+                "evidence": evidence,
+            }
+            self.audit_logger.append("browser.static_anchor_navigated", response)
+            return response
         click = {"selector": _redacted_string(selector, limit=500), "clicked_at": now_utc()}
         clicks = list(session.get("clicks", []))
         clicks.append(click)
@@ -537,7 +630,7 @@ def _selector_inventory(elements: list[dict[str, str]]) -> list[dict[str, Any]]:
         tag = _redacted_string(element.get("tag"), limit=80)
         selector = _redacted_string(element.get("selector_hint") or element.get("form_hint") or tag, limit=500)
         action = _selector_action(tag, element.get("type", ""))
-        supported_actions = ["fill"] if action == "fill" else ["click"]
+        supported_actions = ["fill"] if action == "fill" else ["navigate"] if action == "navigate" else ["click"]
         inventory.append(
             {
                 "selector": selector,
@@ -745,6 +838,67 @@ def _state_text(session: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _matching_static_anchor_elements(session: dict[str, Any], selector: str) -> dict[str, Any]:
+    requested_selector = _redacted_string(selector, limit=500)
+    matches = []
+    for element in _normalize_interactive_elements(session.get("interactive_elements")):
+        if element.get("tag") != "a":
+            continue
+        element_selector = _redacted_string(element.get("selector_hint") or element.get("tag"), limit=500)
+        if element_selector == requested_selector:
+            matches.append(element)
+    if len(matches) > 1:
+        return {"status": "ambiguous"}
+    if matches:
+        return {"status": "matched", "element": matches[0]}
+    return {"status": "no_match"}
+
+
+def _static_anchor_navigation_target(session: dict[str, Any], element: dict[str, str]) -> dict[str, Any]:
+    href = str(element.get("href") or "").strip()
+    if not href:
+        return {"ok": False, "reason": "missing_href", "detail": "static anchor has no href"}
+    parsed_href = urlparse(href)
+    if parsed_href.scheme and parsed_href.scheme.lower() not in {"http", "https"}:
+        return {"ok": False, "reason": "unsupported_scheme", "detail": f"static anchor scheme {parsed_href.scheme!r} is not supported"}
+    if not parsed_href.scheme and not parsed_href.netloc and not parsed_href.path and not parsed_href.params and not parsed_href.query and parsed_href.fragment:
+        return {"ok": False, "reason": "fragment_only_href", "detail": "fragment-only anchors do not navigate through the governed HTTP connector"}
+    base_url = _session_url(session)
+    if not base_url:
+        return {"ok": False, "reason": "missing_base_url", "detail": "browser session has no current URL"}
+    target_url = urljoin(base_url, href)
+    parsed_target = urlparse(target_url)
+    if parsed_target.scheme.lower() not in {"http", "https"} or not parsed_target.netloc:
+        return {"ok": False, "reason": "unsupported_target_url", "detail": "resolved static anchor target is not an HTTP(S) URL"}
+    return {"ok": True, "url": target_url}
+
+
+def _static_anchor_navigation_blocked(
+    session: dict[str, Any],
+    *,
+    session_id: str,
+    selector: str,
+    reason: str,
+    detail: str,
+    href: str = "",
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "status": "static_anchor_navigation_blocked",
+        "session_id": session_id,
+        "selector": _redacted_string(selector, limit=500),
+        "url": _session_url(session),
+        "href": _redacted_string(href, limit=500),
+        "reason": reason,
+        "detail": _redacted_string(detail, limit=500),
+        "effect": "blocked_static_anchor_navigation",
+        "mode": "approved_static_anchor_navigation_no_js",
+        "javascript_executed": False,
+        "dom_mutated": False,
+        "real_selector_events_dispatched": False,
+    }
+
+
 def _redacted_form_state(session: dict[str, Any]) -> str:
     form_state = _normalize_form_state(session.get("form_state"))
     return ", ".join(f"{selector}={value}" for selector, value in sorted(form_state.items()))
@@ -817,7 +971,7 @@ def _browser_evidence(
         "content_sha256_after": content_hash_after,
         "content_changed": (content_hash_before or content_hash_after) != content_hash_after,
         "dom_mutated": False,
-        "mode": "virtual_state_no_dom" if action in {"click", "fill"} else "local_png_session_snapshot_no_dom_render",
+        "mode": "virtual_state_no_dom" if action in {"click", "fill"} else "approved_static_anchor_navigation_no_js" if action == "static_anchor_navigation" else "local_png_session_snapshot_no_dom_render",
         "click_count": len(session.get("clicks", [])),
         "form_field_count": len(session.get("form_state", {})),
     }

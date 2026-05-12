@@ -1290,6 +1290,7 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(browser_click["status"], "approval_required")
                 self.assertEqual(browser_fill["status"], "approval_required")
                 self.assertEqual(browser_click_approval["session_id"], browser_session["id"])
+                self.assertEqual(browser_click_approval["payload"]["click_effect"], "virtual_click_recorded")
                 self.assertEqual(approved_click["status"], "approved")
                 self.assertEqual(approved_click["session_id"], browser_session["id"])
                 self.assertEqual(approved_fill["status"], "approved")

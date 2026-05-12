@@ -482,7 +482,7 @@ def _live_gap_backlog(
             "area": "browser_and_media_depth",
             "platforms": ["OpenClaw"],
             "status": "facade_hardening_required",
-            "detail": "Sanitized browser rendering is available for stored HTTP-content sessions; provider-backed media artifacts can run through allowlisted HTTPS adapters, while real page automation and provider-specific media depth still require stronger sandboxing.",
+            "detail": "Sanitized browser rendering and approved static-anchor navigation are available for stored HTTP-content sessions; provider-backed media artifacts can run through allowlisted HTTPS adapters, while real page automation and provider-specific media depth still require stronger sandboxing.",
             "sample_tools": facade_tools[:8],
             "next_steps": [
                 "Extend rendering toward real browser automation only after network, cookie, and JavaScript boundaries are enforceable.",
@@ -529,6 +529,10 @@ def _live_gap_backlog(
                 {
                     "control": "browser_automation_boundary_receipts",
                     "evidence": "browser snapshot and render evidence records cookie, storage, script, subresource, network, and mutation boundaries before live automation is enabled",
+                },
+                {
+                    "control": "approved_static_anchor_navigation",
+                    "evidence": "approved exact-match anchor clicks resolve safe HTTP(S) hrefs through the governed HTTP connector without JavaScript, cookies, or DOM events",
                 },
                 {
                     "control": "disabled_live_browser_denial",

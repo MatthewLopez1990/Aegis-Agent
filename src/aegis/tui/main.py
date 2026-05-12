@@ -6281,7 +6281,7 @@ def _browser_action_approval(
     fields: dict[str, Any] | None = None,
     approval_id: str | None = None,
 ) -> dict[str, Any]:
-    payload = _browser_action_payload(action=action, session_id=session_id, selector=selector, fields=fields)
+    payload = orchestrator.browser.action_approval_payload(action=action, session_id=session_id, selector=selector, fields=fields)
     if approval_id:
         approval = orchestrator.approvals.get(approval_id)
         if _approved_payload(approval) != payload:
@@ -6309,20 +6309,6 @@ def _browser_action_approval(
             "reason": f"browser {action} requires approval",
         },
     }
-
-
-def _browser_action_payload(*, action: str, session_id: str, selector: str | None = None, fields: dict[str, Any] | None = None) -> dict[str, Any]:
-    payload: dict[str, Any] = {"kind": "browser_action", "action": action, "session_id": session_id}
-    if action == "click":
-        payload["selector"] = selector or ""
-        return payload
-    if action == "fill":
-        safe_fields = {str(key): str(value) for key, value in (fields or {}).items()}
-        encoded = json.dumps(safe_fields, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        payload["field_selectors"] = sorted(safe_fields)
-        payload["fields_sha256"] = hashlib.sha256(encoded).hexdigest()
-        return payload
-    raise ValueError(f"unsupported browser approval action: {action}")
 
 
 def _approved_payload(approval: dict[str, Any]) -> dict[str, Any]:
