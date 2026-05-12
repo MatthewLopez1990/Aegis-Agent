@@ -7,6 +7,9 @@ from typing import Any
 from aegis.connectors.base import live_connector_activation
 
 
+ACTIVE_WORK_STATUSES = {"pending", "planned", "running", "waiting_approval", "paused"}
+
+
 def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
     """Return a product-facing dashboard without exposing raw secrets or payloads."""
 
@@ -22,8 +25,11 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
     approvals = orchestrator.approvals.list()
     pending_approvals = [_decode_pending_approval(orchestrator, approval) for approval in approvals if approval["status"] == "pending"]
     task_rows = orchestrator.store.list_tasks(limit=12)
+    active_work_rows = [row for row in orchestrator.store.list_tasks(limit=1000) if str(row.get("status") or "") in ACTIVE_WORK_STATUSES]
+    active_work_counts = _active_work_counts(active_work_rows)
     session_task_rows = _recent_session_task_rows(orchestrator, task_rows, sessions, limit=12)
     tasks = [_decode_task(orchestrator, row) for row in task_rows]
+    active_work_tasks = [_decode_task(orchestrator, row) for row in active_work_rows[:12]]
     session_tasks = [_decode_task(orchestrator, row) for row in session_task_rows]
     audit_chain_ok = orchestrator.audit_logger.verify_chain()
 
@@ -71,6 +77,12 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
             "subagent_delegations": subagent_delegations["total_cards"],
             "open_subagent_delegations": subagent_delegations["open_cards"],
             "recent_tasks": len(tasks),
+            "active_work_count": active_work_counts["total"],
+            "pending_task_count": active_work_counts["pending"],
+            "planned_task_count": active_work_counts["planned"],
+            "running_task_count": active_work_counts["running"],
+            "waiting_task_count": active_work_counts["waiting_approval"],
+            "paused_task_count": active_work_counts["paused"],
             "pending_approvals": len(pending_approvals),
             "memories": memory_readiness["memory_count"],
             "memory_health_score": memory_readiness["health_score"],
@@ -179,9 +191,19 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
         "memory_readiness": memory_readiness,
         "self_improvement_readiness": self_improvement_readiness,
         "recent_tasks": tasks,
+        "active_work_tasks": active_work_tasks,
         "recent_session_tasks": session_tasks,
         "pending_approvals": pending_approvals[:12],
     }
+
+
+def _active_work_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {status: 0 for status in ACTIVE_WORK_STATUSES}
+    for row in rows:
+        status = str(row.get("status") or "")
+        if status in counts:
+            counts[status] += 1
+    return {"total": sum(counts.values()), **counts}
 
 
 def _memory_readiness(orchestrator: Any) -> dict[str, Any]:

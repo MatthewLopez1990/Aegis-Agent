@@ -67,6 +67,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("Active Status Flags", rendered)
             self.assertIn("[AUDIT:OK]", rendered)
             self.assertIn("[APPROVALS:CLEAR]", rendered)
+            self.assertIn("[WORK:CLEAR]", rendered)
             self.assertIn("[SESSION:", rendered)
             self.assertIn("[MODE:LOCAL-FIRST]", rendered)
             self.assertIn("[GATED:", rendered)
@@ -448,6 +449,22 @@ class TuiTests(unittest.TestCase):
             background_task = tui.orchestrator.store.get_task(tui.last_task_id or "")
             self.assertEqual(background_task["user_request"], "summarize this workspace")
             self.assertEqual(background_task["session_id"], tui.session["id"])
+
+    def test_tui_busy_and_dashboard_show_active_work_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tui = AegisTui(data_dir=root / ".aegis", workspace=root)
+            tui.orchestrator.submit_task("send message hello", session_id=tui.session["id"])
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                tui.onecmd("busy")
+
+            rendered = output.getvalue()
+            self.assertIn('"active_task_count": 1', rendered)
+            self.assertIn('"waiting_task_count": 1', rendered)
+            self.assertIn('"raw_task_requests_included": false', rendered)
+            self.assertIn("[WORK:1]", tui._render_dashboard())
 
     def test_context_debug_prompt_and_save_do_not_dump_raw_session_content(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -2953,14 +2953,17 @@ class AegisTui(cmd.Cmd):
 
     def do_busy(self, arg: str) -> None:
         """busy -- show active/busy task indicators without raw requests."""
-        rows = self.orchestrator.store.list_tasks(limit=25, session_id=self.session["id"])
-        active_statuses = {"created", "running", "waiting_approval", "paused"}
-        active_rows = [row for row in rows if str(row.get("status") or "") in active_statuses]
+        dashboard = build_product_dashboard(self.orchestrator)
+        runtime = dashboard["runtime"]
+        active_rows = dashboard.get("active_work_tasks", [])
         _print_json(
             {
                 "status": "metadata_only",
-                "busy": bool(active_rows),
-                "active_task_count": len(active_rows),
+                "busy": bool(runtime.get("active_work_count")),
+                "active_task_count": runtime.get("active_work_count", 0),
+                "running_task_count": runtime.get("running_task_count", 0),
+                "waiting_task_count": runtime.get("waiting_task_count", 0),
+                "paused_task_count": runtime.get("paused_task_count", 0),
                 "active_task_ids": [_short_id(row.get("id", "")) for row in active_rows[:8]],
                 "raw_task_requests_included": False,
                 "next_actions": ["tasks", "approvals", "events <task_id>"],
@@ -3507,6 +3510,7 @@ class AegisTui(cmd.Cmd):
                 (
                     ("providers", runtime["model_providers"]),
                     ("pending", runtime["pending_approvals"]),
+                    ("active work", runtime.get("active_work_count", 0)),
                     ("session", _short_id(self.session["id"])),
                 ),
                 width,
@@ -4614,6 +4618,8 @@ def _slash_match_rank(prefix: str, row: tuple[str, str]) -> tuple[int, str]:
 def _dashboard_status_flags(runtime: dict[str, Any], session: dict[str, Any], *, workspace: Path | None = None) -> list[str]:
     pending = int(runtime.get("pending_approvals") or 0)
     approval_state = "CLEAR" if pending == 0 else f"WAIT:{pending}"
+    active_work = int(runtime.get("active_work_count") or 0)
+    work_state = "CLEAR" if active_work == 0 else str(active_work)
     audit_state = "OK" if runtime.get("audit_chain_ok") else "FAILED"
     session_id = _short_id(session.get("id", ""))
     session_state = str(session.get("status") or "active").upper()
@@ -4625,6 +4631,7 @@ def _dashboard_status_flags(runtime: dict[str, Any], session: dict[str, Any], *,
             (
                 _status_flag("AUDIT", audit_state, "32;1" if audit_state == "OK" else "31;1"),
                 _status_flag("APPROVALS", approval_state, "32;1" if pending == 0 else "33;1"),
+                _status_flag("WORK", work_state, "32;1" if active_work == 0 else "33;1"),
                 _status_flag("SESSION", f"{session_id}:{session_state}", "36;1"),
                 _status_flag("MODE", "LOCAL-FIRST", "32;1"),
             )

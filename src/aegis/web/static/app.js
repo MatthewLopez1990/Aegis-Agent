@@ -168,6 +168,7 @@ const renderMetrics = (dashboard) => {
     ["Tools", runtime.tools, "neutral"],
     ["Approval Gates", runtime.approval_gated_tools, "warn"],
     ["Providers", runtime.model_providers, "neutral"],
+    ["Active Work", runtime.active_work_count || 0, runtime.active_work_count ? "warn" : "good"],
     ["Pending", runtime.pending_approvals, runtime.pending_approvals ? "warn" : "good"],
   ];
   document.getElementById("runtime-stats").replaceChildren(
@@ -530,6 +531,13 @@ const refresh = async () => {
       meta: `${x.proposal_count || 0} proposals · ${x.candidate_counts?.total || 0} candidates · ${x.attempt_count || 0} attempts`,
       tone: x.ready ? "ready" : "attention",
     }), "No repair readiness summary");
+    setList("active-work", dashboard.active_work_tasks || [], (x) => ({
+      title: x.user_request,
+      detail: x.interpretation,
+      meta: `${shortId(x.id)} · ${x.status} · session ${taskSessionLabel(x)}`,
+      tone: x.status === "waiting_approval" || x.status === "paused" ? "attention" : "",
+      actions: taskActions(x),
+    }), "No active work");
     setList("tasks", visibleTasks.tasks, (x) => ({
       title: x.user_request,
       detail: x.interpretation,
