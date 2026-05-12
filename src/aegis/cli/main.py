@@ -65,6 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands.add_parser("init", help="Create default local configuration")
     subcommands.add_parser("health", help="Show local runtime health")
     subcommands.add_parser("dashboard", help="Show product capability and security posture")
+    subcommands.add_parser("capabilities", help="Show capability groups, readiness buckets, and live gaps")
     enterprise = subcommands.add_parser("enterprise-readiness", help="Show concise enterprise readiness flags")
     enterprise.add_argument("--memory", action="store_true", help="Only report governed memory readiness")
     enterprise.add_argument("--self-improvement", action="store_true", help="Only report self-improvement readiness")
@@ -450,7 +451,7 @@ def build_parser() -> argparse.ArgumentParser:
     remote_control_relay_action.add_argument("--session-id", help="Optional session id for resume/pause/cancel")
     remote_control_relay_action.add_argument("--reason", default="", help="Optional reason for pause/cancel")
 
-    models = subcommands.add_parser("model", help="Manage model routes and usage")
+    models = subcommands.add_parser("model", aliases=["models"], help="Manage model routes and usage")
     model_sub = models.add_subparsers(dest="model_command", required=True)
     model_sub.add_parser("list", help="List supported models")
     model_sub.add_parser("providers", help="List model providers and auth status")
@@ -775,6 +776,30 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _capabilities_view(dashboard: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "product": dashboard.get("product", {}),
+        "runtime": {
+            key: value
+            for key, value in dashboard.get("runtime", {}).items()
+            if key
+            in {
+                "tools",
+                "approval_gated_tools",
+                "limited_or_facade_tools",
+                "sessions",
+                "open_subagent_delegations",
+                "memory_health_score",
+            }
+        },
+        "capability_groups": dashboard.get("capability_groups", []),
+        "implementation_readiness": dashboard.get("implementation_readiness", []),
+        "live_gap_backlog": dashboard.get("live_gap_backlog", []),
+        "model_provider_auth_parity": dashboard.get("model_provider_auth_parity", {}),
+        "competitive_targets": dashboard.get("competitive_targets", []),
+    }
+
+
 def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
     config = load_config(args.data_dir)
     if args.command == "init":
@@ -793,6 +818,10 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
     if args.command == "dashboard":
         orchestrator = build_orchestrator(data_dir=args.data_dir)
         return build_product_dashboard(orchestrator)
+
+    if args.command == "capabilities":
+        orchestrator = build_orchestrator(data_dir=args.data_dir)
+        return _capabilities_view(build_product_dashboard(orchestrator))
 
     if args.command == "enterprise-readiness":
         return _enterprise_readiness(args, config)
@@ -1270,7 +1299,7 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 "result": action_result,
             }
 
-    if args.command == "model":
+    if args.command in {"model", "models"}:
         registry = _model_registry(config)
         if args.model_command == "list":
             return {"models": registry.list_models()}

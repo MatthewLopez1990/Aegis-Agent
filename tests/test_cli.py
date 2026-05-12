@@ -45,8 +45,15 @@ class CliTests(unittest.TestCase):
                 orchestrator.submit_task(f"Summarize unscoped background task {index}.")
             args = parser.parse_args(["--data-dir", str(data_dir), "dashboard"])
             result = dispatch(args)
+            capabilities = dispatch(parser.parse_args(["--data-dir", str(data_dir), "capabilities"]))
 
             self.assertEqual(result["product"]["name"], "Aegis Agent")
+            self.assertEqual(capabilities["product"]["name"], "Aegis Agent")
+            self.assertIn("capability_groups", capabilities)
+            self.assertIn("implementation_readiness", capabilities)
+            self.assertIn("live_gap_backlog", capabilities)
+            self.assertIn("model_provider_auth_parity", capabilities)
+            self.assertNotIn("recent_tasks", capabilities)
             self.assertIn("security_controls", result)
             self.assertGreaterEqual(result["runtime"]["tools"], 47)
             self.assertIn("session_bound_recent_tasks", result["runtime"])
@@ -1907,6 +1914,7 @@ class CliTests(unittest.TestCase):
             fallbacks = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "fallbacks", "ollama/llama3", "lmstudio/local"]))
             providers = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "providers"]))
             models = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "list"]))
+            plural_models = dispatch(parser.parse_args(["--data-dir", str(data_dir), "models", "list"]))
             alias_route = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "route", "localfast"]))
             fallback_route = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "route", "ollama/llama3"]))
 
@@ -1914,6 +1922,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(fallbacks["fallbacks"], ["lmstudio/local"])
             self.assertTrue(any(row["provider"] == "ollama" and row["tokenizer_profile"] == "llama" for row in providers["providers"]))
             self.assertTrue(any(row["identifier"] == "openai/gpt-4o" and row["tokenizer_profile"] == "openai" for row in models["models"]))
+            self.assertEqual(models["models"], plural_models["models"])
             self.assertEqual(alias_route["identifier"], "ollama/llama3")
             self.assertEqual(fallback_route["fallbacks"], ["lmstudio/local"])
 
