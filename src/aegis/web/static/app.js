@@ -297,6 +297,7 @@ const refresh = async () => {
       models,
       modelProviders,
       modelAuthTargets,
+      modelAuthDoctor,
       modelUsage,
       tools,
       backends,
@@ -335,6 +336,7 @@ const refresh = async () => {
       api("/models"),
       api("/model-providers"),
       api("/models/auth/targets"),
+      api("/models/auth/doctor"),
       api("/model-usage"),
       api("/tools"),
       api("/backends"),
@@ -451,6 +453,12 @@ const refresh = async () => {
       meta: `${x.status} · auth ${(x.required_auth || []).join(", ") || "unknown"} · methods ${(x.existing_auth_methods || []).join(", ") || "none"} · bridge ${x.bridge_status || "not_started"}`,
       tone: x.status === "api_key_ready" || x.status === "local_ready" ? "ready" : "attention",
     }), "No provider auth targets");
+    setList("model-auth-doctor", modelAuthDoctor.checks || [], (x) => ({
+      title: x.target,
+      detail: `${x.login_command}${x.setup_required ? ` · setup ${x.setup_required}` : ""}`,
+      meta: `${x.verified ? "verified" : "login required"} · ${x.method} · command ${x.external_command_available ? "available" : "missing"} · provider ${x.provider}`,
+      tone: x.verified ? "ready" : "attention",
+    }), "No provider login checks");
     setList("models", models.models.slice(0, 24), (x) => ({
       title: x.identifier,
       detail: x.local ? "local" : x.auth_configured ? "cloud · auth configured" : "cloud · auth missing",
@@ -2373,6 +2381,11 @@ document.getElementById("model-auth-logout").addEventListener("click", async () 
   const provider = document.getElementById("model-provider").value;
   const result = await api("/models/auth/logout", { method: "POST", body: JSON.stringify({ provider }) });
   renderModelAuthOutput(result);
+  await refresh();
+});
+
+document.getElementById("model-auth-doctor-run").addEventListener("click", async () => {
+  renderModelAuthOutput({ auth_doctor: await api("/models/auth/doctor") });
   await refresh();
 });
 

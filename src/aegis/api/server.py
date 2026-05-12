@@ -245,6 +245,9 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
             if path == "/models/auth/targets":
                 self._json(orchestrator.models.auth_targets())
                 return
+            if path == "/models/auth/doctor":
+                self._json(orchestrator.models.auth_doctor())
+                return
             if path == "/model-usage":
                 self._json(orchestrator.models.usage_summary())
                 return
