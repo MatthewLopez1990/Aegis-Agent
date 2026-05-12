@@ -388,9 +388,33 @@ def build_parser() -> argparse.ArgumentParser:
     channel_send_chat_webhook.add_argument("--session-id")
     channel_send_chat_webhook.add_argument("--approved", action="store_true")
 
-    remote_control = subcommands.add_parser("remote-control", help="Inspect local remote-control and relay readiness")
+    remote_control = subcommands.add_parser(
+        "remote-control",
+        aliases=["rc"],
+        help="Inspect local remote-control and relay readiness",
+    )
+    remote_control.set_defaults(command="remote-control")
     remote_control_sub = remote_control.add_subparsers(dest="remote_control_command", required=True)
     remote_control_sub.add_parser("status", help="Show local remote-control pairing readiness")
+    remote_control_pair = remote_control_sub.add_parser("pair", help="Create a short-lived scoped remote-control pairing token")
+    remote_control_pair.add_argument("--label", default="", help="Pairing label shown in public status")
+    remote_control_pair.add_argument("--session-id", help="Optional session scope")
+    remote_control_pair.add_argument("--task-id", help="Optional task scope")
+    remote_control_pair.add_argument(
+        "--allowed-actions",
+        default="status,events,pause,cancel",
+        help="Comma-separated task actions",
+    )
+    remote_control_pair.add_argument(
+        "--expires-in-seconds",
+        type=int,
+        default=600,
+        help="Pairing TTL, clamped between 60 and 3600",
+    )
+    remote_control_pair.add_argument("--host", default="127.0.0.1", help="Local API host to render in endpoint hints")
+    remote_control_pair.add_argument("--port", type=int, default=8765, help="Local API port to render in endpoint hints")
+    remote_control_revoke = remote_control_sub.add_parser("revoke", help="Revoke a local remote-control pairing")
+    remote_control_revoke.add_argument("pairing_id")
     remote_control_relay = remote_control_sub.add_parser("relay", help="Show outbound relay preflight blockers")
     remote_control_relay.add_argument("--relay-url")
 
@@ -1037,9 +1061,47 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return build_orchestrator(data_dir=config.data_dir).send_chat_webhook(text=args.text, approved=args.approved, session_id=args.session_id, metadata={"source": "cli"})
 
     if args.command == "remote-control":
-        registry = RemoteControlPairingRegistry()
+        registry = RemoteControlPairingRegistry(config.data_dir / "remote_control_pairings.json")
         if args.remote_control_command == "status":
             return registry.status()
+        if args.remote_control_command == "pair":
+            result = registry.create_pairing(
+                label=args.label,
+                session_id=args.session_id,
+                task_id=args.task_id,
+                allowed_actions=_comma_separated(args.allowed_actions),
+                ttl_seconds=args.expires_in_seconds,
+                endpoint_host=args.host,
+                endpoint_port=args.port,
+            )
+            AuditLogger(config.audit_log_path).append(
+                "remote_control.pairing_created",
+                {
+                    "pairing_id": result["pairing"]["id"],
+                    "label": result["pairing"]["label"],
+                    "session_id": result["pairing"].get("session_id"),
+                    "task_id": result["pairing"].get("task_id"),
+                    "allowed_actions": result["pairing"].get("allowed_actions"),
+                    "expires_at": result["pairing"]["expires_at"],
+                    "token_header": result["token_header"],
+                    "token_captured": False,
+                    "source": "cli",
+                },
+            )
+            return result
+        if args.remote_control_command == "revoke":
+            result = registry.revoke(args.pairing_id)
+            AuditLogger(config.audit_log_path).append(
+                "remote_control.pairing_revoked",
+                {
+                    "pairing_id": result["pairing"]["id"],
+                    "label": result["pairing"]["label"],
+                    "session_id": result["pairing"].get("session_id"),
+                    "token_captured": False,
+                    "source": "cli",
+                },
+            )
+            return result
         if args.remote_control_command == "relay":
             return registry.relay_preflight(relay_url=args.relay_url)
 
@@ -1684,6 +1746,10 @@ def _required_next_arg(parts: list[str], index: int, flag: str) -> str:
     if index + 1 >= len(parts):
         raise ValueError(f"{flag} requires a value")
     return parts[index + 1]
+
+
+def _comma_separated(value: str) -> list[str]:
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
 
 def create_skill_template(skill_id: str, *, name: str, description: str) -> dict[str, Any]:

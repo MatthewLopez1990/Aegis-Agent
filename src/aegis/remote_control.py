@@ -5,6 +5,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 import hashlib
+import json
+import os
+from pathlib import Path
 import secrets
 from urllib.parse import urlparse
 
@@ -33,10 +36,12 @@ REMOTE_CONTROL_RELAY_VERIFICATION_GATES = (
 
 
 class RemoteControlPairingRegistry:
-    """In-memory pairing registry for one running local API server."""
+    """Short-lived pairing registry for one local API server or CLI data dir."""
 
-    def __init__(self) -> None:
+    def __init__(self, store_path: str | Path | None = None) -> None:
+        self.store_path = Path(store_path).expanduser().resolve() if store_path else None
         self._pairings: dict[str, dict[str, Any]] = {}
+        self._load()
 
     def create_pairing(
         self,
@@ -46,8 +51,11 @@ class RemoteControlPairingRegistry:
         task_id: str | None = None,
         allowed_actions: tuple[str, ...] | list[str] | None = None,
         ttl_seconds: int | None = None,
+        endpoint_host: str = "127.0.0.1",
+        endpoint_port: int = 8765,
         now: datetime | None = None,
     ) -> dict[str, Any]:
+        self._load()
         created_at = _utc_now(now)
         ttl = _clamp_ttl(ttl_seconds)
         token = "aegis-rc-" + secrets.token_urlsafe(32)
@@ -64,6 +72,7 @@ class RemoteControlPairingRegistry:
             "revoked_at": None,
         }
         self._pairings[pairing_id] = pairing
+        self._save()
         return {
             "status": "paired",
             "pairing": self._public_pairing(pairing, now=created_at),
@@ -78,11 +87,19 @@ class RemoteControlPairingRegistry:
                 "scoped_remote_control_endpoints_only",
                 "audit_receipt_without_token",
             ],
+            "local_endpoints": _local_remote_control_endpoints(
+                host=endpoint_host,
+                port=endpoint_port,
+            ),
         }
 
     def status(self, *, now: datetime | None = None) -> dict[str, Any]:
+        self._load()
         checked_at = _utc_now(now)
-        pairings = [self._public_pairing(pairing, now=checked_at) for pairing in self._pairings.values()]
+        pairings = [
+            self._public_pairing(pairing, now=checked_at)
+            for pairing in self._pairings.values()
+        ]
         active_count = sum(1 for pairing in pairings if pairing["status"] == "active")
         return {
             "status": "local_pairing_available",
@@ -159,6 +176,7 @@ class RemoteControlPairingRegistry:
     def authorize(self, token: str, *, now: datetime | None = None) -> dict[str, Any] | None:
         if not token:
             return None
+        self._load()
         checked_at = _utc_now(now)
         supplied_hash = _token_hash(token)
         for pairing in self._pairings.values():
@@ -170,7 +188,14 @@ class RemoteControlPairingRegistry:
             return None
         return None
 
-    def authorize_action(self, token: str, *, action: str, task_id: str, now: datetime | None = None) -> dict[str, Any] | None:
+    def authorize_action(
+        self,
+        token: str,
+        *,
+        action: str,
+        task_id: str,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
         pairing = self.authorize(token, now=now)
         if pairing is None:
             return None
@@ -183,13 +208,62 @@ class RemoteControlPairingRegistry:
         return pairing
 
     def revoke(self, pairing_id: str, *, now: datetime | None = None) -> dict[str, Any]:
+        self._load()
         pairing = self._pairings.get(pairing_id)
         if pairing is None:
             raise KeyError(pairing_id)
         revoked_at = _utc_now(now)
         if pairing.get("revoked_at") is None:
             pairing["revoked_at"] = revoked_at.isoformat()
+            self._save()
         return {"status": "revoked", "pairing": self._public_pairing(pairing, now=revoked_at)}
+
+    def _load(self) -> None:
+        if self.store_path is None or not self.store_path.exists():
+            return
+        with self.store_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        rows = payload.get("pairings", []) if isinstance(payload, dict) else []
+        pairings: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            pairing_id = str(row.get("id") or "")
+            token_hash = str(row.get("token_sha256") or "")
+            if not pairing_id or not token_hash:
+                continue
+            allowed_source = row.get("allowed_actions")
+            pairings[pairing_id] = {
+                "id": pairing_id,
+                "label": str(row.get("label") or "remote control")[:80],
+                "session_id": _optional_clean_string(row.get("session_id")),
+                "task_id": _optional_clean_string(row.get("task_id")),
+                "allowed_actions": _normalize_allowed_actions(allowed_source)
+                if isinstance(allowed_source, list)
+                else [],
+                "token_sha256": token_hash,
+                "created_at": str(row.get("created_at") or _utc_now(None).isoformat()),
+                "expires_at": str(row.get("expires_at") or _utc_now(None).isoformat()),
+                "revoked_at": _optional_clean_string(row.get("revoked_at")),
+            }
+        self._pairings = pairings
+
+    def _save(self) -> None:
+        if self.store_path is None:
+            return
+        self.store_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "pairings": list(self._pairings.values()),
+            "raw_secret_values_included": False,
+        }
+        temp_path = self.store_path.with_suffix(self.store_path.suffix + ".tmp")
+        with temp_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+        os.chmod(temp_path, 0o600)
+        os.replace(temp_path, self.store_path)
+        os.chmod(self.store_path, 0o600)
 
     def _public_pairing(self, pairing: dict[str, Any], *, now: datetime) -> dict[str, Any]:
         expires_at = datetime.fromisoformat(str(pairing["expires_at"]))
@@ -222,8 +296,19 @@ def _clamp_ttl(ttl_seconds: int | None) -> int:
 def _normalize_allowed_actions(allowed_actions: tuple[str, ...] | list[str] | None) -> list[str]:
     if allowed_actions is None:
         return list(DEFAULT_ALLOWED_TASK_ACTIONS)
-    allowed = {str(action).strip().lower().replace("-", "_") for action in allowed_actions if str(action).strip()}
+    allowed = {
+        str(action).strip().lower().replace("-", "_")
+        for action in allowed_actions
+        if str(action).strip()
+    }
     return sorted(allowed.intersection(DEFAULT_ALLOWED_TASK_ACTIONS))
+
+
+def _optional_clean_string(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _token_hash(token: str) -> str:
@@ -247,3 +332,18 @@ def _redacted_relay_target(relay_url: str | None) -> str | None:
         return None
     path = parsed.path or ""
     return f"{parsed.scheme}://{parsed.netloc}{path}"
+
+
+def _local_remote_control_endpoints(*, host: str = "127.0.0.1", port: int = 8765) -> dict[str, str]:
+    base = f"http://{host}:{port}"
+    return {
+        "status": f"{base}/remote-control/status",
+        "relay": f"{base}/remote-control/relay",
+        "pair": f"{base}/remote-control/pair",
+        "revoke": f"{base}/remote-control/revoke",
+        "task_status": f"{base}/remote-control/tasks/:id",
+        "task_events": f"{base}/remote-control/tasks/:id/events",
+        "task_resume": f"{base}/remote-control/tasks/:id/resume",
+        "task_pause": f"{base}/remote-control/tasks/:id/pause",
+        "task_cancel": f"{base}/remote-control/tasks/:id/cancel",
+    }

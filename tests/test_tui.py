@@ -251,6 +251,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn("inspect", tui.complete_browser("in", "browser in", len("browser "), len("browser in")))
             self.assertIn("screenshot", tui.complete_browser("sc", "browser sc", len("browser "), len("browser sc")))
             self.assertIn("relay", tui.complete_remote_control("re", "remote_control re", len("remote_control "), len("remote_control re")))
+            self.assertIn("revoke", tui.complete_remote_control("rev", "remote_control rev", len("remote_control "), len("remote_control rev")))
+            self.assertIn("--task-id", tui.completedefault("--", "/remote-control pair --", len("/remote-control pair "), len("/remote-control pair --")))
             self.assertIn("append", tui.complete_session("ap", "session ap", len("session "), len("session ap")))
             self.assertIn("run", tui.complete_tools("ru", "tools ru", len("tools "), len("tools ru")))
             self.assertIn("schedule-bundle", tui.complete_security("schedule", "security schedule", len("security "), len("security schedule")))
@@ -274,7 +276,11 @@ class TuiTests(unittest.TestCase):
             pair_output = io.StringIO()
             with redirect_stdout(pair_output):
                 tui.onecmd("/remote-control pair")
-            self.assertIn('"create_pairing": "POST /remote-control/pair"', pair_output.getvalue())
+            pair_rendered = pair_output.getvalue()
+            self.assertIn('"status": "paired"', pair_rendered)
+            self.assertIn('"token_header": "X-Aegis-Remote-Token"', pair_rendered)
+            self.assertIn('"task_pause": "http://127.0.0.1:8765/remote-control/tasks/:id/pause"', pair_rendered)
+            self.assertNotIn("token_sha256", pair_rendered)
             relay_output = io.StringIO()
             with redirect_stdout(relay_output):
                 tui.onecmd("/remote-control relay --relay-url https://relay.example/aegis?token=secret")

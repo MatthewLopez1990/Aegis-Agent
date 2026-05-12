@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+from pathlib import Path
+import stat
+import tempfile
 import unittest
 
 from aegis.remote_control import RemoteControlPairingRegistry
@@ -74,6 +77,27 @@ class RemoteControlPairingTests(unittest.TestCase):
         revoked = registry.revoke(pairing_id, now=now + timedelta(seconds=30))
         self.assertEqual(revoked["pairing"]["status"], "revoked")
         self.assertIsNone(registry.authorize(token, now=now + timedelta(seconds=31)))
+
+    def test_pairing_store_persists_hashes_without_raw_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store_path = Path(temp) / "remote_control_pairings.json"
+            now = datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
+            registry = RemoteControlPairingRegistry(store_path)
+
+            created = registry.create_pairing(label="phone", task_id="task-1", allowed_actions=("status", "pause"), now=now)
+            token = created["token"]
+            persisted = store_path.read_text(encoding="utf-8")
+
+            self.assertNotIn(token, persisted)
+            self.assertIn("token_sha256", persisted)
+            self.assertEqual(stat.S_IMODE(store_path.stat().st_mode), 0o600)
+
+            reloaded = RemoteControlPairingRegistry(store_path)
+            self.assertEqual(reloaded.authorize_action(token, action="pause", task_id="task-1", now=now)["id"], created["pairing"]["id"])
+            revoked = reloaded.revoke(created["pairing"]["id"], now=now + timedelta(seconds=1))
+
+            self.assertEqual(revoked["pairing"]["status"], "revoked")
+            self.assertIsNone(RemoteControlPairingRegistry(store_path).authorize(token, now=now + timedelta(seconds=2)))
 
 
 if __name__ == "__main__":

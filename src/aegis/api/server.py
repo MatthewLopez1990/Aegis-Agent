@@ -118,7 +118,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
     api_token = secrets.token_urlsafe(32)
     allowed_hosts = _allowed_hosts(host, port)
     allowed_origins = _allowed_origins(host, port)
-    remote_control = RemoteControlPairingRegistry()
+    remote_control = RemoteControlPairingRegistry(orchestrator.config.data_dir / "remote_control_pairings.json")
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "AegisAgent/0.1"
@@ -475,6 +475,8 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     task_id=_optional_str(payload, "task_id"),
                     allowed_actions=_optional_str_list(payload, "allowed_actions"),
                     ttl_seconds=_optional_int(payload, "expires_in_seconds"),
+                    endpoint_host=host,
+                    endpoint_port=port,
                 )
                 orchestrator.audit_logger.append(
                     "remote_control.pairing_created",

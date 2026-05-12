@@ -126,6 +126,25 @@ class CliTests(unittest.TestCase):
             data_dir = Path(temp) / ".aegis"
 
             status = dispatch(parser.parse_args(["--data-dir", str(data_dir), "remote-control", "status"]))
+            pair = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "remote-control",
+                        "pair",
+                        "--label",
+                        "phone",
+                        "--task-id",
+                        "task-1",
+                        "--allowed-actions",
+                        "status,pause,shell",
+                        "--expires-in-seconds",
+                        "30",
+                    ]
+                )
+            )
+            paired_status = dispatch(parser.parse_args(["--data-dir", str(data_dir), "rc", "status"]))
             relay = dispatch(
                 parser.parse_args(
                     [
@@ -138,12 +157,21 @@ class CliTests(unittest.TestCase):
                     ]
                 )
             )
+            revoked = dispatch(parser.parse_args(["--data-dir", str(data_dir), "remote-control", "revoke", pair["pairing"]["id"]]))
 
             self.assertEqual(status["relay_preflight"]["status"], "relay_blocked_preflight")
+            self.assertEqual(pair["status"], "paired")
+            self.assertEqual(pair["pairing"]["allowed_actions"], ["pause", "status"])
+            self.assertEqual(pair["expires_in_seconds"], 60)
+            self.assertEqual(pair["local_endpoints"]["task_pause"], "http://127.0.0.1:8765/remote-control/tasks/:id/pause")
+            self.assertEqual(paired_status["active_pairing_count"], 1)
             self.assertEqual(relay["status"], "relay_blocked_preflight")
             self.assertEqual(relay["relay_target"], "https://relay.example/aegis")
             self.assertFalse(relay["outbound_relay_enabled"])
             self.assertNotIn("token=secret", json.dumps(relay, sort_keys=True))
+            self.assertEqual(revoked["pairing"]["status"], "revoked")
+            self.assertNotIn(pair["token"], (data_dir / "remote_control_pairings.json").read_text(encoding="utf-8"))
+            self.assertNotIn(pair["token"], (data_dir / "audit.jsonl").read_text(encoding="utf-8"))
 
     def test_agents_cli_status_and_delegate_use_governed_queue(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -184,7 +184,7 @@ BROWSER_COMMANDS = ("session", "sessions", "close", "navigate", "extract", "insp
 MCP_COMMANDS = ("list", "register", "call")
 HOOK_COMMANDS = ("list", "add", "enable", "disable", "remove", "run")
 AGENTS_COMMANDS = ("status", "delegate")
-REMOTE_CONTROL_COMMANDS = ("pair", "relay")
+REMOTE_CONTROL_COMMANDS = ("pair", "revoke", "relay")
 SESSION_COMMANDS = ("new", "open", "rename", "set-model", "set-personality", "activate", "archive", "pause", "append", "history", "tasks", "compact")
 TASKS_COMMANDS = ("all", "session")
 SECURITY_COMMANDS = (
@@ -2197,28 +2197,70 @@ class AegisTui(cmd.Cmd):
         self.do_rollback(arg)
 
     def do_remote_control(self, arg: str) -> None:
-        """remote_control [name|pair|relay] -- show guarded remote-control readiness."""
+        """remote_control [name|pair|revoke|relay] -- manage guarded remote-control readiness."""
         parts = shlex.split(arg) if arg else []
         if parts and parts[0] == "relay":
             relay_url = _option_value(parts, "--relay-url")
             if relay_url is None and len(parts) > 1 and not parts[1].startswith("--"):
                 relay_url = parts[1]
-            _print_json(RemoteControlPairingRegistry().relay_preflight(relay_url=relay_url))
+            registry = RemoteControlPairingRegistry(
+                self.orchestrator.config.data_dir / "remote_control_pairings.json"
+            )
+            _print_json(registry.relay_preflight(relay_url=relay_url))
             return
         if parts and parts[0] == "pair":
-            _print_json(
-                {
-                    "status": "pairing_endpoint_ready",
-                    "command": "PYTHONPATH=src python3 -m aegis.cli.main serve --workspace . --host 127.0.0.1 --port 8765",
-                    "create_pairing": "POST /remote-control/pair",
-                    "status_endpoint": "GET /remote-control/status",
-                    "relay_preflight": "GET /remote-control/relay",
-                    "token_header": "X-Aegis-Remote-Token",
-                    "auth_required": "local API token required to create or revoke pairings",
-                    "scope": "scoped_remote_task_control",
-                    "blocked_until_relay": ["off_device_outbound_relay", "mobile_push_delivery", "cloud_session_directory"],
-                }
+            label = _option_value(parts, "--label")
+            if label is None and len(parts) > 1 and not parts[1].startswith("--"):
+                label = parts[1]
+            allowed_actions = _comma_separated(
+                _option_value(parts, "--allowed-actions") or "status,events,pause,cancel"
             )
+            expires_in_seconds = _optional_int(_option_value(parts, "--expires-in-seconds"))
+            registry = RemoteControlPairingRegistry(
+                self.orchestrator.config.data_dir / "remote_control_pairings.json"
+            )
+            result = registry.create_pairing(
+                label=label or "tui remote control",
+                session_id=_option_value(parts, "--session-id") or self.session.get("id"),
+                task_id=_option_value(parts, "--task-id") or self.last_task_id,
+                allowed_actions=allowed_actions,
+                ttl_seconds=expires_in_seconds,
+            )
+            self.orchestrator.audit_logger.append(
+                "remote_control.pairing_created",
+                {
+                    "pairing_id": result["pairing"]["id"],
+                    "label": result["pairing"]["label"],
+                    "session_id": result["pairing"].get("session_id"),
+                    "task_id": result["pairing"].get("task_id"),
+                    "allowed_actions": result["pairing"].get("allowed_actions"),
+                    "expires_at": result["pairing"]["expires_at"],
+                    "token_header": result["token_header"],
+                    "token_captured": False,
+                    "source": "tui",
+                },
+            )
+            _print_json(result)
+            return
+        if parts and parts[0] == "revoke":
+            if len(parts) < 2:
+                print("usage: remote-control revoke <pairing_id>")
+                return
+            registry = RemoteControlPairingRegistry(
+                self.orchestrator.config.data_dir / "remote_control_pairings.json"
+            )
+            result = registry.revoke(parts[1])
+            self.orchestrator.audit_logger.append(
+                "remote_control.pairing_revoked",
+                {
+                    "pairing_id": result["pairing"]["id"],
+                    "label": result["pairing"]["label"],
+                    "session_id": result["pairing"].get("session_id"),
+                    "token_captured": False,
+                    "source": "tui",
+                },
+            )
+            _print_json(result)
             return
         width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
         title = arg.strip() or self.session.get("title") or "Aegis TUI"
@@ -4543,8 +4585,11 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("hooks", "add"): ("--id", "--enabled", "--approval-required", "--no-approval-required", "--timeout", "--max-output-bytes"),
     ("hooks", "run"): ("--approved", "--context-json"),
     ("agents", "delegate"): ("--approved",),
+    ("remote-control", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
     ("remote-control", "relay"): ("--relay-url",),
+    ("remote_control", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
     ("remote_control", "relay"): ("--relay-url",),
+    ("rc", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
     ("rc", "relay"): ("--relay-url",),
 }
 
@@ -4974,6 +5019,16 @@ def _option_values(parts: list[str], option: str) -> list[str]:
             raise ValueError(f"{option} requires a value")
         values.append(parts[index + 1])
     return values
+
+
+def _comma_separated(value: str) -> list[str]:
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
+
+
+def _optional_int(value: str | None) -> int | None:
+    if value is None or not str(value).strip():
+        return None
+    return int(value)
 
 
 def _split_json_approval_arg(value: str) -> tuple[str, str | None]:

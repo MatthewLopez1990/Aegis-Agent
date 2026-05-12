@@ -325,7 +325,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "skills and plugin inventory",
                 "model auth status",
                 "remote-control readiness",
-                "short-lived remote-control pairing tokens",
+                "durable short-lived remote-control pairing tokens",
                 "background task submission",
                 "governed lifecycle hooks",
                 "governed local plugin install lifecycle",
