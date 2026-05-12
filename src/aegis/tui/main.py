@@ -86,6 +86,7 @@ TOP_LEVEL_COMMANDS = (
     "gateway",
     "goal",
     "gquota",
+    "handoff",
     "help",
     "hooks",
     "image",
@@ -118,6 +119,7 @@ TOP_LEVEL_COMMANDS = (
     "pr_comments",
     "provider",
     "prompt",
+    "q",
     "queue",
     "rc",
     "redraw",
@@ -133,6 +135,7 @@ TOP_LEVEL_COMMANDS = (
     "reasoning",
     "restart",
     "resume",
+    "retry",
     "review",
     "rename",
     "rewind",
@@ -218,6 +221,7 @@ SLASH_COMMAND_ALIASES = {
     "btw": "background",
     "feedback": "bug",
     "pr-comments": "pr_comments",
+    "q": "queue",
     "rc": "remote_control",
     "remote-control": "remote_control",
     "remote-env": "remote_env",
@@ -3302,12 +3306,45 @@ class AegisTui(cmd.Cmd):
         self.do_cancel(arg)
 
     def do_retry(self, arg: str) -> None:
-        """retry -- show guarded retry status."""
-        _print_json({"status": "not_enabled", "last_task_id": self.last_task_id, "detail": "Task retry needs checkpoint replay and approval matching before it can resubmit safely."})
+        """retry -- resubmit the latest user message in the active session."""
+        history = self.orchestrator.sessions.history(self.session["id"], limit=1000)
+        last_user = next((message for message in reversed(history) if message.get("role") == "user" and str(message.get("content") or "").strip()), None)
+        if last_user is None:
+            _print_json({"status": "no_user_message", "session_id": self.session["id"], "raw_message_content_included": False})
+            return
+        result = self.orchestrator.submit_task(str(last_user["content"]), session_id=self.session["id"])
+        self.last_task_id = result["id"]
+        _print_json(
+            {
+                "status": "retry_submitted",
+                "session_id": self.session["id"],
+                "retry_of_message_id": last_user.get("id"),
+                "task_id": result["id"],
+                "raw_message_content_included": False,
+            }
+        )
+        _print_task_result(result)
 
     def do_undo(self, arg: str) -> None:
-        """undo -- show guarded undo status."""
-        self.do_rollback(arg)
+        """undo -- remove the latest user/assistant exchange from the active session history."""
+        result = self.orchestrator.sessions.undo_last_exchange(self.session["id"])
+        self.last_task_id = self._latest_session_task_id()
+        _print_json(result)
+
+    def do_handoff(self, arg: str) -> None:
+        """handoff [platform] -- show guarded cross-platform handoff readiness."""
+        platform = arg.strip()
+        _print_json(
+            {
+                "status": "handoff_blocked_preflight",
+                "platform": platform or None,
+                "active_session_id": self.session.get("id"),
+                "active_session_title": self.session.get("title"),
+                "raw_messages_included": False,
+                "detail": "Cross-platform handoff needs a configured home channel and gateway delivery confirmation before Aegis will replay session context outside the local terminal.",
+                "next_actions": ["platforms", "sethome", "channel render <channel> <text>", "remote-control pair"],
+            }
+        )
 
     def do_init(self, arg: str) -> None:
         """init -- show project initialization status."""
@@ -3532,7 +3569,7 @@ class AegisTui(cmd.Cmd):
                 print(self._render_slash_palette(""))
                 return
             name = command.split(maxsplit=1)[0]
-            if name in {"q", "quit"}:
+            if name == "quit":
                 return self.do_quit("")
             canonical = SLASH_COMMAND_ALIASES.get(name, name.replace("-", "_"))
             if hasattr(self, f"do_{canonical}"):
@@ -3546,6 +3583,14 @@ class AegisTui(cmd.Cmd):
             print(self._render_slash_palette(name))
             return
         self.do_submit(stripped)
+
+    def _latest_session_task_id(self) -> str | None:
+        for message in reversed(self.orchestrator.sessions.history(self.session["id"], limit=1000)):
+            metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+            task_id = metadata.get("task_id") if isinstance(metadata, dict) else None
+            if isinstance(task_id, str) and task_id:
+                return task_id
+        return None
 
     def _load_or_create_session(
         self,
@@ -4398,11 +4443,12 @@ def _command_reference() -> str:
             "new|reset|clear        Session reset and screen controls",
             "add-dir <path>         Record extra working directory context",
             "history|title|compress Active session transcript helpers",
+            "retry|undo             Resubmit or remove the latest session exchange",
             "background|bg|btw <req>  Submit a governed task from the deck",
             "fast [request]         Inspect fast route or submit a quick governed task",
-            "goal|batch|queue|loop  Goal, queue, and self-improvement readiness",
+            "goal|batch|queue|q|loop Goal, queue, and self-improvement readiness",
             "remote-control|rc      Local-first remote-control readiness",
-            "remote-env|teleport|tp Guarded remote environment handoff readiness",
+            "handoff|remote-env|teleport|tp Guarded remote environment handoff readiness",
             "mobile|desktop|app     Mobile/desktop control-plane readiness",
             "evidence [task_id]     Show receipt and audit evidence",
             "timeline [task_id]     Show plan, receipt, and audit sequence",
@@ -4531,8 +4577,8 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("save|prompt|steer", "explicit save, prompt, and steering readiness"),
             ("status|resume|pause|cancel", "task controls"),
             ("fast [request]", "quick route alias or governed task submission"),
-            ("goal|batch|queue|loop", "goal state, evaluation queue, and self-improvement readiness"),
-            ("stop|retry|undo", "cancel alias plus guarded replay and rollback status"),
+            ("goal|batch|queue|q|loop", "goal state, evaluation queue, and self-improvement readiness"),
+            ("stop|retry|undo", "cancel alias plus session replay and undo"),
         ),
     ),
     (
@@ -4573,7 +4619,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         (
             ("capabilities", "parity and readiness"),
             ("agents", "multi-agent coordination and delegation surfaces"),
-            ("remote-control|rc|remote-env|teleport|tp|mobile|desktop|app", "local-first remote-control readiness"),
+            ("remote-control|rc|handoff|remote-env|teleport|tp|mobile|desktop|app", "local-first remote-control readiness"),
             ("web-setup", "local web control-plane setup"),
             ("connectors|channels|platforms", "integration surfaces"),
             ("pr_comments", "pull request comment integration readiness"),
@@ -4815,6 +4861,10 @@ def _next_command_hint(command: str) -> str:
         "rename": "/session rename <title>",
         "save": "/session history",
         "steer": "/prompt",
+        "retry": "/status <id>",
+        "undo": "/session history",
+        "queue": "/tasks",
+        "q": "/tasks",
         "add-dir": "/session history",
         "status": "/timeline <id>",
         "approvals": "/approval <id>",
@@ -4853,6 +4903,7 @@ def _next_command_hint(command: str) -> str:
         "paste": "/session append <content>",
         "image": "/browser screenshot",
         "agents": "/agents delegate",
+        "handoff": "/platforms",
         "remote-control": "/web-setup",
         "web-setup": "/remote-control",
         "capabilities": "/connectors",

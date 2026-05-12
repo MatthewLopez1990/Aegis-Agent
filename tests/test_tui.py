@@ -145,6 +145,9 @@ class TuiTests(unittest.TestCase):
             self.assertIn("doctor", tui.completenames("doc"))
             self.assertIn("model", tui.completenames("mod"))
             self.assertIn("gquota", tui.completenames("gq"))
+            self.assertIn("handoff", tui.completenames("han"))
+            self.assertIn("q", tui.completenames("q"))
+            self.assertIn("retry", tui.completenames("ret"))
             self.assertIn("add-dir", tui.completenames("add"))
             self.assertIn("allowed-tools", tui.completenames("allow"))
             self.assertIn("commands", tui.completenames("com"))
@@ -172,6 +175,9 @@ class TuiTests(unittest.TestCase):
             self.assertIn("/menu", tui.completedefault("men", "/men", 1, 4))
             self.assertIn("/model", tui.completedefault("mod", "/mod", 1, 4))
             self.assertIn("/gquota", tui.completedefault("gq", "/gq", 1, 3))
+            self.assertIn("/handoff", tui.completedefault("han", "/han", 1, 4))
+            self.assertIn("/q", tui.completedefault("q", "/q", 1, 2))
+            self.assertIn("/retry", tui.completedefault("ret", "/ret", 1, 4))
             self.assertIn("/doctor", tui.completedefault("doc", "/doc", 1, 4))
             self.assertIn("/settings", tui.completedefault("set", "/set", 1, 4))
             self.assertIn("/debug", tui.completedefault("deb", "/deb", 1, 4))
@@ -212,11 +218,12 @@ class TuiTests(unittest.TestCase):
             self.assertIn("/new|/reset|/clear /add-dir /submit /background|/bg|/btw", help_rendered)
             self.assertIn("submit <request>", help_rendered)
             self.assertIn("add-dir <path>", help_rendered)
+            self.assertIn("retry|undo", help_rendered)
             self.assertIn("fast [request]", help_rendered)
             self.assertIn("copy|export|rename", help_rendered)
             self.assertIn("paste|image", help_rendered)
             self.assertIn("save|prompt|steer", help_rendered)
-            self.assertIn("goal|batch|queue|loop", help_rendered)
+            self.assertIn("goal|batch|queue|q|loop", help_rendered)
             self.assertIn("[Govern", help_rendered)
             self.assertIn("/approve|/deny /security", help_rendered)
             self.assertIn("/whoami|/yolo", help_rendered)
@@ -341,9 +348,11 @@ class TuiTests(unittest.TestCase):
                 tui.onecmd("/effort high")
                 tui.onecmd("/cost")
                 tui.onecmd("/remote-env")
+                tui.onecmd("/handoff slack")
                 tui.onecmd("/app")
                 tui.onecmd("/tp")
                 tui.onecmd("/loop")
+                self.assertFalse(tui.onecmd("/q"))
                 tui.onecmd("/add-dir .")
                 tui.onecmd("/bug tui parity smoke")
                 tui.onecmd("/feedback slash parity smoke")
@@ -401,6 +410,9 @@ class TuiTests(unittest.TestCase):
             self.assertIn('"requested_effort": "high"', alias_commands)
             self.assertIn('"estimated_cost"', alias_commands)
             self.assertIn("Remote Control", alias_commands)
+            self.assertIn('"status": "handoff_blocked_preflight"', alias_commands)
+            self.assertIn('"platform": "slack"', alias_commands)
+            self.assertIn('"active_session_id"', alias_commands)
             self.assertIn("github_pr operation=comments", alias_commands)
             self.assertIn("github_pr operation=autofix_plan", alias_commands)
             self.assertIn("github_pr operation=autofix_apply", alias_commands)
@@ -597,6 +609,39 @@ class TuiTests(unittest.TestCase):
             history = tui.orchestrator.sessions.history(tui.session["id"])
             self.assertEqual([message["role"] for message in history], ["user", "assistant"])
             self.assertEqual([message["metadata"].get("source") for message in history], ["task_submission", "task_result"])
+
+    def test_retry_undo_and_q_alias_follow_session_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tui = AegisTui(data_dir=root / ".aegis", workspace=root)
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                tui.onecmd("submit Summarize this workspace safely.")
+            first_task_id = tui.last_task_id
+            first_history = tui.orchestrator.sessions.history(tui.session["id"])
+            self.assertEqual([message["role"] for message in first_history], ["user", "assistant"])
+
+            with redirect_stdout(output):
+                self.assertFalse(tui.onecmd("/q"))
+                tui.onecmd("/retry")
+            retried_task_id = tui.last_task_id
+            self.assertIsNotNone(retried_task_id)
+            self.assertNotEqual(retried_task_id, first_task_id)
+            retry_history = tui.orchestrator.sessions.history(tui.session["id"])
+            self.assertEqual([message["role"] for message in retry_history], ["user", "assistant", "user", "assistant"])
+
+            with redirect_stdout(output):
+                tui.onecmd("/undo")
+            undo_history = tui.orchestrator.sessions.history(tui.session["id"])
+            self.assertEqual([message["role"] for message in undo_history], ["user", "assistant"])
+            self.assertEqual(tui.last_task_id, first_task_id)
+
+            rendered = output.getvalue()
+            self.assertIn('"status": "retry_submitted"', rendered)
+            self.assertIn('"status": "undone"', rendered)
+            self.assertIn('"raw_message_content_included": false', rendered)
+            self.assertIn('"active_session_id"', rendered)
 
     def test_channel_render_records_pending_redacted_outbound_event(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

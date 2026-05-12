@@ -441,6 +441,24 @@ class LocalStore:
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
 
+    def delete_messages(self, session_id: str, message_ids: list[str]) -> list[dict[str, Any]]:
+        if not message_ids:
+            return []
+        placeholders = ", ".join("?" for _ in message_ids)
+        with self.connect() as db:
+            rows = db.execute(
+                f"SELECT * FROM messages WHERE session_id = ? AND id IN ({placeholders})",
+                (session_id, *message_ids),
+            ).fetchall()
+            if rows:
+                db.execute(
+                    f"DELETE FROM messages WHERE session_id = ? AND id IN ({placeholders})",
+                    (session_id, *message_ids),
+                )
+                db.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (now_utc(), session_id))
+        by_id = {str(row["id"]): dict(row) for row in rows}
+        return [by_id[message_id] for message_id in message_ids if message_id in by_id]
+
     def insert_schedule(self, row: dict[str, Any]) -> None:
         timestamp = now_utc()
         with self.connect() as db:

@@ -130,6 +130,47 @@ class SessionManager:
         self.audit_logger.append("session.compacted", result)
         return result
 
+    def undo_last_exchange(self, session_id: str) -> dict[str, Any]:
+        if self.store.get_session(session_id) is None:
+            raise KeyError(session_id)
+        messages = self.history(session_id, limit=1000)
+        if not messages:
+            result = {"status": "no_messages", "session_id": session_id, "removed_count": 0, "raw_message_content_included": False}
+            self.audit_logger.append("session.undo", result)
+            return result
+
+        to_remove: list[dict[str, Any]] = []
+        found_user = False
+        for message in reversed(messages):
+            to_remove.append(message)
+            if message.get("role") == "user":
+                found_user = True
+                break
+        if not found_user:
+            result = {"status": "no_user_message", "session_id": session_id, "removed_count": 0, "raw_message_content_included": False}
+            self.audit_logger.append("session.undo", result)
+            return result
+
+        ordered = list(reversed(to_remove))
+        deleted = self.store.delete_messages(session_id, [str(message["id"]) for message in ordered])
+        removed_task_ids = sorted(
+            {
+                str(metadata.get("task_id"))
+                for metadata in (_safe_json_dict(row.get("metadata_json")) for row in deleted)
+                if metadata.get("task_id")
+            }
+        )
+        result = {
+            "status": "undone",
+            "session_id": session_id,
+            "removed_count": len(deleted),
+            "removed_roles": [str(row.get("role")) for row in deleted],
+            "removed_task_ids": removed_task_ids,
+            "raw_message_content_included": False,
+        }
+        self.audit_logger.append("session.undo", result)
+        return result
+
     def _default_trust_class(self, session_id: str, *, role: str) -> TrustClass:
         if role == "assistant":
             return TrustClass.DEVELOPER_TRUSTED
@@ -207,6 +248,14 @@ def _decode_session(row: dict[str, Any]) -> dict[str, Any]:
     decoded = dict(row)
     decoded["metadata"] = json.loads(decoded.pop("metadata_json", "{}"))
     return decoded
+
+
+def _safe_json_dict(value: Any) -> dict[str, Any]:
+    try:
+        decoded = json.loads(str(value or "{}"))
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
 
 
 def _session_task_summary(row: dict[str, Any]) -> dict[str, Any]:
