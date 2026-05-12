@@ -621,11 +621,11 @@ def _model_auth_operator_checklist(model_auth_parity: dict[str, Any]) -> list[di
         {
             "control": "subscription_token_bridge",
             "state": "partial_official_cli_bridge" if model_auth_parity["subscription_bridge_targets"] else "ready_for_review",
-            "detail": "Verified Codex/ChatGPT, Claude Code, Qwen Code, Gemini CLI, Copilot CLI, brokered Nous Portal OAuth, brokered MiniMax OAuth, and MiniMax Token Plan can invoke through governed bridges without browser-token import; remaining subscription providers stay on official handoff until scoped bridges exist.",
+            "detail": "Verified Codex/ChatGPT, Claude Code, Qwen Code, Gemini CLI, brokered GitHub Copilot OAuth, brokered Nous Portal OAuth, brokered MiniMax OAuth, and MiniMax Token Plan can invoke through governed bridges without browser-token import; remaining subscription providers stay on official handoff until scoped bridges exist.",
         },
         {
             "control": "oauth_device_flows",
-            "state": "official_cli_handoff_only" if model_auth_parity["subscription_bridge_targets"] else "ready_for_review",
+            "state": "partial_brokered_flow" if model_auth_parity["subscription_bridge_targets"] else "ready_for_review",
             "detail": "Nous Portal OAuth, MiniMax OAuth, Google Vertex AI, AWS Bedrock, Azure Foundry, and Copilot have governed bridge paths; other provider-native OAuth/device flows remain explicit local handoff targets until governed bridges exist.",
         },
         {

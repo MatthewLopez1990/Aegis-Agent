@@ -488,6 +488,39 @@ class ModelRegistry:
                 },
             )
             return status
+        if profile.get("oauth_device_flow") == "github_copilot_device_code":
+            status = _github_copilot_oauth_status_template(profile)
+            if run_external:
+                status.update(_run_github_copilot_oauth_login_flow(profile, self.secrets_broker, timeout_seconds=timeout_seconds))
+            elif verify_external:
+                status.update(_verify_github_copilot_oauth_link(profile, self.secrets_broker, self._external_auth_link(str(profile.get("provider") or name), normalized_method)))
+            if status.get("external_status_verified"):
+                status.update(
+                    {
+                        "status": "external_login_verified",
+                        "auth_configured": True,
+                        "auth_source": "oauth_device_flow",
+                        "aegis_bridge_status": "oauth_device_flow_ready",
+                        "token_captured": False,
+                        "token_capture_supported": False,
+                    }
+                )
+                self._remember_external_auth_link(str(status["provider"]), normalized_method, status)
+            self.audit_logger.append(
+                "model.auth_external_login_requested",
+                {
+                    "provider": status["provider"],
+                    "target": status["target"],
+                    "method": status["method"],
+                    "status": status["status"],
+                    "external_command": status.get("external_command"),
+                    "external_login_attempted": status["external_login_attempted"],
+                    "external_login_exit_code": status["external_login_exit_code"],
+                    "token_captured": False,
+                    "oauth_token_brokered": bool(status.get("oauth_token_brokered", False)),
+                },
+            )
+            return status
         command_argv = _external_command_argv(profile)
         executable_path = shutil.which(command_argv[0]) if command_argv else None
         status = {
@@ -601,7 +634,7 @@ class ModelRegistry:
             external_link = self._external_auth_link(provider.provider, provider.external_auth_method)
             if external_link is not None:
                 auth_metadata = dict(external_link)
-                if external_link.get("auth_source") == "oauth_device_flow" or provider.metadata.get("auth_surface") == "oauth_device":
+                if external_link.get("auth_source") == "oauth_device_flow":
                     auth_method = "oauth_token"
                 else:
                     auth_method = f"{provider.external_auth_method}_cli"
@@ -977,6 +1010,13 @@ MINIMAX_OAUTH_ACCESS_TOKEN_SECRET = "MINIMAX_OAUTH_ACCESS_TOKEN"
 MINIMAX_OAUTH_REFRESH_TOKEN_SECRET = "MINIMAX_OAUTH_REFRESH_TOKEN"
 MINIMAX_OAUTH_REFRESH_SKEW_SECONDS = 60
 
+GITHUB_COPILOT_OAUTH_CLIENT_ID = "Ov23li8tweQw6odWQebz"
+GITHUB_COPILOT_OAUTH_SCOPE = "read:user"
+GITHUB_COPILOT_OAUTH_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
+GITHUB_COPILOT_OAUTH_PORTAL_BASE_URL = "https://github.com"
+GITHUB_COPILOT_OAUTH_TOKEN_SECRET = "GITHUB_COPILOT_OAUTH_TOKEN"
+GITHUB_COPILOT_DEVICE_AUTH_POLL_INTERVAL_CAP_SECONDS = 1
+
 
 EXTERNAL_AUTH_HANDOFF_PROFILES: dict[str, dict[str, Any]] = {
     "github-copilot": {
@@ -985,30 +1025,23 @@ EXTERNAL_AUTH_HANDOFF_PROFILES: dict[str, dict[str, Any]] = {
         "provider": "github-copilot",
         "method": "oauth_device",
         "account_surface": "GitHub Copilot subscription",
-        "external_command": "copilot login",
-        "external_command_argv": ("copilot", "login"),
-        "external_status_command": "copilot -p \"Respond with OK only.\" --output-format=json --mode=plan --no-remote --no-custom-instructions --disable-builtin-mcps --no-ask-user --silent --stream=off --log-level=none",
-        "external_status_command_argv": (
-            "copilot",
-            "-p",
-            "Respond with OK only.",
-            "--output-format=json",
-            "--mode=plan",
-            "--no-remote",
-            "--no-custom-instructions",
-            "--disable-builtin-mcps",
-            "--no-ask-user",
-            "--silent",
-            "--stream=off",
-            "--log-level=none",
-        ),
-        "provider_token_source": "official GitHub Copilot CLI credential store or GitHub CLI fallback token",
-        "aegis_bridge_status": "official_cli_bridge_available",
+        "external_command": "GitHub browser OAuth device-code login",
+        "external_command_argv": (),
+        "external_status_command": "brokered GitHub Copilot OAuth token",
+        "external_status_command_argv": (),
+        "provider_token_source": "official GitHub OAuth device-code flow for Copilot",
+        "aegis_bridge_status": "oauth_device_flow_available",
+        "oauth_device_flow": "github_copilot_device_code",
+        "portal_base_url": GITHUB_COPILOT_OAUTH_PORTAL_BASE_URL,
+        "client_id": GITHUB_COPILOT_OAUTH_CLIENT_ID,
+        "scope": GITHUB_COPILOT_OAUTH_SCOPE,
+        "access_token_secret": GITHUB_COPILOT_OAUTH_TOKEN_SECRET,
+        "invocation_bridge": "copilot_oauth_chat_completions",
         "interactive": True,
         "next_steps": [
-            "Run model auth login github-copilot --method oauth-device --run-external or sign in with copilot login directly.",
-            "Route github-copilot/<model-id> after verification to use isolated copilot -p JSON invocation.",
-            "Do not paste GitHub OAuth tokens or Copilot session tokens into Aegis.",
+            "Run model auth login github-copilot --method oauth-device --run-external and approve the GitHub device-code prompt.",
+            "Route github-copilot/<model-id> after verification to use the brokered Copilot OAuth chat-completions bridge.",
+            "Do not paste GitHub OAuth tokens, Copilot session tokens, or GitHub CLI credential files into Aegis.",
         ],
     },
     "aws-bedrock": {
@@ -1714,6 +1747,171 @@ def _verify_nous_oauth_link(profile: dict[str, Any], secrets_broker: SecretsBrok
             }
         },
     }
+
+
+def _github_copilot_oauth_status_template(profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "provider": profile.get("provider") or "github-copilot",
+        "target": profile["target"],
+        "method": profile["method"],
+        "status": "external_login_required",
+        "auth_configured": False,
+        "auth_source": None,
+        "token_captured": False,
+        "token_capture_supported": False,
+        "raw_browser_token_captured": False,
+        "oauth_token_brokered": False,
+        "external_command_argv": [],
+        "external_command_available": True,
+        "external_command_path": None,
+        "external_login_attempted": False,
+        "external_login_exit_code": None,
+        "external_login_error": None,
+        "external_status_checked": False,
+        "external_status_verified": False,
+        **_handoff_profile_public_fields(profile),
+    }
+
+
+def _run_github_copilot_oauth_login_flow(profile: dict[str, Any], secrets_broker: SecretsBroker, *, timeout_seconds: float | None) -> dict[str, Any]:
+    portal_base_url = str(profile.get("portal_base_url") or GITHUB_COPILOT_OAUTH_PORTAL_BASE_URL).rstrip("/")
+    client_id = str(profile.get("client_id") or GITHUB_COPILOT_OAUTH_CLIENT_ID)
+    scope = str(profile.get("scope") or GITHUB_COPILOT_OAUTH_SCOPE)
+    try:
+        device_payload = _github_copilot_request_device_code(
+            portal_base_url=portal_base_url,
+            client_id=client_id,
+            scope=scope,
+            timeout_seconds=timeout_seconds,
+        )
+        verification_uri = str(device_payload.get("verification_uri") or "https://github.com/login/device")
+        user_code = str(device_payload["user_code"])
+        print(f"GitHub Copilot OAuth: open {verification_uri} and enter code {user_code}", file=sys.stderr)
+        token_payload = _github_copilot_poll_token(
+            portal_base_url=portal_base_url,
+            client_id=client_id,
+            device_code=str(device_payload["device_code"]),
+            expires_in=int(device_payload.get("expires_in") or 300),
+            poll_interval=int(device_payload.get("interval") or 5),
+            timeout_seconds=timeout_seconds,
+        )
+        access_token = _required_oauth_value(token_payload, "access_token", "GitHub Copilot OAuth token response")
+    except TimeoutError as exc:
+        return {
+            "status": "external_login_timeout",
+            "external_login_attempted": True,
+            "external_login_exit_code": None,
+            "external_login_error": str(exc),
+            "external_status_checked": False,
+            "external_status_verified": False,
+        }
+    except (RuntimeError, ValueError, OSError) as exc:
+        return {
+            "status": "external_login_failed",
+            "external_login_attempted": True,
+            "external_login_exit_code": None,
+            "external_login_error": str(exc),
+            "external_status_checked": True,
+            "external_status_verified": False,
+        }
+
+    access_secret = str(profile.get("access_token_secret") or GITHUB_COPILOT_OAUTH_TOKEN_SECRET)
+    secrets_broker.store_secret(name=access_secret, value=access_token)
+    return {
+        "status": "external_login_verified",
+        "auth_configured": True,
+        "auth_source": "oauth_device_flow",
+        "aegis_bridge_status": "oauth_device_flow_ready",
+        "external_login_attempted": True,
+        "external_login_exit_code": 0,
+        "external_login_error": None,
+        "external_status_checked": True,
+        "external_status_verified": True,
+        "token_captured": False,
+        "token_capture_supported": False,
+        "raw_browser_token_captured": False,
+        "oauth_token_brokered": True,
+        "access_token_secret": access_secret,
+        "portal_base_url": portal_base_url,
+        "client_id": client_id,
+        "scope": str(token_payload.get("scope") or scope),
+        "token_type": str(token_payload.get("token_type") or "Bearer"),
+        "invocation_bridge": str(profile.get("invocation_bridge") or "copilot_oauth_chat_completions"),
+    }
+
+
+def _verify_github_copilot_oauth_link(profile: dict[str, Any], secrets_broker: SecretsBroker, link: dict[str, Any] | None) -> dict[str, Any]:
+    access_secret = str((link or {}).get("access_token_secret") or profile.get("access_token_secret") or GITHUB_COPILOT_OAUTH_TOKEN_SECRET)
+    verified = link is not None and secrets_broker.has_secret(access_secret)
+    return {
+        "external_status_checked": True,
+        "external_status_verified": verified,
+        "status": "external_login_verified" if verified else "external_login_required",
+        "auth_configured": verified,
+        "auth_source": "oauth_device_flow" if verified else None,
+        "aegis_bridge_status": "oauth_device_flow_ready" if verified else "oauth_device_flow_available",
+        "oauth_token_brokered": verified,
+        "access_token_secret": access_secret,
+        **{
+            key: value
+            for key, value in (link or {}).items()
+            if key in {"portal_base_url", "client_id", "scope", "token_type", "invocation_bridge"}
+        },
+    }
+
+
+def _github_copilot_request_device_code(*, portal_base_url: str, client_id: str, scope: str, timeout_seconds: float | None) -> dict[str, Any]:
+    payload = _post_auth_form(
+        f"{portal_base_url}/login/device/code",
+        {"client_id": client_id, "scope": scope},
+        timeout_seconds=timeout_seconds,
+        label="GitHub Copilot OAuth",
+    )
+    for field in ("device_code", "user_code"):
+        if field not in payload:
+            raise RuntimeError(f"GitHub Copilot OAuth device-code response missing field: {field}")
+    return payload
+
+
+def _github_copilot_poll_token(
+    *,
+    portal_base_url: str,
+    client_id: str,
+    device_code: str,
+    expires_in: int,
+    poll_interval: int,
+    timeout_seconds: float | None,
+) -> dict[str, Any]:
+    deadline = min(time.monotonic() + max(1, expires_in), time.monotonic() + (timeout_seconds or max(1, expires_in)))
+    interval = max(1, min(poll_interval, GITHUB_COPILOT_DEVICE_AUTH_POLL_INTERVAL_CAP_SECONDS))
+    while time.monotonic() < deadline:
+        status_code, payload = _post_auth_form_status(
+            f"{portal_base_url}/login/oauth/access_token",
+            {
+                "client_id": client_id,
+                "device_code": device_code,
+                "grant_type": GITHUB_COPILOT_OAUTH_GRANT_TYPE,
+            },
+            timeout_seconds=timeout_seconds,
+            label="GitHub Copilot OAuth",
+        )
+        if status_code == 200 and payload.get("access_token"):
+            return payload
+        error_code = str(payload.get("error") or "")
+        if error_code == "authorization_pending":
+            time.sleep(interval)
+            continue
+        if error_code == "slow_down":
+            interval = min(interval + 5, 30)
+            time.sleep(interval)
+            continue
+        if error_code == "expired_token":
+            raise RuntimeError("GitHub Copilot OAuth device code expired")
+        if error_code == "access_denied":
+            raise RuntimeError("GitHub Copilot OAuth authorization was denied")
+        description = str(payload.get("error_description") or "unknown authentication error")
+        raise RuntimeError(f"GitHub Copilot OAuth {error_code or status_code}: {description}")
+    raise TimeoutError("GitHub Copilot OAuth timed out before authorization completed")
 
 
 def _nous_request_device_code(*, portal_base_url: str, client_id: str, scope: str, timeout_seconds: float | None) -> dict[str, Any]:

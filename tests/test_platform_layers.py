@@ -1057,7 +1057,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(auth_targets["OpenAI API"]["status"], "api_key_ready")
             self.assertEqual(auth_targets["Claude Code subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(auth_targets["Google Gemini CLI subscription"]["status"], "official_cli_bridge_available")
-            self.assertEqual(auth_targets["GitHub Copilot"]["status"], "official_cli_bridge_available")
+            self.assertEqual(auth_targets["GitHub Copilot"]["status"], "oauth_device_flow_available")
             self.assertEqual(auth_targets["DeepSeek"]["status"], "api_key_ready")
             self.assertEqual(auth_targets["Hugging Face"]["status"], "api_key_ready")
             self.assertEqual(auth_targets["Vercel AI Gateway"]["status"], "api_key_ready")
@@ -1080,7 +1080,7 @@ class PlatformLayerTests(unittest.TestCase):
             auth_checklist = {item["control"]: item for item in backlog["model_provider_auth_login_parity"]["operator_checklist"]}
             self.assertEqual(auth_checklist["api_key_secret_broker"]["state"], "enforced")
             self.assertEqual(auth_checklist["subscription_token_bridge"]["state"], "partial_official_cli_bridge")
-            self.assertEqual(auth_checklist["oauth_device_flows"]["state"], "official_cli_handoff_only")
+            self.assertEqual(auth_checklist["oauth_device_flows"]["state"], "partial_brokered_flow")
             self.assertEqual(auth_checklist["raw_browser_token_capture"]["state"], "denied_by_design")
             self.assertIn("model_auth.raw_token_capture_rejected", backlog["model_provider_auth_login_parity"]["evaluation_scenarios"])
             self.assertIn("allowlisted_live_or_local", readiness["ready"]["statuses"])

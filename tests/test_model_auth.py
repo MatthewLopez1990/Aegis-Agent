@@ -470,7 +470,7 @@ class ModelAuthTests(unittest.TestCase):
             self.assertNotIn("ya29.", audit_text)
             self.assertNotIn("session_cookie", audit_text)
 
-    def test_verified_github_copilot_cli_can_invoke_without_token_import(self) -> None:
+    def test_verified_github_copilot_oauth_can_invoke_without_raw_token_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
             root = Path(temp)
             secret_path = root / ".aegis" / "secrets.json"
@@ -478,58 +478,83 @@ class ModelAuthTests(unittest.TestCase):
             broker = SecretsBroker(secret_path)
             registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(audit_path), broker)
 
-            login_completed = subprocess.CompletedProcess(("copilot", "login"), 0)
-            status_completed = subprocess.CompletedProcess(("copilot", "-p", "Respond with OK only."), 0, stdout='{"type":"result","result":"OK"}\n', stderr="")
-            with (
-                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/copilot"),
-                patch("aegis.models.registry.subprocess.run", side_effect=(login_completed, status_completed)),
-            ):
-                login = registry.login_provider_external("github-copilot", method="oauth-device", run_external=True)
+            class FakeResponse:
+                def __init__(self, payload: dict[str, object], status: int = 200) -> None:
+                    self.payload = payload
+                    self.status = status
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps(self.payload).encode("utf-8")
+
+            captured_auth: list[tuple[str, str]] = []
+
+            def fake_auth_open(request, timeout):
+                body = request.data.decode("utf-8")
+                captured_auth.append((request.full_url, body))
+                if request.full_url.endswith("/login/device/code"):
+                    return FakeResponse(
+                        {
+                            "device_code": "device-123",
+                            "user_code": "GHUB-1234",
+                            "verification_uri": "https://github.com/login/device",
+                            "expires_in": 60,
+                            "interval": 1,
+                        }
+                    )
+                return FakeResponse({"access_token": "gho_copilot_secret", "token_type": "bearer", "scope": "read:user"})
+
+            with patch("aegis.models.registry._open_auth_request", fake_auth_open):
+                login = registry.login_provider_external("github-copilot", method="oauth-device", run_external=True, timeout_seconds=5)
 
             self.assertEqual(login["status"], "external_login_verified")
-            self.assertFalse(secret_path.exists())
+            self.assertEqual(login["auth_source"], "oauth_device_flow")
+            self.assertTrue(login["oauth_token_brokered"])
+            self.assertNotIn("gho_copilot_secret", json.dumps(login))
+            self.assertTrue(secret_path.exists())
+            self.assertEqual(broker.resolve_stored_secret("GITHUB_COPILOT_OAUTH_TOKEN"), "gho_copilot_secret")
+            self.assertIn("client_id=Ov23li8tweQw6odWQebz", captured_auth[0][1])
+            self.assertIn("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code", captured_auth[1][1])
             self.assertTrue(registry.auth_status("github-copilot")["auth_configured"])
-            self.assertEqual(registry.auth_status("github-copilot")["auth_source"], "official_cli")
+            self.assertEqual(registry.auth_status("github-copilot")["auth_source"], "oauth_device_flow")
 
             route = registry.route("github-copilot/gpt-5.1-codex")
-            self.assertEqual(route.auth_method, "oauth_device_cli")
+            self.assertEqual(route.auth_method, "oauth_token")
             self.assertIsNone(route.secret_handle_id)
 
-            def fake_copilot_prompt(command, **kwargs):
-                self.assertEqual(command[0], "/usr/bin/copilot")
-                self.assertEqual(command[1], "-p")
-                self.assertIn("[USER]\nhello from aegis", command[2])
-                self.assertIn("--output-format=json", command)
-                self.assertIn("--mode=plan", command)
-                self.assertIn("--no-remote", command)
-                self.assertIn("--no-custom-instructions", command)
-                self.assertIn("--disable-builtin-mcps", command)
-                self.assertIn("--no-ask-user", command)
-                self.assertIn("--no-auto-update", command)
-                self.assertIn("--no-bash-env", command)
-                self.assertIn("--model=gpt-5.1-codex", command)
-                excluded = next(item for item in command if item.startswith("--excluded-tools="))
-                self.assertIn("bash", excluded)
-                self.assertIn("apply_patch", excluded)
-                self.assertTrue(kwargs["cwd"].name.startswith("aegis-copilot-model-"))
-                self.assertEqual(kwargs["env"]["GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS"], "false")
-                return subprocess.CompletedProcess(command, 0, stdout='{"type":"result","result":"copilot response"}\n', stderr="")
+            captured_model: list[tuple[str, dict[str, str], dict[str, object] | None]] = []
 
-            with (
-                patch("aegis.models.client.shutil.which", return_value="/usr/bin/copilot"),
-                patch("aegis.models.client.subprocess.run", side_effect=fake_copilot_prompt) as run,
-            ):
+            def fake_model_open(request, timeout):
+                headers = {key.lower(): value for key, value in request.header_items()}
+                payload = json.loads(request.data.decode("utf-8")) if request.data else None
+                captured_model.append((request.full_url, headers, payload))
+                if request.full_url == "https://api.github.com/copilot_internal/v2/token":
+                    self.assertEqual(headers["authorization"], "token gho_copilot_secret")
+                    return FakeResponse({"token": "copilot-api-secret", "expires_at": 9999999999})
+                self.assertEqual(request.full_url, "https://api.githubcopilot.com/chat/completions")
+                self.assertEqual(headers["authorization"], "Bearer copilot-api-secret")
+                self.assertEqual(payload["model"], "gpt-5.1-codex")
+                self.assertEqual(payload["messages"][0]["content"], "hello from aegis")
+                return FakeResponse({"choices": [{"message": {"content": "copilot response"}}], "usage": {"prompt_tokens": 4, "completion_tokens": 2}})
+
+            with patch("aegis.models.client._open_model_request", fake_model_open):
                 result = LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello from aegis"}])
 
             self.assertEqual(result.content, "copilot response")
-            self.assertEqual(result.raw_usage["source"], "official_cli")
-            self.assertEqual(result.raw_usage["bridge"], "copilot_prompt_json")
-            run.assert_called_once()
+            self.assertEqual(result.raw_usage["source"], "oauth_device_flow")
+            self.assertEqual(result.raw_usage["bridge"], "copilot_oauth_chat_completions")
+            self.assertEqual([entry[0] for entry in captured_model], ["https://api.github.com/copilot_internal/v2/token", "https://api.githubcopilot.com/chat/completions"])
 
             audit_text = audit_path.read_text(encoding="utf-8")
             self.assertIn("model.auth_external_login_requested", audit_text)
             self.assertNotIn("COPILOT_GITHUB_TOKEN", audit_text)
-            self.assertNotIn("gho_", audit_text)
+            self.assertNotIn("gho_copilot_secret", audit_text)
+            self.assertNotIn("copilot-api-secret", audit_text)
 
     def test_subscription_auth_reports_missing_official_cli_without_token_capture(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
@@ -551,38 +576,53 @@ class ModelAuthTests(unittest.TestCase):
             self.assertFalse(status["token_captured"])
             self.assertFalse(secret_path.exists())
 
-    def test_provider_native_auth_handoff_runs_official_cli_without_token_capture(self) -> None:
+    def test_provider_native_auth_handoff_runs_github_oauth_without_raw_token_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
             root = Path(temp)
             secret_path = root / ".aegis" / "secrets.json"
             audit_path = root / ".aegis" / "audit.jsonl"
             registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(audit_path), SecretsBroker(secret_path))
 
-            login_completed = subprocess.CompletedProcess(("copilot", "login"), 0)
-            status_completed = subprocess.CompletedProcess(("copilot", "-p", "Respond with OK only."), 0, stdout='{"type":"result","result":"OK"}\n', stderr="")
-            with (
-                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/copilot"),
-                patch("aegis.models.registry.subprocess.run", side_effect=(login_completed, status_completed)) as run,
-            ):
-                status = registry.login_provider_external("github-copilot", method="oauth-device", run_external=True)
+            class FakeResponse:
+                def __init__(self, payload: dict[str, object], status: int = 200) -> None:
+                    self.payload = payload
+                    self.status = status
 
-            self.assertEqual(run.call_args_list[0].args[0], ("copilot", "login"))
-            self.assertEqual(run.call_args_list[1].args[0][:3], ("copilot", "-p", "Respond with OK only."))
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps(self.payload).encode("utf-8")
+
+            def fake_open(request, timeout):
+                if request.full_url.endswith("/login/device/code"):
+                    return FakeResponse({"device_code": "device-123", "user_code": "GHUB-1234", "verification_uri": "https://github.com/login/device", "expires_in": 60, "interval": 1})
+                return FakeResponse({"access_token": "gho_copilot_secret", "token_type": "bearer", "scope": "read:user"})
+
+            with patch("aegis.models.registry._open_auth_request", fake_open):
+                status = registry.login_provider_external("github-copilot", method="oauth-device", run_external=True, timeout_seconds=5)
+
             self.assertEqual(status["provider"], "github-copilot")
             self.assertEqual(status["target"], "GitHub Copilot")
             self.assertEqual(status["method"], "oauth_device")
             self.assertEqual(status["status"], "external_login_verified")
             self.assertTrue(status["external_login_attempted"])
             self.assertTrue(status["external_status_verified"])
-            self.assertEqual(status["external_command_argv"], ["copilot", "login"])
+            self.assertEqual(status["auth_source"], "oauth_device_flow")
+            self.assertEqual(status["external_command_argv"], [])
+            self.assertTrue(status["oauth_token_brokered"])
             self.assertTrue(status["auth_configured"])
             self.assertFalse(status["token_captured"])
-            self.assertFalse(secret_path.exists())
+            self.assertTrue(secret_path.exists())
 
             audit_text = audit_path.read_text(encoding="utf-8")
             self.assertIn("model.auth_external_login_requested", audit_text)
             self.assertNotIn("GH_TOKEN", audit_text)
             self.assertNotIn("COPILOT_GITHUB_TOKEN", audit_text)
+            self.assertNotIn("gho_copilot_secret", audit_text)
 
     def test_aws_cloud_identity_handoff_verifies_official_cli_without_token_capture(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
@@ -966,35 +1006,51 @@ class ModelAuthTests(unittest.TestCase):
     def test_verified_provider_native_auth_links_update_targets_and_logout(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
             root = Path(temp)
-            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"))
-            login_completed = subprocess.CompletedProcess(("copilot", "login"), 0)
-            status_completed = subprocess.CompletedProcess(("copilot", "-p", "Respond with OK only."), 0, stdout='{"type":"result","result":"OK"}\n', stderr="")
+            broker = SecretsBroker(root / ".aegis" / "secrets.json")
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"), broker)
 
-            with (
-                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/copilot"),
-                patch("aegis.models.registry.subprocess.run", side_effect=(login_completed, status_completed)) as run,
-            ):
-                login = registry.login_provider_external("github-copilot", method="oauth-device", run_external=True)
+            class FakeResponse:
+                def __init__(self, payload: dict[str, object], status: int = 200) -> None:
+                    self.payload = payload
+                    self.status = status
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps(self.payload).encode("utf-8")
+
+            def fake_open(request, timeout):
+                if request.full_url.endswith("/login/device/code"):
+                    return FakeResponse({"device_code": "device-123", "user_code": "GHUB-1234", "verification_uri": "https://github.com/login/device", "expires_in": 60, "interval": 1})
+                return FakeResponse({"access_token": "gho_copilot_secret", "token_type": "bearer", "scope": "read:user"})
+
+            with patch("aegis.models.registry._open_auth_request", fake_open):
+                login = registry.login_provider_external("github-copilot", method="oauth-device", run_external=True, timeout_seconds=5)
             status = registry.auth_status("github-copilot")
             qwen_status = registry.auth_status("qwen")
             targets = registry.auth_targets()
             by_target = {row["target"]: row for row in targets["targets"]}
 
-            self.assertEqual(run.call_args_list[0].args[0], ("copilot", "login"))
-            self.assertEqual(run.call_args_list[1].args[0][:3], ("copilot", "-p", "Respond with OK only."))
             self.assertEqual(login["status"], "external_login_verified")
             self.assertFalse(login["token_captured"])
+            self.assertTrue(login["oauth_token_brokered"])
+            self.assertEqual(broker.resolve_stored_secret("GITHUB_COPILOT_OAUTH_TOKEN"), "gho_copilot_secret")
             self.assertTrue(status["auth_configured"])
             self.assertTrue(status["external_auth_configured"])
-            self.assertEqual(status["auth_source"], "official_cli")
+            self.assertEqual(status["auth_source"], "oauth_device_flow")
             self.assertEqual(status["provider_native_auth"][0]["status"], "external_login_verified")
-            self.assertEqual(status["provider_native_auth"][0]["bridge_status"], "official_cli_link_verified")
+            self.assertEqual(status["provider_native_auth"][0]["bridge_status"], "oauth_device_flow_ready")
             self.assertIn("oauth", qwen_status["auth_methods"])
             self.assertIn("subscription", qwen_status["auth_methods"])
             self.assertEqual(qwen_status["subscription_auth"]["aegis_bridge_status"], "official_cli_bridge_available")
             self.assertEqual(qwen_status["provider_native_auth"][0]["status"], "provider_discontinued")
             self.assertEqual(by_target["GitHub Copilot"]["status"], "external_login_verified")
-            self.assertEqual(by_target["GitHub Copilot"]["bridge_status"], "official_cli_link_verified")
+            self.assertEqual(by_target["GitHub Copilot"]["bridge_status"], "oauth_device_flow_ready")
+            self.assertTrue(by_target["GitHub Copilot"]["oauth_token_brokered"])
             self.assertTrue(by_target["GitHub Copilot"]["external_auth_configured"])
             self.assertIn("GitHub Copilot", targets["verified_external_auth_targets"])
             self.assertNotIn("GitHub Copilot", targets["subscription_bridge_targets"])
@@ -1006,8 +1062,8 @@ class ModelAuthTests(unittest.TestCase):
 
             self.assertEqual(logout["removed_external_auth_links"], 1)
             self.assertFalse(logout["external_auth_configured"])
-            self.assertEqual(logout["provider_native_auth"][0]["status"], "official_cli_bridge_available")
-            self.assertEqual(by_target_after["GitHub Copilot"]["status"], "official_cli_bridge_available")
+            self.assertEqual(logout["provider_native_auth"][0]["status"], "oauth_device_flow_available")
+            self.assertEqual(by_target_after["GitHub Copilot"]["status"], "oauth_device_flow_available")
 
     def test_provider_auth_targets_track_hermes_and_claude_gaps(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
@@ -1034,8 +1090,9 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(by_target["Nous Portal OAuth subscription"]["status"], "oauth_device_flow_available")
             self.assertEqual(by_target["Nous Portal OAuth subscription"]["provider_token_source"], "official Nous Portal OAuth device-code flow")
             self.assertEqual(by_target["Nous Portal OAuth subscription"]["invocation_bridge"], "nous_oauth_agent_key")
-            self.assertEqual(by_target["GitHub Copilot"]["status"], "official_cli_bridge_available")
-            self.assertEqual(by_target["GitHub Copilot"]["external_command"], "copilot login")
+            self.assertEqual(by_target["GitHub Copilot"]["status"], "oauth_device_flow_available")
+            self.assertEqual(by_target["GitHub Copilot"]["external_command"], "GitHub browser OAuth device-code login")
+            self.assertEqual(by_target["GitHub Copilot"]["invocation_bridge"], "copilot_oauth_chat_completions")
             self.assertEqual(by_target["Google Gemini"]["status"], "api_key_ready")
             self.assertEqual(by_target["Google Vertex AI / Gemini cloud identity"]["status"], "official_cli_bridge_available")
             self.assertEqual(by_target["Google Vertex AI / Gemini cloud identity"]["external_command"], "gcloud auth login --update-adc")

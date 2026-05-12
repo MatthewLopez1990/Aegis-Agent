@@ -91,7 +91,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(auth_targets["Claude Code subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(auth_targets["Google Gemini CLI subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(auth_targets["Qwen Code Coding Plan subscription"]["status"], "official_cli_bridge_available")
-            self.assertEqual(auth_targets["GitHub Copilot"]["status"], "official_cli_bridge_available")
+            self.assertEqual(auth_targets["GitHub Copilot"]["status"], "oauth_device_flow_available")
             self.assertTrue(any(item["area"] == "model_provider_auth_login_parity" for item in result["live_gap_backlog"]))
             self.assertTrue(any(item["area"] == "provider_and_channel_live_connectors" for item in result["live_gap_backlog"]))
             self.assertTrue(any(item["area"] == "subagent_runtime_depth" for item in result["live_gap_backlog"]))
@@ -1942,12 +1942,34 @@ class CliTests(unittest.TestCase):
                 patch("aegis.models.registry.subprocess.run", side_effect=(codex_login_completed, codex_status_completed)) as run,
             ):
                 external_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "openai", "--subscription", "--run-external"]))
-            github_login_completed = subprocess.CompletedProcess(("copilot", "login"), 0)
-            github_status_completed = subprocess.CompletedProcess(("copilot", "-p", "Respond with OK only."), 0, stdout='{"type":"result","result":"OK"}\n', stderr="")
-            with (
-                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/copilot"),
-                patch("aegis.models.registry.subprocess.run", side_effect=(github_login_completed, github_status_completed)) as github_run,
-            ):
+            class FakeGitHubResponse:
+                def __init__(self, payload: dict[str, object], status: int = 200) -> None:
+                    self.payload = payload
+                    self.status = status
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps(self.payload).encode("utf-8")
+
+            def fake_github_auth_open(request, timeout):
+                if request.full_url.endswith("/login/device/code"):
+                    return FakeGitHubResponse(
+                        {
+                            "device_code": "device-123",
+                            "user_code": "GHUB-1234",
+                            "verification_uri": "https://github.com/login/device",
+                            "expires_in": 60,
+                            "interval": 1,
+                        }
+                    )
+                return FakeGitHubResponse({"access_token": "gho_copilot_secret", "token_type": "bearer", "scope": "read:user"})
+
+            with patch("aegis.models.registry._open_auth_request", fake_github_auth_open):
                 github_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "github-copilot", "--method", "oauth-device", "--run-external"]))
             aws_login_completed = subprocess.CompletedProcess(("aws", "sso", "login"), 0)
             aws_status_completed = subprocess.CompletedProcess(("aws", "sts", "get-caller-identity"), 0, stdout='{"Account":"123456789012"}\n', stderr="")
@@ -2006,11 +2028,11 @@ class CliTests(unittest.TestCase):
             self.assertTrue(external_login["auth"]["external_login_attempted"])
             self.assertTrue(external_login["auth"]["subscription_auth_configured"])
             self.assertFalse(external_login["auth"]["token_captured"])
-            self.assertEqual(github_run.call_args_list[0].args[0], ("copilot", "login"))
-            self.assertEqual(github_run.call_args_list[1].args[0][:3], ("copilot", "-p", "Respond with OK only."))
             self.assertEqual(github_login["auth"]["target"], "GitHub Copilot")
             self.assertEqual(github_login["auth"]["method"], "oauth_device")
             self.assertEqual(github_login["auth"]["status"], "external_login_verified")
+            self.assertEqual(github_login["auth"]["auth_source"], "oauth_device_flow")
+            self.assertTrue(github_login["auth"]["oauth_token_brokered"])
             self.assertFalse(github_login["auth"]["token_captured"])
             self.assertEqual(aws_run.call_args_list[0].args[0], ("aws", "sso", "login"))
             self.assertEqual(aws_run.call_args_list[1].args[0], ("aws", "sts", "get-caller-identity"))
@@ -2042,7 +2064,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(targets["auth_targets"]["status"], "auth_parity_gap_tracked")
             self.assertEqual(target_rows_after["OpenAI Codex / ChatGPT subscription"]["status"], "subscription_cli_ready")
             self.assertEqual(target_rows_after["GitHub Copilot"]["status"], "external_login_verified")
-            self.assertEqual(target_rows_after["GitHub Copilot"]["bridge_status"], "official_cli_link_verified")
+            self.assertEqual(target_rows_after["GitHub Copilot"]["bridge_status"], "oauth_device_flow_ready")
             self.assertEqual(target_rows_after["AWS Bedrock"]["status"], "external_login_verified")
             self.assertEqual(target_rows_after["AWS Bedrock"]["bridge_status"], "official_cli_link_verified")
             self.assertEqual(target_rows_after["Google Gemini CLI subscription"]["status"], "subscription_cli_ready")
@@ -2052,13 +2074,14 @@ class CliTests(unittest.TestCase):
             self.assertIn("GitHub Copilot", targets_after["auth_targets"]["verified_external_auth_targets"])
             self.assertIn("AWS Bedrock", targets_after["auth_targets"]["verified_external_auth_targets"])
             self.assertIn("Google Vertex AI / Gemini cloud identity", targets_after["auth_targets"]["verified_external_auth_targets"])
-            self.assertEqual(target_rows_after_logout["GitHub Copilot"]["status"], "official_cli_bridge_available")
+            self.assertEqual(target_rows_after_logout["GitHub Copilot"]["status"], "oauth_device_flow_available")
             self.assertEqual(target_rows["Claude Code subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(target_rows["Google Gemini CLI subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(target_rows["Qwen Code Coding Plan subscription"]["status"], "official_cli_bridge_available")
-            self.assertEqual(target_rows["GitHub Copilot"]["status"], "official_cli_bridge_available")
+            self.assertEqual(target_rows["GitHub Copilot"]["status"], "oauth_device_flow_available")
             self.assertEqual(target_rows["DeepSeek"]["status"], "api_key_ready")
             self.assertNotIn("sk-deepseek-test", json.dumps(deepseek_login, sort_keys=True))
+            self.assertNotIn("gho_copilot_secret", json.dumps(github_login, sort_keys=True))
 
     def test_hooks_cli_registers_lists_and_runs_governed_hook(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

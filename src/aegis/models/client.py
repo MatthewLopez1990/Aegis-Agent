@@ -18,6 +18,7 @@ from urllib.parse import quote, urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from aegis.models.registry import (
+    GITHUB_COPILOT_OAUTH_TOKEN_SECRET,
     ModelRoute,
     NOUS_OAUTH_ACCESS_TOKEN_SECRET,
     NOUS_OAUTH_AGENT_KEY_MIN_TTL_SECONDS,
@@ -111,6 +112,8 @@ class LiveModelClient:
         if route.provider.provider == "azure-foundry":
             return self._chat_azure_foundry(route, messages, temperature=temperature)
         if route.provider.provider == "github-copilot":
+            if route.auth_method == "oauth_token":
+                return self._chat_github_copilot_oauth(route, messages, temperature=temperature)
             return self._chat_github_copilot_cli(route, messages, temperature=temperature)
         if route.provider.provider == "minimax-oauth":
             return self._chat_minimax_oauth(route, messages, temperature=temperature)
@@ -402,6 +405,51 @@ class LiveModelClient:
             input_tokens=max(1, len(prompt) // 4),
             output_tokens=max(1, len(content) // 4),
             raw_usage={"source": "official_cli", "bridge": "copilot_prompt_json", "token_counts": "estimated"},
+        )
+
+    def _chat_github_copilot_oauth(
+        self,
+        route: ModelRoute,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+    ) -> ModelInvocationResult:
+        raw_token = self._resolve_github_copilot_oauth_token(route)
+        api_token = self._exchange_github_copilot_token(raw_token)
+        response = self._post_json(
+            "https://api.githubcopilot.com/chat/completions",
+            payload={
+                "model": route.model,
+                "messages": messages,
+                "stream": False,
+                "temperature": temperature,
+            },
+            headers={
+                "Authorization": f"Bearer {api_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "Editor-Version": "vscode/1.104.1",
+                "Copilot-Integration-Id": "vscode-chat",
+                "Openai-Intent": "conversation-panel",
+                "User-Agent": "GitHubCopilotChat/0.26.7",
+                "x-initiator": "user",
+            },
+        )
+        choices = response.get("choices", [])
+        if not choices:
+            raise RuntimeError("github-copilot provider returned no choices")
+        message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+        content = str(message.get("content", "")).strip()
+        usage = response.get("usage", {}) if isinstance(response.get("usage", {}), dict) else {}
+        raw_usage = dict(usage)
+        raw_usage.update({"source": "oauth_device_flow", "bridge": "copilot_oauth_chat_completions"})
+        return ModelInvocationResult(
+            provider=route.provider.provider,
+            model=route.model,
+            content=content,
+            input_tokens=int(usage.get("prompt_tokens", 0) or 0),
+            output_tokens=int(usage.get("completion_tokens", 0) or 0),
+            raw_usage=raw_usage,
         )
 
     def _chat_aws_bedrock_cli(
@@ -1075,6 +1123,38 @@ class LiveModelClient:
         if rotated_refresh:
             self.secrets_broker.store_secret(name=refresh_secret, value=rotated_refresh)
         return access_token
+
+    def _resolve_github_copilot_oauth_token(self, route: ModelRoute) -> str:
+        metadata = {**route.provider.metadata, **route.auth_metadata}
+        access_secret = str(metadata.get("access_token_secret") or GITHUB_COPILOT_OAUTH_TOKEN_SECRET)
+        return self.secrets_broker.resolve_stored_secret(access_secret)
+
+    def _exchange_github_copilot_token(self, raw_token: str) -> str:
+        token = raw_token.strip()
+        if not token:
+            raise ValueError("github-copilot provider requires a brokered OAuth token")
+        if token.startswith("ghp_"):
+            raise ValueError("github-copilot provider does not support classic GitHub personal access tokens")
+        request = Request(
+            "https://api.github.com/copilot_internal/v2/token",
+            method="GET",
+            headers={
+                "Authorization": f"token {token}",
+                "Accept": "application/json",
+                "User-Agent": "GitHubCopilotChat/0.26.7",
+                "Editor-Version": "vscode/1.104.1",
+            },
+        )
+        try:
+            with _open_model_request(request, timeout=self.timeout_seconds) as response:  # noqa: S310 - fixed GitHub Copilot token endpoint.
+                raw = response.read().decode("utf-8")
+            decoded = json.loads(raw)
+        except (HTTPError, URLError, OSError, json.JSONDecodeError):
+            return token
+        if not isinstance(decoded, dict):
+            return token
+        api_token = str(decoded.get("token") or "").strip()
+        return api_token or token
 
     def _post_openai_compatible(self, url: str, *, api_key: str | None, payload: dict[str, Any]) -> dict[str, Any]:
         headers = {
