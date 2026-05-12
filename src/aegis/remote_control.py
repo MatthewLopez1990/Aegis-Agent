@@ -21,6 +21,7 @@ DEFAULT_PAIRING_TTL_SECONDS = 600
 MIN_PAIRING_TTL_SECONDS = 60
 MAX_PAIRING_TTL_SECONDS = 3600
 DEFAULT_ALLOWED_TASK_ACTIONS = ("status", "events", "resume", "pause", "cancel")
+MAX_REMOTE_DIRECTORY_TASKS = 25
 REMOTE_CONTROL_RELAY_REQUIRED_CONTROLS = (
     "explicit_operator_enablement",
     "brokered_relay_auth",
@@ -123,6 +124,7 @@ class RemoteControlPairingRegistry:
             "active_relay_action_proxy_count": relay_action_count,
             "pairings": pairings,
             "control_surface": [
+                "scoped task directory",
                 "remote task status",
                 "remote task events",
                 "remote task resume",
@@ -133,7 +135,6 @@ class RemoteControlPairingRegistry:
             ],
             "blocked_until_relay": [
                 "mobile_push_delivery",
-                "cloud_session_directory",
             ],
             "relay_preflight": self.relay_preflight(),
         }
@@ -156,7 +157,7 @@ class RemoteControlPairingRegistry:
             "relay_target": relay_target,
             "relay_url_redacted": bool(relay_url),
             "mobile_push_delivery": "blocked",
-            "cloud_session_directory": "blocked",
+            "cloud_session_directory": "scoped_local_directory_available",
             "token_capture_supported": False,
             "token_captured": False,
             "pairing_token_relayed": False,
@@ -170,11 +171,13 @@ class RemoteControlPairingRegistry:
                 "local_revocation",
                 "approved_relay_revocation_propagation",
                 "approved_relay_action_pull",
+                "scoped_remote_directory",
             ],
             "blockers": blockers,
             "verification_gates": list(REMOTE_CONTROL_RELAY_VERIFICATION_GATES),
             "allowed_local_endpoints": [
                 "GET /remote-control/status",
+                "GET /remote-control/directory",
                 "POST /remote-control/pair",
                 "POST /remote-control/revoke",
                 "GET /remote-control/tasks/:id",
@@ -184,7 +187,7 @@ class RemoteControlPairingRegistry:
             "next_steps": [
                 "Register an active pairing with an allowlisted relay using a brokered credential handle.",
                 "Preserve local pairing scope, expiry, revocation, host checks, and audit receipts through relayed actions.",
-                "Add mobile push delivery and cloud directory tests before broad off-device delivery.",
+                "Add mobile push delivery tests before broad off-device delivery.",
             ],
         }
 
@@ -291,7 +294,6 @@ class RemoteControlPairingRegistry:
             ],
             "remaining_controls": [
                 "mobile_push_delivery_approval",
-                "cloud_session_directory",
             ],
         }
 
@@ -454,6 +456,13 @@ class RemoteControlPairingRegistry:
                 return public
             return None
         return None
+
+    def public_pairing(self, pairing_id: str, *, now: datetime | None = None) -> dict[str, Any]:
+        self._load()
+        pairing = self._pairings.get(pairing_id)
+        if pairing is None:
+            raise KeyError(pairing_id)
+        return self._public_pairing(pairing, now=_utc_now(now))
 
     def authorize_action(
         self,
@@ -640,6 +649,123 @@ class RemoteControlPairingRegistry:
         }
 
 
+def build_remote_control_directory(
+    pairing: dict[str, Any],
+    *,
+    store: Any,
+    limit: int = 10,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    checked_at = _utc_now(now)
+    task_limit = _clamp_directory_limit(limit)
+    scope = _remote_directory_scope(pairing)
+    if pairing.get("status") != "active":
+        raise ValueError("remote-control directory requires an active pairing")
+    rows = _scoped_directory_task_rows(pairing, store=store, limit=task_limit)
+    tasks = [_remote_directory_task(row, pairing) for row in rows]
+    return {
+        "status": "remote_directory_available",
+        "mode": "scoped_remote_directory",
+        "checked_at": checked_at.isoformat(),
+        "pairing": pairing,
+        "scope": scope,
+        "task_count": len(tasks),
+        "task_limit": task_limit,
+        "tasks": tasks,
+        "broad_task_listing": False,
+        "pairing_token_relayed": False,
+        "raw_secret_values_included": False,
+        "user_request_included": False,
+        "plan_receipt_included": False,
+        "directory_controls": [
+            "active_pairing_required",
+            "task_or_session_scope_required_for_task_listing",
+            "sanitized_task_metadata_only",
+            "no_user_request_plan_or_receipt",
+        ],
+    }
+
+
+def _clamp_directory_limit(limit: int) -> int:
+    return max(1, min(int(limit), MAX_REMOTE_DIRECTORY_TASKS))
+
+
+def _remote_directory_scope(pairing: dict[str, Any]) -> dict[str, Any]:
+    task_id = _optional_clean_string(pairing.get("task_id"))
+    session_id = _optional_clean_string(pairing.get("session_id"))
+    if task_id:
+        return {
+            "type": "task",
+            "task_id": task_id,
+            "session_id": session_id,
+            "task_listing": "single_task",
+        }
+    if session_id:
+        return {
+            "type": "session",
+            "task_id": None,
+            "session_id": session_id,
+            "task_listing": "session_tasks",
+        }
+    return {
+        "type": "pairing",
+        "task_id": None,
+        "session_id": None,
+        "task_listing": "unavailable_without_task_or_session_scope",
+    }
+
+
+def _scoped_directory_task_rows(pairing: dict[str, Any], *, store: Any, limit: int) -> list[dict[str, Any]]:
+    task_id = _optional_clean_string(pairing.get("task_id"))
+    if task_id:
+        task = store.get_task(task_id)
+        return [task] if task else []
+    session_id = _optional_clean_string(pairing.get("session_id"))
+    if session_id:
+        return store.list_tasks(limit=limit, session_id=session_id)
+    return []
+
+
+def _remote_directory_task(row: dict[str, Any], pairing: dict[str, Any]) -> dict[str, Any]:
+    task_id = str(row.get("id") or "")
+    allowed_actions = _directory_allowed_actions(pairing, task_id=task_id)
+    return {
+        "id": task_id,
+        "status": str(row.get("status") or "unknown"),
+        "risk_level": str(row.get("risk_level") or "unknown"),
+        "session_id": _optional_clean_string(row.get("session_id")),
+        "created_at": str(row.get("created_at") or ""),
+        "updated_at": str(row.get("updated_at") or ""),
+        "allowed_actions": allowed_actions,
+        "links": _remote_directory_links(task_id, allowed_actions),
+        "metadata_only": True,
+    }
+
+
+def _directory_allowed_actions(pairing: dict[str, Any], *, task_id: str) -> list[str]:
+    scoped_task = _optional_clean_string(pairing.get("task_id"))
+    if scoped_task and scoped_task != task_id:
+        return []
+    allowed = [
+        action
+        for action in DEFAULT_ALLOWED_TASK_ACTIONS
+        if action in set(pairing.get("allowed_actions") or ())
+    ]
+    return allowed
+
+
+def _remote_directory_links(task_id: str, allowed_actions: list[str]) -> dict[str, str]:
+    links: dict[str, str] = {}
+    if "status" in allowed_actions:
+        links["status"] = f"/remote-control/tasks/{task_id}"
+    if "events" in allowed_actions:
+        links["events"] = f"/remote-control/tasks/{task_id}/events"
+    for action in ("resume", "pause", "cancel"):
+        if action in allowed_actions:
+            links[action] = f"/remote-control/tasks/{task_id}/{action}"
+    return links
+
+
 def _clamp_ttl(ttl_seconds: int | None) -> int:
     if ttl_seconds is None:
         return DEFAULT_PAIRING_TTL_SECONDS
@@ -756,6 +882,7 @@ def _local_remote_control_endpoints(*, host: str = "127.0.0.1", port: int = 8765
     base = f"http://{host}:{port}"
     return {
         "status": f"{base}/remote-control/status",
+        "directory": f"{base}/remote-control/directory",
         "relay": f"{base}/remote-control/relay",
         "pair": f"{base}/remote-control/pair",
         "revoke": f"{base}/remote-control/revoke",

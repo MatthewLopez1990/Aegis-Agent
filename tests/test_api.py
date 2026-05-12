@@ -354,6 +354,9 @@ class ApiServerSecurityTests(unittest.TestCase):
                 with self.assertRaises(HTTPError) as remote_relay_error:
                     _json_get(port, "/remote-control/relay")
                 self.assertEqual(remote_relay_error.exception.code, 403)
+                with self.assertRaises(HTTPError) as remote_directory_error:
+                    _json_get(port, "/remote-control/directory")
+                self.assertEqual(remote_directory_error.exception.code, 403)
 
                 token = _json_get(port, "/auth")["token"]
                 remote_status_initial = _json_get(port, "/remote-control/status", token=token)
@@ -513,6 +516,12 @@ class ApiServerSecurityTests(unittest.TestCase):
                 )
                 remote_token = str(remote_pair["token"])
                 remote_status_paired = _json_get(port, "/remote-control/status", remote_token=remote_token)
+                remote_directory = _json_get(port, "/remote-control/directory?limit=5", remote_token=remote_token)
+                local_remote_directory = _json_get(
+                    port,
+                    f"/remote-control/directory?pairing_id={remote_pair['pairing']['id']}&limit=5",
+                    token=token,
+                )
                 remote_task_status = _json_get(port, f"/remote-control/tasks/{remote_control_task['id']}", remote_token=remote_token)
                 remote_task_events = _json_get(port, f"/remote-control/tasks/{remote_control_task['id']}/events", remote_token=remote_token)
 
@@ -1019,6 +1028,14 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(remote_pair["pairing"]["allowed_actions"], ["cancel", "events", "pause", "status"])
                 self.assertNotIn(remote_token, json.dumps(remote_pair["pairing"], sort_keys=True))
                 self.assertEqual(remote_status_paired["status"], "remote_pairing_active")
+                self.assertEqual(remote_directory["status"], "remote_directory_available")
+                self.assertEqual(remote_directory["scope"]["type"], "task")
+                self.assertEqual(remote_directory["tasks"][0]["id"], remote_control_task["id"])
+                self.assertEqual(remote_directory["tasks"][0]["links"]["status"], f"/remote-control/tasks/{remote_control_task['id']}")
+                self.assertFalse(remote_directory["user_request_included"])
+                self.assertFalse(remote_directory["plan_receipt_included"])
+                self.assertEqual(local_remote_directory["tasks"][0]["id"], remote_control_task["id"])
+                self.assertNotIn("send message remote control", json.dumps(remote_directory, sort_keys=True))
                 self.assertEqual(remote_task_status["id"], remote_control_task["id"])
                 self.assertEqual(remote_task_events["task_id"], remote_control_task["id"])
                 self.assertEqual(relay_proxy_registration["status"], "relay_registered")

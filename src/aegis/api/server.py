@@ -22,7 +22,7 @@ from aegis.memory.models import MemoryType
 from aegis.migration.openclaw import preview_hermes_memory_import, preview_openclaw_memory_import
 from aegis.product.capabilities import build_product_dashboard
 from aegis.research.harness import ResearchHarness
-from aegis.remote_control import REMOTE_CONTROL_TOKEN_HEADER, RemoteControlPairingRegistry
+from aegis.remote_control import REMOTE_CONTROL_TOKEN_HEADER, RemoteControlPairingRegistry, build_remote_control_directory
 from aegis.scheduler.worker import ScheduleWorker
 from aegis.security.policy_engine import PolicyDecision, PolicyRequest
 from aegis.security.policy_profile import activate_due_policy_rollouts, apply_policy_bundle, apply_policy_bundle_text, diff_policy_bundle, diff_policy_bundle_text, import_policy_bundle_text, list_policy_bundles, list_policy_promotions, list_policy_rollouts, policy_profile_to_dict, promote_policy_bundle, rollback_policy_bundle, schedule_policy_bundle
@@ -171,6 +171,23 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     self._json({"status": "remote_pairing_active", "pairing": auth["pairing"], "token_header": REMOTE_CONTROL_TOKEN_HEADER})
                 else:
                     self._json(remote_control.status())
+                return
+            if path == "/remote-control/directory":
+                auth = self._authorize_remote_control_status()
+                if auth.get("auth_kind") == "remote_control":
+                    pairing = auth["pairing"]
+                else:
+                    pairing_id = query.get("pairing_id", [None])[0]
+                    if not pairing_id:
+                        raise ValueError("pairing_id is required for local remote-control directory reads")
+                    pairing = remote_control.public_pairing(pairing_id)
+                self._json(
+                    build_remote_control_directory(
+                        pairing,
+                        store=orchestrator.store,
+                        limit=_limit(query, default=10),
+                    )
+                )
                 return
             if path == "/remote-control/relay":
                 self._authorize_remote_control_status()

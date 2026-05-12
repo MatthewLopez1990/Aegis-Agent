@@ -282,6 +282,18 @@ class CliTests(unittest.TestCase):
                     ]
                 )
             )
+            directory = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "remote-control",
+                        "directory",
+                        "--pairing-id",
+                        pair["pairing"]["id"],
+                    ]
+                )
+            )
             revoked = dispatch(parser.parse_args(["--data-dir", str(data_dir), "remote-control", "revoke", pair["pairing"]["id"]]))
 
             self.assertEqual(status["relay_preflight"]["status"], "relay_blocked_preflight")
@@ -309,6 +321,12 @@ class CliTests(unittest.TestCase):
             self.assertEqual(relay_action["result"]["status"], "paused")
             self.assertFalse(relay_action["pairing_token_relayed"])
             self.assertFalse(relay_action["relay_auth_token_captured"])
+            self.assertEqual(directory["status"], "remote_directory_available")
+            self.assertEqual(directory["scope"]["type"], "task")
+            self.assertEqual(directory["tasks"][0]["id"], relay_task["id"])
+            self.assertIn("pause", directory["tasks"][0]["links"])
+            self.assertFalse(directory["user_request_included"])
+            self.assertNotIn("send message relay controlled", json.dumps(directory, sort_keys=True))
             self.assertEqual(revoked["pairing"]["status"], "revoked")
             self.assertNotIn(pair["token"], (data_dir / "remote_control_pairings.json").read_text(encoding="utf-8"))
             self.assertNotIn("relay-raw-secret", (data_dir / "remote_control_pairings.json").read_text(encoding="utf-8"))

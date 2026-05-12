@@ -24,7 +24,7 @@ from aegis.hooks.manager import HOOK_EVENTS
 from aegis.memory.models import MemoryType
 from aegis.migration.openclaw import inspect_hermes_home, inspect_openclaw_home, preview_hermes_memory_import, preview_openclaw_memory_import
 from aegis.product.capabilities import build_product_dashboard
-from aegis.remote_control import RemoteControlPairingRegistry
+from aegis.remote_control import RemoteControlPairingRegistry, build_remote_control_directory
 from aegis.research.harness import ResearchHarness
 from aegis.security.policy_engine import PolicyRequest
 from aegis.security.policy_profile import activate_due_policy_rollouts, apply_policy_bundle, diff_policy_bundle, import_policy_bundle, list_policy_bundles, list_policy_promotions, list_policy_rollouts, policy_profile_to_dict, promote_policy_bundle, rollback_policy_bundle, schedule_policy_bundle
@@ -200,7 +200,7 @@ BROWSER_COMMANDS = ("session", "sessions", "close", "navigate", "extract", "insp
 MCP_COMMANDS = ("list", "register", "auth", "call")
 HOOK_COMMANDS = ("list", "add", "enable", "disable", "remove", "run")
 AGENTS_COMMANDS = ("status", "delegate")
-REMOTE_CONTROL_COMMANDS = ("pair", "revoke", "relay", "relay-pull", "relay-action")
+REMOTE_CONTROL_COMMANDS = ("pair", "directory", "revoke", "relay", "relay-pull", "relay-action")
 SESSION_COMMANDS = ("new", "open", "rename", "set-model", "set-personality", "activate", "archive", "pause", "append", "history", "tasks", "compact")
 TASKS_COMMANDS = ("all", "session")
 SECURITY_COMMANDS = (
@@ -2362,8 +2362,42 @@ class AegisTui(cmd.Cmd):
         self.do_rollback(arg)
 
     def do_remote_control(self, arg: str) -> None:
-        """remote_control [name|pair|revoke|relay|relay-pull|relay-action] -- manage guarded remote-control readiness."""
+        """remote_control [name|pair|directory|revoke|relay|relay-pull|relay-action] -- manage guarded remote-control readiness."""
         parts = shlex.split(arg) if arg else []
+        if parts and parts[0] == "directory":
+            pairing_id = _option_value(parts, "--pairing-id")
+            if pairing_id is None and len(parts) > 1 and not parts[1].startswith("--"):
+                pairing_id = parts[1]
+            limit = _optional_int(_option_value(parts, "--limit")) or 10
+            if not pairing_id:
+                print("usage: remote-control directory --pairing-id <id> [--limit N]")
+                return
+            registry = RemoteControlPairingRegistry(
+                self.orchestrator.config.data_dir / "remote_control_pairings.json"
+            )
+            try:
+                pairing = registry.public_pairing(pairing_id)
+                result = build_remote_control_directory(
+                    pairing,
+                    store=self.orchestrator.store,
+                    limit=limit,
+                )
+            except (KeyError, ValueError) as exc:
+                print(f"remote-control directory error: {exc}")
+                return
+            self.orchestrator.audit_logger.append(
+                "remote_control.directory_viewed",
+                {
+                    "pairing_id": pairing["id"],
+                    "scope": result["scope"]["type"],
+                    "task_count": result["task_count"],
+                    "pairing_token_relayed": False,
+                    "raw_secret_values_included": False,
+                    "source": "tui",
+                },
+            )
+            _print_json(result)
+            return
         if parts and parts[0] == "relay-pull":
             pairing_id = _option_value(parts, "--pairing-id")
             relay_secret = _option_value(parts, "--relay-auth-secret")
@@ -2656,7 +2690,7 @@ class AegisTui(cmd.Cmd):
                     "Pairing endpoint: POST /remote-control/pair returns one token for X-Aegis-Remote-Token.",
                     "Relay: remote-control relay can register an approved pairing; relay-pull polls queued relay actions; relay-action proxies one scoped task action through the registered bearer.",
                     "Security posture: host/origin checks still apply; no subscription token capture; pairing creation needs the local API token.",
-                    "Remaining live gap: mobile push delivery and cloud session directory.",
+                    "Remaining live gap: mobile push delivery and broad cloud relay delivery.",
                 ],
                 width,
             )
@@ -5455,16 +5489,19 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("plugin", "update-marketplace"): ("--catalog-path", "--enable", "--disable", "--force"),
     ("curator", "run"): ("--dry-run",),
     ("remote-control", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
+    ("remote-control", "directory"): ("--pairing-id", "--limit"),
     ("remote-control", "revoke"): ("--relay-auth-secret", "--approved"),
     ("remote-control", "relay"): ("--relay-url", "--pairing-id", "--relay-auth-secret", "--approved"),
     ("remote-control", "relay-pull"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit", "--dry-run"),
     ("remote-control", "relay-action"): ("--pairing-id", "--task-id", "--action", "--relay-auth-secret", "--session-id", "--reason"),
     ("remote_control", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
+    ("remote_control", "directory"): ("--pairing-id", "--limit"),
     ("remote_control", "revoke"): ("--relay-auth-secret", "--approved"),
     ("remote_control", "relay"): ("--relay-url", "--pairing-id", "--relay-auth-secret", "--approved"),
     ("remote_control", "relay-pull"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit", "--dry-run"),
     ("remote_control", "relay-action"): ("--pairing-id", "--task-id", "--action", "--relay-auth-secret", "--session-id", "--reason"),
     ("rc", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
+    ("rc", "directory"): ("--pairing-id", "--limit"),
     ("rc", "revoke"): ("--relay-auth-secret", "--approved"),
     ("rc", "relay"): ("--relay-url", "--pairing-id", "--relay-auth-secret", "--approved"),
     ("rc", "relay-pull"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit", "--dry-run"),

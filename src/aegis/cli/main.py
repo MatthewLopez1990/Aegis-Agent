@@ -29,7 +29,7 @@ from aegis.models.registry import ModelRegistry
 from aegis.personality.context import ContextFileLoader, PERSONALITY_NAMES
 from aegis.plugins.manager import PluginManager
 from aegis.product.capabilities import build_product_dashboard
-from aegis.remote_control import RemoteControlPairingRegistry
+from aegis.remote_control import RemoteControlPairingRegistry, build_remote_control_directory
 from aegis.research.harness import ResearchHarness
 from aegis.scheduler.manager import ScheduleManager
 from aegis.security.policy_profile import activate_due_policy_rollouts, apply_policy_bundle, diff_policy_bundle, export_policy_bundle, import_policy_bundle, list_policy_bundles, list_policy_promotions, list_policy_rollouts, promote_policy_bundle, rollback_policy_bundle, schedule_policy_bundle
@@ -436,6 +436,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     remote_control_pair.add_argument("--host", default="127.0.0.1", help="Local API host to render in endpoint hints")
     remote_control_pair.add_argument("--port", type=int, default=8765, help="Local API port to render in endpoint hints")
+    remote_control_directory = remote_control_sub.add_parser("directory", help="Show the sanitized task directory for one active pairing")
+    remote_control_directory.add_argument("--pairing-id", required=True, help="Active pairing id")
+    remote_control_directory.add_argument("--limit", type=int, default=10, help="Maximum session-scoped tasks to show")
     remote_control_revoke = remote_control_sub.add_parser("revoke", help="Revoke a local remote-control pairing")
     remote_control_revoke.add_argument("pairing_id")
     remote_control_revoke.add_argument("--relay-auth-secret", help="Brokered secret name used to propagate relay revocation")
@@ -1205,6 +1208,26 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                     "expires_at": result["pairing"]["expires_at"],
                     "token_header": result["token_header"],
                     "token_captured": False,
+                    "source": "cli",
+                },
+            )
+            return result
+        if args.remote_control_command == "directory":
+            orchestrator = build_orchestrator(data_dir=config.data_dir)
+            pairing = registry.public_pairing(args.pairing_id)
+            result = build_remote_control_directory(
+                pairing,
+                store=orchestrator.store,
+                limit=args.limit,
+            )
+            orchestrator.audit_logger.append(
+                "remote_control.directory_viewed",
+                {
+                    "pairing_id": pairing["id"],
+                    "scope": result["scope"]["type"],
+                    "task_count": result["task_count"],
+                    "pairing_token_relayed": False,
+                    "raw_secret_values_included": False,
                     "source": "cli",
                 },
             )

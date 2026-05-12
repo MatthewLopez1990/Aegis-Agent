@@ -272,7 +272,7 @@ const refresh = async () => {
       meta: `${x.status} · expires ${x.expires_at}`,
       tone: x.status === "active" ? "ready" : "attention",
       actions: x.status === "active"
-        ? `<button type="button" class="secondary" data-remote-control-revoke="${escapeHtml(x.id)}">Revoke</button>`
+        ? `<button type="button" class="secondary" data-remote-control-directory="${escapeHtml(x.id)}">Directory</button><button type="button" class="secondary" data-remote-control-revoke="${escapeHtml(x.id)}">Revoke</button>`
         : "",
     }), "No remote-control pairings");
     setFeatureGrid("security-controls", dashboard.security_controls, (x) => ({
@@ -2413,7 +2413,19 @@ document.getElementById("remote-control-relay-pull").addEventListener("click", a
   await refresh();
 });
 
+document.getElementById("remote-control-directory").addEventListener("click", async () => {
+  const pairingId = document.getElementById("remote-control-relay-pairing-id").value.trim();
+  const result = await api(`/remote-control/directory?pairing_id=${encodeURIComponent(pairingId)}&limit=12`);
+  renderRemoteControlOutput(result);
+});
+
 document.getElementById("remote-control-pairings").addEventListener("click", async (event) => {
+  const directoryId = event.target.dataset.remoteControlDirectory;
+  if (directoryId) {
+    const result = await api(`/remote-control/directory?pairing_id=${encodeURIComponent(directoryId)}&limit=12`);
+    renderRemoteControlOutput(result);
+    return;
+  }
   const pairingId = event.target.dataset.remoteControlRevoke;
   if (!pairingId) return;
   const result = await api("/remote-control/revoke", {

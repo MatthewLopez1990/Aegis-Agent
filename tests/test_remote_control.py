@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from aegis.remote_control import RemoteControlPairingRegistry
+from aegis.remote_control import RemoteControlPairingRegistry, build_remote_control_directory
 
 
 class RemoteControlPairingTests(unittest.TestCase):
@@ -38,6 +38,49 @@ class RemoteControlPairingTests(unittest.TestCase):
         self.assertFalse(status["relay_preflight"]["outbound_relay_enabled"])
         self.assertFalse(status["relay_preflight"]["pairing_token_relayed"])
         self.assertNotIn(created["token"], str(status))
+
+    def test_scoped_directory_sanitizes_task_metadata(self) -> None:
+        registry = RemoteControlPairingRegistry()
+        now = datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
+        created = registry.create_pairing(label="phone", session_id="session-1", allowed_actions=("status", "events", "pause"), now=now)
+
+        class FakeStore:
+            def list_tasks(self, limit: int = 20, *, session_id: str | None = None):
+                self.limit = limit
+                self.session_id = session_id
+                return [
+                    {
+                        "id": "task-1",
+                        "status": "paused",
+                        "risk_level": "medium",
+                        "session_id": "session-1",
+                        "created_at": "2026-05-12T12:00:00+00:00",
+                        "updated_at": "2026-05-12T12:01:00+00:00",
+                        "user_request": "token=secret should not be exposed",
+                        "plan_json": '[{"secret":"hidden"}]',
+                        "receipt_json": '{"token":"hidden"}',
+                    }
+                ]
+
+        store = FakeStore()
+        directory = build_remote_control_directory(created["pairing"], store=store, limit=99, now=now)
+        rendered = json.dumps(directory, sort_keys=True)
+
+        self.assertEqual(directory["status"], "remote_directory_available")
+        self.assertEqual(directory["scope"]["type"], "session")
+        self.assertEqual(directory["task_limit"], 25)
+        self.assertEqual(store.session_id, "session-1")
+        self.assertEqual(directory["tasks"][0]["id"], "task-1")
+        self.assertEqual(directory["tasks"][0]["links"]["status"], "/remote-control/tasks/task-1")
+        self.assertEqual(directory["tasks"][0]["links"]["events"], "/remote-control/tasks/task-1/events")
+        self.assertEqual(directory["tasks"][0]["links"]["pause"], "/remote-control/tasks/task-1/pause")
+        self.assertFalse(directory["broad_task_listing"])
+        self.assertFalse(directory["raw_secret_values_included"])
+        self.assertFalse(directory["user_request_included"])
+        self.assertFalse(directory["plan_receipt_included"])
+        self.assertNotIn(created["token"], rendered)
+        self.assertNotIn("token=secret", rendered)
+        self.assertNotIn("hidden", rendered)
 
     def test_relay_preflight_redacts_url_secrets_and_blocks_transport(self) -> None:
         registry = RemoteControlPairingRegistry()
