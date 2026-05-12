@@ -71,9 +71,9 @@ Commands:
 - `models auth doctor`
 - `models auth logout <provider>`
 - `provider`, `usage`, `insights [days]`
-- `tools`, `allowed-tools`, `bashes`
+- `tools [list|run|enable|disable]`, `allowed-tools`, `bashes`
 - `toolsets`
-- `skills [hub query|disable skill_id|enable skill_id]`
+- `skills [hub|search|browse query|inspect skill_id|install skill_id|disable skill_id|enable skill_id]`
 - Enabled installed skills are also exposed as dynamic slash commands such as `/aegis-project-summary`; pass a JSON object for structured inputs.
 - Configured `[quick_commands.<name>]` entries expose local slash shortcuts. `type = "alias"` forwards to another slash command, while `type = "exec"` runs the configured command through the governed shell tool and still requires `--approved`.
 - `curator [status|run [--dry-run]|pin <skill_id>|unpin <skill_id>|archive <skill_id>|restore <skill_id>|pause|resume]`
@@ -116,7 +116,7 @@ Commands:
 - `evaluation trends [--limit N]`
 - `evaluation delta [--baseline-report-id id --candidate-report-id id] [--scenario name]`
 - `evaluation readiness [--baseline-report-id id --candidate-report-id id] [--scenario name] [--reviewer name] [--limit N]`
-- `browser session|sessions|close [session_id]|navigate <url>`
+- `browser status|connect|disconnect|session|sessions|close [session_id]|navigate <url>`
 - `browser extract|inspect|table [selector]|screenshot|render|click <selector> [--approval-id id]|fill <json> [--approval-id id]`
 - `boards`
 - `backends`, `sandbox`

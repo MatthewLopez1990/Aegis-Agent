@@ -191,16 +191,16 @@ MEMORY_COMMANDS = ("search", "health", "session-preview", "session-commit", "cre
 MIGRATE_COMMANDS = ("openclaw", "hermes", "openclaw-memory-preview", "hermes-memory-preview", "openclaw-memory-commit", "hermes-memory-commit")
 MODEL_COMMANDS = ("list", "route", "alias", "fallbacks", "usage", "auth", "providers")
 MODEL_AUTH_COMMANDS = ("login", "logout", "methods", "targets", "doctor")
-TOOLS_COMMANDS = ("run",)
-SKILLS_COMMANDS = ("hub", "disable", "enable")
+TOOLS_COMMANDS = ("list", "run", "disable", "enable")
+SKILLS_COMMANDS = ("hub", "search", "browse", "inspect", "install", "disable", "enable")
 PLUGIN_COMMANDS = ("list", "install", "enable", "disable", "remove", "reload", "marketplace", "updates", "fetch-manifest", "fetch-bundle", "install-bundle", "install-marketplace", "update-marketplace", "prepare-update", "apply-prepared-update")
 CURATOR_COMMANDS = ("status", "run", "pin", "unpin", "archive", "restore", "pause", "resume")
 REPAIR_COMMANDS = ("readiness", "review", "approve", "reject", "candidate", "generate-candidate", "synthesis-prompt", "synthesize-candidate", "review-candidate", "apply-candidate", "rollback-candidate", "attempt")
 SCHEDULE_COMMANDS = ("create", "memory-review-digest", "memory-review-escalation", "evaluation-run", "evaluation-suite", "due", "approve", "activate", "pause", "run-due")
-BROWSER_COMMANDS = ("session", "sessions", "close", "navigate", "extract", "inspect", "table", "screenshot", "render", "click", "fill")
+BROWSER_COMMANDS = ("status", "connect", "disconnect", "session", "sessions", "close", "navigate", "extract", "inspect", "table", "screenshot", "render", "click", "fill")
 MCP_COMMANDS = ("list", "register", "auth", "call")
 HOOK_COMMANDS = ("list", "add", "enable", "disable", "remove", "run")
-AGENTS_COMMANDS = ("status", "delegate")
+AGENTS_COMMANDS = ("status", "profiles", "profile-create", "profile-disable", "delegate", "handoff", "run")
 REMOTE_CONTROL_COMMANDS = ("pair", "directory", "revoke", "relay", "relay-directory", "relay-notify", "relay-pull", "relay-action")
 SESSION_COMMANDS = ("new", "open", "rename", "set-model", "set-personality", "activate", "archive", "pause", "append", "history", "tasks", "compact")
 TASKS_COMMANDS = ("all", "session")
@@ -1017,8 +1017,10 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_tools(self, arg: str) -> None:
-        """tools [run <name> <json-params> [--approved]] -- list or run built-in tools."""
+        """tools [list|run <name> <json-params> [--approved]|enable|disable <name>] -- list or run built-in tools."""
         parts = shlex.split(arg)
+        if parts and parts[0] == "list":
+            parts = []
         if parts and parts[0] == "run":
             if len(parts) < 3:
                 print("usage: tools run <name> <json-params> [--approved]")
@@ -1034,6 +1036,26 @@ class AegisTui(cmd.Cmd):
                 return
             _print_json(self.orchestrator.tools.execute(parts[1], params, approved=approved))
             return
+        if parts and parts[0] in {"enable", "disable"}:
+            if len(parts) < 2:
+                print(f"usage: tools {parts[0]} <tool_name>")
+                return
+            tool_name = parts[1]
+            tools = [*self.orchestrator.tool_catalog.list(), *self.orchestrator.mcp.virtual_tool_specs()]
+            tool = next((row for row in tools if row.get("name") == tool_name), None)
+            _print_json(
+                {
+                    "status": "policy_owned_tool_preference",
+                    "tool": tool_name,
+                    "known_tool": tool is not None,
+                    "requested_enabled": parts[0] == "enable",
+                    "persisted": False,
+                    "raw_secret_values_included": False,
+                    "detail": "Tool availability is governed by policy profiles, connector scope, and approval gates; this command reports the requested preference without mutating policy.",
+                    "next_actions": ["allowed-tools", "security profile", "tools list"],
+                }
+            )
+            return
         rows = [*self.orchestrator.tool_catalog.list(), *self.orchestrator.mcp.virtual_tool_specs()]
         print(
             _table(
@@ -1048,11 +1070,47 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_skills(self, arg: str) -> None:
-        """skills [hub query|disable skill_id|enable skill_id] -- manage governed skills or inspect the read-only hub."""
+        """skills [hub|search|browse query|inspect skill_id|install skill_id|disable skill_id|enable skill_id] -- manage governed skills or inspect the read-only hub."""
         parts = shlex.split(arg)
-        if parts and parts[0] == "hub":
+        if parts and parts[0] in {"hub", "search", "browse"}:
             query = " ".join(parts[1:])
             _print_json(self.orchestrator.skill_hub.search(query))
+            return
+        if parts and parts[0] == "inspect":
+            if len(parts) < 2:
+                print("usage: skills inspect <skill_id>")
+                return
+            try:
+                manifest, enabled = self.orchestrator.skills.get(parts[1])
+                _print_json(
+                    {
+                        "status": "installed_skill",
+                        "skill_id": manifest.id,
+                        "enabled": enabled,
+                        "name": manifest.name,
+                        "risk_level": manifest.risk_level.value,
+                        "approval_required": manifest.approval_required,
+                        "permissions": manifest.permissions,
+                        "connectors": manifest.connectors,
+                        "raw_secret_values_included": False,
+                    }
+                )
+            except KeyError:
+                _print_json({**self.orchestrator.skill_hub.search(parts[1]), "status": "virtual_catalog_result"})
+            return
+        if parts and parts[0] == "install":
+            if len(parts) < 2:
+                print("usage: skills install <skill_id>")
+                return
+            _print_json(
+                {
+                    "status": "governed_install_required",
+                    "skill_id": parts[1],
+                    "raw_secret_values_included": False,
+                    "detail": "Remote or local skill installation must flow through signed manifests, governed plugins, or an explicit local enable path.",
+                    "next_actions": [f"skills inspect {parts[1]}", "plugins install <plugin.json>", f"skills enable {parts[1]}"],
+                }
+            )
             return
         if parts and parts[0] in {"disable", "enable"}:
             if len(parts) < 2:
@@ -1851,12 +1909,37 @@ class AegisTui(cmd.Cmd):
             print(f"evaluation review failed: {exc}")
 
     def do_browser(self, arg: str) -> None:
-        """browser session|sessions|close|navigate|extract|inspect|table|screenshot|render|click|fill -- operate the governed browser sandbox."""
+        """browser status|connect|disconnect|session|sessions|close|navigate|extract|inspect|table|screenshot|render|click|fill -- operate the governed browser sandbox."""
         raw_parts = arg.strip().split(maxsplit=1)
         raw_command = raw_parts[0] if raw_parts else "session"
         parts = [raw_command, raw_parts[1]] if raw_command == "fill" and len(raw_parts) > 1 else shlex.split(arg)
         command = parts[0] if parts else "session"
         try:
+            if command == "status":
+                _print_json(
+                    {
+                        "status": "local_browser_sandbox_ready",
+                        "active_session_id": self.browser_session_id,
+                        "sessions": self.orchestrator.browser.list_sessions(),
+                        "live_browser_automation": "blocked_until_explicit_adapter",
+                        "raw_secret_values_included": False,
+                    }
+                )
+                return
+            if command == "connect":
+                session = self.orchestrator.browser.create_session(label="TUI browser")
+                self.browser_session_id = session["id"]
+                _print_json(
+                    {
+                        "status": "local_browser_session_connected",
+                        "session": session,
+                        "live_browser_automation": "blocked_until_explicit_adapter",
+                        "raw_secret_values_included": False,
+                    }
+                )
+                return
+            if command == "disconnect":
+                command = "close"
             if command == "session":
                 session = self.orchestrator.browser.create_session(label="TUI browser")
                 self.browser_session_id = session["id"]
@@ -3281,7 +3364,7 @@ class AegisTui(cmd.Cmd):
         self.do_models("route alias/fast")
 
     def do_agents(self, arg: str) -> None:
-        """agents [status|profiles|profile-create|delegate|handoff|run] -- manage subagent delegations."""
+        """agents [status|profiles|profile-create|profile-disable|delegate|handoff|run] -- manage subagent delegations."""
         parts = shlex.split(arg)
         if parts and parts[0] == "profiles":
             _print_json({"profiles": self.orchestrator.kanban.list_subagent_profiles(), "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
@@ -5322,12 +5405,12 @@ def _command_reference() -> str:
             "commands|keybindings   Slash command and terminal keybinding surfaces",
             "provider|usage         Model provider and usage aliases",
             "gquota [model]         Google Gemini Code Assist quota metadata",
-            "models auth methods|targets|login|logout <provider>",
+            "models auth methods|targets|doctor|login|logout <provider>",
             "tools                  Governed tool catalog",
             "toolsets               Group tools by permission and risk",
             "allowed-tools|bashes   Policy-visible tools and shell posture",
-            "tools run <name> <json> Run a governed tool",
-            "skills [hub query]     Governed skills and virtual Skill Hub",
+            "tools list|run|enable|disable  Governed tool catalog and policy-owned preferences",
+            "skills hub|search|browse|inspect|install  Governed skills and virtual Skill Hub",
             "curator status|run|pin|archive  Local authored skill maintenance",
             "plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-bundle|install-marketplace|update-marketplace|prepare-update|apply-prepared-update",
             "plugin|reload|reload-plugins|reload-skills|reload_skills  Extension inventory aliases",
@@ -5352,7 +5435,7 @@ def _command_reference() -> str:
             "schedule run-due",
             "cron                   Alias for scheduled automation",
             "voice                  Guarded voice-mode readiness",
-            "browser session|sessions|close|navigate <url>",
+            "browser status|connect|disconnect|session|sessions|close|navigate <url>",
             "browser extract|inspect|screenshot|render|click <selector>|fill <json>",
             "boards                 Work boards and cards",
             "backends|sandbox       Execution backend sandbox posture",
@@ -5446,9 +5529,9 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("statusbar|statusline|sb|theme|skin|color|verbose", "UI preference and status metadata"),
             ("commands|keybindings", "slash command and terminal keybinding surfaces"),
             ("allowed-tools|bashes", "policy-visible tools and shell posture"),
-            ("tools run <name> <json>", "safe tool execution"),
+            ("tools list|run|enable|disable", "safe tool execution and policy-owned preferences"),
             ("toolsets", "tool catalog grouped by permission and risk"),
-            ("skills [hub query]", "governed skill hub"),
+            ("skills hub|search|browse|inspect|install", "governed skill hub"),
             ("curator status|run|pin|archive", "local authored skill maintenance"),
             ("plugin|plugins|reload|reload-plugins|reload-skills", "extension inventory and reload readiness"),
             ("reload_skills", "extension inventory and reload readiness"),
@@ -5465,7 +5548,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("web-setup", "local web control-plane setup"),
             ("connectors|channels|platforms", "integration surfaces"),
             ("pr_comments", "pull request comment integration readiness"),
-            ("browser session|render", "sandboxed browser work"),
+            ("browser status|connect|disconnect|render", "sandboxed browser work"),
             ("boards|backends|sandbox", "work and execution planes"),
             ("voice|terminal-setup|vim|mouse", "optional interaction and terminal readiness"),
             ("footer|busy|indicator|details|redraw", "runtime UI indicators and safe details"),
@@ -5802,7 +5885,7 @@ def _next_command_hint(command: str) -> str:
         "capabilities": "/connectors",
         "connectors": "/channels",
         "pr_comments": "/connectors",
-        "browser": "/browser sessions",
+        "browser": "/browser status",
         "boards": "/backends",
         "terminal-setup": "/vim",
         "mouse": "/terminal-setup",

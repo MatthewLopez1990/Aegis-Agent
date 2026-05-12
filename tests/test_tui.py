@@ -267,6 +267,10 @@ class TuiTests(unittest.TestCase):
             self.assertIn("create", tui.complete_memory("cr", "memory cr", len("memory "), len("memory cr")))
             self.assertIn("health", tui.complete_memory("he", "memory he", len("memory "), len("memory he")))
             self.assertIn("enable", tui.complete_skills("en", "skills en", len("skills "), len("skills en")))
+            self.assertIn("search", tui.complete_skills("se", "skills se", len("skills "), len("skills se")))
+            self.assertIn("browse", tui.complete_skills("br", "skills br", len("skills "), len("skills br")))
+            self.assertIn("inspect", tui.complete_skills("in", "skills in", len("skills "), len("skills in")))
+            self.assertIn("install", tui.complete_skills("in", "skills in", len("skills "), len("skills in")))
             self.assertIn("archive", tui.complete_curator("ar", "curator ar", len("curator "), len("curator ar")))
             self.assertIn("run", tui.complete_curator("ru", "curator ru", len("curator "), len("curator ru")))
             self.assertIn("fetch-manifest", tui.complete_plugins("fetch", "plugins fetch", len("plugins "), len("plugins fetch")))
@@ -296,6 +300,9 @@ class TuiTests(unittest.TestCase):
             self.assertIn("review", tui.complete_evaluation("rev", "evaluation rev", len("evaluation "), len("evaluation rev")))
             self.assertIn("delta", tui.complete_evaluation("de", "evaluation de", len("evaluation "), len("evaluation de")))
             self.assertIn("readiness", tui.complete_evaluation("rea", "evaluation rea", len("evaluation "), len("evaluation rea")))
+            self.assertIn("status", tui.complete_browser("st", "browser st", len("browser "), len("browser st")))
+            self.assertIn("connect", tui.complete_browser("con", "browser con", len("browser "), len("browser con")))
+            self.assertIn("disconnect", tui.complete_browser("dis", "browser dis", len("browser "), len("browser dis")))
             self.assertIn("inspect", tui.complete_browser("in", "browser in", len("browser "), len("browser in")))
             self.assertIn("screenshot", tui.complete_browser("sc", "browser sc", len("browser "), len("browser sc")))
             self.assertIn("relay", tui.complete_remote_control("re", "remote_control re", len("remote_control "), len("remote_control re")))
@@ -315,6 +322,14 @@ class TuiTests(unittest.TestCase):
             self.assertIn("--action", tui.completedefault("--", "/remote-control relay-action --", len("/remote-control relay-action "), len("/remote-control relay-action --")))
             self.assertIn("append", tui.complete_session("ap", "session ap", len("session "), len("session ap")))
             self.assertIn("run", tui.complete_tools("ru", "tools ru", len("tools "), len("tools ru")))
+            self.assertIn("list", tui.complete_tools("li", "tools li", len("tools "), len("tools li")))
+            self.assertIn("enable", tui.complete_tools("en", "tools en", len("tools "), len("tools en")))
+            self.assertIn("disable", tui.complete_tools("di", "tools di", len("tools "), len("tools di")))
+            self.assertIn("profiles", tui.complete_agents("pr", "agents pr", len("agents "), len("agents pr")))
+            self.assertIn("profile-create", tui.complete_agents("profile-c", "agents profile-c", len("agents "), len("agents profile-c")))
+            self.assertIn("profile-disable", tui.complete_agents("profile-d", "agents profile-d", len("agents "), len("agents profile-d")))
+            self.assertIn("handoff", tui.complete_agents("ha", "agents ha", len("agents "), len("agents ha")))
+            self.assertIn("run", tui.complete_agents("ru", "agents ru", len("agents "), len("agents ru")))
             self.assertIn("--discover", tui.completedefault("--", "/mcp register fake python3 --", len("/mcp register fake python3 "), len("/mcp register fake python3 --")))
             self.assertIn("--transport", tui.completedefault("--", "/mcp register fake python3 --", len("/mcp register fake python3 "), len("/mcp register fake python3 --")))
             self.assertIn("--no-resources", tui.completedefault("--", "/mcp register fake python3 --", len("/mcp register fake python3 "), len("/mcp register fake python3 --")))
@@ -934,6 +949,9 @@ class TuiTests(unittest.TestCase):
             )
 
             with redirect_stdout(output):
+                tui.onecmd("tools list")
+                tui.onecmd("tools disable shell")
+                tui.onecmd("tools enable shell")
                 tui.onecmd("""tools run calculator '{"expression":"2+2"}'""")
                 tui.onecmd("""tools run service_ticket_write '{"operation":"close","ticket":{"id":"INC000001"}}'""")
                 tui.onecmd("""tools run service_ticket_write '{"operation":"close","ticket":{"id":"INC000001"}}' --approved""")
@@ -951,6 +969,9 @@ class TuiTests(unittest.TestCase):
                 tui.onecmd("approvals")
 
             rendered = output.getvalue()
+            self.assertIn("policy_owned_tool_preference", rendered)
+            self.assertIn('"requested_enabled": false', rendered)
+            self.assertIn('"requested_enabled": true', rendered)
             self.assertIn('"result": 4.0', rendered)
             self.assertIn('"status": "approval_required"', rendered)
             self.assertIn('"operation": "close_ticket"', rendered)
@@ -1028,6 +1049,11 @@ class TuiTests(unittest.TestCase):
 
             with redirect_stdout(output):
                 tui.onecmd("skills hub browser")
+                tui.onecmd("skills search browser")
+                tui.onecmd("skills browse browser")
+                tui.onecmd("skills inspect aegis.project_summary")
+                tui.onecmd("skills inspect browser")
+                tui.onecmd("skills install browser")
                 tui.onecmd("skills disable aegis.project_summary")
                 tui.onecmd("skills enable aegis.project_summary")
                 tui.onecmd("skills enable aegis.workflow_candidate")
@@ -1038,6 +1064,9 @@ class TuiTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertIn('"mode": "virtual_catalog_no_code_download"', rendered)
             self.assertIn('"advertised_capacity": 5700', rendered)
+            self.assertIn('"status": "installed_skill"', rendered)
+            self.assertIn('"status": "virtual_catalog_result"', rendered)
+            self.assertIn('"status": "governed_install_required"', rendered)
             self.assertIn("Browser Research", rendered)
             self.assertIn("manifest validation", rendered)
             self.assertIn('"skill_id": "aegis.project_summary"', rendered)
@@ -1792,7 +1821,9 @@ class TuiTests(unittest.TestCase):
             output = io.StringIO()
 
             with redirect_stdout(output):
-                tui.onecmd("browser session")
+                tui.onecmd("browser status")
+                tui.onecmd("browser connect")
+                tui.onecmd("browser status")
                 with patch.object(
                     tui.orchestrator.connectors.get("http"),
                     "read",
@@ -1822,10 +1853,12 @@ class TuiTests(unittest.TestCase):
                 tui.onecmd("browser table")
                 tui.onecmd("browser screenshot")
                 tui.onecmd("browser render")
-                tui.onecmd("browser close")
+                tui.onecmd("browser disconnect")
                 tui.onecmd("browser extract")
 
             rendered = output.getvalue()
+            self.assertIn("local_browser_sandbox_ready", rendered)
+            self.assertIn("local_browser_session_connected", rendered)
             self.assertIn("approval_required", rendered)
             self.assertIn(click_approval["payload"]["session_id"][:8], rendered)
             self.assertIn("sanitized_dom_render", rendered)
