@@ -676,6 +676,30 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertFalse(pr_autofix_response["provider_writes_performed"])
             self.assertFalse(pr_autofix_response["raw_secret_values_included"])
             self.assertIn("body", pr_autofix_response["accepted"]["param_keys"])
+            review_target = root / "src" / "aegis" / "example.py"
+            review_target.parent.mkdir(parents=True, exist_ok=True)
+            review_target.write_text("before review\n", encoding="utf-8")
+            review_patch = "--- a/src/aegis/example.py\n+++ b/src/aegis/example.py\n@@ -1 +1 @@\n-before review\n+after review\n"
+            pending_pr_autofix_patch = orchestrator.tools.execute(
+                "github_pr",
+                {"operation": "autofix_apply", "autofix_plan": pr_autofix_plan, "patch": review_patch},
+            )
+            self.assertEqual(pending_pr_autofix_patch["status"], "approval_required")
+            self.assertEqual(review_target.read_text(encoding="utf-8"), "before review\n")
+            pr_autofix_patch = orchestrator.tools.execute(
+                "github_pr",
+                {"operation": "autofix_apply", "autofix_plan": pr_autofix_plan, "patch": review_patch},
+                approved=True,
+            )
+            self.assertTrue(pr_autofix_patch["ok"])
+            self.assertEqual(pr_autofix_patch["operation"], "pr_autofix_local_patch_application")
+            self.assertEqual(pr_autofix_patch["connector"], "github")
+            self.assertEqual(pr_autofix_patch["status"], "autofix_patch_applied")
+            self.assertEqual(pr_autofix_patch["changed_files"], ["src/aegis/example.py"])
+            self.assertEqual(pr_autofix_patch["linked_comment_ids"], [101])
+            self.assertFalse(pr_autofix_patch["provider_writes_performed"])
+            self.assertFalse(pr_autofix_patch["auto_generated_patch"])
+            self.assertEqual(review_target.read_text(encoding="utf-8"), "after review\n")
             with patch.object(
                 orchestrator.connectors.get("http"),
                 "read",

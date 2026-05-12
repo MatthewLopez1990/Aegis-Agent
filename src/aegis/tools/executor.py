@@ -1310,6 +1310,8 @@ class BuiltinToolExecutor:
         requested = str(params.get("operation", "read")).lower()
         connector = self.connectors.get("github")
         if name == "github_pr":
+            if requested in {"autofix_apply", "autofix_patch", "apply_autofix", "apply_patch", "local_patch"}:
+                return self._execute_github_pr_autofix_patch(params=params)
             if requested in {"autofix_response", "autofix_comment", "autofix_report", "post_autofix", "provider_autofix"}:
                 write_params = {key: value for key, value in params.items() if key != "operation"}
                 write_params["body"] = _github_pr_autofix_response_body(params)
@@ -1378,6 +1380,46 @@ class BuiltinToolExecutor:
             return self._execute_github_live_read(kind="issue", operation="read_issue", params=params)
         result = connector.read(ConnectorRequest(operation="read_issue", params=params, scopes=("read",)))
         return {"ok": result.ok, "operation": "read_issue", "connector": result.connector, "data": result.data.get("data", {}), "taint": "CONNECTOR_CONTENT", "error": result.error}
+
+    def _execute_github_pr_autofix_patch(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        patch = str(params.get("patch") or params.get("unified_diff") or "")
+        if not patch.strip():
+            raise ToolExecutionError("github_pr autofix patch requires patch or unified_diff")
+        action_items = _github_pr_action_items(params)
+        if not action_items:
+            raise ToolExecutionError("github_pr autofix patch requires autofix_plan.action_items or action_items")
+        changed_files = _changed_files_from_patch(patch)
+        referenced_files = _github_pr_referenced_files(action_items)
+        linked_comment_ids = [
+            item.get("comment_id")
+            for item in action_items
+            if isinstance(item, dict) and item.get("comment_id") is not None
+        ]
+        apply_result = self._execute_diff_apply(params={"patch": patch})
+        applied = bool(apply_result.get("ok"))
+        return {
+            "ok": applied,
+            "operation": "pr_autofix_local_patch_application",
+            "connector": "github",
+            "status": "autofix_patch_applied" if applied else "autofix_patch_check_failed",
+            "mode": "approved_review_comment_patch_application",
+            "changed_files": changed_files,
+            "referenced_files": sorted(referenced_files),
+            "unreferenced_changed_files": sorted(path for path in changed_files if path not in referenced_files),
+            "linked_comment_ids": linked_comment_ids[:50],
+            "comment_linked_action_count": len(action_items),
+            "patch_sha256": hashlib.sha256(patch.encode("utf-8")).hexdigest(),
+            "auto_generated_patch": False,
+            "approval_required_before_application": True,
+            "provider_writes_performed": False,
+            "raw_secret_values_included": False,
+            "post_apply_required_controls": [
+                "workspace_diff_review",
+                "targeted_tests_before_commit",
+                "approval_before_provider_response",
+            ],
+            "apply_result": apply_result,
+        }
 
     def _execute_github_live_read(self, *, kind: str, operation: str, params: dict[str, Any]) -> dict[str, Any]:
         url = str(params.get("provider_url") or params["api_url"])
@@ -2210,12 +2252,7 @@ def _github_pr_autofix_response_body(params: dict[str, Any]) -> str:
     explicit_body = str(params.get("body") or params.get("comment") or "").strip()
     if explicit_body:
         return str(redact(explicit_body))[:4000]
-    action_items = params.get("action_items")
-    plan = params.get("autofix_plan")
-    if not isinstance(action_items, list) and isinstance(plan, dict):
-        action_items = plan.get("action_items")
-    if not isinstance(action_items, list):
-        action_items = []
+    action_items = _github_pr_action_items(params)
     lines = [
         "Aegis PR autofix response",
         "",
@@ -2242,6 +2279,35 @@ def _github_pr_autofix_response_body(params: dict[str, Any]) -> str:
     if rendered_items == 0:
         lines.append("- No review action items were supplied.")
     return str(redact("\n".join(lines)))[:4000]
+
+
+def _github_pr_action_items(params: dict[str, Any]) -> list[dict[str, Any]]:
+    action_items = params.get("action_items")
+    plan = params.get("autofix_plan")
+    if not isinstance(action_items, list) and isinstance(plan, dict):
+        action_items = plan.get("action_items")
+    if not isinstance(action_items, list):
+        return []
+    return [item for item in action_items[:50] if isinstance(item, dict)]
+
+
+def _github_pr_referenced_files(action_items: list[dict[str, Any]]) -> set[str]:
+    referenced: set[str] = set()
+    for item in action_items:
+        candidates: list[Any] = [item.get("path")]
+        for key in ("planned_files", "changed_files"):
+            values = item.get(key)
+            if isinstance(values, list):
+                candidates.extend(values)
+        for value in candidates:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            path = Path(text)
+            if path.is_absolute() or ".." in path.parts:
+                raise ToolExecutionError(f"review comment path {text!r} escapes workspace root")
+            referenced.add(text)
+    return referenced
 
 
 def _normalize_gitlab_record(decoded: dict[str, Any], *, kind: str) -> dict[str, Any]:
