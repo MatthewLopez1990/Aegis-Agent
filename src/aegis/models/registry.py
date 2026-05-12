@@ -843,7 +843,7 @@ EXTERNAL_AUTH_HANDOFF_PROFILES: dict[str, dict[str, Any]] = {
         "external_status_command": "az account show",
         "external_status_command_argv": ("az", "account", "show"),
         "provider_token_source": "official Azure CLI token cache",
-        "aegis_bridge_status": "official_cli_handoff_only",
+        "aegis_bridge_status": "official_cli_bridge_available",
         "interactive": True,
         "next_steps": [
             "Run model auth login azure-foundry --method cloud-identity --run-external from a local terminal.",
@@ -1338,7 +1338,7 @@ def default_providers(*, custom_base_url: str | None = None, azure_foundry_base_
         ModelProviderSpec("minimax", ("MiniMax-M2.7", "MiniMax-M2.5", "MiniMax-M2"), "MINIMAX_API_KEY", "https://api.minimax.io/v1", False, True, False, False, 0.0, 0.0, 128000, "openai_compatible"),
         ModelProviderSpec("zai", ("glm-5.1", "glm-5", "glm-4.7", "glm-4.6", "glm-4.5"), "GLM_API_KEY", "https://api.z.ai/api/paas/v4", False, True, True, False, 0.0, 0.0, 128000, "openai_compatible"),
         ModelProviderSpec("qwen", ("qwen-plus", "qwen-max", "qwen-turbo"), "DASHSCOPE_API_KEY", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", False, True, True, False, 0.0, 0.0, 128000, "openai_compatible"),
-        ModelProviderSpec("azure-foundry", ("*",), "AZURE_OPENAI_API_KEY", azure_foundry_base_url, False, True, True, True, 0.0, 0.0, 128000, "openai_compatible"),
+        ModelProviderSpec("azure-foundry", ("*",), "AZURE_OPENAI_API_KEY", azure_foundry_base_url, False, True, True, True, 0.0, 0.0, 128000, "openai_compatible", "cloud_identity"),
         ModelProviderSpec("aws-bedrock", ("*",), None, None, False, True, True, False, 0.0, 0.0, 200000, "bedrock_converse", "cloud_identity"),
         ModelProviderSpec("ollama", ("llama3", "llama3.1", "mistral", "mixtral", "phi3", "gemma2", "codellama", "deepseek-coder"), None, "http://localhost:11434", True, False, context_window_tokens=8192, tokenizer_profile="llama"),
         ModelProviderSpec("lmstudio", ("local",), None, "http://localhost:1234/v1", True, False, context_window_tokens=8192, tokenizer_profile="openai_compatible"),

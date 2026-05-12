@@ -614,7 +614,7 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(by_target["MiniMax OAuth"]["status"], "manual_provider_handoff_only")
             self.assertEqual(by_target["AWS Bedrock"]["status"], "official_cli_bridge_available")
             self.assertEqual(by_target["Azure Foundry API key"]["status"], "api_key_ready")
-            self.assertEqual(by_target["Azure Foundry"]["status"], "official_cli_handoff_only")
+            self.assertEqual(by_target["Azure Foundry"]["status"], "official_cli_bridge_available")
             self.assertEqual(by_target["Qwen DashScope API"]["status"], "api_key_ready")
             self.assertEqual(by_target["Qwen OAuth"]["required_auth"], ["oauth"])
             self.assertEqual(by_target["Qwen OAuth"]["status"], "official_cli_handoff_only")
@@ -674,6 +674,76 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(result.content, "azure response")
             self.assertEqual(result.input_tokens, 7)
             self.assertEqual(result.output_tokens, 3)
+
+    def test_verified_azure_foundry_cloud_identity_can_invoke_without_token_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            secret_path = root / ".aegis" / "secrets.json"
+            audit_path = root / ".aegis" / "audit.jsonl"
+            broker = SecretsBroker(secret_path)
+            registry = ModelRegistry(
+                LocalStore(root / ".aegis" / "aegis.db"),
+                AuditLogger(audit_path),
+                broker,
+                azure_foundry_base_url="https://aoai.example.openai.azure.com/openai/v1",
+            )
+
+            login_completed = subprocess.CompletedProcess(("az", "login"), 0)
+            status_completed = subprocess.CompletedProcess(
+                ("az", "account", "show"),
+                0,
+                stdout='{"id":"00000000-0000-0000-0000-000000000000","user":{"name":"operator@example.com"}}\n',
+                stderr="",
+            )
+            with (
+                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/az"),
+                patch("aegis.models.registry.subprocess.run", side_effect=(login_completed, status_completed)),
+            ):
+                login = registry.login_provider_external("azure-foundry", method="cloud-identity", run_external=True)
+
+            self.assertEqual(login["status"], "external_login_verified")
+            self.assertFalse(secret_path.exists())
+            self.assertTrue(registry.auth_status("azure-foundry")["auth_configured"])
+            self.assertEqual(registry.auth_status("azure-foundry")["auth_source"], "official_cli")
+
+            route = registry.route("azure-foundry/prod-gpt-4o")
+            self.assertEqual(route.auth_method, "cloud_identity_cli")
+            self.assertIsNone(route.secret_handle_id)
+
+            def fake_az_rest(command, **kwargs):
+                self.assertEqual(command[0], "/usr/bin/az")
+                self.assertEqual(command[1], "rest")
+                self.assertEqual(command[command.index("--method") + 1], "post")
+                self.assertEqual(command[command.index("--resource") + 1], "https://ai.azure.com")
+                self.assertEqual(command[command.index("--url") + 1], "https://aoai.example.openai.azure.com/openai/v1/chat/completions")
+                payload = json.loads(command[command.index("--body") + 1])
+                self.assertEqual(payload["model"], "prod-gpt-4o")
+                self.assertEqual(payload["messages"][0]["content"], "hello from aegis")
+                self.assertTrue(kwargs["cwd"].name.startswith("aegis-azure-model-"))
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout='{"choices":[{"message":{"content":"azure identity response"}}],"usage":{"prompt_tokens":9,"completion_tokens":4}}\n',
+                    stderr="",
+                )
+
+            with (
+                patch("aegis.models.client.shutil.which", return_value="/usr/bin/az"),
+                patch("aegis.models.client.subprocess.run", side_effect=fake_az_rest) as run,
+            ):
+                result = LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello from aegis"}])
+
+            self.assertEqual(result.content, "azure identity response")
+            self.assertEqual(result.input_tokens, 9)
+            self.assertEqual(result.output_tokens, 4)
+            self.assertEqual(result.raw_usage["source"], "official_cli")
+            self.assertEqual(result.raw_usage["bridge"], "az_rest")
+            run.assert_called_once()
+
+            audit_text = audit_path.read_text(encoding="utf-8")
+            self.assertIn("model.auth_external_login_requested", audit_text)
+            self.assertNotIn("operator@example.com", audit_text)
+            self.assertNotIn("00000000-0000-0000-0000-000000000000", audit_text)
 
     def test_azure_foundry_rejects_unsafe_base_urls_before_auth_resolution(self) -> None:
         for base_url in (

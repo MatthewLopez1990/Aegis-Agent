@@ -303,12 +303,14 @@ class LiveModelClient:
         *,
         temperature: float,
     ) -> ModelInvocationResult:
+        if route.auth_method == "cloud_identity_cli":
+            return self._chat_azure_foundry_az_cli(route, messages, temperature=temperature)
         if route.provider.base_url is None:
             raise ValueError("azure-foundry provider requires models.azure_foundry_base_url")
         _validate_azure_foundry_base_url(route.provider.base_url)
         api_key = self._resolve_api_key(route)
         if api_key is None:
-            raise ValueError("azure-foundry provider has no API key")
+            raise ValueError("azure-foundry provider requires an API key or verified cloud identity login")
         response = self._post_json(
             f"{route.provider.base_url.rstrip('/')}/chat/completions",
             payload={
@@ -334,6 +336,76 @@ class LiveModelClient:
             input_tokens=int(usage.get("prompt_tokens", 0) or 0),
             output_tokens=int(usage.get("completion_tokens", 0) or 0),
             raw_usage=dict(usage),
+        )
+
+    def _chat_azure_foundry_az_cli(
+        self,
+        route: ModelRoute,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+    ) -> ModelInvocationResult:
+        if route.provider.base_url is None:
+            raise ValueError("azure-foundry provider requires models.azure_foundry_base_url")
+        _validate_azure_foundry_base_url(route.provider.base_url)
+        executable_path = shutil.which("az")
+        if executable_path is None:
+            raise RuntimeError("official Azure CLI is not installed")
+        payload = {
+            "model": route.model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        command = (
+            executable_path,
+            "rest",
+            "--method",
+            "post",
+            "--url",
+            f"{route.provider.base_url.rstrip('/')}/chat/completions",
+            "--resource",
+            "https://ai.azure.com",
+            "--body",
+            json.dumps(payload, separators=(",", ":")),
+            "--output",
+            "json",
+        )
+        with tempfile.TemporaryDirectory(prefix="aegis-azure-model-") as temp:
+            try:
+                completed = subprocess.run(
+                    command,
+                    text=True,
+                    capture_output=True,
+                    timeout=self.timeout_seconds,
+                    check=False,
+                    cwd=Path(temp),
+                )  # noqa: S603 - argv is a fixed official provider CLI bridge.
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("official Azure CLI model invocation timed out") from exc
+            except OSError as exc:
+                raise RuntimeError(f"official Azure CLI model invocation failed: {exc}") from exc
+        if completed.returncode != 0:
+            raise RuntimeError(f"official Azure CLI model invocation exited with {completed.returncode}")
+        if not completed.stdout.strip():
+            raise RuntimeError("official Azure CLI model invocation returned no response")
+        response = json.loads(completed.stdout)
+        if not isinstance(response, dict):
+            raise RuntimeError("official Azure CLI model invocation returned invalid JSON")
+        choices = response.get("choices", [])
+        if not choices:
+            raise RuntimeError("azure-foundry provider returned no choices")
+        message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+        content = str(message.get("content", "")).strip()
+        usage = response.get("usage", {}) if isinstance(response.get("usage", {}), dict) else {}
+        raw_usage = dict(usage)
+        raw_usage.update({"source": "official_cli", "bridge": "az_rest"})
+        return ModelInvocationResult(
+            provider=route.provider.provider,
+            model=route.model,
+            content=content,
+            input_tokens=int(usage.get("prompt_tokens", 0) or 0),
+            output_tokens=int(usage.get("completion_tokens", 0) or 0),
+            raw_usage=raw_usage,
         )
 
     def _chat_anthropic(

@@ -65,8 +65,8 @@ Dashboard fields for audit: `enterprise_readiness`, `memory_readiness`, `self_im
 
 - Model registry supports OpenAI, Anthropic, Google, Mistral, Cohere, OpenRouter, Nous, DeepSeek, xAI, Kimi, MiniMax, Z.AI, Qwen, AWS Bedrock, Ollama, LM Studio, and custom endpoints.
 - Aliases, fallback routes, usage tracking, cost estimation, provider-specific tokenizer-profile context accounting with optional exact `tiktoken` support for OpenAI-compatible profiles and optional local SentencePiece support for Llama/Mistral profiles, and secret handles are implemented without exposing raw secrets to model-facing code.
-- Live model invocation is available for OpenAI, Anthropic, Google Gemini, Mistral, Cohere, OpenRouter, Nous, DeepSeek, xAI, Kimi, MiniMax, Z.AI, Qwen, AWS Bedrock through verified AWS CLI cloud identity, Ollama, LM Studio, configured Azure Foundry/OpenAI v1, and configured custom OpenAI-compatible endpoints, with prompt-boundary redaction and taint-labeled session context.
-- Verified Codex/Claude Code subscription login and AWS Bedrock cloud identity can invoke through isolated official CLI bridges without importing provider tokens; remaining provider-native subscription/OAuth/cloud-identity bridges are tracked as explicit gaps.
+- Live model invocation is available for OpenAI, Anthropic, Google Gemini, Mistral, Cohere, OpenRouter, Nous, DeepSeek, xAI, Kimi, MiniMax, Z.AI, Qwen, AWS Bedrock through verified AWS CLI cloud identity, Ollama, LM Studio, configured Azure Foundry/OpenAI v1 through API key or verified Azure CLI cloud identity, and configured custom OpenAI-compatible endpoints, with prompt-boundary redaction and taint-labeled session context.
+- Verified Codex/Claude Code subscription login, AWS Bedrock cloud identity, and configured Azure Foundry cloud identity can invoke through isolated official CLI bridges without importing provider tokens; remaining provider-native subscription/OAuth/cloud-identity bridges are tracked as explicit gaps.
 
 ### Scheduling and Work Orchestration
 
