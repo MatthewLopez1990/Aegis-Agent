@@ -286,7 +286,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "approved remote-control relay action proxy",
             ],
             "security_delta": "Aegis treats all external outputs as tainted data and requires approval for high-impact actions by default.",
-            "live_gap": "API-key-ready Hermes providers, brokered Nous Portal OAuth, MiniMax Token Plan, brokered MiniMax OAuth, verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, Google Vertex AI, AWS Bedrock, and Azure Foundry cloud-identity bridges are routable; remaining provider-native gaps are broader OAuth/account bridges beyond the implemented targets.",
+            "live_gap": "API-key-ready Hermes providers including Hugging Face, NVIDIA NIM, Vercel AI Gateway, OpenCode, Kilo Code, Ollama Cloud, Arcee, GMI, StepFun, Xiaomi, Tencent TokenHub, Kimi China, and MiniMax China are routable alongside brokered Nous Portal OAuth, MiniMax Token Plan, brokered MiniMax OAuth, verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, Google Vertex AI, AWS Bedrock, and Azure Foundry cloud-identity bridges; remaining provider-native gaps are broader OAuth/account bridges beyond the implemented targets.",
             "target_requirements": [
                 "provider_native_oauth_and_device_flows",
                 "subscription_login_bridge",
@@ -413,7 +413,7 @@ def _live_gap_backlog(
             "operator_checklist": _model_auth_operator_checklist(model_auth_parity),
             "next_steps": [
                 "Implement provider-native OAuth/device/cloud-identity bridges one provider at a time with token refresh receipts.",
-                "Use the verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, brokered Nous Portal OAuth, brokered MiniMax OAuth, MiniMax Token Plan, Google Vertex AI, AWS Bedrock, and Azure Foundry bridges where available; keep other subscription and provider-native flows as official handoffs until scoped bridges exist.",
+                "Use the expanded Hermes API-key providers plus verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, brokered Nous Portal OAuth, brokered MiniMax OAuth, MiniMax Token Plan, Google Vertex AI, AWS Bedrock, and Azure Foundry bridges where available; keep other subscription and provider-native flows as official handoffs until scoped bridges exist.",
                 "Add denied, approved, refresh, logout, and receipt-redaction tests for every bridge before enabling live model calls through it.",
             ],
             "required_controls": model_auth_parity["required_controls"],

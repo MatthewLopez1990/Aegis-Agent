@@ -56,6 +56,29 @@ class ModelRoute:
     auth_metadata: dict[str, Any] = field(default_factory=dict)
 
 
+DYNAMIC_MODEL_ID_PROVIDERS = {
+    "custom",
+    "lmstudio",
+    "azure-foundry",
+    "aws-bedrock",
+    "google",
+    "qwen",
+    "github-copilot",
+    "arcee",
+    "gmi",
+    "nvidia",
+    "ai-gateway",
+    "opencode-zen",
+    "opencode-go",
+    "kilocode",
+    "huggingface",
+    "xiaomi",
+    "tencent-tokenhub",
+    "ollama-cloud",
+    "alibaba-coding-plan",
+}
+
+
 class ModelRegistry:
     def __init__(
         self,
@@ -644,7 +667,7 @@ class ModelRegistry:
         provider_name, model = identifier.split("/", 1)
         if provider_name not in self.providers:
             raise KeyError(f"unknown model provider {provider_name!r}")
-        if model not in self.providers[provider_name].models and provider_name not in {"custom", "lmstudio", "azure-foundry", "aws-bedrock", "google", "qwen", "github-copilot"}:
+        if model not in self.providers[provider_name].models and provider_name not in DYNAMIC_MODEL_ID_PROVIDERS:
             raise KeyError(f"unknown model {model!r} for provider {provider_name!r}")
         return provider_name, model
 
@@ -1324,11 +1347,39 @@ MODEL_PROVIDER_AUTH_TARGETS: tuple[dict[str, Any], ...] = (
         "account_surface": "Kimi / Moonshot",
     },
     {
+        "target": "Kimi China",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "kimi-cn",
+        "required_auth": ("api_key",),
+        "account_surface": "Moonshot China",
+    },
+    {
+        "target": "Arcee AI",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "arcee",
+        "required_auth": ("api_key",),
+        "account_surface": "Arcee AI",
+    },
+    {
+        "target": "GMI Cloud",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "gmi",
+        "required_auth": ("api_key",),
+        "account_surface": "GMI Cloud",
+    },
+    {
         "target": "MiniMax",
         "platforms": ("Hermes Agent",),
         "aegis_provider": "minimax",
         "required_auth": ("api_key",),
         "account_surface": "MiniMax",
+    },
+    {
+        "target": "MiniMax China",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "minimax-cn",
+        "required_auth": ("api_key",),
+        "account_surface": "MiniMax China",
     },
     {
         "target": "MiniMax OAuth",
@@ -1373,6 +1424,13 @@ MODEL_PROVIDER_AUTH_TARGETS: tuple[dict[str, Any], ...] = (
         "account_surface": "Alibaba Cloud Model Studio / DashScope",
     },
     {
+        "target": "Alibaba Cloud Coding Plan API",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "alibaba-coding-plan",
+        "required_auth": ("api_key",),
+        "account_surface": "Alibaba Cloud Coding Plan",
+    },
+    {
         "target": "Qwen Code Coding Plan subscription",
         "platforms": ("Hermes Agent",),
         "aegis_provider": "qwen",
@@ -1380,6 +1438,76 @@ MODEL_PROVIDER_AUTH_TARGETS: tuple[dict[str, Any], ...] = (
         "external_command": "qwen auth coding-plan",
         "external_login_instruction": "/auth",
         "account_surface": "Alibaba Cloud Coding Plan / Qwen Code",
+    },
+    {
+        "target": "StepFun Step Plan",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "stepfun",
+        "required_auth": ("api_key",),
+        "account_surface": "StepFun",
+    },
+    {
+        "target": "Hugging Face",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "huggingface",
+        "required_auth": ("api_key",),
+        "account_surface": "Hugging Face Inference Providers",
+    },
+    {
+        "target": "NVIDIA NIM",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "nvidia",
+        "required_auth": ("api_key",),
+        "account_surface": "NVIDIA Build / NIM",
+    },
+    {
+        "target": "Vercel AI Gateway",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "ai-gateway",
+        "required_auth": ("api_key",),
+        "account_surface": "Vercel AI Gateway",
+    },
+    {
+        "target": "OpenCode Zen",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "opencode-zen",
+        "required_auth": ("api_key",),
+        "account_surface": "OpenCode Zen",
+    },
+    {
+        "target": "OpenCode Go",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "opencode-go",
+        "required_auth": ("api_key",),
+        "account_surface": "OpenCode Go",
+    },
+    {
+        "target": "Kilo Code",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "kilocode",
+        "required_auth": ("api_key",),
+        "account_surface": "Kilo Code",
+    },
+    {
+        "target": "Xiaomi MiMo",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "xiaomi",
+        "required_auth": ("api_key",),
+        "account_surface": "Xiaomi MiMo",
+    },
+    {
+        "target": "Tencent TokenHub",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "tencent-tokenhub",
+        "required_auth": ("api_key",),
+        "account_surface": "Tencent MaaS TokenHub",
+    },
+    {
+        "target": "Ollama Cloud",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "ollama-cloud",
+        "required_auth": ("api_key",),
+        "account_surface": "Ollama Cloud",
     },
     {
         "target": "Ollama",
@@ -2218,7 +2346,25 @@ def default_providers(
         ModelProviderSpec("deepseek", ("deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner"), "DEEPSEEK_API_KEY", "https://api.deepseek.com", False, True, False, False, 0.0, 0.0, 128000, "openai_compatible"),
         ModelProviderSpec("xai", ("grok-4.20-reasoning", "grok-4", "grok-4-fast"), "XAI_API_KEY", "https://api.x.ai/v1", False, True, True, False, 0.0, 0.0, 256000, "openai_compatible"),
         ModelProviderSpec("kimi", ("kimi-k2.5", "kimi-k2-turbo-preview", "kimi-k2-thinking"), "KIMI_API_KEY", "https://api.moonshot.ai/v1", False, True, True, False, 0.0, 0.0, 256000, "openai_compatible"),
+        ModelProviderSpec("kimi-cn", ("kimi-k2.5", "moonshot-v1-128k", "moonshot-v1-32k"), "KIMI_CN_API_KEY", "https://api.moonshot.cn/v1", False, True, True, False, 0.0, 0.0, 256000, "openai_compatible", metadata={"hermes_provider": "kimi-coding-cn"}),
+        ModelProviderSpec("arcee", ("auto", "*"), "ARCEEAI_API_KEY", "https://api.arcee.ai/api/v1", False, True, False, False, 0.0, 0.0, 128000, "openai_compatible"),
+        ModelProviderSpec("gmi", ("*",), "GMI_API_KEY", "https://api.gmi-serving.com/v1", False, True, True, False, 0.0, 0.0, 128000, "openai_compatible"),
         ModelProviderSpec("minimax", ("MiniMax-M2.7", "MiniMax-M2.5", "MiniMax-M2"), "MINIMAX_API_KEY", "https://api.minimax.io/v1", False, True, False, False, 0.0, 0.0, 128000, "openai_compatible"),
+        ModelProviderSpec(
+            "minimax-cn",
+            ("MiniMax-M2.7", "MiniMax-M2.5", "MiniMax-M2"),
+            "MINIMAX_CN_API_KEY",
+            "https://api.minimaxi.com/anthropic",
+            False,
+            True,
+            False,
+            False,
+            0.0,
+            0.0,
+            204800,
+            "anthropic",
+            metadata={"compatibility": "anthropic_messages", "invocation_bridge": "minimax_cn_anthropic_compatible"},
+        ),
         ModelProviderSpec(
             "minimax-oauth",
             ("MiniMax-M2.7", "MiniMax-M2.7-highspeed"),
@@ -2261,6 +2407,17 @@ def default_providers(
         ),
         ModelProviderSpec("zai", ("glm-5.1", "glm-5", "glm-4.7", "glm-4.6", "glm-4.5"), "GLM_API_KEY", "https://api.z.ai/api/paas/v4", False, True, True, False, 0.0, 0.0, 128000, "openai_compatible"),
         ModelProviderSpec("qwen", ("qwen-plus", "qwen-max", "qwen-turbo"), "DASHSCOPE_API_KEY", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", False, True, True, False, 0.0, 0.0, 128000, "openai_compatible"),
+        ModelProviderSpec("alibaba-coding-plan", ("qwen3-coder-plus", "qwen3-coder-flash", "*"), "ALIBABA_CODING_PLAN_API_KEY", "https://coding-intl.dashscope.aliyuncs.com/v1", False, True, True, False, 0.0, 0.0, 128000, "openai_compatible"),
+        ModelProviderSpec("stepfun", ("step-3", "step-2-16k", "step-1-256k"), "STEPFUN_API_KEY", "https://api.stepfun.ai/step_plan/v1", False, True, True, False, 0.0, 0.0, 256000, "openai_compatible"),
+        ModelProviderSpec("huggingface", ("Qwen/Qwen3-235B-A22B-Instruct-2507", "deepseek-ai/DeepSeek-V3.1", "moonshotai/Kimi-K2-Instruct", "*"), "HF_TOKEN", "https://router.huggingface.co/v1", False, True, True, False, 0.0, 0.0, 128000, "openai_compatible"),
+        ModelProviderSpec("nvidia", ("nvidia/llama-3.1-nemotron-70b-instruct", "nvidia/llama-3.3-nemotron-super-49b-v1", "*"), "NVIDIA_API_KEY", "https://integrate.api.nvidia.com/v1", False, True, True, False, 0.0, 0.0, 128000, "openai_compatible"),
+        ModelProviderSpec("ai-gateway", ("*",), "AI_GATEWAY_API_KEY", "https://ai-gateway.vercel.sh/v1", False, True, True, True, 0.0, 0.0, 128000, "openai_compatible"),
+        ModelProviderSpec("opencode-zen", ("*",), "OPENCODE_ZEN_API_KEY", "https://opencode.ai/zen/v1", False, True, True, False, 0.0, 0.0, 128000, "openai_compatible"),
+        ModelProviderSpec("opencode-go", ("*",), "OPENCODE_GO_API_KEY", "https://opencode.ai/zen/go/v1", False, True, True, False, 0.0, 0.0, 128000, "openai_compatible", metadata={"mixed_api_surface": "openai_for_glm_kimi_anthropic_for_minimax"}),
+        ModelProviderSpec("kilocode", ("*",), "KILOCODE_API_KEY", "https://api.kilo.ai/api/gateway", False, True, True, False, 0.0, 0.0, 128000, "openai_compatible"),
+        ModelProviderSpec("xiaomi", ("mimo-vl-7b-rl", "*"), "XIAOMI_API_KEY", "https://api.xiaomimimo.com/v1", False, True, True, False, 0.0, 0.0, 128000, "openai_compatible"),
+        ModelProviderSpec("tencent-tokenhub", ("*",), "TOKENHUB_API_KEY", "https://tokenhub.tencentmaas.com/v1", False, True, True, False, 0.0, 0.0, 128000, "openai_compatible"),
+        ModelProviderSpec("ollama-cloud", ("gpt-oss:120b", "llama3.3", "qwen3", "*"), "OLLAMA_API_KEY", "https://ollama.com/v1", False, True, True, False, 0.0, 0.0, 128000, "openai_compatible"),
         ModelProviderSpec("azure-foundry", ("*",), "AZURE_OPENAI_API_KEY", azure_foundry_base_url, False, True, True, True, 0.0, 0.0, 128000, "openai_compatible", "cloud_identity"),
         ModelProviderSpec("aws-bedrock", ("*",), None, None, False, True, True, False, 0.0, 0.0, 200000, "bedrock_converse", "cloud_identity"),
         ModelProviderSpec("github-copilot", ("gpt-5.1-codex", "gpt-5.1", "gpt-4.1"), None, None, False, True, False, False, 0.0, 0.0, 200000, "openai_compatible", "oauth_device"),

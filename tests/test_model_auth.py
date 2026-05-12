@@ -65,6 +65,7 @@ class ModelAuthTests(unittest.TestCase):
             self.assertFalse(registry.auth_status("google")["auth_configured"])
             self.assertFalse(registry.auth_status("mistral")["auth_configured"])
             self.assertFalse(registry.auth_status("cohere")["auth_configured"])
+            self.assertFalse(registry.auth_status("huggingface")["auth_configured"])
 
             openai_status = registry.login_provider("openai", "sk-openai-test")
             openrouter_status = registry.login_provider("openrouter", "sk-openrouter-test")
@@ -72,6 +73,7 @@ class ModelAuthTests(unittest.TestCase):
             google_status = registry.login_provider("google", "sk-google-test")
             mistral_status = registry.login_provider("mistral", "sk-mistral-test")
             cohere_status = registry.login_provider("cohere", "sk-cohere-test")
+            hf_status = registry.login_provider("huggingface", "hf-test-token")
 
             self.assertEqual(openai_status["auth_source"], "local")
             self.assertEqual(openrouter_status["auth_source"], "local")
@@ -79,18 +81,21 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(google_status["auth_source"], "local")
             self.assertEqual(mistral_status["auth_source"], "local")
             self.assertEqual(cohere_status["auth_source"], "local")
+            self.assertEqual(hf_status["auth_source"], "local")
             self.assertTrue(registry.auth_status("openai")["auth_configured"])
             self.assertTrue(registry.auth_status("openrouter")["auth_configured"])
             self.assertTrue(registry.auth_status("anthropic")["auth_configured"])
             self.assertTrue(registry.auth_status("google")["auth_configured"])
             self.assertTrue(registry.auth_status("mistral")["auth_configured"])
             self.assertTrue(registry.auth_status("cohere")["auth_configured"])
+            self.assertTrue(registry.auth_status("huggingface")["auth_configured"])
             self.assertTrue(registry.route("openai/gpt-4o").secret_handle_id)
             self.assertTrue(registry.route("openrouter/openai/gpt-4o").secret_handle_id)
             self.assertTrue(registry.route("anthropic/claude-sonnet-4.6").secret_handle_id)
             self.assertTrue(registry.route("google/gemini-pro").secret_handle_id)
             self.assertTrue(registry.route("mistral/mistral-large").secret_handle_id)
             self.assertTrue(registry.route("cohere/command-r-plus").secret_handle_id)
+            self.assertTrue(registry.route("huggingface/Qwen/Qwen3-235B-A22B-Instruct-2507").secret_handle_id)
 
             openai_handle = broker.request_handle(
                 name="OPENAI_API_KEY",
@@ -108,6 +113,7 @@ class ModelAuthTests(unittest.TestCase):
             self.assertNotIn("sk-google-test", audit_text)
             self.assertNotIn("sk-mistral-test", audit_text)
             self.assertNotIn("sk-cohere-test", audit_text)
+            self.assertNotIn("hf-test-token", audit_text)
 
             logout_status = registry.logout_provider("openrouter")
             self.assertFalse(logout_status["auth_configured"])
@@ -1012,7 +1018,7 @@ class ModelAuthTests(unittest.TestCase):
             by_target = {row["target"]: row for row in targets["targets"]}
 
             self.assertEqual(targets["status"], "auth_parity_gap_tracked")
-            self.assertGreaterEqual(targets["target_provider_count"], 26)
+            self.assertGreaterEqual(targets["target_provider_count"], 40)
             self.assertIn("api_key", targets["implemented_auth_methods"])
             self.assertIn("subscription", targets["implemented_auth_methods"])
             self.assertIn("oauth", targets["implemented_auth_methods"])
@@ -1039,7 +1045,11 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(by_target["Google Gemini CLI subscription"]["external_status_command"], 'gemini -p "Respond with OK only." --output-format=json --approval-mode=plan --sandbox --skip-trust')
             self.assertEqual(by_target["Google Gemini CLI subscription"]["external_login_instruction"], "/auth")
             self.assertEqual(by_target["DeepSeek"]["status"], "api_key_ready")
+            self.assertEqual(by_target["Kimi China"]["status"], "api_key_ready")
+            self.assertEqual(by_target["Arcee AI"]["status"], "api_key_ready")
+            self.assertEqual(by_target["GMI Cloud"]["status"], "api_key_ready")
             self.assertEqual(by_target["MiniMax"]["status"], "api_key_ready")
+            self.assertEqual(by_target["MiniMax China"]["status"], "api_key_ready")
             self.assertEqual(by_target["MiniMax Token Plan"]["status"], "api_key_ready")
             self.assertEqual(by_target["MiniMax Token Plan"]["required_auth"], ["api_key"])
             self.assertEqual(by_target["MiniMax Token Plan"]["account_surface"], "MiniMax Token Plan")
@@ -1050,10 +1060,21 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(by_target["Azure Foundry API key"]["status"], "api_key_ready")
             self.assertEqual(by_target["Azure Foundry"]["status"], "official_cli_bridge_available")
             self.assertEqual(by_target["Qwen DashScope API"]["status"], "api_key_ready")
+            self.assertEqual(by_target["Alibaba Cloud Coding Plan API"]["status"], "api_key_ready")
             self.assertEqual(by_target["Qwen Code Coding Plan subscription"]["required_auth"], ["subscription"])
             self.assertEqual(by_target["Qwen Code Coding Plan subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(by_target["Qwen Code Coding Plan subscription"]["external_command"], "qwen auth coding-plan")
             self.assertEqual(by_target["Qwen Code Coding Plan subscription"]["external_login_instruction"], "/auth")
+            self.assertEqual(by_target["StepFun Step Plan"]["status"], "api_key_ready")
+            self.assertEqual(by_target["Hugging Face"]["status"], "api_key_ready")
+            self.assertEqual(by_target["NVIDIA NIM"]["status"], "api_key_ready")
+            self.assertEqual(by_target["Vercel AI Gateway"]["status"], "api_key_ready")
+            self.assertEqual(by_target["OpenCode Zen"]["status"], "api_key_ready")
+            self.assertEqual(by_target["OpenCode Go"]["status"], "api_key_ready")
+            self.assertEqual(by_target["Kilo Code"]["status"], "api_key_ready")
+            self.assertEqual(by_target["Xiaomi MiMo"]["status"], "api_key_ready")
+            self.assertEqual(by_target["Tencent TokenHub"]["status"], "api_key_ready")
+            self.assertEqual(by_target["Ollama Cloud"]["status"], "api_key_ready")
             self.assertEqual(by_target["Ollama"]["status"], "local_ready")
             self.assertFalse(any(row["raw_tokens_captured"] for row in targets["targets"]))
             self.assertIn("raw_token_capture_rejection", targets["verification_gates"])
@@ -1213,9 +1234,23 @@ class ModelAuthTests(unittest.TestCase):
                 ("deepseek", "deepseek-v4-flash", "https://api.deepseek.com/chat/completions", "DEEPSEEK_API_KEY"),
                 ("xai", "grok-4", "https://api.x.ai/v1/chat/completions", "XAI_API_KEY"),
                 ("kimi", "kimi-k2.5", "https://api.moonshot.ai/v1/chat/completions", "KIMI_API_KEY"),
+                ("kimi-cn", "kimi-k2.5", "https://api.moonshot.cn/v1/chat/completions", "KIMI_CN_API_KEY"),
+                ("arcee", "auto", "https://api.arcee.ai/api/v1/chat/completions", "ARCEEAI_API_KEY"),
+                ("gmi", "provider-model", "https://api.gmi-serving.com/v1/chat/completions", "GMI_API_KEY"),
                 ("minimax", "MiniMax-M2.7", "https://api.minimax.io/v1/chat/completions", "MINIMAX_API_KEY"),
                 ("zai", "glm-5.1", "https://api.z.ai/api/paas/v4/chat/completions", "GLM_API_KEY"),
                 ("qwen", "qwen-plus", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions", "DASHSCOPE_API_KEY"),
+                ("alibaba-coding-plan", "qwen3-coder-plus", "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions", "ALIBABA_CODING_PLAN_API_KEY"),
+                ("stepfun", "step-3", "https://api.stepfun.ai/step_plan/v1/chat/completions", "STEPFUN_API_KEY"),
+                ("huggingface", "Qwen/Qwen3-235B-A22B-Instruct-2507", "https://router.huggingface.co/v1/chat/completions", "HF_TOKEN"),
+                ("nvidia", "nvidia/llama-3.1-nemotron-70b-instruct", "https://integrate.api.nvidia.com/v1/chat/completions", "NVIDIA_API_KEY"),
+                ("ai-gateway", "gateway-model", "https://ai-gateway.vercel.sh/v1/chat/completions", "AI_GATEWAY_API_KEY"),
+                ("opencode-zen", "zen-model", "https://opencode.ai/zen/v1/chat/completions", "OPENCODE_ZEN_API_KEY"),
+                ("opencode-go", "go-model", "https://opencode.ai/zen/go/v1/chat/completions", "OPENCODE_GO_API_KEY"),
+                ("kilocode", "kilo-model", "https://api.kilo.ai/api/gateway/chat/completions", "KILOCODE_API_KEY"),
+                ("xiaomi", "mimo-vl-7b-rl", "https://api.xiaomimimo.com/v1/chat/completions", "XIAOMI_API_KEY"),
+                ("tencent-tokenhub", "tokenhub-model", "https://tokenhub.tencentmaas.com/v1/chat/completions", "TOKENHUB_API_KEY"),
+                ("ollama-cloud", "llama3.3", "https://ollama.com/v1/chat/completions", "OLLAMA_API_KEY"),
             )
 
             for provider, model, expected_url, secret_name in cases:
@@ -1300,6 +1335,44 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(result.input_tokens, 11)
             self.assertEqual(result.output_tokens, 4)
             self.assertEqual(result.raw_usage["bridge"], "minimax_anthropic_compatible")
+
+    def test_minimax_china_uses_anthropic_compatible_api_key_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            broker = SecretsBroker(root / ".aegis" / "secrets.json")
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"), broker)
+            registry.login_provider("minimax-cn", "sk-minimax-cn")
+            route = registry.route("minimax-cn/MiniMax-M2.7")
+
+            class FakeResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self) -> bytes:
+                    return b'{"content":[{"type":"text","text":"minimax cn response"}],"usage":{"input_tokens":7,"output_tokens":3}}'
+
+            captured: dict[str, object] = {}
+
+            def fake_urlopen(request, timeout):
+                captured["url"] = request.full_url
+                captured["headers"] = dict(request.header_items())
+                captured["payload"] = json.loads(request.data.decode("utf-8"))
+                self.assertNotIn("sk-minimax-cn", request.data.decode("utf-8"))
+                return FakeResponse()
+
+            with patch("aegis.models.client._open_model_request", fake_urlopen):
+                result = LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello"}])
+
+            self.assertEqual(captured["url"], "https://api.minimaxi.com/anthropic/messages")
+            self.assertEqual(captured["headers"]["X-api-key"], "sk-minimax-cn")
+            self.assertEqual(captured["headers"]["Anthropic-version"], "2023-06-01")
+            self.assertEqual(captured["payload"]["model"], "MiniMax-M2.7")
+            self.assertEqual(result.provider, "minimax-cn")
+            self.assertEqual(result.content, "minimax cn response")
+            self.assertEqual(result.raw_usage["bridge"], "minimax_cn_anthropic_compatible")
 
     def test_minimax_oauth_live_client_uses_brokered_oauth_token(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
