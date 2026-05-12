@@ -24,6 +24,7 @@ const state = {
   pluginMarketplaceCatalogPath: "",
   pendingSubagentDelegation: null,
   pendingSkillEnable: {},
+  slashSelectionIndex: 0,
 };
 
 const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "blocked", "cancelled"]);
@@ -40,6 +41,22 @@ const TOOL_RUN_PRESETS = [
   { label: "Subagent", name: "subagent_delegate", params: { role: "Researcher", task: "Compare provider auth gaps." } },
   { label: "Service Ticket", name: "service_ticket_read", params: { operation: "search", query: "incident" } },
   { label: "Close Ticket", name: "service_ticket_write", params: { operation: "close", ticket: { id: "INC000001" } } },
+];
+
+const WEB_SLASH_COMMANDS = [
+  { command: "submit", label: "/submit <request>", detail: "Submit a governed task", kind: "submit", acceptsRequest: true },
+  { command: "background", aliases: ["bg", "btw", "queue", "q"], label: "/background|/bg|/btw <request>", detail: "Queue governed work from the active session", kind: "submit", acceptsRequest: true },
+  { command: "resume", label: "/resume", detail: "Resume the last waiting or paused task", kind: "resume" },
+  { command: "tasks", aliases: ["task", "list"], label: "/tasks", detail: "Open the task feed", kind: "section", section: "activity" },
+  { command: "approvals", aliases: ["approve", "permissions"], label: "/approvals", detail: "Open pending approval gates", kind: "section", section: "security" },
+  { command: "models", aliases: ["model", "login", "logout"], label: "/models", detail: "Open provider login and model routing controls", kind: "section", section: "models" },
+  { command: "tools", aliases: ["tool", "allowed-tools"], label: "/tools", detail: "Open governed tool and MCP controls", kind: "section", section: "tools" },
+  { command: "memory", aliases: ["mem"], label: "/memory", detail: "Open governed memory controls", kind: "section", section: "memory" },
+  { command: "remote-control", aliases: ["rc", "remote"], label: "/remote-control", detail: "Open remote pairing and relay controls", kind: "section", section: "automation" },
+  { command: "schedules", aliases: ["schedule", "hooks"], label: "/schedules", detail: "Open automation, hooks, and scheduled runs", kind: "section", section: "automation" },
+  { command: "evidence", aliases: ["events", "timeline", "audit"], label: "/evidence", detail: "Open evidence, timelines, and audit output", kind: "section", section: "evidence" },
+  { command: "settings", aliases: ["status", "dashboard", "controls"], label: "/settings", detail: "Open runtime posture and security controls", kind: "section", section: "security" },
+  { command: "commands", aliases: ["help", "keybindings"], label: "/commands", detail: "Show slash command suggestions", kind: "palette" },
 ];
 
 const api = async (url, options = {}) => {
@@ -73,6 +90,89 @@ const escapeHtml = (value) =>
     .replaceAll("'", "&#039;");
 
 const text = (value) => escapeHtml(Array.isArray(value) ? value.join(", ") : value);
+
+const slashCommandTerms = (entry) => [entry.command, ...(entry.aliases || [])].map((term) => String(term).toLowerCase());
+
+const slashMatchRank = (prefix, entry) => {
+  const normalized = String(prefix || "").replace(/^\/+/, "").toLowerCase();
+  if (!normalized) return [0, entry.command];
+  const terms = slashCommandTerms(entry);
+  if (terms.includes(normalized)) return [0, entry.command];
+  if (terms.some((term) => term.startsWith(normalized))) return [1, entry.command];
+  if (terms.some((term) => term.includes(normalized))) return [2, entry.command];
+  if (String(entry.detail || "").toLowerCase().includes(normalized)) return [3, entry.command];
+  return [9, entry.command];
+};
+
+const slashCommandMatches = (prefix) =>
+  WEB_SLASH_COMMANDS
+    .filter((entry) => slashMatchRank(prefix, entry)[0] < 9)
+    .sort((left, right) => {
+      const leftRank = slashMatchRank(prefix, left);
+      const rightRank = slashMatchRank(prefix, right);
+      return leftRank[0] - rightRank[0] || leftRank[1].localeCompare(rightRank[1]);
+    });
+
+const slashCommandForToken = (token) => {
+  const normalized = String(token || "").replace(/^\/+/, "").toLowerCase();
+  return WEB_SLASH_COMMANDS.find((entry) => slashCommandTerms(entry).includes(normalized)) || null;
+};
+
+const parseTaskSlashCommand = (rawValue) => {
+  const raw = String(rawValue || "");
+  const trimmedStart = raw.trimStart();
+  if (!trimmedStart.startsWith("/")) {
+    return { kind: "task", request: raw };
+  }
+  const match = trimmedStart.match(/^\/([a-zA-Z0-9_.:-]+)(?:\s+([\s\S]*))?$/);
+  if (!match) {
+    return { kind: "unknown", token: trimmedStart.slice(1).split(/\s+/, 1)[0], request: "" };
+  }
+  const entry = slashCommandForToken(match[1]);
+  if (!entry) {
+    return { kind: "unknown", token: match[1], request: match[2] || "" };
+  }
+  return { ...entry, request: match[2] || "", token: match[1] };
+};
+
+const renderSlashPalette = () => {
+  const input = document.getElementById("task-request");
+  const palette = document.getElementById("slash-palette");
+  const value = input.value.trimStart();
+  if (!value.startsWith("/")) {
+    palette.hidden = true;
+    palette.replaceChildren();
+    state.slashSelectionIndex = 0;
+    return;
+  }
+  const prefix = value.slice(1).split(/\s+/, 1)[0];
+  const matches = slashCommandMatches(prefix).slice(0, 8);
+  if (!matches.length) {
+    palette.hidden = false;
+    palette.innerHTML = `<div class="slash-palette-header"><span>No slash matches</span><span>/${text(prefix)}</span></div>`;
+    return;
+  }
+  state.slashSelectionIndex = Math.min(state.slashSelectionIndex, matches.length - 1);
+  palette.hidden = false;
+  palette.innerHTML = `
+    <div class="slash-palette-header"><span>Slash Commands</span><span>Tab completes · Ctrl+Enter sends</span></div>
+    ${matches.map((entry, index) => `
+      <button type="button" class="slash-palette-row ${index === state.slashSelectionIndex ? "active" : ""}" data-slash-command="${text(entry.command)}">
+        <strong>${text(entry.label)}</strong>
+        <span>${text(entry.detail)}</span>
+      </button>
+    `).join("")}
+  `;
+};
+
+const applySlashCompletion = (entry) => {
+  const input = document.getElementById("task-request");
+  const parsed = parseTaskSlashCommand(input.value);
+  const suffix = parsed.request ? ` ${parsed.request}` : entry.acceptsRequest ? " " : "";
+  input.value = `/${entry.command}${suffix}`;
+  input.focus();
+  renderSlashPalette();
+};
 
 const item = ({ title, detail = "", meta = "", tone = "", actions = "", data = {} }) => {
   const node = document.createElement("div");
@@ -1473,6 +1573,45 @@ const renderTaskError = (message) => {
   node.replaceChildren(card);
 };
 
+const renderTaskNotice = (title, detail = "") => {
+  const node = document.getElementById("task-output");
+  const card = document.createElement("section");
+  card.className = "task-card";
+  card.innerHTML = `
+    <div class="task-card-header">
+      <div>
+        <span class="status-chip">local</span>
+        <h4>${text(title)}</h4>
+      </div>
+    </div>
+    ${detail ? `<div class="next-action">${text(detail)}</div>` : ""}
+  `;
+  node.replaceChildren(card);
+};
+
+const executeLocalSlashCommand = async (parsed) => {
+  if (parsed.kind === "resume") {
+    if (!state.lastTask?.id) {
+      renderTaskNotice("No resumable task is selected", "Open a waiting or paused task, then run /resume again.");
+      return;
+    }
+    await resumeTask(state.lastTask.id);
+    return;
+  }
+  if (parsed.kind === "section") {
+    state.activeSection = parsed.section;
+    applySectionVisibility();
+    renderTaskNotice(parsed.label, parsed.detail);
+    return;
+  }
+  if (parsed.kind === "palette") {
+    renderSlashPalette();
+    renderTaskNotice("/commands", "Type / plus a few letters, then use Tab or click a row to complete.");
+    return;
+  }
+  renderTaskError(`unknown slash command: /${parsed.token || ""}`);
+};
+
 const renderBrowserOutput = (payload) => {
   const node = document.getElementById("browser-output");
   if (payload.status === "approval_required" && payload.approval_id && state.pendingBrowserAction) {
@@ -1725,13 +1864,64 @@ document.querySelector(".section-switcher").addEventListener("click", (event) =>
   applySectionVisibility();
 });
 
+const taskRequestInput = document.getElementById("task-request");
+
+taskRequestInput.addEventListener("input", renderSlashPalette);
+
+taskRequestInput.addEventListener("keydown", (event) => {
+  const value = taskRequestInput.value.trimStart();
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault();
+    document.getElementById("task-form").requestSubmit();
+    return;
+  }
+  if (!value.startsWith("/")) return;
+  const prefix = value.slice(1).split(/\s+/, 1)[0];
+  const matches = slashCommandMatches(prefix).slice(0, 8);
+  if (!matches.length) return;
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    state.slashSelectionIndex = (state.slashSelectionIndex + 1) % matches.length;
+    renderSlashPalette();
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    state.slashSelectionIndex = (state.slashSelectionIndex + matches.length - 1) % matches.length;
+    renderSlashPalette();
+  } else if (event.key === "Tab") {
+    event.preventDefault();
+    applySlashCompletion(matches[state.slashSelectionIndex] || matches[0]);
+  } else if (event.key === "Escape") {
+    document.getElementById("slash-palette").hidden = true;
+  }
+});
+
+document.getElementById("slash-palette").addEventListener("click", (event) => {
+  const command = event.target.closest("[data-slash-command]")?.dataset.slashCommand;
+  if (!command) return;
+  const entry = slashCommandForToken(command);
+  if (entry) {
+    applySlashCompletion(entry);
+  }
+});
+
 document.getElementById("task-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
-    const request = document.getElementById("task-request").value || "Summarize my project safely";
+    const input = document.getElementById("task-request");
+    const parsed = parseTaskSlashCommand(input.value);
+    if (!["task", "submit"].includes(parsed.kind)) {
+      await executeLocalSlashCommand(parsed);
+      return;
+    }
+    const request = (parsed.kind === "submit" ? parsed.request : input.value).trim() || (parsed.kind === "submit" ? "" : "Summarize my project safely");
+    if (!request) {
+      renderTaskNotice(parsed.label || "/submit", "Add a request after the slash command before sending.");
+      return;
+    }
     const path = document.getElementById("task-path").value || undefined;
     const result = await api("/tasks", { method: "POST", body: JSON.stringify({ request, path, session_id: state.activeSessionId }) });
-    document.getElementById("task-request").value = "";
+    input.value = "";
+    renderSlashPalette();
     renderTaskResult(result);
     await refresh();
   } catch (error) {

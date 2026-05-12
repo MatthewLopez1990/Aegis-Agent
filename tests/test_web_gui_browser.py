@@ -106,6 +106,53 @@ if (frames.length !== 2 || frames[1].event !== "task" || frames[1].data.status !
         if result.returncode != 0:
             raise AssertionError(result.stderr.strip() or result.stdout.strip())
 
+    def test_web_slash_palette_matches_tui_fuzzy_submit_flow(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "src" / "aegis" / "web" / "static"
+        markup = (root / "index.html").read_text(encoding="utf-8")
+        styles = (root / "styles.css").read_text(encoding="utf-8")
+        script = (root / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="slash-palette"', markup)
+        self.assertIn(".slash-palette-row.active", styles)
+        self.assertIn("WEB_SLASH_COMMANDS", script)
+        self.assertIn("slashCommandMatches(prefix).slice(0, 8)", script)
+        self.assertIn('document.getElementById("slash-palette").addEventListener("click"', script)
+        self.assertIn('document.getElementById("task-form").requestSubmit()', script)
+        self.assertIn('const request = (parsed.kind === "submit" ? parsed.request : input.value).trim()', script)
+
+        node = shutil.which("node")
+        if node is None:
+            return
+        app_js = root / "app.js"
+        node_script = r"""
+const fs = require("fs");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const catalogStart = source.indexOf("const WEB_SLASH_COMMANDS =");
+const catalogEnd = source.indexOf("\n\nconst api =", catalogStart);
+const helperStart = source.indexOf("const slashCommandTerms =", catalogEnd);
+const helperEnd = source.indexOf("\n\nconst renderSlashPalette =", helperStart);
+if (catalogStart < 0 || catalogEnd < 0 || helperStart < 0 || helperEnd < 0) {
+  throw new Error("slash palette helpers not found");
+}
+const api = {};
+eval(`${source.slice(catalogStart, catalogEnd)}\n${source.slice(helperStart, helperEnd)}\napi.matches = slashCommandMatches;\napi.parse = parseTaskSlashCommand;`);
+const su = api.matches("su").map((entry) => entry.command);
+if (su[0] !== "submit" || !su.includes("resume") || su.includes("settings")) {
+  throw new Error(`/su fuzzy matches are wrong: ${JSON.stringify(su)}`);
+}
+const parsed = api.parse("/q inspect the failing test");
+if (parsed.kind !== "submit" || parsed.command !== "background" || parsed.request !== "inspect the failing test") {
+  throw new Error(`queue alias parsed incorrectly: ${JSON.stringify(parsed)}`);
+}
+const nav = api.parse("/models");
+if (nav.kind !== "section" || nav.section !== "models") {
+  throw new Error(`models navigation parsed incorrectly: ${JSON.stringify(nav)}`);
+}
+"""
+        result = subprocess.run((node, "-e", node_script, str(app_js)), capture_output=True, text=True, timeout=5, check=False)
+        if result.returncode != 0:
+            raise AssertionError(result.stderr.strip() or result.stdout.strip())
+
     def test_web_event_renderer_shows_status_frames_without_events(self) -> None:
         node = shutil.which("node")
         if node is None:
