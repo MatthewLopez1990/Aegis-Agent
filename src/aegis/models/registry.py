@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -731,6 +731,47 @@ class ModelRegistry:
             "recent_events": [_usage_event_summary(row) for row in rows[:10]],
         }
 
+    def usage_insights(self, *, days: int = 30) -> dict[str, Any]:
+        window_days = max(1, int(days))
+        cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
+        rows = [row for row in self.store.list_model_usage(limit=10000) if _usage_created_at(row) >= cutoff]
+        total_cost = sum(float(row["estimated_cost"]) for row in rows)
+        total_input = sum(int(row["input_tokens"]) for row in rows)
+        total_output = sum(int(row["output_tokens"]) for row in rows)
+        by_provider: dict[str, dict[str, Any]] = {}
+        by_model: dict[str, dict[str, Any]] = {}
+        by_day: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            provider = str(row["provider"])
+            model_key = f"{provider}/{row['model']}"
+            _accumulate_usage(by_provider, provider, row)
+            _accumulate_usage(by_model, model_key, row)
+            day_key = _usage_created_at(row).date().isoformat()
+            _accumulate_usage(by_day, day_key, row)
+        top_provider = _top_usage_bucket(by_provider)
+        top_model = _top_usage_bucket(by_model)
+        busiest_day = _top_usage_bucket(by_day)
+        total_tokens = total_input + total_output
+        return {
+            "status": "usage_insights",
+            "window_days": window_days,
+            "events": len(rows),
+            "input_tokens": total_input,
+            "output_tokens": total_output,
+            "total_tokens": total_tokens,
+            "estimated_cost": round(total_cost, 6),
+            "avg_events_per_day": round(len(rows) / window_days, 3),
+            "avg_tokens_per_day": round(total_tokens / window_days, 2),
+            "top_provider": top_provider,
+            "top_model": top_model,
+            "busiest_day": busiest_day,
+            "by_provider": list(by_provider.values()),
+            "by_model": list(by_model.values()),
+            "by_day": list(sorted(by_day.values(), key=lambda row: row["key"], reverse=True)),
+            "recent_events": [_usage_event_summary(row) for row in rows[:10]],
+            "raw_metadata_values_included": False,
+        }
+
     def _split_identifier(self, identifier: str) -> tuple[str, str]:
         if "/" not in identifier:
             raise ValueError("model identifier must be provider/model")
@@ -1001,6 +1042,25 @@ def _accumulate_usage(bucket: dict[str, dict[str, Any]], key: str, row: dict[str
     latest_at = str(row.get("created_at") or "")
     if latest_at and (current["latest_at"] is None or latest_at > str(current["latest_at"])):
         current["latest_at"] = latest_at
+
+
+def _top_usage_bucket(bucket: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+    if not bucket:
+        return None
+    return max(bucket.values(), key=lambda row: (int(row["input_tokens"]) + int(row["output_tokens"]), int(row["events"]), str(row["key"])))
+
+
+def _usage_created_at(row: dict[str, Any]) -> datetime:
+    raw = str(row.get("created_at") or "").strip()
+    if not raw:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _usage_event_summary(row: dict[str, Any]) -> dict[str, Any]:

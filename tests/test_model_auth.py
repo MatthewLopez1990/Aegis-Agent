@@ -51,6 +51,17 @@ class ModelAuthTests(unittest.TestCase):
             self.assertNotIn("secret-like usage context", serialized)
             self.assertNotIn("sha256:abc", serialized)
 
+            insights = registry.usage_insights(days=30)
+            insight_text = json.dumps(insights, sort_keys=True)
+            self.assertEqual(insights["status"], "usage_insights")
+            self.assertEqual(insights["events"], 2)
+            self.assertEqual(insights["total_tokens"], 135)
+            self.assertEqual(insights["top_provider"]["key"], "openai")
+            self.assertEqual(insights["top_model"]["key"], "openai/gpt-4o-mini")
+            self.assertFalse(insights["raw_metadata_values_included"])
+            self.assertNotIn("secret-like usage context", insight_text)
+            self.assertNotIn("sha256:abc", insight_text)
+
     def test_cloud_provider_login_uses_brokered_local_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
             root = Path(temp)

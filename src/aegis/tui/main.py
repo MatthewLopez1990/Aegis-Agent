@@ -91,6 +91,7 @@ TOP_LEVEL_COMMANDS = (
     "hooks",
     "image",
     "indicator",
+    "insights",
     "init",
     "kanban",
     "keybindings",
@@ -2422,6 +2423,16 @@ class AegisTui(cmd.Cmd):
         """usage -- show model usage summary."""
         self.do_models("usage")
 
+    def do_insights(self, arg: str) -> None:
+        """insights [days] -- show sanitized model usage analytics."""
+        parts = shlex.split(arg)
+        try:
+            days = int(parts[0]) if parts else 30
+        except ValueError:
+            print("usage: insights [days]")
+            return
+        _print_json(self.orchestrator.models.usage_insights(days=days))
+
     def do_gquota(self, arg: str) -> None:
         """gquota [google-gemini-oauth/model] -- show Google Gemini Code Assist quota metadata."""
         identifier = arg.strip() or str(self.session.get("model") or "")
@@ -4477,6 +4488,7 @@ def _command_reference() -> str:
             "channel events [limit]  Recent channel activity",
             "models|model           Model providers",
             "login|logout <provider> Model auth aliases",
+            "usage|stats|insights   Model usage and local analytics",
             "effort [level]         Guarded reasoning-effort status",
             "cost                   Model usage and estimated cost",
             "statusbar|statusline   UI status metadata",
@@ -4600,6 +4612,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         "Build",
         (
             ("model|models|provider|usage", "provider routes, auth, and usage"),
+            ("insights [days]", "sanitized local usage analytics"),
             ("gquota [model]", "Google Gemini Code Assist quota metadata"),
             ("login|logout <provider>", "model auth login/logout aliases"),
             ("effort|cost", "guarded reasoning-effort metadata and usage cost"),
@@ -4880,6 +4893,7 @@ def _next_command_hint(command: str) -> str:
         "logout": "/models auth methods",
         "effort": "/model",
         "cost": "/models usage",
+        "insights": "/usage",
         "commands": "/commands all",
         "keybindings": "/terminal-setup",
         "allowed-tools": "/toolsets",

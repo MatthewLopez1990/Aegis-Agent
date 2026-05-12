@@ -44,7 +44,7 @@ Commands:
 - `model [identifier|args]`
 - `login [provider [subscription]]`
 - `logout <provider>`
-- `effort|reasoning [level]`, `cost`, `stats`, `statusbar|statusline|sb`, `footer`, `busy`, `indicator`, `theme`, `skin`, `color`, `verbose`
+- `effort|reasoning [level]`, `cost`, `stats`, `insights [days]`, `statusbar|statusline|sb`, `footer`, `busy`, `indicator`, `theme`, `skin`, `color`, `verbose`
 - `models list`
 - `models route <identifier>`
 - `models alias <alias> <identifier>`
@@ -69,7 +69,7 @@ Commands:
 - `models auth methods [provider]`
 - `models auth targets`
 - `models auth logout <provider>`
-- `provider`, `usage`
+- `provider`, `usage`, `insights [days]`
 - `tools`, `allowed-tools`, `bashes`
 - `toolsets`
 - `skills [hub query|disable skill_id|enable skill_id]`
