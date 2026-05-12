@@ -22,6 +22,7 @@ MIN_PAIRING_TTL_SECONDS = 60
 MAX_PAIRING_TTL_SECONDS = 3600
 DEFAULT_ALLOWED_TASK_ACTIONS = ("status", "events", "resume", "pause", "cancel")
 MAX_REMOTE_DIRECTORY_TASKS = 25
+MAX_RELAY_OUTBOX_ITEMS = 100
 REMOTE_CONTROL_RELAY_NOTIFICATION_EVENTS = (
     "pairing_ready",
     "directory_updated",
@@ -57,6 +58,7 @@ class RemoteControlPairingRegistry:
     def __init__(self, store_path: str | Path | None = None) -> None:
         self.store_path = Path(store_path).expanduser().resolve() if store_path else None
         self._pairings: dict[str, dict[str, Any]] = {}
+        self._relay_outbox: list[dict[str, Any]] = []
         self._load()
 
     def create_pairing(
@@ -132,6 +134,7 @@ class RemoteControlPairingRegistry:
             "active_pairing_count": active_count,
             "active_relay_action_proxy_count": relay_action_count,
             "pairings": pairings,
+            "relay_outbox": self.relay_outbox(limit=20)["items"],
             "control_surface": [
                 "scoped task directory",
                 "remote task status",
@@ -143,6 +146,7 @@ class RemoteControlPairingRegistry:
                 "registered relay action proxy",
                 "registered relay directory publish",
                 "registered relay notification publish",
+                "durable relay notification outbox",
             ],
             "blocked_until_relay": [
                 "mobile_push_delivery",
@@ -183,6 +187,7 @@ class RemoteControlPairingRegistry:
                 "approved_relay_revocation_propagation",
                 "approved_relay_action_pull",
                 "approved_relay_notification_publish",
+                "durable_relay_notification_outbox",
                 "approved_relay_directory_publish",
                 "scoped_remote_directory",
             ],
@@ -483,27 +488,25 @@ class RemoteControlPairingRegistry:
             "raw_secret_values_included": False,
             "required_controls": ["scoped_remote_notification", "audit_receipts_without_tokens"],
         }
-        request = Request(
-            relay_target,
-            data=json.dumps(payload, sort_keys=True).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {relay_auth_token}",
-                "Content-Type": "application/json",
-                "User-Agent": "Aegis-Agent/0.1",
-            },
-            method="POST",
+        outbox_id = self._enqueue_relay_notification(
+            pairing_id=pairing["id"],
+            relay_target=relay_target,
+            notification=sanitized_notification,
+            payload=payload,
+            now=checked_at,
         )
+        self._mark_relay_outbox_attempt(outbox_id, now=checked_at)
         try:
-            response_context = _open_without_redirects(request, timeout=10)
+            response_status, response_body = _post_relay_payload(relay_target, payload=payload, relay_auth_token=relay_auth_token)
         except HTTPError as exc:
+            self._mark_relay_outbox_failed(outbox_id, now=checked_at, error=f"status {exc.code}", response_status=exc.code)
             if 300 <= exc.code < 400:
                 raise ValueError("HTTP redirects are not followed for remote-control relay notification publish") from exc
             raise ValueError(f"remote-control relay notification publish failed with status {exc.code}") from exc
         except URLError as exc:
+            self._mark_relay_outbox_failed(outbox_id, now=checked_at, error=str(exc.reason), response_status=None)
             raise ValueError(f"remote-control relay notification publish failed: {exc.reason}") from exc
-        with response_context as response:
-            response_status = response.getcode() if hasattr(response, "getcode") else None
-            response_body = response.read(2048)
+        self._mark_relay_outbox_delivered(outbox_id, now=checked_at, response_status=response_status, response_bytes=len(response_body))
         relay_registration["last_notification_publish_at"] = checked_at.isoformat()
         relay_registration["last_notification_publish_response_status"] = response_status
         relay_registration["last_notification_publish_event"] = sanitized_notification["event"]
@@ -517,6 +520,9 @@ class RemoteControlPairingRegistry:
             "relay_target": relay_target,
             "relay_response_status": response_status,
             "relay_response_bytes": len(response_body),
+            "outbox_id": outbox_id,
+            "outbox_status": self._relay_outbox_item(outbox_id).get("status"),
+            "relay_acknowledged": self._relay_outbox_item(outbox_id).get("status") == "acknowledged",
             "notification_event": sanitized_notification["event"],
             "notification": sanitized_notification,
             "pairing_token_relayed": False,
@@ -524,6 +530,131 @@ class RemoteControlPairingRegistry:
             "relay_auth_token_captured": False,
             "user_request_included": False,
             "plan_receipt_included": False,
+            "raw_secret_values_included": False,
+        }
+
+    def relay_outbox(self, *, status: str | None = None, limit: int = 20) -> dict[str, Any]:
+        self._load()
+        normalized_status = _optional_clean_string(status)
+        max_items = max(1, min(int(limit), MAX_RELAY_OUTBOX_ITEMS))
+        rows = [
+            item
+            for item in self._relay_outbox
+            if normalized_status is None or item.get("status") == normalized_status
+        ][:max_items]
+        counts: dict[str, int] = {}
+        for item in self._relay_outbox:
+            item_status = str(item.get("status") or "unknown")
+            counts[item_status] = counts.get(item_status, 0) + 1
+        return {
+            "status": "relay_notification_outbox",
+            "mode": "metadata_only_relay_delivery_state",
+            "item_count": len(rows),
+            "status_counts": counts,
+            "items": [_public_relay_outbox_item(item) for item in rows],
+            "pairing_token_relayed": False,
+            "relay_auth_token_captured": False,
+            "user_request_included": False,
+            "plan_receipt_included": False,
+            "raw_secret_values_included": False,
+        }
+
+    def retry_relay_notifications(
+        self,
+        pairing_id: str,
+        *,
+        relay_auth_token: str,
+        allowlist: tuple[str, ...],
+        approved: bool = False,
+        limit: int = 10,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if not approved:
+            raise PermissionError("remote-control relay outbox retry requires explicit approval")
+        self._load()
+        checked_at = _utc_now(now)
+        pairing = self._pairings.get(pairing_id)
+        if pairing is None:
+            raise KeyError(pairing_id)
+        relay_registration = pairing.get("relay_registration")
+        if not isinstance(relay_registration, dict):
+            raise ValueError("remote-control relay outbox retry requires a registered relay")
+        if not relay_auth_token.strip():
+            raise ValueError("remote-control relay outbox retry requires a brokered relay auth token")
+        stored_hash = str(relay_registration.get("relay_auth_sha256") or "")
+        if not stored_hash or not secrets.compare_digest(stored_hash, _token_hash(relay_auth_token)):
+            raise PermissionError("remote-control relay outbox retry auth does not match registration")
+        public_pairing = self._public_pairing(pairing, now=checked_at)
+        if public_pairing["status"] != "active":
+            raise ValueError("remote-control relay outbox retry requires an active pairing")
+        relay_target = _validated_relay_target(str(relay_registration.get("relay_target") or ""), allowlist=allowlist)
+        retry_limit = max(1, min(int(limit), 25))
+        candidates = [
+            item
+            for item in self._relay_outbox
+            if item.get("kind") == "notification"
+            and item.get("pairing_id") == pairing["id"]
+            and item.get("status") in {"pending", "failed", "retry_pending"}
+        ][:retry_limit]
+        results: list[dict[str, Any]] = []
+        for item in candidates:
+            outbox_id = str(item["id"])
+            payload = dict(item.get("payload") if isinstance(item.get("payload"), dict) else {})
+            notification = item.get("notification") if isinstance(item.get("notification"), dict) else {}
+            sanitized_notification = _sanitize_remote_notification_for_relay(notification, pairing=public_pairing)
+            payload.update(
+                {
+                    "sent_at": checked_at.isoformat(),
+                    "pairing": public_pairing,
+                    "notification": sanitized_notification,
+                    "pairing_token_included": False,
+                    "relay_auth_token_included": False,
+                    "user_request_included": False,
+                    "plan_receipt_included": False,
+                    "raw_secret_values_included": False,
+                }
+            )
+            self._mark_relay_outbox_attempt(outbox_id, now=checked_at)
+            try:
+                response_status, response_body = _post_relay_payload(relay_target, payload=payload, relay_auth_token=relay_auth_token)
+            except HTTPError as exc:
+                self._mark_relay_outbox_failed(outbox_id, now=checked_at, error=f"status {exc.code}", response_status=exc.code)
+                results.append({"outbox_id": outbox_id, "status": "failed", "error": f"status {exc.code}", "response_status": exc.code})
+                continue
+            except URLError as exc:
+                self._mark_relay_outbox_failed(outbox_id, now=checked_at, error=str(exc.reason), response_status=None)
+                results.append({"outbox_id": outbox_id, "status": "failed", "error": str(exc.reason), "response_status": None})
+                continue
+            self._mark_relay_outbox_delivered(outbox_id, now=checked_at, response_status=response_status, response_bytes=len(response_body))
+            updated = self._relay_outbox_item(outbox_id)
+            results.append(
+                {
+                    "outbox_id": outbox_id,
+                    "status": updated.get("status"),
+                    "response_status": response_status,
+                    "response_bytes": len(response_body),
+                    "relay_acknowledged": updated.get("status") == "acknowledged",
+                }
+            )
+        relay_registration["last_notification_retry_at"] = checked_at.isoformat()
+        relay_registration["last_notification_retry_count"] = len(results)
+        relay_registration["pairing_token_relayed"] = False
+        relay_registration["raw_secret_values_included"] = False
+        self._save()
+        acknowledged = sum(1 for result in results if result.get("status") == "acknowledged")
+        failed = sum(1 for result in results if result.get("status") == "failed")
+        return {
+            "status": "relay_notification_outbox_retried",
+            "mode": "approved_relay_notification_retry",
+            "pairing": public_pairing,
+            "relay_target": relay_target,
+            "attempted_count": len(results),
+            "acknowledged_count": acknowledged,
+            "failed_count": failed,
+            "results": results,
+            "outbox": self.relay_outbox(limit=20),
+            "pairing_token_relayed": False,
+            "relay_auth_token_captured": False,
             "raw_secret_values_included": False,
         }
 
@@ -828,6 +959,7 @@ class RemoteControlPairingRegistry:
                 "relay_registration": _normalize_relay_registration(row.get("relay_registration")),
             }
         self._pairings = pairings
+        self._relay_outbox = _normalize_relay_outbox(payload.get("relay_outbox") if isinstance(payload, dict) else None)
 
     def _save(self) -> None:
         if self.store_path is None:
@@ -836,6 +968,7 @@ class RemoteControlPairingRegistry:
         payload = {
             "version": 1,
             "pairings": list(self._pairings.values()),
+            "relay_outbox": self._relay_outbox[:MAX_RELAY_OUTBOX_ITEMS],
             "raw_secret_values_included": False,
         }
         temp_path = self.store_path.with_suffix(self.store_path.suffix + ".tmp")
@@ -880,9 +1013,86 @@ class RemoteControlPairingRegistry:
             "relay_last_pull_at": relay_last_pull_at or None,
             "relay_last_directory_publish_at": relay_last_directory_publish_at or None,
             "relay_last_notification_publish_at": relay_last_notification_publish_at or None,
+            "relay_notification_outbox_count": sum(1 for item in self._relay_outbox if item.get("pairing_id") == pairing["id"] and item.get("status") in {"pending", "failed", "retry_pending"}),
             "relay_revocation_propagated": bool(relay_revocation_relayed_at),
             "relay_revocation_relayed_at": relay_revocation_relayed_at or None,
         }
+
+    def _enqueue_relay_notification(
+        self,
+        *,
+        pairing_id: str,
+        relay_target: str,
+        notification: dict[str, Any],
+        payload: dict[str, Any],
+        now: datetime,
+    ) -> str:
+        outbox_id = "rco_" + secrets.token_hex(8)
+        item = {
+            "id": outbox_id,
+            "kind": "notification",
+            "status": "pending",
+            "pairing_id": pairing_id,
+            "relay_target": relay_target,
+            "event": str(notification.get("event") or ""),
+            "task_id": _optional_clean_string(notification.get("task_id")),
+            "session_id": _optional_clean_string(notification.get("session_id")),
+            "notification": notification,
+            "payload": payload,
+            "attempt_count": 0,
+            "created_at": now.isoformat(),
+            "updated_at": now.isoformat(),
+            "last_attempt_at": None,
+            "delivered_at": None,
+            "acknowledged_at": None,
+            "response_status": None,
+            "response_bytes": 0,
+            "last_error": None,
+            "pairing_token_relayed": False,
+            "relay_auth_token_captured": False,
+            "user_request_included": False,
+            "plan_receipt_included": False,
+            "raw_secret_values_included": False,
+        }
+        self._relay_outbox.insert(0, item)
+        self._relay_outbox = self._relay_outbox[:MAX_RELAY_OUTBOX_ITEMS]
+        self._save()
+        return outbox_id
+
+    def _relay_outbox_item(self, outbox_id: str) -> dict[str, Any]:
+        for item in self._relay_outbox:
+            if item.get("id") == outbox_id:
+                return item
+        raise KeyError(outbox_id)
+
+    def _mark_relay_outbox_attempt(self, outbox_id: str, *, now: datetime) -> None:
+        item = self._relay_outbox_item(outbox_id)
+        item["status"] = "retry_pending" if int(item.get("attempt_count") or 0) else "pending"
+        item["attempt_count"] = int(item.get("attempt_count") or 0) + 1
+        item["last_attempt_at"] = now.isoformat()
+        item["updated_at"] = now.isoformat()
+        item["last_error"] = None
+        self._save()
+
+    def _mark_relay_outbox_delivered(self, outbox_id: str, *, now: datetime, response_status: int | None, response_bytes: int) -> None:
+        item = self._relay_outbox_item(outbox_id)
+        item["status"] = "acknowledged" if response_status is not None and 200 <= int(response_status) < 300 else "delivered"
+        item["delivered_at"] = now.isoformat()
+        item["acknowledged_at"] = now.isoformat() if item["status"] == "acknowledged" else None
+        item["updated_at"] = now.isoformat()
+        item["response_status"] = response_status
+        item["response_bytes"] = int(response_bytes)
+        item["last_error"] = None
+        self._save()
+
+    def _mark_relay_outbox_failed(self, outbox_id: str, *, now: datetime, error: str, response_status: int | None) -> None:
+        item = self._relay_outbox_item(outbox_id)
+        item["status"] = "failed"
+        item["updated_at"] = now.isoformat()
+        item["response_status"] = response_status
+        item["last_error"] = str(error)[:240]
+        item["next_retry_after"] = (now + timedelta(seconds=min(300, 30 * max(1, int(item.get("attempt_count") or 1))))).isoformat()
+        self._save()
 
 
 def build_remote_control_directory(
@@ -1219,7 +1429,124 @@ def _normalize_relay_registration(value: Any) -> dict[str, Any] | None:
         normalized["last_notification_publish_response_status"] = int(value["last_notification_publish_response_status"])
     if value.get("last_notification_publish_event"):
         normalized["last_notification_publish_event"] = str(value["last_notification_publish_event"])
+    if value.get("last_notification_retry_at"):
+        normalized["last_notification_retry_at"] = str(value["last_notification_retry_at"])
+    if value.get("last_notification_retry_count") is not None:
+        normalized["last_notification_retry_count"] = int(value["last_notification_retry_count"])
     return normalized
+
+
+def _normalize_relay_outbox(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    items: list[dict[str, Any]] = []
+    for row in value[:MAX_RELAY_OUTBOX_ITEMS]:
+        if not isinstance(row, dict):
+            continue
+        outbox_id = _optional_clean_string(row.get("id"))
+        pairing_id = _optional_clean_string(row.get("pairing_id"))
+        relay_target = _optional_clean_string(row.get("relay_target"))
+        notification = row.get("notification") if isinstance(row.get("notification"), dict) else {}
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        if not outbox_id or not pairing_id or not relay_target:
+            continue
+        status = str(row.get("status") or "pending")
+        if status not in {"pending", "retry_pending", "failed", "delivered", "acknowledged"}:
+            status = "pending"
+        items.append(
+            {
+                "id": outbox_id,
+                "kind": "notification",
+                "status": status,
+                "pairing_id": pairing_id,
+                "relay_target": relay_target,
+                "event": str(row.get("event") or notification.get("event") or "")[:80],
+                "task_id": _optional_clean_string(row.get("task_id") or notification.get("task_id")),
+                "session_id": _optional_clean_string(row.get("session_id") or notification.get("session_id")),
+                "notification": _persisted_notification(notification),
+                "payload": _persisted_payload(payload),
+                "attempt_count": _safe_int(row.get("attempt_count"), default=0),
+                "created_at": str(row.get("created_at") or _utc_now(None).isoformat()),
+                "updated_at": str(row.get("updated_at") or _utc_now(None).isoformat()),
+                "last_attempt_at": _optional_clean_string(row.get("last_attempt_at")),
+                "delivered_at": _optional_clean_string(row.get("delivered_at")),
+                "acknowledged_at": _optional_clean_string(row.get("acknowledged_at")),
+                "response_status": _safe_optional_int(row.get("response_status")),
+                "response_bytes": _safe_int(row.get("response_bytes"), default=0),
+                "last_error": _optional_clean_string(row.get("last_error")),
+                "next_retry_after": _optional_clean_string(row.get("next_retry_after")),
+                "pairing_token_relayed": False,
+                "relay_auth_token_captured": False,
+                "user_request_included": False,
+                "plan_receipt_included": False,
+                "raw_secret_values_included": False,
+            }
+        )
+    return items
+
+
+def _persisted_notification(notification: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": "remote_notification_available",
+        "mode": "scoped_remote_notification",
+        "checked_at": str(notification.get("checked_at") or _utc_now(None).isoformat()),
+        "event": str(notification.get("event") or "")[:80],
+        "pairing": notification.get("pairing") if isinstance(notification.get("pairing"), dict) else {},
+        "task_id": _optional_clean_string(notification.get("task_id")),
+        "session_id": _optional_clean_string(notification.get("session_id")),
+        "task": _sanitize_remote_directory_task(notification.get("task") if isinstance(notification.get("task"), dict) else None),
+        "metadata_only": True,
+        "pairing_token_relayed": False,
+        "raw_secret_values_included": False,
+        "user_request_included": False,
+        "plan_receipt_included": False,
+    }
+
+
+def _persisted_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "aegis.remote_control.notification",
+        "version": 1,
+        "sent_at": str(payload.get("sent_at") or _utc_now(None).isoformat()),
+        "pairing_id": _optional_clean_string(payload.get("pairing_id")),
+        "pairing": payload.get("pairing") if isinstance(payload.get("pairing"), dict) else {},
+        "notification": _persisted_notification(payload.get("notification") if isinstance(payload.get("notification"), dict) else {}),
+        "pairing_token_included": False,
+        "relay_auth_token_included": False,
+        "user_request_included": False,
+        "plan_receipt_included": False,
+        "raw_secret_values_included": False,
+        "required_controls": ["scoped_remote_notification", "audit_receipts_without_tokens"],
+    }
+
+
+def _public_relay_outbox_item(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": item.get("id"),
+        "kind": "notification",
+        "status": item.get("status"),
+        "pairing_id": item.get("pairing_id"),
+        "relay_target": item.get("relay_target"),
+        "event": item.get("event"),
+        "task_id": item.get("task_id"),
+        "session_id": item.get("session_id"),
+        "attempt_count": int(item.get("attempt_count") or 0),
+        "created_at": item.get("created_at"),
+        "updated_at": item.get("updated_at"),
+        "last_attempt_at": item.get("last_attempt_at"),
+        "delivered_at": item.get("delivered_at"),
+        "acknowledged_at": item.get("acknowledged_at"),
+        "response_status": item.get("response_status"),
+        "response_bytes": item.get("response_bytes"),
+        "last_error": item.get("last_error"),
+        "next_retry_after": item.get("next_retry_after"),
+        "metadata_only": True,
+        "pairing_token_relayed": False,
+        "relay_auth_token_captured": False,
+        "user_request_included": False,
+        "plan_receipt_included": False,
+        "raw_secret_values_included": False,
+    }
 
 
 def _relay_registered(pairing: dict[str, Any]) -> bool:
@@ -1252,6 +1579,49 @@ def _redacted_relay_target(relay_url: str | None) -> str | None:
 
 def _allowed_domain(domain: str, allowlist: tuple[str, ...]) -> bool:
     return any(domain == allowed or domain.endswith(f".{allowed}") for allowed in allowlist)
+
+
+def _validated_relay_target(relay_target: str, *, allowlist: tuple[str, ...]) -> str:
+    parsed = urlparse(relay_target)
+    validation_error = _validate_url(parsed)
+    if validation_error:
+        raise ValueError(validation_error)
+    if parsed.scheme != "https":
+        raise ValueError("remote-control relay URL must use https")
+    domain = parsed.hostname or ""
+    if not _allowed_domain(domain, allowlist):
+        raise ValueError(f"domain {domain!r} is not allowlisted")
+    private_error = _private_network_error(domain)
+    if private_error:
+        raise ValueError(private_error)
+    return relay_target
+
+
+def _post_relay_payload(relay_target: str, *, payload: dict[str, Any], relay_auth_token: str) -> tuple[int | None, bytes]:
+    request = Request(
+        relay_target,
+        data=json.dumps(payload, sort_keys=True).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {relay_auth_token}",
+            "Content-Type": "application/json",
+            "User-Agent": "Aegis-Agent/0.1",
+        },
+        method="POST",
+    )
+    response_context = _open_without_redirects(request, timeout=10)
+    with response_context as response:
+        response_status = response.getcode() if hasattr(response, "getcode") else None
+        response_body = response.read(2048)
+    return response_status, response_body
+
+
+def _safe_optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_relay_action_envelope(raw: dict[str, Any], public_pairing: dict[str, Any]) -> dict[str, Any]:

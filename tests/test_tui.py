@@ -323,6 +323,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn("--approved", tui.completedefault("--", "/remote-control relay --", len("/remote-control relay "), len("/remote-control relay --")))
             self.assertIn("--relay-auth-secret", tui.completedefault("--", "/remote-control relay-directory --", len("/remote-control relay-directory "), len("/remote-control relay-directory --")))
             self.assertIn("--event", tui.completedefault("--", "/remote-control relay-notify --", len("/remote-control relay-notify "), len("/remote-control relay-notify --")))
+            self.assertIn("--limit", tui.completedefault("--", "/remote-control relay-outbox --", len("/remote-control relay-outbox "), len("/remote-control relay-outbox --")))
+            self.assertIn("--approved", tui.completedefault("--", "/remote-control relay-retry --", len("/remote-control relay-retry "), len("/remote-control relay-retry --")))
             self.assertIn("--dry-run", tui.completedefault("--", "/remote-control relay-pull --", len("/remote-control relay-pull "), len("/remote-control relay-pull --")))
             self.assertIn("--action", tui.completedefault("--", "/remote-control relay-action --", len("/remote-control relay-action "), len("/remote-control relay-action --")))
             self.assertIn("append", tui.complete_session("ap", "session ap", len("session "), len("session ap")))

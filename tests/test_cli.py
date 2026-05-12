@@ -282,6 +282,31 @@ class CliTests(unittest.TestCase):
                             ]
                         )
                     )
+                    relay_outbox = dispatch(
+                        parser.parse_args(
+                            [
+                                "--data-dir",
+                                str(data_dir),
+                                "remote-control",
+                                "relay-outbox",
+                            ]
+                        )
+                    )
+                    relay_retry = dispatch(
+                        parser.parse_args(
+                            [
+                                "--data-dir",
+                                str(data_dir),
+                                "remote-control",
+                                "relay-retry",
+                                "--pairing-id",
+                                pair["pairing"]["id"],
+                                "--relay-auth-secret",
+                                "AEGIS_REMOTE_RELAY_TOKEN",
+                                "--approved",
+                            ]
+                        )
+                    )
                     relay_pull = dispatch(
                         parser.parse_args(
                             [
@@ -361,6 +386,12 @@ class CliTests(unittest.TestCase):
             self.assertFalse(relay_notify["relay_auth_token_captured"])
             self.assertNotIn("send message relay controlled", json.dumps(relay_notify, sort_keys=True))
             self.assertNotIn("relay-raw-secret", json.dumps(relay_notify, sort_keys=True))
+            self.assertEqual(relay_outbox["status"], "relay_notification_outbox")
+            self.assertEqual(relay_outbox["item_count"], 1)
+            self.assertEqual(relay_outbox["items"][0]["status"], "acknowledged")
+            self.assertEqual(relay_retry["status"], "relay_notification_outbox_retried")
+            self.assertEqual(relay_retry["attempted_count"], 0)
+            self.assertFalse(relay_retry["relay_auth_token_captured"])
             self.assertEqual(relay_pull["status"], "relay_actions_pulled")
             self.assertEqual(relay_pull["executed_action_count"], 1)
             self.assertEqual(relay_pull["executed_actions"][0]["result"]["id"], relay_task["id"])

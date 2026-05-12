@@ -193,6 +193,10 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 self._authorize_remote_control_status()
                 self._json(remote_control.relay_preflight(relay_url=query.get("relay_url", [None])[0]))
                 return
+            if path == "/remote-control/relay/outbox":
+                self._authorize_remote_control_status()
+                self._json(remote_control.relay_outbox(status=query.get("status", [None])[0], limit=_limit(query, default=20)))
+                return
             match_remote_task = re.fullmatch(r"/remote-control/tasks/([^/]+)", path)
             if match_remote_task:
                 task_id = match_remote_task.group(1)
@@ -480,7 +484,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
         def _do_POST(self) -> None:
             parsed = urlparse(self.path)
             path = parsed.path
-            if path in {"/remote-control/pair", "/remote-control/revoke", "/remote-control/relay", "/remote-control/relay/pull", "/remote-control/relay/directory", "/remote-control/relay/notify"}:
+            if path in {"/remote-control/pair", "/remote-control/revoke", "/remote-control/relay", "/remote-control/relay/pull", "/remote-control/relay/directory", "/remote-control/relay/notify", "/remote-control/relay/retry"}:
                 self._authorize_local_mutation()
             elif path == "/remote-control/relay/action":
                 pass
@@ -717,6 +721,39 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                         "relay_target": result["relay_target"],
                         "event": result["notification_event"],
                         "task_id": result["notification"].get("task_id"),
+                        "pairing_token_relayed": False,
+                        "relay_auth_token_captured": False,
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(result)
+                return
+            if path == "/remote-control/relay/retry":
+                payload = self._read_json()
+                relay_secret = str(_required(payload, "relay_auth_secret"))
+                handle = orchestrator.secrets_broker.request_handle(
+                    name=relay_secret,
+                    requester="remote_control_relay",
+                    reason="retry scoped remote-control relay notification outbox",
+                    scopes=("remote_control:relay",),
+                )
+                relay_auth_token = orchestrator.secrets_broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                result = remote_control.retry_relay_notifications(
+                    str(_required(payload, "pairing_id")),
+                    relay_auth_token=relay_auth_token,
+                    allowlist=orchestrator.config.network_allowlist,
+                    approved=bool(payload.get("approved", False)),
+                    limit=int(payload.get("limit", 10)),
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.relay_notification_outbox_retried",
+                    {
+                        "pairing_id": result["pairing"]["id"],
+                        "relay_target": result["relay_target"],
+                        "attempted_count": result["attempted_count"],
+                        "acknowledged_count": result["acknowledged_count"],
+                        "failed_count": result["failed_count"],
                         "pairing_token_relayed": False,
                         "relay_auth_token_captured": False,
                         "raw_secret_values_included": False,

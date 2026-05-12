@@ -357,6 +357,9 @@ class ApiServerSecurityTests(unittest.TestCase):
                 with self.assertRaises(HTTPError) as remote_relay_error:
                     _json_get(port, "/remote-control/relay")
                 self.assertEqual(remote_relay_error.exception.code, 403)
+                with self.assertRaises(HTTPError) as remote_relay_outbox_error:
+                    _json_get(port, "/remote-control/relay/outbox")
+                self.assertEqual(remote_relay_outbox_error.exception.code, 403)
                 with self.assertRaises(HTTPError) as remote_directory_error:
                     _json_get(port, "/remote-control/directory")
                 self.assertEqual(remote_directory_error.exception.code, 403)
@@ -550,6 +553,7 @@ class ApiServerSecurityTests(unittest.TestCase):
                             relay_auth_token="relay-raw-secret",
                             approved=True,
                         )
+                remote_relay_outbox_initial = _json_get(port, "/remote-control/relay/outbox", token=token)
                 remote_relay_action = _json_post(
                     port,
                     "/remote-control/relay/action",
@@ -1097,6 +1101,8 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(relay_proxy_registration["status"], "relay_registered")
                 self.assertTrue(relay_proxy_registration["relay_action_proxy_enabled"])
                 self.assertFalse(relay_proxy_registration["pairing_token_relayed"])
+                self.assertEqual(remote_relay_outbox_initial["status"], "relay_notification_outbox")
+                self.assertEqual(remote_relay_outbox_initial["item_count"], 0)
                 self.assertEqual(remote_relay_action["status"], "relay_action_proxied")
                 self.assertEqual(remote_relay_action["mode"], "approved_relay_action_proxy")
                 self.assertEqual(remote_relay_action["action"], "pause")

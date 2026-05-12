@@ -289,6 +289,7 @@ const refresh = async () => {
       dashboard,
       remoteControl,
       remoteControlRelay,
+      remoteControlOutbox,
       connectors,
       policy,
       policyBundles,
@@ -328,6 +329,7 @@ const refresh = async () => {
       api("/dashboard"),
       api("/remote-control/status"),
       api("/remote-control/relay"),
+      api("/remote-control/relay/outbox"),
       api("/connectors"),
       api("/policy"),
       api("/policy/bundles"),
@@ -368,6 +370,7 @@ const refresh = async () => {
     syncPendingSkillEnableApprovals([...(approvedApprovals.approvals || []), ...(approvals.approvals || [])]);
     renderMetrics(dashboard);
     renderRemoteControlRelay(remoteControlRelay);
+    renderRemoteControlOutbox(remoteControlOutbox);
     setList("remote-control-pairings", remoteControl.pairings || [], (x) => ({
       title: x.label || x.id,
       detail: `Session ${x.session_id || "any"} · task ${x.task_id || "any"} · actions ${(x.allowed_actions || []).join(", ") || "none"}`,
@@ -1760,6 +1763,19 @@ const renderRemoteControlRelay = (payload = {}) => {
   }), "Relay preflight has no blockers");
 };
 
+const renderRemoteControlOutbox = (payload = {}) => {
+  const counts = payload.status_counts || {};
+  const summary = Object.entries(counts)
+    .map(([status, count]) => `${status}:${count}`)
+    .join(" · ");
+  setList("remote-control-relay-outbox", payload.items || [], (x) => ({
+    title: x.event || x.id,
+    detail: `Pairing ${x.pairing_id || "unknown"} · task ${x.task_id || "any"} · attempts ${x.attempt_count || 0}`,
+    meta: `${x.status || "pending"} · ${x.updated_at || x.created_at || "not timestamped"}${summary ? ` · ${summary}` : ""}`,
+    tone: x.status === "acknowledged" ? "ready" : "attention",
+  }), "No relay notification outbox rows");
+};
+
 const renderChannelOutput = (payload) => {
   const node = document.getElementById("channel-render-output");
   node.innerHTML = `
@@ -2650,6 +2666,24 @@ document.getElementById("remote-control-relay-notify").addEventListener("click",
       ...remoteControlRelayBody(),
       event: document.getElementById("remote-control-relay-event").value.trim() || "directory-updated",
       task_id: taskId || undefined,
+    }),
+  });
+  renderRemoteControlOutput(result);
+  await refresh();
+});
+
+document.getElementById("remote-control-relay-outbox-refresh").addEventListener("click", async () => {
+  const result = await api("/remote-control/relay/outbox");
+  renderRemoteControlOutbox(result);
+  renderRemoteControlOutput(result);
+});
+
+document.getElementById("remote-control-relay-retry").addEventListener("click", async () => {
+  const result = await api("/remote-control/relay/retry", {
+    method: "POST",
+    body: JSON.stringify({
+      ...remoteControlRelayBody(),
+      limit: 10,
     }),
   });
   renderRemoteControlOutput(result);

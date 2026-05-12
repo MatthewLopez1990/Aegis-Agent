@@ -201,7 +201,7 @@ BROWSER_COMMANDS = ("status", "connect", "disconnect", "session", "sessions", "c
 MCP_COMMANDS = ("list", "register", "auth", "call")
 HOOK_COMMANDS = ("list", "add", "enable", "disable", "remove", "run")
 AGENTS_COMMANDS = ("status", "profiles", "profile-create", "profile-disable", "delegate", "handoff", "run")
-REMOTE_CONTROL_COMMANDS = ("pair", "directory", "revoke", "relay", "relay-directory", "relay-notify", "relay-pull", "relay-action")
+REMOTE_CONTROL_COMMANDS = ("pair", "directory", "revoke", "relay", "relay-directory", "relay-notify", "relay-outbox", "relay-retry", "relay-pull", "relay-action")
 SESSION_COMMANDS = ("new", "open", "rename", "set-model", "set-personality", "activate", "archive", "pause", "append", "history", "tasks", "compact")
 TASKS_COMMANDS = ("all", "session")
 QUEUE_COMMANDS = ("status", "show", "list", "active", "pending", "all", "session", "submit")
@@ -2583,6 +2583,59 @@ class AegisTui(cmd.Cmd):
                     "relay_target": result["relay_target"],
                     "event": result["notification_event"],
                     "task_id": result["notification"].get("task_id"),
+                    "pairing_token_relayed": False,
+                    "relay_auth_token_captured": False,
+                    "raw_secret_values_included": False,
+                    "source": "tui",
+                },
+            )
+            _print_json(result)
+            return
+        if parts and parts[0] == "relay-outbox":
+            status_filter = _option_value(parts, "--status")
+            limit = _optional_int(_option_value(parts, "--limit")) or 20
+            registry = RemoteControlPairingRegistry(
+                self.orchestrator.config.data_dir / "remote_control_pairings.json"
+            )
+            _print_json(registry.relay_outbox(status=status_filter, limit=limit))
+            return
+        if parts and parts[0] == "relay-retry":
+            pairing_id = _option_value(parts, "--pairing-id")
+            relay_secret = _option_value(parts, "--relay-auth-secret")
+            approved = "--approved" in parts
+            limit = _optional_int(_option_value(parts, "--limit")) or 10
+            if not pairing_id or not relay_secret:
+                print("usage: remote-control relay-retry --pairing-id <id> --relay-auth-secret <secret_name> --approved [--limit N]")
+                return
+            registry = RemoteControlPairingRegistry(
+                self.orchestrator.config.data_dir / "remote_control_pairings.json"
+            )
+            try:
+                handle = self.orchestrator.secrets_broker.request_handle(
+                    name=relay_secret,
+                    requester="remote_control_relay",
+                    reason="retry scoped remote-control relay notification outbox",
+                    scopes=("remote_control:relay",),
+                )
+                relay_auth_token = self.orchestrator.secrets_broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                result = registry.retry_relay_notifications(
+                    pairing_id,
+                    relay_auth_token=relay_auth_token,
+                    allowlist=self.orchestrator.config.network_allowlist,
+                    approved=approved,
+                    limit=limit,
+                )
+            except (KeyError, PermissionError, ValueError) as exc:
+                print(f"remote-control relay-retry error: {exc}")
+                return
+            self.orchestrator.audit_logger.append(
+                "remote_control.relay_notification_outbox_retried",
+                {
+                    "pairing_id": result["pairing"]["id"],
+                    "relay_target": result["relay_target"],
+                    "attempted_count": result["attempted_count"],
+                    "acknowledged_count": result["acknowledged_count"],
+                    "failed_count": result["failed_count"],
                     "pairing_token_relayed": False,
                     "relay_auth_token_captured": False,
                     "raw_secret_values_included": False,
@@ -6090,6 +6143,8 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("remote-control", "relay"): ("--relay-url", "--pairing-id", "--relay-auth-secret", "--approved"),
     ("remote-control", "relay-directory"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit"),
     ("remote-control", "relay-notify"): ("--pairing-id", "--relay-auth-secret", "--approved", "--event", "--task-id"),
+    ("remote-control", "relay-outbox"): ("--status", "--limit"),
+    ("remote-control", "relay-retry"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit"),
     ("remote-control", "relay-pull"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit", "--dry-run"),
     ("remote-control", "relay-action"): ("--pairing-id", "--task-id", "--action", "--relay-auth-secret", "--session-id", "--reason"),
     ("remote_control", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
@@ -6098,6 +6153,8 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("remote_control", "relay"): ("--relay-url", "--pairing-id", "--relay-auth-secret", "--approved"),
     ("remote_control", "relay-directory"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit"),
     ("remote_control", "relay-notify"): ("--pairing-id", "--relay-auth-secret", "--approved", "--event", "--task-id"),
+    ("remote_control", "relay-outbox"): ("--status", "--limit"),
+    ("remote_control", "relay-retry"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit"),
     ("remote_control", "relay-pull"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit", "--dry-run"),
     ("remote_control", "relay-action"): ("--pairing-id", "--task-id", "--action", "--relay-auth-secret", "--session-id", "--reason"),
     ("rc", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
@@ -6106,6 +6163,8 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("rc", "relay"): ("--relay-url", "--pairing-id", "--relay-auth-secret", "--approved"),
     ("rc", "relay-directory"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit"),
     ("rc", "relay-notify"): ("--pairing-id", "--relay-auth-secret", "--approved", "--event", "--task-id"),
+    ("rc", "relay-outbox"): ("--status", "--limit"),
+    ("rc", "relay-retry"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit"),
     ("rc", "relay-pull"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit", "--dry-run"),
     ("rc", "relay-action"): ("--pairing-id", "--task-id", "--action", "--relay-auth-secret", "--session-id", "--reason"),
 }
