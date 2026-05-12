@@ -172,6 +172,7 @@ TOP_LEVEL_COMMANDS = (
     "theme",
     "timeline",
     "title",
+    "topic",
     "toolsets",
     "tools",
     "tp",
@@ -2221,6 +2222,59 @@ class AegisTui(cmd.Cmd):
             self.do_session(f"rename {arg}")
             return
         self.do_session("")
+
+    def do_topic(self, arg: str) -> None:
+        """topic [off|help|session_id] -- show local topic-mode status or restore a session."""
+        topic = arg.strip()
+        if topic == "help":
+            _print_json(
+                {
+                    "status": "topic_help",
+                    "mode": "local_session_topic_boundary",
+                    "usage": "topic [off|help|session_id]",
+                    "local_restore": "topic <session_id>",
+                    "title_command": "title [name]",
+                    "raw_message_content_included": False,
+                }
+            )
+            return
+        if topic == "off":
+            _print_json(
+                {
+                    "status": "topic_mode_off",
+                    "mode": "local_session_topic_boundary",
+                    "topic_bindings_cleared": False,
+                    "gateway_topic_mode_enabled": False,
+                    "raw_message_content_included": False,
+                }
+            )
+            return
+        if topic:
+            try:
+                self.session = self.orchestrator.sessions.get_session(topic)
+            except KeyError:
+                print(f"session not found: {topic}")
+                return
+            _print_json(
+                {
+                    "status": "topic_session_restored",
+                    "mode": "local_session_topic_boundary",
+                    "session": _session_public_summary(self.session),
+                    "raw_message_content_included": False,
+                }
+            )
+            return
+        _print_json(
+            {
+                "status": "topic_status",
+                "mode": "local_session_topic_boundary",
+                "active_session": _session_public_summary(self.session),
+                "gateway_topic_mode_enabled": False,
+                "remote_topic_bindings": "not_enabled",
+                "next_actions": ["topic help", "sessions", "topic <session_id>", "title <name>"],
+                "raw_message_content_included": False,
+            }
+        )
 
     def do_compress(self, arg: str) -> None:
         """compress [keep_last] -- compact the active session history."""
@@ -4333,6 +4387,18 @@ def _session_summary_line(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _session_public_summary(session: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(session.get("id") or ""),
+        "short_id": _short_id(session.get("id", "")),
+        "title": str(redact(str(session.get("title") or ""))),
+        "channel": str(redact(str(session.get("channel") or ""))),
+        "status": str(session.get("status") or ""),
+        "model": str(session.get("model") or ""),
+        "personality": str(session.get("personality") or ""),
+    }
+
+
 def _print_action_hints(payload: dict[str, Any]) -> None:
     hints = payload.get("action_hints", [])
     if not isinstance(hints, list):
@@ -4564,7 +4630,7 @@ def _command_reference() -> str:
             "save|prompt|steer      Explicit save, prompt, and steering readiness",
             "new|reset|clear        Session reset and screen controls",
             "add-dir <path>         Record extra working directory context",
-            "history|title|compress Active session transcript helpers",
+            "history|title|topic|compress Active session transcript helpers",
             "retry|undo             Resubmit or remove the latest session exchange",
             "background|bg|btw <req>  Submit a governed task from the deck",
             "fast [request]         Inspect fast route or submit a quick governed task",
@@ -4694,7 +4760,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("background|bg|btw <request>", "start a governed task without leaving the deck"),
             ("dashboard", "runtime command deck"),
             ("tasks [all|session <id>]", "recent task lanes"),
-            ("session|history|title|compress", "active transcript context"),
+            ("session|history|title|topic|compress", "active transcript context"),
             ("branch|fork|context", "conversation branch and context metadata"),
             ("copy|export|rename", "explicit copy/export and session rename surfaces"),
             ("paste|image <path>", "safe clipboard and image attachment boundaries"),
@@ -4995,6 +5061,7 @@ def _next_command_hint(command: str) -> str:
         "dashboard": "/menu",
         "tasks": "/events <id>",
         "session": "/session history",
+        "topic": "/sessions",
         "branch": "/session new <title>",
         "copy": "/session history",
         "export": "/audit export-siem",

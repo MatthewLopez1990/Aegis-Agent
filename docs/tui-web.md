@@ -18,7 +18,7 @@ Commands:
 - `tasks [all|session <session_id>] [--limit N]`
 - `new [title]`, `reset [title]`, `clear`
 - `add-dir <path>`
-- `history [session_id] [--limit N]`, `title [name]`, `compress|compact [keep_last]`
+- `history [session_id] [--limit N]`, `title [name]`, `topic [off|help|session_id]`, `compress|compact [keep_last]`
 - `background <request>` / `bg <request>`
 - `fast [request]`, `goal`, `batch`, `queue` / `q`, `loop`, `plan`, `branch`, `fork`, `context`, `copy`, `export`, `rename [title]`, `save`, `prompt`, `steer [instruction]`, `stop [task_id]`, `continue [task_id]`, `checkpoint`, `rewind`, `retry`, `undo`, `snapshot`, `snap`
 - `remote-control [name|pair|revoke|relay]` / `rc [name|pair|revoke|relay]`, `handoff [platform]`, `remote-env`, `teleport`, `tp`, `mobile`, `desktop`, `app`, `web-setup`
