@@ -67,11 +67,18 @@ class CliTests(unittest.TestCase):
             self.assertTrue(any(group["name"] == "Session continuity" for group in result["capability_groups"]))
             self.assertTrue(all(target["security_delta"] for target in result["competitive_targets"]))
             self.assertTrue(all(target["live_gap"] for target in result["competitive_targets"]))
+            self.assertEqual(result["model_provider_auth_parity"]["status"], "auth_parity_gap_tracked")
+            auth_targets = {row["target"]: row for row in result["model_provider_auth_parity"]["targets"]}
+            self.assertEqual(auth_targets["Claude Code subscription"]["status"], "metadata_only_bridge_pending")
+            self.assertEqual(auth_targets["GitHub Copilot"]["status"], "not_started")
+            self.assertTrue(any(item["area"] == "model_provider_auth_login_parity" for item in result["live_gap_backlog"]))
             self.assertTrue(any(item["area"] == "provider_and_channel_live_connectors" for item in result["live_gap_backlog"]))
             self.assertTrue(all("sample_tools" in item for item in result["live_gap_backlog"]))
             self.assertTrue(all(item["required_controls"] for item in result["live_gap_backlog"]))
             self.assertTrue(all(item["verification_gates"] for item in result["live_gap_backlog"]))
             self.assertTrue(all(item["evaluation_scenarios"] for item in result["live_gap_backlog"]))
+            auth_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "model_provider_auth_login_parity")
+            self.assertIn("subscription_token_bridge", {item["control"] for item in auth_gap["operator_checklist"]})
             provider_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "provider_and_channel_live_connectors")
             self.assertIn("human_approval", provider_gap["required_controls"])
             self.assertIn("live_connector_receipts.redacted_write_summary", provider_gap["evaluation_scenarios"])
@@ -206,6 +213,8 @@ class CliTests(unittest.TestCase):
                         "--approved",
                         "--require-live-parity",
                         "--defer-live-gap",
+                        "model_provider_auth_login_parity",
+                        "--defer-live-gap",
                         "provider_and_channel_live_connectors",
                         "--defer-live-gap",
                         "browser_and_media_depth",
@@ -217,9 +226,9 @@ class CliTests(unittest.TestCase):
                 )
             )
             self.assertEqual(deferred_promotion["status"], "promoted")
-            self.assertEqual(len(deferred_promotion["deferred_live_gaps"]), 3)
+            self.assertEqual(len(deferred_promotion["deferred_live_gaps"]), 4)
             deferred_promotions = dispatch(parser.parse_args(["--data-dir", str(data_dir), "policy", "promotions"]))
-            self.assertEqual(len(deferred_promotions["promotions"][-1]["deferred_live_gaps"]), 3)
+            self.assertEqual(len(deferred_promotions["promotions"][-1]["deferred_live_gaps"]), 4)
 
     def test_tool_run_executes_governed_tool_and_preserves_approval_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1726,6 +1735,7 @@ class CliTests(unittest.TestCase):
             parser = build_parser()
 
             methods = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "methods", "openai"]))
+            targets = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "targets"]))
             login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "openai", "--subscription"]))
 
             self.assertIn("subscription", methods["auth"]["auth_methods"])
@@ -1736,6 +1746,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(login["auth"]["status"], "external_login_required")
             self.assertEqual(login["auth"]["external_command"], "codex login")
             self.assertFalse(login["auth"]["token_captured"])
+            target_rows = {row["target"]: row for row in targets["auth_targets"]["targets"]}
+            self.assertEqual(targets["auth_targets"]["status"], "auth_parity_gap_tracked")
+            self.assertEqual(target_rows["Claude Code subscription"]["status"], "metadata_only_bridge_pending")
+            self.assertEqual(target_rows["GitHub Copilot"]["status"], "not_started")
 
     @unittest.skipUnless(os.name == "posix", "POSIX mode assertions only apply on POSIX")
     def test_local_state_files_are_private(self) -> None:

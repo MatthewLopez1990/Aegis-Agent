@@ -306,6 +306,7 @@ class ApiServerSecurityTests(unittest.TestCase):
                         "approved": True,
                         "require_live_parity": True,
                         "deferred_live_gap_areas": [
+                            "model_provider_auth_login_parity",
                             "provider_and_channel_live_connectors",
                             "browser_and_media_depth",
                             "remote_backend_activation",
@@ -397,6 +398,7 @@ class ApiServerSecurityTests(unittest.TestCase):
                 model_subscription_login = _json_post(port, "/models/auth/login", {"provider": "openai", "method": "subscription"}, token=token)
                 model_auth_login = _json_post(port, "/models/auth/login", {"provider": "openai", "api_key": "sk-api-secret"}, token=token)
                 model_providers_after_login = _json_get(port, "/model-providers", token=token)
+                model_auth_targets = _json_get(port, "/models/auth/targets", token=token)
                 model_auth_logout = _json_post(port, "/models/auth/logout", {"provider": "openai"}, token=token)
                 model_providers_after_logout = _json_get(port, "/model-providers", token=token)
                 model_usage = _json_get(port, "/model-usage", token=token)
@@ -784,6 +786,10 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertFalse(model_auth_logout["auth"]["auth_configured"])
                 self.assertTrue(any(row["provider"] == "openai" and row["auth_configured"] for row in model_providers_after_login["providers"]))
                 self.assertTrue(any(row["provider"] == "openai" and not row["auth_configured"] for row in model_providers_after_logout["providers"]))
+                model_auth_target_rows = {row["target"]: row for row in model_auth_targets["targets"]}
+                self.assertEqual(model_auth_targets["status"], "auth_parity_gap_tracked")
+                self.assertEqual(model_auth_target_rows["Claude Code subscription"]["status"], "metadata_only_bridge_pending")
+                self.assertEqual(model_auth_target_rows["GitHub Copilot"]["status"], "not_started")
                 self.assertNotIn("sk-api-secret", json.dumps(model_auth_login, sort_keys=True))
                 self.assertNotIn("sk-api-secret", json.dumps(model_auth_logout, sort_keys=True))
                 self.assertIn("events", model_usage)
@@ -911,8 +917,8 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(live_gap_blocked_policy_promotion["status"], "blocked_by_live_parity_gap")
                 self.assertTrue(live_gap_blocked_policy_promotion["live_gap_backlog"])
                 self.assertEqual(live_gap_deferred_policy_promotion["status"], "promoted")
-                self.assertEqual(len(live_gap_deferred_policy_promotion["deferred_live_gaps"]), 3)
-                self.assertEqual(len(policy_promotions["promotions"][-1]["deferred_live_gaps"]), 3)
+                self.assertEqual(len(live_gap_deferred_policy_promotion["deferred_live_gaps"]), 4)
+                self.assertEqual(len(policy_promotions["promotions"][-1]["deferred_live_gaps"]), 4)
                 self.assertEqual(activated_schedule["status"], "active")
                 self.assertTrue(any(row["id"] == schedule["id"] for row in due_schedules["schedules"]))
                 self.assertEqual(run_due_schedules["ran"], 1)

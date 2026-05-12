@@ -149,6 +149,29 @@ class ModelAuthTests(unittest.TestCase):
             self.assertNotIn("sk-", audit_text)
             self.assertNotIn("session_cookie", audit_text)
 
+    def test_provider_auth_targets_track_hermes_and_claude_gaps(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"))
+
+            targets = registry.auth_targets()
+            by_target = {row["target"]: row for row in targets["targets"]}
+
+            self.assertEqual(targets["status"], "auth_parity_gap_tracked")
+            self.assertGreaterEqual(targets["target_provider_count"], 20)
+            self.assertIn("api_key", targets["implemented_auth_methods"])
+            self.assertIn("subscription", targets["implemented_auth_methods"])
+            self.assertEqual(by_target["OpenAI API"]["status"], "api_key_ready")
+            self.assertEqual(by_target["OpenAI Codex / ChatGPT subscription"]["status"], "metadata_only_bridge_pending")
+            self.assertEqual(by_target["OpenAI Codex / ChatGPT subscription"]["external_command"], "codex login")
+            self.assertEqual(by_target["Claude Code subscription"]["status"], "metadata_only_bridge_pending")
+            self.assertEqual(by_target["Claude Code subscription"]["external_command"], "claude auth login")
+            self.assertEqual(by_target["GitHub Copilot"]["status"], "not_started")
+            self.assertEqual(by_target["Qwen OAuth"]["required_auth"], ["oauth"])
+            self.assertEqual(by_target["Ollama"]["status"], "local_ready")
+            self.assertFalse(any(row["raw_tokens_captured"] for row in targets["targets"]))
+            self.assertIn("raw_token_capture_rejection", targets["verification_gates"])
+
     def test_openrouter_live_client_uses_brokered_secret_and_records_usage(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
             root = Path(temp)

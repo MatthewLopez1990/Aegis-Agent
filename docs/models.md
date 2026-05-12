@@ -24,6 +24,7 @@ Features:
 - Secret handles through the secrets broker.
 - Local auth login for OpenAI, Anthropic, Google, Mistral, Cohere, OpenRouter, and custom API keys.
 - Guarded subscription-login metadata for OpenAI/ChatGPT Codex and Anthropic/claude.ai. Aegis reports the required provider-native command (`codex login` or `claude auth login`) but does not capture browser cookies, subscription session tokens, or refresh tokens until a governed token bridge exists.
+- Hermes/Claude provider-auth target tracking for OpenAI Codex, Claude Code, Copilot, Nous Portal, OpenRouter, Gemini, Qwen OAuth, Bedrock, Azure Foundry, xAI/Grok, Z.AI, Kimi, MiniMax, DeepSeek, Ollama, LM Studio, and custom endpoints. Unsupported provider-native login bridges are surfaced as explicit gaps instead of silent stubs.
 - Live chat completion calls for OpenAI, Anthropic, Google Gemini, Mistral, Cohere, OpenRouter, Ollama, LM Studio, and configured custom OpenAI-compatible routes. LM Studio accepts arbitrary local model IDs after the `lmstudio/` prefix.
 - Policy-gated model egress through the configured network allowlist, including local endpoints with a base URL.
 
@@ -41,6 +42,7 @@ PYTHONPATH=src python3 -m aegis.cli.main model auth methods openai
 PYTHONPATH=src python3 -m aegis.cli.main model auth login openai --subscription
 PYTHONPATH=src python3 -m aegis.cli.main model auth login anthropic --subscription
 PYTHONPATH=src python3 -m aegis.cli.main model auth status
+PYTHONPATH=src python3 -m aegis.cli.main model auth targets
 PYTHONPATH=src python3 -m aegis.cli.main model providers
 PYTHONPATH=src python3 -m aegis.cli.main model route alias/smart
 PYTHONPATH=src python3 -m aegis.cli.main model alias localfast ollama/llama3

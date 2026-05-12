@@ -122,6 +122,94 @@ class ModelRegistry:
             return self._provider_auth_status(provider)
         return [self._provider_auth_status(provider) for provider in self.providers.values() if provider.auth_secret]
 
+    def auth_targets(self) -> dict[str, Any]:
+        targets: list[dict[str, Any]] = []
+        provider_rows = {row["provider"]: row for row in self.list_providers()}
+        bridge_pending: list[str] = []
+        not_started: list[str] = []
+        api_key_ready: list[str] = []
+        local_ready: list[str] = []
+        for target in MODEL_PROVIDER_AUTH_TARGETS:
+            target_row = dict(target)
+            provider_name = target.get("aegis_provider")
+            provider = provider_rows.get(str(provider_name)) if provider_name else None
+            required_auth = list(target.get("required_auth", ()))
+            target_row["required_auth"] = required_auth
+            target_row["raw_tokens_captured"] = False
+            target_row["existing_auth_methods"] = []
+            target_row["auth_configured"] = False
+            target_row["subscription_auth_supported"] = False
+            target_row["subscription_auth_configured"] = False
+            target_row["bridge_status"] = "not_started"
+            if provider is None:
+                target_row["status"] = "not_started"
+                not_started.append(str(target["target"]))
+            else:
+                methods = list(provider.get("auth_methods") or [])
+                target_row["existing_auth_methods"] = methods
+                target_row["auth_configured"] = bool(provider.get("auth_configured"))
+                target_row["subscription_auth_supported"] = bool(provider.get("subscription_auth_supported"))
+                target_row["subscription_auth_configured"] = bool(provider.get("subscription_auth_configured"))
+                subscription_profile = provider.get("subscription_auth") if isinstance(provider.get("subscription_auth"), dict) else {}
+                if subscription_profile:
+                    target_row["external_command"] = subscription_profile.get("external_command", target_row.get("external_command"))
+                    target_row["bridge_status"] = subscription_profile.get("aegis_bridge_status", "not_implemented")
+                    target_row["account_surface"] = subscription_profile.get("account_surface", target_row.get("account_surface"))
+                elif provider.get("local"):
+                    target_row["bridge_status"] = "not_required_local"
+                elif "api_key" in methods:
+                    target_row["bridge_status"] = "not_required_api_key"
+
+                if "subscription" in required_auth or "oauth_device" in required_auth or "oauth" in required_auth or "cloud_identity" in required_auth:
+                    if "subscription" in required_auth and target_row["subscription_auth_supported"]:
+                        target_row["status"] = "metadata_only_bridge_pending"
+                        bridge_pending.append(str(target["target"]))
+                    else:
+                        target_row["status"] = "provider_native_auth_bridge_required"
+                        bridge_pending.append(str(target["target"]))
+                elif provider.get("local") or "none" in methods:
+                    target_row["status"] = "local_ready"
+                    local_ready.append(str(target["target"]))
+                elif "api_key" in required_auth and "api_key" in methods:
+                    target_row["status"] = "api_key_ready"
+                    api_key_ready.append(str(target["target"]))
+                else:
+                    target_row["status"] = "auth_surface_incomplete"
+                    not_started.append(str(target["target"]))
+            targets.append(target_row)
+
+        missing_or_pending = len(bridge_pending) + len(not_started)
+        return {
+            "status": "target_surface_ready" if missing_or_pending == 0 else "auth_parity_gap_tracked",
+            "target_provider_count": len(targets),
+            "aegis_provider_count": len(provider_rows),
+            "api_key_ready_count": len(api_key_ready),
+            "local_ready_count": len(local_ready),
+            "metadata_or_bridge_pending_count": len(bridge_pending),
+            "not_started_count": len(not_started),
+            "api_key_ready_targets": api_key_ready,
+            "local_ready_targets": local_ready,
+            "subscription_bridge_targets": bridge_pending,
+            "not_started_targets": not_started,
+            "implemented_auth_methods": sorted({method for row in provider_rows.values() for method in row.get("auth_methods", [])}),
+            "required_controls": [
+                "official_provider_login_flow",
+                "scoped_refresh_token_bridge",
+                "secret_broker_storage",
+                "token_refresh_receipts",
+                "no_browser_cookie_import",
+                "provider_domain_allowlist",
+            ],
+            "verification_gates": [
+                "api_key_secret_redaction",
+                "subscription_login_metadata_only",
+                "oauth_device_flow_denial_until_bridge",
+                "raw_token_capture_rejection",
+                "provider_allowlist_enforced_before_live_call",
+            ],
+            "targets": targets,
+        }
+
     def login_provider(self, provider_name: str, api_key: str) -> dict[str, Any]:
         provider = self._provider(provider_name)
         if provider.auth_secret is None:
@@ -412,6 +500,159 @@ SUBSCRIPTION_AUTH_PROFILES: dict[str, dict[str, Any]] = {
         ],
     },
 }
+
+
+MODEL_PROVIDER_AUTH_TARGETS: tuple[dict[str, Any], ...] = (
+    {
+        "target": "OpenAI API",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "openai",
+        "required_auth": ("api_key",),
+        "account_surface": "OpenAI platform",
+    },
+    {
+        "target": "OpenAI Codex / ChatGPT subscription",
+        "platforms": ("Hermes Agent", "Claude Code parity"),
+        "aegis_provider": "openai",
+        "required_auth": ("subscription",),
+        "external_command": "codex login",
+        "account_surface": "ChatGPT / Codex",
+    },
+    {
+        "target": "Anthropic API",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "anthropic",
+        "required_auth": ("api_key",),
+        "account_surface": "Anthropic Console",
+    },
+    {
+        "target": "Claude Code subscription",
+        "platforms": ("Claude Code", "Hermes Agent"),
+        "aegis_provider": "anthropic",
+        "required_auth": ("subscription",),
+        "external_command": "claude auth login",
+        "account_surface": "claude.ai / Claude Code",
+    },
+    {
+        "target": "GitHub Copilot",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": None,
+        "required_auth": ("oauth_device",),
+        "account_surface": "GitHub Copilot subscription",
+    },
+    {
+        "target": "Nous Portal",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": None,
+        "required_auth": ("oauth", "api_key"),
+        "account_surface": "Nous Portal",
+    },
+    {
+        "target": "OpenRouter",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "openrouter",
+        "required_auth": ("api_key",),
+        "account_surface": "OpenRouter",
+    },
+    {
+        "target": "Google Gemini",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "google",
+        "required_auth": ("api_key",),
+        "account_surface": "Google AI Studio / Gemini API",
+    },
+    {
+        "target": "Mistral",
+        "platforms": ("Aegis current",),
+        "aegis_provider": "mistral",
+        "required_auth": ("api_key",),
+        "account_surface": "Mistral Console",
+    },
+    {
+        "target": "Cohere",
+        "platforms": ("Aegis current",),
+        "aegis_provider": "cohere",
+        "required_auth": ("api_key",),
+        "account_surface": "Cohere Dashboard",
+    },
+    {
+        "target": "Z.AI",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": None,
+        "required_auth": ("api_key",),
+        "account_surface": "Z.AI",
+    },
+    {
+        "target": "Kimi",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": None,
+        "required_auth": ("api_key",),
+        "account_surface": "Kimi / Moonshot",
+    },
+    {
+        "target": "MiniMax",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": None,
+        "required_auth": ("api_key",),
+        "account_surface": "MiniMax",
+    },
+    {
+        "target": "DeepSeek",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": None,
+        "required_auth": ("api_key",),
+        "account_surface": "DeepSeek",
+    },
+    {
+        "target": "AWS Bedrock",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": None,
+        "required_auth": ("cloud_identity",),
+        "account_surface": "AWS IAM / Bedrock",
+    },
+    {
+        "target": "Azure Foundry",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": None,
+        "required_auth": ("cloud_identity", "api_key"),
+        "account_surface": "Azure AI Foundry",
+    },
+    {
+        "target": "xAI / Grok",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": None,
+        "required_auth": ("api_key",),
+        "account_surface": "xAI Console",
+    },
+    {
+        "target": "Qwen OAuth",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": None,
+        "required_auth": ("oauth",),
+        "account_surface": "Qwen",
+    },
+    {
+        "target": "Ollama",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "ollama",
+        "required_auth": ("none",),
+        "account_surface": "local Ollama",
+    },
+    {
+        "target": "LM Studio",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "lmstudio",
+        "required_auth": ("none",),
+        "account_surface": "local LM Studio",
+    },
+    {
+        "target": "Custom OpenAI-compatible endpoint",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "custom",
+        "required_auth": ("api_key",),
+        "account_surface": "operator supplied endpoint",
+    },
+)
 
 
 def default_providers(*, custom_base_url: str | None = None) -> dict[str, ModelProviderSpec]:

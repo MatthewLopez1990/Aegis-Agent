@@ -33,6 +33,7 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
     implementation_readiness = _tool_implementation_readiness(tools)
     limited_or_facade_tools = sum(item["count"] for item in implementation_readiness if item["state"] != "ready")
     configured_providers = [provider for provider in providers if provider["auth_configured"] or provider["local"]]
+    model_auth_parity = orchestrator.models.auth_targets()
     live_connector_adapters = _live_connector_adapters(connectors, orchestrator.config)
     available_live_connector_adapters = _available_live_connector_adapters(connectors, orchestrator.config)
     competitive_targets = _competitive_targets()
@@ -115,9 +116,9 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
             },
             {
                 "name": "Models",
-                "state": "route_ready",
-                "coverage": f"{len(providers)} providers",
-                "detail": "Cloud, local, OpenRouter, Ollama, LM Studio, and custom endpoints share aliases, fallbacks, auth state, and usage tracking.",
+                "state": "route_ready" if model_auth_parity["status"] == "target_surface_ready" else "auth_parity_gap_tracked",
+                "coverage": f"{len(providers)} providers, {model_auth_parity['target_provider_count']} auth targets tracked",
+                "detail": "Cloud, local, OpenRouter, Ollama, LM Studio, and custom endpoints share aliases, fallbacks, auth state, usage tracking, and a visible provider-login parity ledger.",
             },
             {
                 "name": "Memory",
@@ -157,9 +158,11 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
             },
         ],
         "competitive_targets": competitive_targets,
+        "model_provider_auth_parity": model_auth_parity,
         "live_gap_backlog": _live_gap_backlog(
             competitive_targets,
             implementation_readiness,
+            model_auth_parity,
             configured_providers,
             tools,
             live_connector_adapters,
@@ -263,6 +266,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
             "covered": [
                 "TUI",
                 "model routing",
+                "provider auth parity ledger",
                 "gateway surface",
                 "memory",
                 "skills",
@@ -272,9 +276,17 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "terminal backends",
                 "research tool surface",
                 "session resume continuity",
+                "guarded remote-control readiness",
             ],
             "security_delta": "Aegis treats all external outputs as tainted data and requires approval for high-impact actions by default.",
-            "live_gap": "Provider invocation and real channel credentials still need per-service live connectors before unrestricted production rollout.",
+            "live_gap": "Several Hermes provider-native auth flows, including Copilot, Nous Portal, Qwen OAuth, Bedrock, Azure, xAI, Z.AI, Kimi, MiniMax, and DeepSeek, are now tracked as explicit gaps until governed OAuth/cloud-identity bridges exist.",
+            "target_requirements": [
+                "provider_native_oauth_and_device_flows",
+                "subscription_login_bridge",
+                "remote_http_mcp_oauth",
+                "messaging_gateway_depth",
+                "remote_control_relay",
+            ],
         },
         {
             "platform": "OpenClaw",
@@ -292,6 +304,33 @@ def _competitive_targets() -> list[dict[str, Any]]:
             ],
             "security_delta": "Aegis defaults to mock or dry-run mode for broad-access capabilities until credentials, scopes, rollback, and approvals are explicit.",
             "live_gap": "Mobile nodes, native desktop wrappers, and live third-party channel implementations remain staged behind secure adapter work.",
+            "target_requirements": [
+                "native_shell_depth",
+                "live_browser_automation",
+                "provider_specific_media_adapters",
+                "mobile_desktop_wrappers",
+            ],
+        },
+        {
+            "platform": "Claude Code",
+            "covered": [
+                "slash command aliases",
+                "session controls",
+                "MCP registry surface",
+                "skills and plugin inventory",
+                "model auth status",
+                "remote-control readiness",
+                "background task submission",
+            ],
+            "security_delta": "Aegis exposes Claude-style controls through the governed local runtime and keeps off-device remote control blocked until a scoped relay, approval prompts, and audit receipts exist.",
+            "live_gap": "Claude Code subscription login, Remote Control pairing, hooks, plugin install parity, subagent runtime depth, and PR automation remain tracked gaps instead of silent stubs.",
+            "target_requirements": [
+                "claude_subscription_token_bridge",
+                "remote_control_pairing_tokens",
+                "hooks_and_plugin_lifecycle",
+                "subagent_runtime_depth",
+                "pr_review_and_autofix_workflows",
+            ],
         },
     ]
 
@@ -299,6 +338,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
 def _live_gap_backlog(
     competitive_targets: list[dict[str, Any]],
     readiness: list[dict[str, Any]],
+    model_auth_parity: dict[str, Any],
     configured_providers: list[dict[str, Any]],
     tools: list[dict[str, Any]],
     live_connector_adapters: list[dict[str, Any]],
@@ -335,6 +375,37 @@ def _live_gap_backlog(
         else "Promote write-capable service and channel integrations from mock-default mode into configured, scoped, allowlisted, approval-gated live adapters."
     )
     return [
+        {
+            "area": "model_provider_auth_login_parity",
+            "platforms": ["Hermes Agent", "Claude Code"],
+            "status": model_auth_parity["status"],
+            "detail": (
+                f"{model_auth_parity['target_provider_count']} provider/auth targets are tracked; "
+                f"{model_auth_parity['api_key_ready_count']} API-key targets and {model_auth_parity['local_ready_count']} local targets are ready, "
+                f"{model_auth_parity['metadata_or_bridge_pending_count']} provider-native subscription/OAuth/cloud-identity bridges remain gated."
+            ),
+            "target_provider_count": model_auth_parity["target_provider_count"],
+            "aegis_provider_count": model_auth_parity["aegis_provider_count"],
+            "sample_tools": [],
+            "target_providers": model_auth_parity["targets"],
+            "subscription_bridge_targets": model_auth_parity["subscription_bridge_targets"],
+            "not_started_targets": model_auth_parity["not_started_targets"],
+            "implemented_auth_methods": model_auth_parity["implemented_auth_methods"],
+            "operator_checklist": _model_auth_operator_checklist(model_auth_parity),
+            "next_steps": [
+                "Implement provider-native OAuth/device/cloud-identity bridges one provider at a time with token refresh receipts.",
+                "Keep subscription login metadata-only until Aegis can read provider-approved token stores without browser cookie import.",
+                "Add denied, approved, refresh, logout, and receipt-redaction tests for every bridge before enabling live model calls through it.",
+            ],
+            "required_controls": model_auth_parity["required_controls"],
+            "verification_gates": model_auth_parity["verification_gates"],
+            "evaluation_scenarios": [
+                "model_auth.subscription_login_metadata_only",
+                "model_auth.raw_token_capture_rejected",
+                "model_auth.provider_native_oauth_disabled_until_bridge",
+            ],
+            "configured_provider_count": len(configured_providers),
+        },
         {
             "area": "provider_and_channel_live_connectors",
             "platforms": [target["platform"] for target in competitive_targets],
@@ -472,6 +543,41 @@ def _live_gap_backlog(
             "verification_gates": ["disabled_backend_denial", "approved_activation", "cleanup_receipt", "scope_escape_rejection"],
             "evaluation_scenarios": ["backend_activation.remote_execution_disabled"],
             "configured_provider_count": len(configured_providers),
+        },
+    ]
+
+
+def _model_auth_operator_checklist(model_auth_parity: dict[str, Any]) -> list[dict[str, str]]:
+    return [
+        {
+            "control": "api_key_secret_broker",
+            "state": "enforced" if model_auth_parity["api_key_ready_count"] else "pending",
+            "detail": "API-key providers use brokered local secrets and redact raw values from status, receipts, and model-facing flows.",
+        },
+        {
+            "control": "subscription_token_bridge",
+            "state": "not_implemented" if model_auth_parity["subscription_bridge_targets"] else "not_required",
+            "detail": "Codex/ChatGPT and Claude Code subscription login is metadata-only until a governed provider-token bridge exists.",
+        },
+        {
+            "control": "oauth_device_flows",
+            "state": "not_started" if model_auth_parity["not_started_targets"] else "ready_for_review",
+            "detail": "Copilot, Qwen, Nous Portal, and cloud-identity providers need provider-native OAuth/device/cloud identity flows.",
+        },
+        {
+            "control": "raw_browser_token_capture",
+            "state": "denied_by_design",
+            "detail": "Aegis does not accept pasted browser cookies, session tokens, or refresh tokens as subscription auth.",
+        },
+        {
+            "control": "provider_catalog_depth",
+            "state": "partial" if model_auth_parity["status"] != "target_surface_ready" else "complete",
+            "detail": f"{model_auth_parity['target_provider_count']} target providers tracked against {model_auth_parity['aegis_provider_count']} current provider routes.",
+        },
+        {
+            "control": "provider_allowlist_before_live_call",
+            "state": "enforced",
+            "detail": "Live model calls still require policy-approved provider domains before credentials are used.",
         },
     ]
 

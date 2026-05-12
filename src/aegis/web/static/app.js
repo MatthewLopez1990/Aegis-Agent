@@ -189,6 +189,7 @@ const refresh = async () => {
       channelEvents,
       models,
       modelProviders,
+      modelAuthTargets,
       modelUsage,
       tools,
       backends,
@@ -220,6 +221,7 @@ const refresh = async () => {
       api("/channel-events?limit=20"),
       api("/models"),
       api("/model-providers"),
+      api("/models/auth/targets"),
       api("/model-usage"),
       api("/tools"),
       api("/backends"),
@@ -273,7 +275,7 @@ const refresh = async () => {
     }));
     setList("live-gap-backlog", dashboard.live_gap_backlog || [], (x) => ({
       title: x.area,
-      detail: `${x.detail} Live reads: ${(x.live_read_surfaces || []).slice(0, 6).join(", ") || "none"}. Live adapters: ${(x.implemented_live_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Available adapters: ${(x.available_live_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Backend adapters: ${(x.implemented_backend_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Available backends: ${(x.available_backend_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Backend preflight: ${backendActivationSummary([...(x.implemented_backend_adapters || []), ...(x.available_backend_adapters || [])])}. Readiness checklist: ${(x.operator_checklist || []).slice(0, 8).map((item) => `${item.control}:${item.state}`).join(", ") || "none"}. Hardened: ${(x.implemented_hardening_controls || []).slice(0, 8).map((control) => control.control).join(", ") || "none"}. Remaining depth: ${(x.remaining_depth_work || []).slice(0, 6).join(", ") || "none"}. Controls: ${(x.required_controls || []).join(", ") || "none"}. Gates: ${(x.verification_gates || []).join(", ") || "none"}. Evaluations: ${(x.evaluation_scenarios || []).join(", ") || "none"}. Next: ${(x.next_steps || []).slice(0, 2).join(" ")}`,
+      detail: `${x.detail} Provider targets: ${x.target_provider_count || "n/a"}. Auth bridges: ${(x.subscription_bridge_targets || []).slice(0, 6).join(", ") || "none"}. Not started: ${(x.not_started_targets || []).slice(0, 6).join(", ") || "none"}. Live reads: ${(x.live_read_surfaces || []).slice(0, 6).join(", ") || "none"}. Live adapters: ${(x.implemented_live_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Available adapters: ${(x.available_live_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Backend adapters: ${(x.implemented_backend_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Available backends: ${(x.available_backend_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Backend preflight: ${backendActivationSummary([...(x.implemented_backend_adapters || []), ...(x.available_backend_adapters || [])])}. Readiness checklist: ${(x.operator_checklist || []).slice(0, 8).map((item) => `${item.control}:${item.state}`).join(", ") || "none"}. Hardened: ${(x.implemented_hardening_controls || []).slice(0, 8).map((control) => control.control).join(", ") || "none"}. Remaining depth: ${(x.remaining_depth_work || []).slice(0, 6).join(", ") || "none"}. Controls: ${(x.required_controls || []).join(", ") || "none"}. Gates: ${(x.verification_gates || []).join(", ") || "none"}. Evaluations: ${(x.evaluation_scenarios || []).join(", ") || "none"}. Next: ${(x.next_steps || []).slice(0, 2).join(" ")}`,
       meta: `${x.status} · ${(x.platforms || []).join(", ")} · tools ${(x.sample_tools || []).slice(0, 6).join(", ") || "none"}`,
     }), "No live gaps");
     setList("competitor-targets", dashboard.competitive_targets, (x) => ({
@@ -316,6 +318,12 @@ const refresh = async () => {
         tone: x.local || x.auth_configured ? "ready" : "attention",
       })
     );
+    setList("model-auth-targets", modelAuthTargets.targets || dashboard.model_provider_auth_parity?.targets || [], (x) => ({
+      title: x.target,
+      detail: `${(x.platforms || []).join(", ") || "provider"} · ${x.account_surface || ""}`,
+      meta: `${x.status} · auth ${(x.required_auth || []).join(", ") || "unknown"} · methods ${(x.existing_auth_methods || []).join(", ") || "none"} · bridge ${x.bridge_status || "not_started"}`,
+      tone: x.status === "api_key_ready" || x.status === "local_ready" ? "ready" : "attention",
+    }), "No provider auth targets");
     setList("models", models.models.slice(0, 24), (x) => ({
       title: x.identifier,
       detail: x.local ? "local" : x.auth_configured ? "cloud · auth configured" : "cloud · auth missing",

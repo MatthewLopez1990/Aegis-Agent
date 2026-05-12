@@ -90,7 +90,7 @@ TOP_LEVEL_COMMANDS = (
 MEMORY_COMMANDS = ("search", "health", "session-preview", "session-commit", "create", "review-queue", "review-digest", "review-action", "review-batch", "recertify", "update", "merge", "resolve-conflict", "expire", "cleanup-expired", "explain", "export", "delete")
 MIGRATE_COMMANDS = ("openclaw", "hermes", "openclaw-memory-preview", "hermes-memory-preview", "openclaw-memory-commit", "hermes-memory-commit")
 MODEL_COMMANDS = ("list", "route", "alias", "fallbacks", "usage", "auth", "providers")
-MODEL_AUTH_COMMANDS = ("login", "logout", "methods")
+MODEL_AUTH_COMMANDS = ("login", "logout", "methods", "targets")
 TOOLS_COMMANDS = ("run",)
 SKILLS_COMMANDS = ("hub", "disable", "enable")
 REPAIR_COMMANDS = ("readiness", "review", "approve", "reject", "candidate", "generate-candidate", "synthesis-prompt", "synthesize-candidate", "review-candidate", "apply-candidate", "rollback-candidate", "attempt")
@@ -799,6 +799,9 @@ class AegisTui(cmd.Cmd):
             return
         if command == "auth":
             try:
+                if len(parts) >= 2 and parts[1] == "targets":
+                    _print_json({"auth_targets": self.orchestrator.models.auth_targets()})
+                    return
                 if len(parts) >= 2 and parts[1] == "methods":
                     provider = parts[2] if len(parts) > 2 else None
                     _print_json({"auth": self.orchestrator.models.auth_status(provider)})
@@ -821,7 +824,7 @@ class AegisTui(cmd.Cmd):
                 print(f"model auth invalid: {exc}")
             return
         if command != "providers":
-            print("usage: models list|providers|route <identifier>|alias <alias> <identifier>|fallbacks <identifier> <fallback> [fallback...]|usage|auth [provider]|auth methods [provider]|auth login <provider> [subscription]|auth logout <provider>")
+            print("usage: models list|providers|route <identifier>|alias <alias> <identifier>|fallbacks <identifier> <fallback> [fallback...]|usage|auth [provider]|auth methods [provider]|auth targets|auth login <provider> [subscription]|auth logout <provider>")
             return
         print(
             _table(
@@ -1870,6 +1873,30 @@ class AegisTui(cmd.Cmd):
                 ),
             )
         )
+        model_auth_gap = next((item for item in dashboard.get("live_gap_backlog", []) if item.get("area") == "model_provider_auth_login_parity"), None)
+        if model_auth_gap:
+            print()
+            print("Model Provider Auth Parity")
+            print(
+                _table(
+                    model_auth_gap.get("target_providers", []),
+                    (
+                        ("target", "target", 34),
+                        ("status", "status", 30),
+                        ("auth", "required_auth", 24),
+                        ("methods", "existing_auth_methods", 24),
+                        ("bridge", "bridge_status", 28),
+                    ),
+                )
+            )
+            print()
+            print("Model Auth Readiness")
+            print(
+                _table(
+                    model_auth_gap.get("operator_checklist", []),
+                    (("control", "control", 32), ("state", "state", 24), ("detail", "detail", 82)),
+                )
+            )
         provider_gap = next((item for item in dashboard.get("live_gap_backlog", []) if item.get("area") == "provider_and_channel_live_connectors"), None)
         if provider_gap:
             print()
@@ -2909,7 +2936,7 @@ def _command_reference() -> str:
             "channel events [limit]  Recent channel activity",
             "models                 Model providers",
             "provider|usage         Model provider and usage aliases",
-            "models auth methods|login|logout <provider>",
+            "models auth methods|targets|login|logout <provider>",
             "tools                  Governed tool catalog",
             "toolsets               Group tools by permission and risk",
             "tools run <name> <json> Run a governed tool",
