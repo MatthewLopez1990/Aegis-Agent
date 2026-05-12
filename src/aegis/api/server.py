@@ -426,6 +426,9 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
             if match_cards:
                 self._json({"cards": orchestrator.kanban.list_cards(match_cards.group(1))})
                 return
+            if path == "/subagents/status":
+                self._json(orchestrator.kanban.subagent_status(limit=_limit(query, default=20)))
+                return
             match = re.fullmatch(r"/tasks/([^/]+)", path)
             if match:
                 self._json(orchestrator.status(match.group(1)))
@@ -1271,6 +1274,26 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 lane = str(_required(payload, "lane"))
                 orchestrator.kanban.move_card(match_move.group(1), lane)
                 self._json({"ok": True, "card_id": match_move.group(1), "lane": lane})
+                return
+            if path == "/subagents/delegate":
+                payload = self._read_json()
+                params = {"role": str(_required(payload, "role")), "task": str(_required(payload, "task"))}
+                approval = _tool_run_approval(orchestrator, name="subagent_delegate", params=params, approval_id=payload.get("approval_id"))
+                if approval["approved"]:
+                    result = orchestrator.tools.execute(
+                        "subagent_delegate",
+                        params,
+                        approved=True,
+                        admin_approved=bool(approval.get("admin_approved")),
+                        task_id=str(payload.get("task_id")) if payload.get("task_id") else None,
+                    )
+                    self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
+                    return
+                result = orchestrator.tools.execute("subagent_delegate", params, approved=False, task_id=str(payload.get("task_id")) if payload.get("task_id") else None)
+                if result.get("status") == "approval_required":
+                    self._json({**result, **approval["response"], "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
+                    return
+                self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
                 return
             match_approval_approve = re.fullmatch(r"/approvals/([^/]+)/approve", path)
             if match_approval_approve:

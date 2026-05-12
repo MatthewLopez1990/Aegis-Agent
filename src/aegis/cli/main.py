@@ -568,6 +568,18 @@ def build_parser() -> argparse.ArgumentParser:
     card_move.add_argument("card_id")
     card_move.add_argument("lane")
 
+    agents = subcommands.add_parser("agents", help="Inspect and queue governed subagent delegations")
+    agents.add_argument("--workspace", default=".")
+    agents_sub = agents.add_subparsers(dest="agents_command", required=True)
+    agents_status = agents_sub.add_parser("status", help="Show subagent delegation queue status")
+    agents_status.add_argument("--limit", type=int, default=20)
+    agents_delegate = agents_sub.add_parser("delegate", help="Queue a subagent delegation card through the governed tool path")
+    agents_delegate.add_argument("role")
+    agents_delegate.add_argument("task")
+    agents_delegate.add_argument("--approved", action="store_true")
+    agents_delegate.add_argument("--task-id")
+    agents_delegate.add_argument("--limit", type=int, default=20)
+
     mcp = subcommands.add_parser("mcp", help="Manage governed MCP server registrations")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
     mcp_register = mcp_sub.add_parser("register", help="Register an MCP server disabled by default")
@@ -1185,6 +1197,19 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
         if args.kanban_command == "card-move":
             manager.move_card(args.card_id, args.lane)
             return {"ok": True, "card_id": args.card_id, "lane": args.lane}
+
+    if args.command == "agents":
+        orchestrator = build_orchestrator(data_dir=args.data_dir, workspace=args.workspace)
+        if args.agents_command == "status":
+            return orchestrator.kanban.subagent_status(limit=args.limit)
+        if args.agents_command == "delegate":
+            result = orchestrator.tools.execute(
+                "subagent_delegate",
+                {"role": args.role, "task": args.task},
+                approved=args.approved,
+                task_id=args.task_id,
+            )
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
 
     if args.command == "mcp":
         registry = _mcp_registry(config)

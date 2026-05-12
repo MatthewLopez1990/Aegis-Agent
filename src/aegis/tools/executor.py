@@ -562,32 +562,17 @@ class BuiltinToolExecutor:
         task = str(params["task"]).strip()
         if not role or not task:
             raise ToolExecutionError("subagent delegation requires non-empty role and task")
-        board = self._delegation_board()
-        card = self.kanban.add_card(
-            board["id"],
-            title=f"{role}: {task[:80]}",
-            description=task,
-            lane="ready",
-            owner=role,
-            risk_level=RiskLevel.HIGH,
-            task_id=task_id,
-            metadata={
-                "delegation_type": "subagent",
-                "role": role,
-                "source_tool": "subagent_delegate",
-                "isolation": "durable_card",
-                "instructions_tainted": True,
-                "parent_task_id": task_id,
-            },
-        )
-        return {"ok": True, "board_id": board["id"], "card_id": card["id"], "lane": card["lane"], "owner": role}
-
-    def _delegation_board(self) -> dict[str, Any]:
-        assert self.kanban is not None
-        for board in self.kanban.list_boards():
-            if board.get("metadata", {}).get("purpose") == "subagent_delegations":
-                return board
-        return self.kanban.create_board("Subagent Delegations", metadata={"purpose": "subagent_delegations", "isolation": "card_per_delegate"})
+        card = self.kanban.add_subagent_delegation(role=role, task=task, task_id=task_id)
+        return {
+            "ok": True,
+            "board_id": card["board_id"],
+            "card_id": card["id"],
+            "lane": card["lane"],
+            "owner": role,
+            "execution_mode": "durable_card_queue",
+            "instructions_tainted": True,
+            "raw_instruction_forwarded_to_model": False,
+        }
 
     def _execute_kanban_create(self, *, params: dict[str, Any], task_id: str | None) -> dict[str, Any]:
         assert self.kanban is not None

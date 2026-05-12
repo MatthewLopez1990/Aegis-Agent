@@ -50,6 +50,9 @@ class CliTests(unittest.TestCase):
             self.assertGreaterEqual(result["runtime"]["session_bound_recent_tasks"], 1)
             self.assertIn("limited_or_facade_tools", result["runtime"])
             self.assertIn("memory_health_score", result["runtime"])
+            self.assertIn("open_subagent_delegations", result["runtime"])
+            self.assertIn("subagent_delegations", result)
+            self.assertFalse(result["subagent_delegations"]["autonomous_runtime"])
             self.assertIn("memory_readiness", result)
             self.assertIn("self_improvement_readiness", result)
             self.assertIn("enterprise_readiness", result)
@@ -75,6 +78,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(auth_targets["GitHub Copilot"]["status"], "official_cli_handoff_only")
             self.assertTrue(any(item["area"] == "model_provider_auth_login_parity" for item in result["live_gap_backlog"]))
             self.assertTrue(any(item["area"] == "provider_and_channel_live_connectors" for item in result["live_gap_backlog"]))
+            self.assertTrue(any(item["area"] == "subagent_runtime_depth" for item in result["live_gap_backlog"]))
             self.assertTrue(all("sample_tools" in item for item in result["live_gap_backlog"]))
             self.assertTrue(all(item["required_controls"] for item in result["live_gap_backlog"]))
             self.assertTrue(all(item["verification_gates"] for item in result["live_gap_backlog"]))
@@ -114,6 +118,51 @@ class CliTests(unittest.TestCase):
             self.assertEqual(backend_checklist["scope_limits"]["state"], "enforced")
             self.assertEqual(backend_checklist["rollback_receipts"]["state"], "enforced")
             self.assertEqual(backend_checklist["provider_lifecycle_depth"]["state"], "not_started")
+
+    def test_agents_cli_status_and_delegate_use_governed_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            data_dir = Path(temp) / ".aegis"
+
+            initial = dispatch(parser.parse_args(["--data-dir", str(data_dir), "agents", "status"]))
+            self.assertEqual(initial["status"], "no_delegations")
+            self.assertFalse(initial["autonomous_runtime"])
+
+            gated = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "delegate",
+                        "Researcher",
+                        "Compare provider auth gaps.",
+                    ]
+                )
+            )
+            self.assertEqual(gated["status"], "approval_required")
+            self.assertEqual(gated["tool"], "subagent_delegate")
+
+            delegated = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "delegate",
+                        "Researcher",
+                        "Compare provider auth gaps.",
+                        "--approved",
+                        "--task-id",
+                        "parent-task",
+                    ]
+                )
+            )
+            self.assertTrue(delegated["ok"])
+            self.assertEqual(delegated["execution_mode"], "durable_card_queue")
+            self.assertFalse(delegated["raw_instruction_forwarded_to_model"])
+            self.assertEqual(delegated["subagents"]["ready_cards"], 1)
+            self.assertEqual(delegated["subagents"]["cards"][0]["parent_task_id"], "parent-task")
 
     def test_enterprise_readiness_reports_memory_improvement_and_tui_flags(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -221,6 +270,8 @@ class CliTests(unittest.TestCase):
                         "--defer-live-gap",
                         "browser_and_media_depth",
                         "--defer-live-gap",
+                        "subagent_runtime_depth",
+                        "--defer-live-gap",
                         "remote_backend_activation",
                         "--live-gap-deferral-reason",
                         "Local-only release; live adapters remain gated.",
@@ -228,9 +279,9 @@ class CliTests(unittest.TestCase):
                 )
             )
             self.assertEqual(deferred_promotion["status"], "promoted")
-            self.assertEqual(len(deferred_promotion["deferred_live_gaps"]), 4)
+            self.assertEqual(len(deferred_promotion["deferred_live_gaps"]), 5)
             deferred_promotions = dispatch(parser.parse_args(["--data-dir", str(data_dir), "policy", "promotions"]))
-            self.assertEqual(len(deferred_promotions["promotions"][-1]["deferred_live_gaps"]), 4)
+            self.assertEqual(len(deferred_promotions["promotions"][-1]["deferred_live_gaps"]), 5)
 
     def test_tool_run_executes_governed_tool_and_preserves_approval_gate(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

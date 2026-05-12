@@ -182,6 +182,7 @@ SCHEDULE_COMMANDS = ("create", "memory-review-digest", "memory-review-escalation
 BROWSER_COMMANDS = ("session", "sessions", "close", "navigate", "extract", "inspect", "table", "screenshot", "render", "click", "fill")
 MCP_COMMANDS = ("list", "register", "call")
 HOOK_COMMANDS = ("list", "add", "enable", "disable", "remove", "run")
+AGENTS_COMMANDS = ("status", "delegate")
 SESSION_COMMANDS = ("new", "open", "rename", "set-model", "set-personality", "activate", "archive", "pause", "append", "history", "tasks", "compact")
 TASKS_COMMANDS = ("all", "session")
 SECURITY_COMMANDS = (
@@ -435,6 +436,9 @@ class AegisTui(cmd.Cmd):
 
     def complete_hooks(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return _complete_subcommand(HOOK_COMMANDS, text, line, begidx)
+
+    def complete_agents(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return _complete_subcommand(AGENTS_COMMANDS, text, line, begidx)
 
     def complete_session(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return _complete_subcommand(SESSION_COMMANDS, text, line, begidx)
@@ -2480,7 +2484,22 @@ class AegisTui(cmd.Cmd):
         self.do_models("route alias/fast")
 
     def do_agents(self, arg: str) -> None:
-        """agents -- show multi-agent and delegation surfaces."""
+        """agents [status|delegate <role> <task> [--approved]] -- show or queue subagent delegations."""
+        parts = shlex.split(arg)
+        if parts and parts[0] == "delegate":
+            approved = "--approved" in parts[1:]
+            delegate_parts = [part for part in parts[1:] if part != "--approved"]
+            if len(delegate_parts) < 2:
+                print("usage: agents delegate <role> <task> [--approved]")
+                return
+            result = self.orchestrator.tools.execute(
+                "subagent_delegate",
+                {"role": delegate_parts[0], "task": " ".join(delegate_parts[1:])},
+                approved=approved,
+                task_id=self.last_task_id,
+            )
+            _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
+            return
         dashboard = build_product_dashboard(self.orchestrator)
         _print_json(
             {
@@ -2488,7 +2507,8 @@ class AegisTui(cmd.Cmd):
                 "boards": dashboard["runtime"]["boards"],
                 "schedules": dashboard["runtime"]["schedules"],
                 "skills": len(self.orchestrator.skills.list_public()),
-                "subagent_tool": next((tool for tool in self.orchestrator.tool_catalog.list() if tool["name"] == "subagent"), None),
+                "subagent_tool": next((tool for tool in self.orchestrator.tool_catalog.list() if tool["name"] == "subagent_delegate"), None),
+                "subagent_delegations": dashboard["subagent_delegations"],
                 "remaining_depth_work": ["isolated_parallel_runtime", "agent_profile_lifecycle", "handoff_receipts"],
             }
         )
@@ -4455,7 +4475,7 @@ def _next_command_hint(command: str) -> str:
         "indicator": "/statusbar",
         "details": "/dashboard",
         "permissions": "/security profile",
-        "agents": "/boards",
+        "agents": "/agents delegate",
         "remote-control": "/web-setup",
         "web-setup": "/remote-control",
         "capabilities": "/connectors",
@@ -4482,6 +4502,7 @@ SLASH_SUBCOMMANDS: dict[str, tuple[str, ...]] = {
     "browser": BROWSER_COMMANDS,
     "mcp": MCP_COMMANDS,
     "hooks": HOOK_COMMANDS,
+    "agents": AGENTS_COMMANDS,
     "session": SESSION_COMMANDS,
     "tasks": TASKS_COMMANDS,
     "security": SECURITY_COMMANDS,
@@ -4505,6 +4526,7 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("schedule", "run-due"): ("--limit", "--now"),
     ("hooks", "add"): ("--id", "--enabled", "--approval-required", "--no-approval-required", "--timeout", "--max-output-bytes"),
     ("hooks", "run"): ("--approved", "--context-json"),
+    ("agents", "delegate"): ("--approved",),
 }
 
 

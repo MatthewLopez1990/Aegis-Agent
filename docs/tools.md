@@ -16,7 +16,7 @@ Aegis has a governed tool catalog with 48+ entries:
 - `tts`
 - `voice_transcribe`
 - `video_analyze`
-- `subagent_delegate`
+- `subagent_delegate` (approval-gated durable delegation cards with tainted-instruction status, not autonomous recursion)
 - `mcp_call`
 - Web extraction, browser click/fill/screenshot/table extraction/session close.
 - Code execution, Python REPL, Git/GitHub, database, calendar, email, contact search/write.

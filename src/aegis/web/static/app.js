@@ -22,6 +22,7 @@ const state = {
   skillHubQuery: "",
   pluginMarketplaceQuery: "",
   pluginMarketplaceCatalogPath: "",
+  pendingSubagentDelegation: null,
   pendingSkillEnable: {},
 };
 
@@ -36,6 +37,7 @@ const TOOL_RUN_PRESETS = [
   { label: "Calendar", name: "calendar_read", params: { provider_url: "https://graph.example.com/me/events" } },
   { label: "Contacts", name: "contacts_search", params: { query: "local", provider_url: "https://graph.example.com/me/contacts" } },
   { label: "Create Contact", name: "contacts_write", params: { operation: "create", contact: { displayName: "Local User", email: "local@example.test" } } },
+  { label: "Subagent", name: "subagent_delegate", params: { role: "Researcher", task: "Compare provider auth gaps." } },
   { label: "Service Ticket", name: "service_ticket_read", params: { operation: "search", query: "incident" } },
   { label: "Close Ticket", name: "service_ticket_write", params: { operation: "close", ticket: { id: "INC000001" } } },
 ];
@@ -214,6 +216,7 @@ const refresh = async () => {
       approvedApprovals,
       deniedApprovals,
       boards,
+      subagents,
       evaluationQueue,
       evaluationTrends,
       evaluationDelta,
@@ -250,6 +253,7 @@ const refresh = async () => {
       api("/approvals?status=approved&limit=8"),
       api("/approvals?status=denied&limit=8"),
       api("/kanban/boards"),
+      api("/subagents/status?limit=12"),
       api("/evaluation/queue?limit=20"),
       api("/evaluation/trends?limit=20"),
       api("/evaluation/delta"),
@@ -567,6 +571,7 @@ const refresh = async () => {
     }
     renderBoards();
     await renderCards();
+    renderSubagents(subagents);
     await renderSessionTranscript();
     applySectionVisibility();
   } catch (error) {
@@ -574,6 +579,25 @@ const refresh = async () => {
     document.getElementById("app-status").className = "status-pill bad";
     renderTaskError(error.message);
   }
+};
+
+const renderSubagents = (payload) => {
+  const summary = document.getElementById("subagent-summary");
+  summary.textContent = `${payload.open_cards || 0} open · ${payload.ready_cards || 0} ready · ${payload.in_progress_cards || 0} active · ${payload.done_cards || 0} done · autonomous runtime ${payload.autonomous_runtime ? "enabled" : "blocked"}`;
+  setList("subagent-cards", payload.cards || [], (x) => ({
+    title: x.title,
+    detail: x.description_preview || "No preview",
+    meta: `${x.lane} · ${x.owner || "unassigned"} · tainted ${x.instructions_tainted ? "yes" : "no"}`,
+    tone: x.lane === "done" ? "ready" : x.lane === "blocked" ? "attention" : "",
+  }), "No subagent delegation cards");
+};
+
+const renderSubagentOutput = (payload) => {
+  const node = document.getElementById("subagent-output");
+  const replay = payload.status === "approval_required" && payload.approval_id
+    ? `<div class="item-actions"><button type="button" class="secondary" data-subagent-approved="${escapeHtml(payload.approval_id)}">Run Approved Delegation</button></div>`
+    : "";
+  node.innerHTML = `<pre>${escapeHtml(JSON.stringify(payload, null, 2))}</pre>${replay}`;
 };
 
 const renderBoards = () => {
@@ -3208,6 +3232,35 @@ document.getElementById("card-form").addEventListener("submit", async (event) =>
     }),
   });
   state.selectedBoardId = boardId;
+  await refresh();
+});
+
+document.getElementById("subagent-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const payload = {
+    role: document.getElementById("subagent-role").value || "Researcher",
+    task: document.getElementById("subagent-task").value || "Review the current work queue.",
+  };
+  state.pendingSubagentDelegation = payload;
+  const result = await api("/subagents/delegate", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  renderSubagentOutput(result);
+  renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
+  await refresh();
+});
+
+document.getElementById("subagent-output").addEventListener("click", async (event) => {
+  const approvalId = event.target.dataset.subagentApproved;
+  if (!approvalId || !state.pendingSubagentDelegation) return;
+  const result = await api("/subagents/delegate", {
+    method: "POST",
+    body: JSON.stringify({ ...state.pendingSubagentDelegation, approval_id: approvalId }),
+  });
+  state.pendingSubagentDelegation = null;
+  renderSubagentOutput(result);
+  renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
   await refresh();
 });
 

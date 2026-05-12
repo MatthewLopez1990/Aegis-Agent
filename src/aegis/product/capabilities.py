@@ -18,6 +18,7 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
     schedules = orchestrator.schedules.list_schedules()
     sessions = orchestrator.sessions.list_sessions()
     boards = orchestrator.kanban.list_boards()
+    subagent_delegations = orchestrator.kanban.subagent_status(limit=12)
     approvals = orchestrator.approvals.list()
     pending_approvals = [_decode_pending_approval(orchestrator, approval) for approval in approvals if approval["status"] == "pending"]
     task_rows = orchestrator.store.list_tasks(limit=12)
@@ -67,6 +68,8 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
             "session_bound_recent_tasks": len(session_task_rows),
             "schedules": len(schedules),
             "boards": len(boards),
+            "subagent_delegations": subagent_delegations["total_cards"],
+            "open_subagent_delegations": subagent_delegations["open_cards"],
             "recent_tasks": len(tasks),
             "pending_approvals": len(pending_approvals),
             "memories": memory_readiness["memory_count"],
@@ -141,8 +144,8 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
             {
                 "name": "Scheduling and orchestration",
                 "state": "durable",
-                "coverage": f"{len(schedules)} schedules, {len(boards)} work boards",
-                "detail": "Schedules start paused pending approval; Kanban cards provide a durable multi-agent coordination surface.",
+                "coverage": f"{len(schedules)} schedules, {len(boards)} work boards, {subagent_delegations['open_cards']} open subagent delegation(s)",
+                "detail": "Schedules start paused pending approval; Kanban cards provide a durable multi-agent coordination surface with approved subagent delegation queues.",
             },
             {
                 "name": "Session continuity",
@@ -168,8 +171,10 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
             live_connector_adapters,
             available_live_connector_adapters,
             backends,
+            subagent_delegations,
         ),
         "implementation_readiness": implementation_readiness,
+        "subagent_delegations": subagent_delegations,
         "enterprise_readiness": enterprise_readiness,
         "memory_readiness": memory_readiness,
         "self_improvement_readiness": self_improvement_readiness,
@@ -348,6 +353,7 @@ def _live_gap_backlog(
     live_connector_adapters: list[dict[str, Any]],
     available_live_connector_adapters: list[dict[str, Any]],
     backends: list[dict[str, Any]],
+    subagent_delegations: dict[str, Any],
 ) -> list[dict[str, Any]]:
     readiness_by_state = {row["state"]: row for row in readiness}
     mock_write_tools = [
@@ -518,6 +524,26 @@ def _live_gap_backlog(
             "configured_provider_count": len(configured_providers),
         },
         {
+            "area": "subagent_runtime_depth",
+            "platforms": ["Hermes Agent", "Claude Code"],
+            "status": "delegation_queue_ready_runtime_gap",
+            "detail": (
+                f"Approved subagent work is tracked through a durable, auditable delegation queue with "
+                f"{subagent_delegations['open_cards']} open card(s); recursive autonomous worker execution remains blocked until isolation, budgets, and handoff receipts are implemented."
+            ),
+            "sample_tools": ["subagent_delegate"],
+            "operator_checklist": _subagent_operator_checklist(subagent_delegations),
+            "next_steps": [
+                "Add isolated worker profiles before running delegated tasks autonomously.",
+                "Bind every handoff and result to parent task receipts.",
+                "Enforce recursive budget, tool, workspace, and network limits before enabling nested agent loops.",
+            ],
+            "required_controls": ["human_approval", "tainted_instruction_metadata", "durable_queue", "recursive_budget_limits", "handoff_receipts"],
+            "verification_gates": ["approval_required_delegation", "status_queue_visibility", "raw_instruction_redaction", "blocked_autonomous_runtime"],
+            "evaluation_scenarios": ["subagent.delegation_queue_visibility", "subagent.autonomous_runtime_blocked"],
+            "configured_provider_count": len(configured_providers),
+        },
+        {
             "area": "remote_backend_activation",
             "platforms": ["Hermes Agent", "OpenClaw"],
             "status": (
@@ -547,6 +573,31 @@ def _live_gap_backlog(
             "verification_gates": ["disabled_backend_denial", "approved_activation", "cleanup_receipt", "scope_escape_rejection"],
             "evaluation_scenarios": ["backend_activation.remote_execution_disabled"],
             "configured_provider_count": len(configured_providers),
+        },
+    ]
+
+
+def _subagent_operator_checklist(subagent_delegations: dict[str, Any]) -> list[dict[str, str]]:
+    return [
+        {
+            "control": "approval_required_delegation",
+            "state": "enforced",
+            "detail": "The subagent_delegate tool is approval-gated before a delegation card is created.",
+        },
+        {
+            "control": "durable_queue_visibility",
+            "state": "available" if subagent_delegations["status"] == "delegation_queue_ready" else "ready_for_first_delegation",
+            "detail": "CLI, TUI, API, and web surfaces expose lane counts and safe card previews for delegated work.",
+        },
+        {
+            "control": "tainted_instruction_metadata",
+            "state": "enforced",
+            "detail": "Delegation cards mark instructions as tainted and avoid forwarding raw instructions to an autonomous model loop.",
+        },
+        {
+            "control": "isolated_parallel_runtime",
+            "state": "blocked",
+            "detail": "Recursive autonomous subagents remain disabled until worker isolation, budgets, and receipt handoffs are implemented.",
         },
     ]
 
