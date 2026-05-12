@@ -2541,7 +2541,9 @@ class CliTests(unittest.TestCase):
             marketplace = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "marketplace", "--query", "test", "--catalog-path", str(catalog_path)]))
             updates = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "updates", "--catalog-path", str(catalog_path)]))
             with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeUpdateResponse()):
-                updated_marketplace = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "update-marketplace", "test.plugin", "--catalog-path", str(update_catalog)]))
+                with self.assertRaises(PermissionError):
+                    dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "update-marketplace", "test.plugin", "--catalog-path", str(update_catalog)]))
+                updated_marketplace = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "update-marketplace", "test.plugin", "--catalog-path", str(update_catalog), "--approved"]))
             with patch("aegis.plugins.manager._open_without_redirects", return_value=FakePreparedUpdateResponse()):
                 prepared_marketplace_update = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "prepare-update", "test.plugin", "--catalog-path", str(prepared_update_catalog)]))
             applied_prepared_update = dispatch(

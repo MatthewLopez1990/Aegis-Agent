@@ -356,7 +356,9 @@ class PluginManagerTests(unittest.TestCase):
                     return body
 
             with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeResponse()):
-                updated = manager.update_marketplace_plugin("test.plugin", catalog_path=catalog_path, allowlist=("example.com",))
+                with self.assertRaises(PermissionError):
+                    manager.update_marketplace_plugin("test.plugin", catalog_path=catalog_path, allowlist=("example.com",))
+                updated = manager.update_marketplace_plugin("test.plugin", approved=True, catalog_path=catalog_path, allowlist=("example.com",))
 
             self.assertEqual(installed["version"], "0.1.0")
             self.assertEqual(updated["status"], "marketplace_plugin_updated")

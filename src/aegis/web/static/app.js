@@ -2814,6 +2814,7 @@ document.getElementById("plugin-updates").addEventListener("click", async (event
     method: "POST",
     body: JSON.stringify({
       plugin_id: pluginId,
+      approved: true,
       catalog_path: state.pluginMarketplaceCatalogPath || undefined,
     }),
   });

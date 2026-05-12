@@ -690,6 +690,7 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn('api("/plugins/marketplace/fetch-bundle"', script)
         self.assertIn('api("/plugins/marketplace/install-bundle"', script)
         self.assertIn('api("/plugins/marketplace/update"', script)
+        self.assertIn("approved: true", script)
         self.assertIn('setList("installed-plugins"', script)
         self.assertIn('setList("plugin-marketplace"', script)
         self.assertIn('setList("plugin-updates"', script)

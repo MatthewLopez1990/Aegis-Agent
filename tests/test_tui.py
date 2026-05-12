@@ -283,6 +283,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("--enable", tui.completedefault("--", "/plugins install-bundle remote.plugin --", len("/plugins install-bundle remote.plugin "), len("/plugins install-bundle remote.plugin --")))
             self.assertIn("--enable", tui.completedefault("--", "/plugins install-marketplace remote.plugin --", len("/plugins install-marketplace remote.plugin "), len("/plugins install-marketplace remote.plugin --")))
             self.assertIn("--force", tui.completedefault("--", "/plugins update-marketplace remote.plugin --", len("/plugins update-marketplace remote.plugin "), len("/plugins update-marketplace remote.plugin --")))
+            self.assertIn("--approved", tui.completedefault("--", "/plugins update-marketplace remote.plugin --", len("/plugins update-marketplace remote.plugin "), len("/plugins update-marketplace remote.plugin --")))
             self.assertIn("--dry-run", tui.completedefault("--", "/curator run --", len("/curator run "), len("/curator run --")))
             self.assertIn("openclaw-memory-preview", tui.complete_migrate("openclaw", "migrate openclaw", len("migrate "), len("migrate openclaw")))
             self.assertIn("candidate", tui.complete_repair("ca", "repair ca", len("repair "), len("repair ca")))

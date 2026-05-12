@@ -122,7 +122,7 @@ class PluginManager:
                     "review marketplace metadata",
                     "run plugins fetch-manifest <plugin_id> to verify the remote manifest",
                     "run plugins prepare-update <plugin_id> to stage a reviewed update candidate",
-                    "run plugins update-marketplace <plugin_id> for an explicit governed update",
+                    "run plugins update-marketplace <plugin_id> --approved for an explicit governed update",
                     "install through plugins install <plugin.json> using the existing governed lifecycle",
                 ],
             }
@@ -368,11 +368,14 @@ class PluginManager:
         self,
         plugin_id: str,
         *,
+        approved: bool = False,
         catalog_path: str | Path | None = None,
         allowlist: tuple[str, ...] = (),
         enable: bool | None = None,
         force: bool = False,
     ) -> dict[str, Any]:
+        if not approved:
+            raise PermissionError("marketplace plugin update requires explicit approval")
         store = self._read_store()
         previous = store["plugins"].get(plugin_id)
         if previous is None:
@@ -1073,7 +1076,7 @@ def _public_marketplace_entry(raw: dict[str, Any], *, installed: dict[str, Any] 
             "run plugins install-marketplace <plugin_id> for an explicit governed install",
             "run plugins install-bundle <plugin_id> for an explicit signed-bundle install",
             "run plugins prepare-update <plugin_id> to stage a reviewed update candidate",
-            "run plugins update-marketplace <plugin_id> for an explicit governed update",
+            "run plugins update-marketplace <plugin_id> --approved for an explicit governed update",
             "install through the existing governed plugin lifecycle",
         ],
     }

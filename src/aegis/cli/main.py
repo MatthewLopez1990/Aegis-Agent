@@ -371,6 +371,7 @@ def build_parser() -> argparse.ArgumentParser:
         plugin_marketplace_update.add_argument("--enable", action="store_true", help="Enable default-enabled resources after update")
         plugin_marketplace_update.add_argument("--disable", action="store_true", help="Keep updated resources disabled")
         plugin_marketplace_update.add_argument("--force", action="store_true", help="Allow reinstalling the same or older catalog version")
+        plugin_marketplace_update.add_argument("--approved", action="store_true", help="Approve applying the marketplace update")
         plugin_prepare_update = plugin_sub.add_parser("prepare-update", help="Fetch and verify one marketplace update as a private review candidate")
         plugin_prepare_update.add_argument("plugin_id")
         plugin_prepare_update.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
@@ -1180,6 +1181,7 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 raise ValueError("use either --enable or --disable, not both")
             return manager.update_marketplace_plugin(
                 args.plugin_id,
+                approved=args.approved,
                 catalog_path=args.catalog_path,
                 allowlist=config.network_allowlist,
                 enable=True if args.enable else False if args.disable else None,

@@ -4180,6 +4180,7 @@ class AegisTui(cmd.Cmd):
                 _print_json(
                     manager.update_marketplace_plugin(
                         parts[1],
+                        approved="--approved" in parts[2:],
                         catalog_path=_option_value(parts, "--catalog-path"),
                         allowlist=self.orchestrator.config.network_allowlist,
                         enable=True if "--enable" in parts[2:] else False if "--disable" in parts[2:] else None,
@@ -4211,7 +4212,7 @@ class AegisTui(cmd.Cmd):
         except (KeyError, PermissionError, ValueError) as exc:
             print(f"plugin error: {exc}")
             return
-        print("usage: plugins list | plugins install <plugin.json> [--enable] [--unsigned-local] | plugins enable|disable|remove <plugin_id> | plugins reload | plugins marketplace [--query q] [--catalog-path file] | plugins updates [--catalog-path file] | plugins fetch-manifest <plugin_id> [--catalog-path file] | plugins fetch-bundle <plugin_id> [--catalog-path file] [--key-name name] | plugins install-bundle <plugin_id> [--catalog-path file] [--key-name name] [--enable] | plugins install-marketplace <plugin_id> [--catalog-path file] [--enable] | plugins update-marketplace <plugin_id> [--catalog-path file] [--enable|--disable] [--force] | plugins prepare-update <plugin_id> [--catalog-path file] [--force] | plugins apply-prepared-update <candidate_id> --approved [--enable|--disable]")
+        print("usage: plugins list | plugins install <plugin.json> [--enable] [--unsigned-local] | plugins enable|disable|remove <plugin_id> | plugins reload | plugins marketplace [--query q] [--catalog-path file] | plugins updates [--catalog-path file] | plugins fetch-manifest <plugin_id> [--catalog-path file] | plugins fetch-bundle <plugin_id> [--catalog-path file] [--key-name name] | plugins install-bundle <plugin_id> [--catalog-path file] [--key-name name] [--enable] | plugins install-marketplace <plugin_id> [--catalog-path file] [--enable] | plugins update-marketplace <plugin_id> --approved [--catalog-path file] [--enable|--disable] [--force] | plugins prepare-update <plugin_id> [--catalog-path file] [--force] | plugins apply-prepared-update <candidate_id> --approved [--enable|--disable]")
 
     def do_toolsets(self, arg: str) -> None:
         """toolsets -- summarize governed tools by permission and risk."""
@@ -5945,8 +5946,8 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("plugin", "install-bundle"): ("--catalog-path", "--key-name", "--enable"),
     ("plugins", "install-marketplace"): ("--catalog-path", "--enable"),
     ("plugin", "install-marketplace"): ("--catalog-path", "--enable"),
-    ("plugins", "update-marketplace"): ("--catalog-path", "--enable", "--disable", "--force"),
-    ("plugin", "update-marketplace"): ("--catalog-path", "--enable", "--disable", "--force"),
+    ("plugins", "update-marketplace"): ("--catalog-path", "--enable", "--disable", "--force", "--approved"),
+    ("plugin", "update-marketplace"): ("--catalog-path", "--enable", "--disable", "--force", "--approved"),
     ("plugins", "prepare-update"): ("--catalog-path", "--force"),
     ("plugin", "prepare-update"): ("--catalog-path", "--force"),
     ("plugins", "apply-prepared-update"): ("--approved", "--enable", "--disable"),
