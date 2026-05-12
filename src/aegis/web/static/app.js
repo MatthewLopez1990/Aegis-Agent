@@ -410,7 +410,7 @@ const refresh = async () => {
     setList("remote-control-push-targets", remoteControl.native_push_targets || [], (x) => ({
       title: x.label || x.id,
       detail: `${x.provider || "provider"} · auth ${x.push_auth_secret_configured ? "configured" : "missing"} · device ${x.device_token_secret_configured ? "configured" : "missing"}`,
-      meta: `${x.status} · ${x.last_push_delivery_state || "not pushed"}${x.last_push_at ? ` · ${x.last_push_at}` : ""}`,
+      meta: `${x.status} · rotated ${x.rotation_count || 0} · ${x.last_push_delivery_state || "not pushed"}${x.last_push_at ? ` · ${x.last_push_at}` : ""}`,
       tone: x.status === "active" ? "ready" : "attention",
     }), "No native push targets");
     setList("remote-control-pairings", remoteControl.pairings || [], (x) => ({
@@ -2745,6 +2745,23 @@ document.getElementById("remote-control-push-register").addEventListener("click"
     body: JSON.stringify(remoteControlPushBody()),
   });
   document.getElementById("remote-control-push-target-id").value = result.target?.id || "";
+  renderRemoteControlOutput(result);
+  await refresh();
+});
+
+document.getElementById("remote-control-push-rotate").addEventListener("click", async () => {
+  const pushBody = remoteControlPushBody();
+  const result = await api("/remote-control/push/rotate", {
+    method: "POST",
+    body: JSON.stringify({
+      target_id: pushBody.target_id,
+      push_auth_secret: pushBody.push_auth_secret || undefined,
+      device_token_secret: pushBody.device_token_secret || undefined,
+      approved: pushBody.approved,
+      apns_topic: pushBody.apns_topic,
+      fcm_project_id: pushBody.fcm_project_id,
+    }),
+  });
   renderRemoteControlOutput(result);
   await refresh();
 });

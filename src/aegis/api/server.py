@@ -599,6 +599,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 "/remote-control/relay/notify",
                 "/remote-control/push/register",
                 "/remote-control/push/disable",
+                "/remote-control/push/rotate",
                 "/remote-control/push",
                 "/remote-control/relay/retry",
             }:
@@ -889,6 +890,30 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     {
                         "target_id": result["target"]["id"],
                         "provider": result["target"]["provider"],
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(result)
+                return
+            if path == "/remote-control/push/rotate":
+                payload = self._read_json()
+                result = remote_control.rotate_native_push_target(
+                    str(_required(payload, "target_id")),
+                    push_auth_secret=str(payload["push_auth_secret"]) if payload.get("push_auth_secret") else None,
+                    device_token_secret=str(payload["device_token_secret"]) if payload.get("device_token_secret") else None,
+                    apns_topic=str(payload["apns_topic"]) if payload.get("apns_topic") else None,
+                    fcm_project_id=str(payload["fcm_project_id"]) if payload.get("fcm_project_id") else None,
+                    approved=bool(payload.get("approved", False)),
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.native_push_target_rotated",
+                    {
+                        "target_id": result["target"]["id"],
+                        "provider": result["target"]["provider"],
+                        "rotated_fields": result["rotated_fields"],
+                        "push_auth_secret_captured": False,
+                        "device_token_secret_captured": False,
                         "raw_secret_values_included": False,
                         "source": "api",
                     },

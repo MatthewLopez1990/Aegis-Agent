@@ -236,6 +236,8 @@ class CliTests(unittest.TestCase):
             broker.store_secret(name="AEGIS_REMOTE_RELAY_TOKEN", value="relay-raw-secret")
             broker.store_secret(name="AEGIS_REMOTE_PUSH_TOKEN", value="push-raw-secret")
             broker.store_secret(name="AEGIS_REMOTE_DEVICE_TOKEN", value="device-raw-secret")
+            broker.store_secret(name="AEGIS_REMOTE_PUSH_TOKEN_ROTATED", value="push-raw-secret-2")
+            broker.store_secret(name="AEGIS_REMOTE_DEVICE_TOKEN_ROTATED", value="device-raw-secret-2")
             push_target = dispatch(
                 parser.parse_args(
                     [
@@ -253,6 +255,25 @@ class CliTests(unittest.TestCase):
                         "AEGIS_REMOTE_DEVICE_TOKEN",
                         "--fcm-project-id",
                         "aegis-project",
+                        "--approved",
+                    ]
+                )
+            )
+            rotated_push_target = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "remote-control",
+                        "push-rotate",
+                        "--target-id",
+                        push_target["target"]["id"],
+                        "--push-auth-secret",
+                        "AEGIS_REMOTE_PUSH_TOKEN_ROTATED",
+                        "--device-token-secret",
+                        "AEGIS_REMOTE_DEVICE_TOKEN_ROTATED",
+                        "--fcm-project-id",
+                        "aegis-project-rotated",
                         "--approved",
                     ]
                 )
@@ -289,7 +310,7 @@ class CliTests(unittest.TestCase):
                 if body.get("type") == "aegis.remote_control.pull":
                     return FakeRelayResponse({"actions": [{"request_id": "pull-1", "action": "status", "task_id": relay_task["id"]}]})
                 if "fcm.googleapis.com" in request.full_url:
-                    return FakeRelayResponse({"name": "projects/aegis-project/messages/native-1", "token": "device-raw-secret"})
+                    return FakeRelayResponse({"name": "projects/aegis-project-rotated/messages/native-1", "token": "device-raw-secret-2"})
                 return FakeRelayResponse()
 
             with patch("aegis.remote_control._private_network_error", return_value=None):
@@ -472,23 +493,32 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("send message relay controlled", json.dumps(relay_notify, sort_keys=True))
             self.assertNotIn("relay-raw-secret", json.dumps(relay_notify, sort_keys=True))
             self.assertEqual(push_target["status"], "native_push_target_registered")
+            self.assertEqual(rotated_push_target["status"], "native_push_target_rotated")
+            self.assertEqual(rotated_push_target["rotated_fields"], ["push_auth_secret", "device_token_secret", "fcm_project_id"])
+            self.assertEqual(rotated_push_target["target"]["rotation_count"], 1)
+            self.assertFalse(rotated_push_target["target"]["secret_names_included"])
             self.assertEqual(push_targets["active_target_count"], 1)
+            self.assertEqual(push_targets["targets"][0]["rotation_count"], 1)
             self.assertFalse(push_targets["targets"][0]["secret_names_included"])
             self.assertNotIn("AEGIS_REMOTE_PUSH_TOKEN", json.dumps(push_targets, sort_keys=True))
             self.assertNotIn("AEGIS_REMOTE_DEVICE_TOKEN", json.dumps(push_targets, sort_keys=True))
+            self.assertNotIn("AEGIS_REMOTE_PUSH_TOKEN_ROTATED", json.dumps(rotated_push_target, sort_keys=True))
+            self.assertNotIn("AEGIS_REMOTE_DEVICE_TOKEN_ROTATED", json.dumps(rotated_push_target, sort_keys=True))
             self.assertEqual(native_push["status"], "native_push_published")
             self.assertEqual(native_push["provider"], "fcm")
             self.assertEqual(native_push["target_id"], push_target["target"]["id"])
-            self.assertEqual(native_push["push_target"], "https://fcm.googleapis.com/v1/projects/aegis-project/messages:send")
+            self.assertEqual(native_push["push_target"], "https://fcm.googleapis.com/v1/projects/aegis-project-rotated/messages:send")
             self.assertEqual(native_push["native_push_receipt"]["delivery_state"], "accepted")
             self.assertFalse(native_push["pairing_token_relayed"])
             self.assertFalse(native_push["push_auth_token_captured"])
             self.assertFalse(native_push["raw_device_token_captured"])
             fcm_request = next(item for item in captured_requests if "fcm.googleapis.com" in str(item["url"]))
-            self.assertEqual(fcm_request["authorization"], "Bearer push-raw-secret")
-            self.assertEqual(fcm_request["body"]["message"]["token"], "device-raw-secret")
+            self.assertEqual(fcm_request["authorization"], "Bearer push-raw-secret-2")
+            self.assertEqual(fcm_request["body"]["message"]["token"], "device-raw-secret-2")
             self.assertNotIn("push-raw-secret", json.dumps(native_push, sort_keys=True))
             self.assertNotIn("device-raw-secret", json.dumps(native_push, sort_keys=True))
+            self.assertNotIn("push-raw-secret-2", json.dumps(native_push, sort_keys=True))
+            self.assertNotIn("device-raw-secret-2", json.dumps(native_push, sort_keys=True))
             self.assertEqual(relay_outbox["status"], "relay_notification_outbox")
             self.assertEqual(relay_outbox["item_count"], 1)
             self.assertEqual(relay_outbox["items"][0]["status"], "acknowledged")

@@ -687,6 +687,21 @@ class RemoteControlPairingTests(unittest.TestCase):
                 now=now,
             )
             target_id = registered["target"]["id"]
+            with self.assertRaises(PermissionError):
+                registry.rotate_native_push_target(
+                    target_id,
+                    push_auth_secret="AEGIS_REMOTE_PUSH_TOKEN_ROTATED",
+                    approved=False,
+                    now=now + timedelta(milliseconds=500),
+                )
+            rotated = registry.rotate_native_push_target(
+                target_id,
+                push_auth_secret="AEGIS_REMOTE_PUSH_TOKEN_ROTATED",
+                device_token_secret="AEGIS_REMOTE_DEVICE_TOKEN_ROTATED",
+                fcm_project_id="aegis-project-rotated",
+                approved=True,
+                now=now + timedelta(milliseconds=500),
+            )
             refs = registry.native_push_target_secret_refs(target_id)
 
             class FakeResponse:
@@ -721,22 +736,30 @@ class RemoteControlPairingTests(unittest.TestCase):
                     )
             listed = registry.native_push_targets()
             disabled = registry.disable_native_push_target(target_id, approved=True, now=now + timedelta(seconds=2))
-            rendered_public = json.dumps({"registered": registered, "published": published, "listed": listed, "disabled": disabled}, sort_keys=True)
+            rendered_public = json.dumps({"registered": registered, "rotated": rotated, "published": published, "listed": listed, "disabled": disabled}, sort_keys=True)
             rendered_store = store_path.read_text(encoding="utf-8")
 
             self.assertEqual(registered["status"], "native_push_target_registered")
-            self.assertEqual(refs["push_auth_secret"], "AEGIS_REMOTE_PUSH_TOKEN")
-            self.assertEqual(refs["device_token_secret"], "AEGIS_REMOTE_DEVICE_TOKEN")
+            self.assertEqual(rotated["status"], "native_push_target_rotated")
+            self.assertEqual(rotated["rotated_fields"], ["push_auth_secret", "device_token_secret", "fcm_project_id"])
+            self.assertEqual(rotated["target"]["rotation_count"], 1)
+            self.assertFalse(rotated["target"]["secret_names_included"])
+            self.assertEqual(refs["push_auth_secret"], "AEGIS_REMOTE_PUSH_TOKEN_ROTATED")
+            self.assertEqual(refs["device_token_secret"], "AEGIS_REMOTE_DEVICE_TOKEN_ROTATED")
+            self.assertEqual(refs["fcm_project_id"], "aegis-project-rotated")
             self.assertEqual(published["target_id"], target_id)
             self.assertEqual(published["native_push_receipt"]["delivery_state"], "accepted")
             self.assertEqual(listed["active_target_count"], 1)
             self.assertEqual(listed["targets"][0]["last_push_delivery_state"], "accepted")
+            self.assertEqual(listed["targets"][0]["rotation_count"], 1)
             self.assertFalse(listed["targets"][0]["secret_names_included"])
             self.assertEqual(disabled["target"]["status"], "disabled")
             with self.assertRaises(ValueError):
                 registry.native_push_target_secret_refs(target_id)
             self.assertNotIn("AEGIS_REMOTE_PUSH_TOKEN", rendered_public)
             self.assertNotIn("AEGIS_REMOTE_DEVICE_TOKEN", rendered_public)
+            self.assertNotIn("AEGIS_REMOTE_PUSH_TOKEN_ROTATED", rendered_public)
+            self.assertNotIn("AEGIS_REMOTE_DEVICE_TOKEN_ROTATED", rendered_public)
             self.assertNotIn("push-raw-secret", rendered_public)
             self.assertNotIn("device-raw-secret", rendered_public)
             self.assertNotIn("push-raw-secret", rendered_store)

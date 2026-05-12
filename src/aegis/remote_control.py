@@ -180,7 +180,7 @@ class RemoteControlPairingRegistry:
             ],
             "blocked_until_relay": ["mobile_gateway_registration"] if mobile_gateway_count == 0 else [],
             "remaining_live_delivery_gaps": [
-                "native_push_provider_rotation" if active_native_push_target_count else "native_push_target_registration",
+                *([] if active_native_push_target_count else ["native_push_target_registration"]),
                 "broad_cloud_relay_service",
             ],
             "relay_preflight": self.relay_preflight(),
@@ -295,6 +295,63 @@ class RemoteControlPairingRegistry:
         return {
             "status": "native_push_target_disabled",
             "target": _public_native_push_target(target, now=disabled_at),
+            "push_auth_secret_captured": False,
+            "device_token_secret_captured": False,
+            "raw_device_token_captured": False,
+            "raw_secret_values_included": False,
+        }
+
+    def rotate_native_push_target(
+        self,
+        target_id: str,
+        *,
+        push_auth_secret: str | None = None,
+        device_token_secret: str | None = None,
+        apns_topic: str | None = None,
+        fcm_project_id: str | None = None,
+        approved: bool = False,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if not approved:
+            raise PermissionError("remote-control native push target rotation requires explicit approval")
+        self._load()
+        target = self._native_push_targets.get(target_id)
+        if target is None:
+            raise KeyError(target_id)
+        if target.get("disabled_at"):
+            raise ValueError("remote-control native push target is disabled")
+        rotated_at = _utc_now(now)
+        rotated_fields: list[str] = []
+        if push_auth_secret:
+            target["push_auth_secret_name"] = _required_brokered_secret_name(
+                push_auth_secret,
+                field_name="push_auth_secret",
+            )
+            rotated_fields.append("push_auth_secret")
+        if device_token_secret:
+            target["device_token_secret_name"] = _required_brokered_secret_name(
+                device_token_secret,
+                field_name="device_token_secret",
+            )
+            rotated_fields.append("device_token_secret")
+        provider = str(target.get("provider") or "")
+        if provider == "apns" and apns_topic:
+            target["apns_topic"] = _optional_clean_string(apns_topic)
+            rotated_fields.append("apns_topic")
+        if provider == "fcm" and fcm_project_id:
+            target["fcm_project_id"] = _clean_fcm_project_id(_optional_clean_string(fcm_project_id))
+            rotated_fields.append("fcm_project_id")
+        if not rotated_fields:
+            raise ValueError("remote-control native push target rotation requires at least one replacement secret or provider metadata field")
+        target["rotated_at"] = rotated_at.isoformat()
+        target["rotation_count"] = int(target.get("rotation_count") or 0) + 1
+        target["last_rotation_fields"] = list(rotated_fields)
+        target["raw_secret_values_included"] = False
+        self._save()
+        return {
+            "status": "native_push_target_rotated",
+            "target": _public_native_push_target(target, now=rotated_at),
+            "rotated_fields": list(rotated_fields),
             "push_auth_secret_captured": False,
             "device_token_secret_captured": False,
             "raw_device_token_captured": False,
@@ -1774,6 +1831,12 @@ def _normalize_native_push_targets(value: Any) -> dict[str, dict[str, Any]]:
             target["last_push_delivery_state"] = str(row["last_push_delivery_state"])[:40]
         if row.get("last_push_target"):
             target["last_push_target"] = str(row["last_push_target"])[:240]
+        if row.get("rotated_at"):
+            target["rotated_at"] = str(row["rotated_at"])
+        if row.get("rotation_count") is not None:
+            target["rotation_count"] = int(row["rotation_count"])
+        if isinstance(row.get("last_rotation_fields"), list):
+            target["last_rotation_fields"] = [str(item)[:80] for item in row["last_rotation_fields"][:8]]
         targets[target["id"]] = target
     return targets
 
@@ -1796,6 +1859,9 @@ def _public_native_push_target(target: dict[str, Any], *, now: datetime) -> dict
         "last_push_response_status": target.get("last_push_response_status"),
         "last_push_delivery_state": _optional_clean_string(target.get("last_push_delivery_state")),
         "last_push_target": _optional_clean_string(target.get("last_push_target")),
+        "rotated_at": _optional_clean_string(target.get("rotated_at")),
+        "rotation_count": int(target.get("rotation_count") or 0),
+        "last_rotation_fields": list(target.get("last_rotation_fields") or []),
         "raw_device_token_captured": False,
         "raw_secret_values_included": False,
     }

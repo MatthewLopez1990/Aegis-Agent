@@ -574,6 +574,18 @@ class ApiServerSecurityTests(unittest.TestCase):
                     },
                     token=token,
                 )
+                remote_push_rotated = _json_post(
+                    port,
+                    "/remote-control/push/rotate",
+                    {
+                        "target_id": remote_push_target["target"]["id"],
+                        "push_auth_secret": "AEGIS_REMOTE_PUSH_TOKEN_ROTATED",
+                        "device_token_secret": "AEGIS_REMOTE_DEVICE_TOKEN_ROTATED",
+                        "fcm_project_id": "aegis-project-rotated",
+                        "approved": True,
+                    },
+                    token=token,
+                )
                 remote_push_targets = _json_get(port, "/remote-control/push/targets", token=token)
                 with self.assertRaises(HTTPError) as remote_push_unapproved_error:
                     _json_post(
@@ -1172,11 +1184,18 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(remote_relay_outbox_initial["status"], "relay_notification_outbox")
                 self.assertEqual(remote_relay_outbox_initial["item_count"], 0)
                 self.assertEqual(remote_push_target["status"], "native_push_target_registered")
+                self.assertEqual(remote_push_rotated["status"], "native_push_target_rotated")
+                self.assertEqual(remote_push_rotated["rotated_fields"], ["push_auth_secret", "device_token_secret", "fcm_project_id"])
+                self.assertEqual(remote_push_rotated["target"]["rotation_count"], 1)
+                self.assertFalse(remote_push_rotated["target"]["secret_names_included"])
                 self.assertEqual(remote_push_targets["active_target_count"], 1)
+                self.assertEqual(remote_push_targets["targets"][0]["rotation_count"], 1)
                 self.assertFalse(remote_push_targets["targets"][0]["secret_names_included"])
                 self.assertEqual(remote_push_disabled["target"]["status"], "disabled")
                 self.assertNotIn("AEGIS_REMOTE_PUSH_TOKEN", json.dumps(remote_push_targets, sort_keys=True))
                 self.assertNotIn("AEGIS_REMOTE_DEVICE_TOKEN", json.dumps(remote_push_targets, sort_keys=True))
+                self.assertNotIn("AEGIS_REMOTE_PUSH_TOKEN_ROTATED", json.dumps(remote_push_rotated, sort_keys=True))
+                self.assertNotIn("AEGIS_REMOTE_DEVICE_TOKEN_ROTATED", json.dumps(remote_push_rotated, sort_keys=True))
                 self.assertEqual(remote_push_unapproved_error.exception.code, 403)
                 self.assertEqual(remote_relay_action["status"], "relay_action_proxied")
                 self.assertEqual(remote_relay_action["mode"], "approved_relay_action_proxy")

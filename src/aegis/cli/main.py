@@ -501,6 +501,13 @@ def build_parser() -> argparse.ArgumentParser:
     remote_control_push_disable = remote_control_sub.add_parser("push-disable", help="Disable a registered native push target")
     remote_control_push_disable.add_argument("--target-id", required=True, help="Registered native push target id")
     remote_control_push_disable.add_argument("--approved", action="store_true", help="Approve native push target disable")
+    remote_control_push_rotate = remote_control_sub.add_parser("push-rotate", help="Rotate brokered APNS/FCM push target secret references")
+    remote_control_push_rotate.add_argument("--target-id", required=True, help="Registered native push target id")
+    remote_control_push_rotate.add_argument("--push-auth-secret", help="Replacement brokered provider auth token secret")
+    remote_control_push_rotate.add_argument("--device-token-secret", help="Replacement brokered APNS/FCM device token secret")
+    remote_control_push_rotate.add_argument("--apns-topic", help="Replacement APNS topic/bundle id")
+    remote_control_push_rotate.add_argument("--fcm-project-id", help="Replacement Firebase project id for FCM HTTP v1")
+    remote_control_push_rotate.add_argument("--approved", action="store_true", help="Approve native push target rotation")
     remote_control_push = remote_control_sub.add_parser("push", help="Publish one approved native APNS/FCM notification")
     remote_control_push.add_argument("--pairing-id", required=True, help="Active pairing id")
     remote_control_push.add_argument("--target-id", help="Registered native push target id")
@@ -1541,6 +1548,28 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 {
                     "target_id": result["target"]["id"],
                     "provider": result["target"]["provider"],
+                    "raw_secret_values_included": False,
+                    "source": "cli",
+                },
+            )
+            return result
+        if args.remote_control_command == "push-rotate":
+            result = registry.rotate_native_push_target(
+                args.target_id,
+                push_auth_secret=args.push_auth_secret,
+                device_token_secret=args.device_token_secret,
+                apns_topic=args.apns_topic,
+                fcm_project_id=args.fcm_project_id,
+                approved=args.approved,
+            )
+            AuditLogger(config.audit_log_path).append(
+                "remote_control.native_push_target_rotated",
+                {
+                    "target_id": result["target"]["id"],
+                    "provider": result["target"]["provider"],
+                    "rotated_fields": result["rotated_fields"],
+                    "push_auth_secret_captured": False,
+                    "device_token_secret_captured": False,
                     "raw_secret_values_included": False,
                     "source": "cli",
                 },

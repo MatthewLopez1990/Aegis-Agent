@@ -217,7 +217,7 @@ BROWSER_COMMANDS = ("status", "connect", "disconnect", "session", "sessions", "c
 MCP_COMMANDS = ("list", "register", "auth", "call")
 HOOK_COMMANDS = ("list", "add", "enable", "disable", "remove", "run")
 AGENTS_COMMANDS = ("status", "profiles", "profile-create", "profile-disable", "delegate", "handoff", "run", "run-batch")
-REMOTE_CONTROL_COMMANDS = ("pair", "directory", "revoke", "relay", "relay-directory", "relay-notify", "push-targets", "push-register", "push-disable", "push", "relay-outbox", "relay-retry", "relay-pull", "relay-action")
+REMOTE_CONTROL_COMMANDS = ("pair", "directory", "revoke", "relay", "relay-directory", "relay-notify", "push-targets", "push-register", "push-disable", "push-rotate", "push", "relay-outbox", "relay-retry", "relay-pull", "relay-action")
 SESSION_COMMANDS = ("new", "open", "rename", "set-model", "set-personality", "activate", "archive", "pause", "append", "history", "tasks", "compact")
 TASK_COMMANDS = ("status", "resume", "pause", "cancel", "events", "timeline", "submit", "list", "all", "session")
 TASKS_COMMANDS = ("all", "session")
@@ -2529,7 +2529,7 @@ class AegisTui(cmd.Cmd):
         self.do_rollback(arg)
 
     def do_remote_control(self, arg: str) -> None:
-        """remote_control [name|pair|directory|revoke|relay|relay-directory|relay-notify|push-targets|push-register|push-disable|push|relay-pull|relay-action] -- manage guarded remote-control readiness."""
+        """remote_control [name|pair|directory|revoke|relay|relay-directory|relay-notify|push-targets|push-register|push-disable|push-rotate|push|relay-pull|relay-action] -- manage guarded remote-control readiness."""
         parts = shlex.split(arg) if arg else []
         if parts and parts[0] == "directory":
             pairing_id = _option_value(parts, "--pairing-id")
@@ -2740,6 +2740,40 @@ class AegisTui(cmd.Cmd):
                 {
                     "target_id": result["target"]["id"],
                     "provider": result["target"]["provider"],
+                    "raw_secret_values_included": False,
+                    "source": "tui",
+                },
+            )
+            _print_json(result)
+            return
+        if parts and parts[0] == "push-rotate":
+            target_id = _option_value(parts, "--target-id")
+            if not target_id:
+                print("usage: remote-control push-rotate --target-id <id> --approved [--push-auth-secret name] [--device-token-secret name] [--apns-topic topic] [--fcm-project-id project]")
+                return
+            registry = RemoteControlPairingRegistry(
+                self.orchestrator.config.data_dir / "remote_control_pairings.json"
+            )
+            try:
+                result = registry.rotate_native_push_target(
+                    target_id,
+                    push_auth_secret=_option_value(parts, "--push-auth-secret"),
+                    device_token_secret=_option_value(parts, "--device-token-secret"),
+                    apns_topic=_option_value(parts, "--apns-topic"),
+                    fcm_project_id=_option_value(parts, "--fcm-project-id"),
+                    approved="--approved" in parts,
+                )
+            except (KeyError, PermissionError, ValueError) as exc:
+                print(f"remote-control push-rotate error: {exc}")
+                return
+            self.orchestrator.audit_logger.append(
+                "remote_control.native_push_target_rotated",
+                {
+                    "target_id": result["target"]["id"],
+                    "provider": result["target"]["provider"],
+                    "rotated_fields": result["rotated_fields"],
+                    "push_auth_secret_captured": False,
+                    "device_token_secret_captured": False,
                     "raw_secret_values_included": False,
                     "source": "tui",
                 },
@@ -3169,9 +3203,9 @@ class AegisTui(cmd.Cmd):
                     "Status: local control plane available with short-lived pairing tokens.",
                     "Current secure surface: aegis serve --host 127.0.0.1 --port 8765",
                     "Pairing endpoint: POST /remote-control/pair returns one token for X-Aegis-Remote-Token.",
-                    "Relay: remote-control relay can register an approved pairing; relay-directory publishes one sanitized scoped directory snapshot; relay-notify publishes one metadata-only mobile/gateway notification; push-register records brokered APNS/FCM targets; push publishes one approved native notification; relay-pull polls queued relay actions; relay-action proxies one scoped task action through the registered bearer.",
+                    "Relay: remote-control relay can register an approved pairing; relay-directory publishes one sanitized scoped directory snapshot; relay-notify publishes one metadata-only mobile/gateway notification; push-register records brokered APNS/FCM targets; push-rotate rotates brokered target references; push publishes one approved native notification; relay-pull polls queued relay actions; relay-action proxies one scoped task action through the registered bearer.",
                     "Security posture: host/origin checks still apply; no subscription token capture; pairing creation needs the local API token.",
-                    "Remaining live gap: native push credential rotation and broad cloud relay delivery.",
+                    "Remaining live gap: broad cloud relay delivery.",
                 ],
                 width,
             )
@@ -6662,6 +6696,7 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("remote-control", "push-targets"): ("--target-id",),
     ("remote-control", "push-register"): ("--label", "--provider", "--push-auth-secret", "--device-token-secret", "--approved", "--apns-topic", "--fcm-project-id"),
     ("remote-control", "push-disable"): ("--target-id", "--approved"),
+    ("remote-control", "push-rotate"): ("--target-id", "--push-auth-secret", "--device-token-secret", "--approved", "--apns-topic", "--fcm-project-id"),
     ("remote-control", "push"): ("--pairing-id", "--target-id", "--provider", "--push-auth-secret", "--device-token-secret", "--approved", "--apns-topic", "--fcm-project-id", "--event", "--task-id"),
     ("remote-control", "relay-outbox"): ("--status", "--limit"),
     ("remote-control", "relay-retry"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit"),
@@ -6676,6 +6711,7 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("remote_control", "push-targets"): ("--target-id",),
     ("remote_control", "push-register"): ("--label", "--provider", "--push-auth-secret", "--device-token-secret", "--approved", "--apns-topic", "--fcm-project-id"),
     ("remote_control", "push-disable"): ("--target-id", "--approved"),
+    ("remote_control", "push-rotate"): ("--target-id", "--push-auth-secret", "--device-token-secret", "--approved", "--apns-topic", "--fcm-project-id"),
     ("remote_control", "push"): ("--pairing-id", "--target-id", "--provider", "--push-auth-secret", "--device-token-secret", "--approved", "--apns-topic", "--fcm-project-id", "--event", "--task-id"),
     ("remote_control", "relay-outbox"): ("--status", "--limit"),
     ("remote_control", "relay-retry"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit"),
@@ -6690,6 +6726,7 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("rc", "push-targets"): ("--target-id",),
     ("rc", "push-register"): ("--label", "--provider", "--push-auth-secret", "--device-token-secret", "--approved", "--apns-topic", "--fcm-project-id"),
     ("rc", "push-disable"): ("--target-id", "--approved"),
+    ("rc", "push-rotate"): ("--target-id", "--push-auth-secret", "--device-token-secret", "--approved", "--apns-topic", "--fcm-project-id"),
     ("rc", "push"): ("--pairing-id", "--target-id", "--provider", "--push-auth-secret", "--device-token-secret", "--approved", "--apns-topic", "--fcm-project-id", "--event", "--task-id"),
     ("rc", "relay-outbox"): ("--status", "--limit"),
     ("rc", "relay-retry"): ("--pairing-id", "--relay-auth-secret", "--approved", "--limit"),
