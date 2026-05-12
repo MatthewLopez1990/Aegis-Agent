@@ -1310,6 +1310,22 @@ class BuiltinToolExecutor:
         requested = str(params.get("operation", "read")).lower()
         connector = self.connectors.get("github")
         if name == "github_pr":
+            if requested in {"comments", "review_comments", "pull_request_comments", "read_comments"}:
+                if params.get("provider_url") or params.get("api_url"):
+                    return self._execute_github_live_read(
+                        kind="pull_request_comments",
+                        operation="read_pull_request_comments",
+                        params=params,
+                    )
+                result = connector.read(ConnectorRequest(operation="read_pull_request_comments", params=params, scopes=("read",)))
+                return {
+                    "ok": result.ok,
+                    "operation": "read_pull_request_comments",
+                    "connector": result.connector,
+                    "data": result.data.get("data", {}),
+                    "taint": "CONNECTOR_CONTENT",
+                    "error": result.error,
+                }
             if requested in {"comment", "comment_on_pull_request", "write"}:
                 result = connector.write(ConnectorRequest(operation="comment_on_pull_request", params=params, scopes=("write",), approved=approved))
                 return {"ok": result.ok, "operation": "comment_on_pull_request", "connector": result.connector, "accepted": result.data.get("accepted", {}), **_connector_activation_fields(result), "rollback": result.rollback, "error": result.error}
@@ -1334,6 +1350,28 @@ class BuiltinToolExecutor:
             decoded = json.loads(str(read.data.get("content", "")))
         except json.JSONDecodeError:
             return {"ok": False, "operation": operation, "connector": "http", "mode": "allowlisted_live_read", "data": {}, "error": "GitHub provider response must be JSON"}
+        if kind == "pull_request_comments":
+            if not isinstance(decoded, list):
+                return {"ok": False, "operation": operation, "connector": "http", "mode": "allowlisted_live_read", "data": {}, "error": "GitHub PR comments response must be a JSON array"}
+            data = {
+                "kind": kind,
+                "count": len(decoded),
+                "comments": [
+                    _normalize_github_pr_comment(item)
+                    for item in decoded[:100]
+                    if isinstance(item, dict)
+                ],
+            }
+            return {
+                "ok": True,
+                "operation": operation,
+                "connector": "http",
+                "mode": "allowlisted_live_read",
+                "url": read.data.get("url", url),
+                "data": data,
+                "taint": "WEB_CONTENT",
+                "error": None,
+            }
         if not isinstance(decoded, dict):
             return {"ok": False, "operation": operation, "connector": "http", "mode": "allowlisted_live_read", "data": {}, "error": "GitHub provider response must be a JSON object"}
         return {
@@ -2034,6 +2072,24 @@ def _normalize_github_record(decoded: dict[str, Any], *, kind: str) -> dict[str,
             }
         )
     return normalized
+
+
+def _normalize_github_pr_comment(decoded: dict[str, Any]) -> dict[str, Any]:
+    user = decoded.get("user")
+    if not isinstance(user, dict):
+        user = {}
+    return {
+        "id": decoded.get("id"),
+        "path": str(decoded.get("path", ""))[:1000],
+        "line": decoded.get("line") or decoded.get("position"),
+        "side": str(decoded.get("side", ""))[:50],
+        "user": str(user.get("login", ""))[:200],
+        "created_at": str(decoded.get("created_at", ""))[:100],
+        "updated_at": str(decoded.get("updated_at", ""))[:100],
+        "html_url": str(decoded.get("html_url", ""))[:1000],
+        "body_preview": str(decoded.get("body", ""))[:1000],
+        "diff_hunk_preview": str(decoded.get("diff_hunk", ""))[:1000],
+    }
 
 
 def _normalize_gitlab_record(decoded: dict[str, Any], *, kind: str) -> dict[str, Any]:

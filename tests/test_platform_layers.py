@@ -628,6 +628,30 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertTrue(live_pr["data"]["draft"])
             self.assertEqual(live_pr["data"]["base_ref"], "main")
             self.assertEqual(github_pr_read.call_args.args[0].params["url"], "https://api.github.com/repos/example/aegis/pulls/8")
+            with patch.object(
+                orchestrator.connectors.get("http"),
+                "read",
+                return_value=ConnectorResult(
+                    "http",
+                    "read",
+                    True,
+                    {
+                        "url": "https://api.github.com/repos/example/aegis/pulls/8/comments",
+                        "domain": "api.github.com",
+                        "content": '[{"id":101,"path":"src/aegis/agent.py","line":42,"side":"RIGHT","html_url":"https://github.com/example/aegis/pull/8#discussion_r101","user":{"login":"reviewer"},"body":"Please handle revocation."}]',
+                    },
+                ),
+            ) as github_pr_comments_read:
+                live_pr_comments = orchestrator.tools.execute(
+                    "github_pr",
+                    {"operation": "comments", "provider_url": "https://api.github.com/repos/example/aegis/pulls/8/comments"},
+                    approved=True,
+                )
+            self.assertTrue(live_pr_comments["ok"])
+            self.assertEqual(live_pr_comments["operation"], "read_pull_request_comments")
+            self.assertEqual(live_pr_comments["mode"], "allowlisted_live_read")
+            self.assertEqual(live_pr_comments["data"]["comments"][0]["path"], "src/aegis/agent.py")
+            self.assertEqual(github_pr_comments_read.call_args.args[0].params["url"], "https://api.github.com/repos/example/aegis/pulls/8/comments")
             gitlab_issue = orchestrator.tools.execute("gitlab_issue", {"operation": "create", "title": "Track GitLab parity"})
             self.assertEqual(gitlab_issue["status"], "approval_required")
             approved_gitlab_issue = orchestrator.tools.execute("gitlab_issue", {"operation": "create", "title": "Track GitLab parity"}, approved=True)

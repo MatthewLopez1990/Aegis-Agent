@@ -2963,8 +2963,13 @@ class AegisTui(cmd.Cmd):
                 "status": "connector_surface_ready" if github else "not_configured",
                 "github_connector": github,
                 "telemetry_sent": False,
-                "live_gap": "Live PR comment read/write requires a governed GitHub connector credential, repository scope, and receipt redaction before automatic ingestion.",
-                "next_actions": ["connectors", "tools run github_issue_read '{\"query\":\"repo pull request comments\"}'", "review"],
+                "live_gap": "Live PR comment writes require a governed GitHub connector credential, repository scope, approval, and receipt redaction before automatic posting.",
+                "read_surface": "github_pr operation=comments supports mock comments and allowlisted GitHub-compatible PR comments JSON endpoints.",
+                "next_actions": [
+                    "connectors",
+                    "tools run github_pr '{\"operation\":\"comments\"}' --approved",
+                    "tools run github_pr '{\"operation\":\"comments\",\"provider_url\":\"https://api.github.com/repos/OWNER/REPO/pulls/NUMBER/comments\"}' --approved",
+                ],
             }
         )
 

@@ -350,10 +350,13 @@ class ConnectorTests(unittest.TestCase):
     def test_github_stub_supports_mock_read_and_approval_gated_write(self) -> None:
         connector = GitHubConnectorStub()
         read = connector.read(ConnectorRequest(operation="read_repo", scopes=("read",)))
+        pr_comments = connector.read(ConnectorRequest(operation="read_pull_request_comments", scopes=("read",)))
         write = connector.write(ConnectorRequest(operation="create_issue", params={"title": "x"}, scopes=("write",)))
 
         self.assertTrue(read.ok)
         self.assertEqual(read.connector, "github")
+        self.assertTrue(pr_comments.ok)
+        self.assertIn("pull_request_comments", pr_comments.data["data"])
         self.assertFalse(write.ok)
         with self.assertRaisesRegex(PermissionError, "requires 'read' scope"):
             connector.read(ConnectorRequest(operation="read_repo", scopes=()))

@@ -27,11 +27,20 @@ class GitHubConnectorStub(MockServiceConnector):
     ) -> None:
         super().__init__(
             name="github",
-            operations=("read_repo", "read_issue", "read_pull_request"),
+            operations=("read_repo", "read_issue", "read_pull_request", "read_pull_request_comments"),
             write_operations=("create_issue", "comment_on_pull_request"),
             sample_data={
                 "repositories": [{"name": "mock-repo", "default_branch": "main"}],
                 "issues": [{"number": 1, "title": "Mock issue", "state": "open"}],
+                "pull_request_comments": [
+                    {
+                        "id": 101,
+                        "path": "src/aegis/example.py",
+                        "line": 12,
+                        "body": "Mock review comment",
+                        "user": "reviewer",
+                    }
+                ],
             },
         )
         self.allowlist = allowlist
@@ -48,6 +57,7 @@ class GitHubConnectorStub(MockServiceConnector):
                 "read_repo": RiskLevel.LOW,
                 "read_issue": RiskLevel.LOW,
                 "read_pull_request": RiskLevel.LOW,
+                "read_pull_request_comments": RiskLevel.LOW,
                 "create_issue": RiskLevel.HIGH,
                 "comment_on_pull_request": RiskLevel.HIGH,
                 "dry_run": RiskLevel.MEDIUM,
