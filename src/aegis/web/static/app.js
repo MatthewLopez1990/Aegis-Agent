@@ -412,8 +412,9 @@ const refresh = async () => {
     setList("plugin-marketplace", pluginMarketplace.entries || [], (x) => ({
       title: x.name || x.id,
       detail: `${x.description || "Marketplace metadata"} Resources: ${(x.resource_kinds || []).join(", ") || "none"}`,
-      meta: `${x.installed ? `installed ${x.installed_version || "unknown"}` : "not installed"} · catalog v${x.version || "0.0.0"} · ${x.install_mode || "manual"} · download ${formatBool(x.download_supported)}`,
+      meta: `${x.installed ? `installed ${x.installed_version || "unknown"}` : "not installed"} · catalog v${x.version || "0.0.0"} · ${x.install_mode || "manual"} · verified manifest ${formatBool(x.marketplace_install_supported)} · bundle download ${formatBool(x.download_supported)}`,
       tone: x.update_available ? "attention" : x.installed ? "ready" : "",
+      actions: x.marketplace_install_supported ? `<button type="button" class="secondary" data-plugin-marketplace-install="${escapeHtml(x.id)}">Install</button>` : "",
     }), "No marketplace plugin metadata");
     setList("plugin-updates", pluginUpdates.updates || [], (x) => ({
       title: x.name || x.id,
@@ -2455,6 +2456,20 @@ document.getElementById("plugin-marketplace-form").addEventListener("submit", as
   event.preventDefault();
   state.pluginMarketplaceQuery = document.getElementById("plugin-marketplace-query").value || "";
   state.pluginMarketplaceCatalogPath = document.getElementById("plugin-marketplace-catalog").value || "";
+  await refresh();
+});
+
+document.getElementById("plugin-marketplace").addEventListener("click", async (event) => {
+  const pluginId = event.target.dataset.pluginMarketplaceInstall;
+  if (!pluginId) return;
+  const result = await api("/plugins/marketplace/install", {
+    method: "POST",
+    body: JSON.stringify({
+      plugin_id: pluginId,
+      catalog_path: state.pluginMarketplaceCatalogPath || undefined,
+    }),
+  });
+  renderPluginOutput(result);
   await refresh();
 });
 

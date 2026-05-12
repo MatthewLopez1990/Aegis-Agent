@@ -114,7 +114,8 @@ class PluginManager:
                 "requires_review": entry["requires_review"],
                 "next_actions": [
                     "review marketplace metadata",
-                    "obtain and verify the plugin manifest out of band",
+                    "run plugins fetch-manifest <plugin_id> to verify the remote manifest",
+                    "run plugins install-marketplace <plugin_id> for an explicit governed install",
                     "install through plugins install <plugin.json> using the existing governed lifecycle",
                 ],
             }
@@ -153,6 +154,8 @@ class PluginManager:
         expected_sha256 = _normalize_sha256(str(entry.get("manifest_sha256") or ""))
         if not expected_sha256:
             raise ValueError("marketplace manifest download requires manifest_sha256")
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+            raise ValueError("marketplace manifest_sha256 must be a 64-character hex digest")
         parsed = urlparse(manifest_url)
         domain = parsed.hostname or ""
         validation_error = _validate_url(parsed)
@@ -198,6 +201,38 @@ class PluginManager:
             ],
         }
         self.audit_logger.append("plugin.marketplace_manifest_downloaded", redact(result))
+        return result
+
+    def install_marketplace_plugin(
+        self,
+        plugin_id: str,
+        *,
+        catalog_path: str | Path | None = None,
+        allowlist: tuple[str, ...] = (),
+        enable: bool = False,
+    ) -> dict[str, Any]:
+        fetched = self.fetch_marketplace_manifest(plugin_id, catalog_path=catalog_path, allowlist=allowlist)
+        plugin = self.install_plugin(fetched["manifest_path"], enable=enable, unsigned_local=False)
+        result = {
+            "status": "marketplace_plugin_installed",
+            "mode": "sha256_verified_manifest_install",
+            "fetch": {
+                "id": fetched["id"],
+                "manifest_url": fetched["manifest_url"],
+                "manifest_sha256": fetched["manifest_sha256"],
+                "manifest_path": fetched["manifest_path"],
+            },
+            "plugin": plugin,
+            "enabled": bool(plugin.get("enabled", False)),
+            "raw_secret_values_included": False,
+            "blocked_operations": [
+                "remote_bundle_download",
+                "dynamic_plugin_import",
+                "marketplace_token_capture",
+                "unsigned_auto_update",
+            ],
+        }
+        self.audit_logger.append("plugin.marketplace_installed", redact(result))
         return result
 
     def install_plugin(
@@ -547,6 +582,9 @@ def _download_manifest_bytes(url: str) -> bytes:
 
 def _public_marketplace_entry(raw: dict[str, Any], *, installed: dict[str, Any] | None = None) -> dict[str, Any]:
     resource_kinds = _string_list(raw.get("resource_kinds", raw.get("resources", [])))
+    manifest_url = str(raw.get("manifest_url") or "")
+    manifest_sha256 = str(raw.get("manifest_sha256") or "")
+    verified_manifest_available = bool(manifest_url and _normalize_sha256(manifest_sha256))
     entry = {
         "id": str(raw.get("id") or ""),
         "name": str(raw.get("name") or raw.get("id") or ""),
@@ -556,10 +594,12 @@ def _public_marketplace_entry(raw: dict[str, Any], *, installed: dict[str, Any] 
         "tags": _string_list(raw.get("tags", [])),
         "resource_kinds": resource_kinds,
         "install_mode": str(raw.get("install_mode") or "manual_manifest_review"),
-        "manifest_url": str(raw.get("manifest_url") or ""),
-        "manifest_sha256": str(raw.get("manifest_sha256") or ""),
+        "manifest_url": manifest_url,
+        "manifest_sha256": manifest_sha256,
         "requires_review": bool(raw.get("requires_review", True)),
         "download_supported": False,
+        "manifest_fetch_supported": verified_manifest_available,
+        "marketplace_install_supported": verified_manifest_available,
         "dynamic_code_import_supported": False,
         "token_capture_supported": False,
         "installed": installed is not None,
@@ -567,7 +607,8 @@ def _public_marketplace_entry(raw: dict[str, Any], *, installed: dict[str, Any] 
         "update_available": bool(installed and _version_newer(str(raw.get("version") or "0.0.0"), str(installed.get("version") or "0.0.0"))),
         "next_actions": [
             "review marketplace metadata",
-            "obtain and verify the plugin manifest out of band",
+            "run plugins fetch-manifest <plugin_id> to verify the remote manifest",
+            "run plugins install-marketplace <plugin_id> for an explicit governed install",
             "install through the existing governed plugin lifecycle",
         ],
     }

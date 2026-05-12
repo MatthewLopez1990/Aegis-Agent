@@ -351,6 +351,10 @@ def build_parser() -> argparse.ArgumentParser:
         plugin_fetch = plugin_sub.add_parser("fetch-manifest", help="Download and verify one marketplace plugin manifest for review")
         plugin_fetch.add_argument("plugin_id")
         plugin_fetch.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
+        plugin_marketplace_install = plugin_sub.add_parser("install-marketplace", help="Fetch, verify, and install one marketplace plugin manifest")
+        plugin_marketplace_install.add_argument("plugin_id")
+        plugin_marketplace_install.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
+        plugin_marketplace_install.add_argument("--enable", action="store_true", help="Enable default-enabled resources after install")
 
     connector = subcommands.add_parser("connector", help="List connector status")
     connector_sub = connector.add_subparsers(dest="connector_command", required=True)
@@ -1020,6 +1024,13 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 args.plugin_id,
                 catalog_path=args.catalog_path,
                 allowlist=config.network_allowlist,
+            )
+        if args.plugin_command == "install-marketplace":
+            return manager.install_marketplace_plugin(
+                args.plugin_id,
+                catalog_path=args.catalog_path,
+                allowlist=config.network_allowlist,
+                enable=args.enable,
             )
 
     if args.command == "connector":

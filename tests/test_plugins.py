@@ -121,6 +121,8 @@ class PluginManagerTests(unittest.TestCase):
             self.assertTrue(marketplace["entries"][0]["installed"])
             self.assertTrue(marketplace["entries"][0]["update_available"])
             self.assertFalse(marketplace["entries"][0]["download_supported"])
+            self.assertTrue(marketplace["entries"][0]["manifest_fetch_supported"])
+            self.assertTrue(marketplace["entries"][0]["marketplace_install_supported"])
             self.assertFalse(marketplace["entries"][0]["dynamic_code_import_supported"])
             self.assertEqual(updates["status"], "updates_available")
             self.assertEqual(updates["updates"][0]["id"], "test.plugin")
@@ -168,6 +170,8 @@ class PluginManagerTests(unittest.TestCase):
             manager = _plugin_manager(data_dir, workspace=root)
             with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeResponse()):
                 fetched = manager.fetch_marketplace_manifest("remote.plugin", catalog_path=catalog_path, allowlist=("example.com",))
+            with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeResponse()):
+                installed = manager.install_marketplace_plugin("remote.plugin", catalog_path=catalog_path, allowlist=("example.com",))
 
             manifest_path = Path(fetched["manifest_path"])
             self.assertEqual(fetched["status"], "manifest_downloaded_for_review")
@@ -176,6 +180,33 @@ class PluginManagerTests(unittest.TestCase):
             self.assertEqual(manifest_path.read_bytes(), body)
             self.assertEqual(stat.S_IMODE(manifest_path.stat().st_mode), 0o600)
             self.assertIn("plugins install", fetched["install_command"])
+            self.assertEqual(installed["status"], "marketplace_plugin_installed")
+            self.assertEqual(installed["plugin"]["id"], "remote.plugin")
+            self.assertEqual(installed["fetch"]["manifest_sha256"], digest)
+            self.assertIn("remote_bundle_download", installed["blocked_operations"])
+            self.assertEqual(manager.list_plugins()[0]["id"], "remote.plugin")
+
+            invalid_catalog_path = root / "invalid-marketplace.json"
+            invalid_catalog_path.write_text(
+                json.dumps(
+                    {
+                        "plugins": [
+                            {
+                                "id": "bad.plugin",
+                                "name": "Bad Plugin",
+                                "version": "1.0.0",
+                                "manifest_url": "https://example.com/bad.plugin/plugin.json",
+                                "manifest_sha256": "sha256:not-a-real-digest",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch("aegis.plugins.manager._open_without_redirects") as open_without_redirects:
+                with self.assertRaises(ValueError):
+                    manager.fetch_marketplace_manifest("bad.plugin", catalog_path=invalid_catalog_path, allowlist=("example.com",))
+            open_without_redirects.assert_not_called()
 
     @unittest.skipUnless(os.name == "posix", "POSIX mode assertions only apply on POSIX")
     def test_plugin_store_is_private(self) -> None:

@@ -1106,6 +1106,17 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
             if path == "/plugins/reload":
                 self._json({"ok": True, **_plugins_payload(orchestrator)})
                 return
+            if path == "/plugins/marketplace/install":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.plugins.install_marketplace_plugin(
+                        str(_required(payload, "plugin_id")),
+                        catalog_path=_optional_str(payload, "catalog_path"),
+                        allowlist=orchestrator.config.network_allowlist,
+                        enable=bool(payload.get("enable", False)),
+                    )
+                )
+                return
             match_plugin_action = re.fullmatch(r"/plugins/([^/]+)/(enable|disable|remove)", path)
             if match_plugin_action:
                 plugin_id = unquote(match_plugin_action.group(1))

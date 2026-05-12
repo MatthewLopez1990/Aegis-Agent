@@ -2028,6 +2028,10 @@ class CliTests(unittest.TestCase):
             updates = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "updates", "--catalog-path", str(catalog_path)]))
             with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeResponse()):
                 fetched = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "fetch-manifest", "remote.plugin", "--catalog-path", str(fetch_catalog)]))
+            with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeResponse()):
+                installed_marketplace = dispatch(
+                    parser.parse_args(["--data-dir", str(data_dir), "plugins", "install-marketplace", "remote.plugin", "--catalog-path", str(fetch_catalog)])
+                )
             enabled = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugin", "enable", "test.plugin"]))
             disabled = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugin", "disable", "test.plugin"]))
             removed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugin", "remove", "test.plugin"]))
@@ -2039,6 +2043,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(updates["updates"][0]["status"], "update_available")
             self.assertEqual(fetched["status"], "manifest_downloaded_for_review")
             self.assertEqual(Path(fetched["manifest_path"]).read_bytes(), manifest_body)
+            self.assertEqual(installed_marketplace["status"], "marketplace_plugin_installed")
+            self.assertEqual(installed_marketplace["plugin"]["id"], "remote.plugin")
             self.assertTrue(enabled["plugin"]["enabled"])
             self.assertFalse(disabled["plugin"]["enabled"])
             self.assertTrue(removed["removed"])
