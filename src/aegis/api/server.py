@@ -1569,6 +1569,16 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     return
                 self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
                 return
+            if path == "/subagents/handoff":
+                payload = self._read_json()
+                result = orchestrator.kanban.move_subagent_delegation(
+                    str(_required(payload, "card_id")),
+                    str(_required(payload, "lane")),
+                    actor=str(payload.get("actor", "api-operator")),
+                    reason=str(payload.get("reason", "")),
+                )
+                self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
+                return
             match_approval_approve = re.fullmatch(r"/approvals/([^/]+)/approve", path)
             if match_approval_approve:
                 payload = self._read_json()

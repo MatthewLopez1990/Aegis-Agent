@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 from uuid import uuid4
@@ -66,6 +67,60 @@ class KanbanManager:
         self.store.move_kanban_card(card_id, lane)
         self.audit_logger.append("kanban.card_moved", {"card_id": card_id, "lane": lane})
 
+    def move_subagent_delegation(self, card_id: str, lane: str, *, actor: str = "operator", reason: str = "") -> dict[str, Any]:
+        if lane not in DEFAULT_LANES:
+            raise ValueError(f"unknown lane {lane!r}")
+        card = self._require_card(card_id)
+        board = self.subagent_delegation_board(create=False)
+        metadata = card.get("metadata", {})
+        if board is None or card.get("board_id") != board.get("id") or metadata.get("delegation_type") != "subagent":
+            raise ValueError("card is not a subagent delegation")
+        from_lane = str(card.get("lane", ""))
+        timestamp = now_utc()
+        reason_text = reason.strip()
+        receipt = {
+            "receipt_schema": "aegis.subagent.handoff.v1",
+            "event_type": "subagent.handoff_recorded",
+            "card_id": card_id,
+            "board_id": board["id"],
+            "from_lane": from_lane,
+            "to_lane": lane,
+            "actor": _safe_actor(actor),
+            "reason_included": bool(reason_text),
+            "reason_sha256": hashlib.sha256(reason_text.encode("utf-8")).hexdigest() if reason_text else None,
+            "reason_character_count": len(reason_text),
+            "raw_reason_included": False,
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+            "autonomous_runtime": False,
+            "created_at": timestamp,
+        }
+        receipt_count = _handoff_receipt_count(metadata, default=1 if metadata.get("handoff_receipt") else 0) + 1
+        self.store.move_kanban_card(card_id, lane)
+        self.store.update_kanban_card_metadata(
+            card_id,
+            {
+                "handoff_receipt": "subagent.handoff_recorded",
+                "handoff_receipts_recorded": receipt_count,
+                "last_handoff_receipt": receipt,
+            },
+        )
+        audit_entry = self.audit_logger.append(
+            "subagent.handoff_recorded",
+            {**receipt, "role": metadata.get("role"), "receipt_count": receipt_count},
+            task_id=str(card.get("task_id")) if card.get("task_id") else None,
+        )
+        updated_card = self._require_card(card_id)
+        return {
+            "ok": True,
+            "card_id": card_id,
+            "lane": lane,
+            "receipt": receipt,
+            "receipt_count": receipt_count,
+            "audit_event_hash": audit_entry["event_hash"],
+            "card": _subagent_card_summary(updated_card),
+        }
+
     def list_boards(self) -> list[dict[str, Any]]:
         return [_decode(row) for row in self.store.list_kanban_boards()]
 
@@ -113,6 +168,17 @@ class KanbanManager:
                 "parent_task_id": task_id,
                 "approval_gate": "tool_catalog_required",
                 "handoff_receipt": "kanban.card_created",
+                "handoff_receipts_recorded": 1,
+                "last_handoff_receipt": {
+                    "receipt_schema": "aegis.subagent.handoff.v1",
+                    "event_type": "kanban.card_created",
+                    "from_lane": None,
+                    "to_lane": "ready",
+                    "raw_reason_included": False,
+                    "raw_instruction_included": False,
+                    "raw_instruction_forwarded_to_model": False,
+                    "autonomous_runtime": False,
+                },
                 "raw_instruction_forwarded_to_model": False,
             },
         )
@@ -152,11 +218,11 @@ class KanbanManager:
                 "tainted_instruction_metadata",
                 "audit_receipts",
                 "operator_lane_control",
+                "handoff_receipts",
             ],
             "remaining_depth_work": [
                 "isolated_parallel_runtime",
                 "agent_profile_lifecycle",
-                "handoff_receipts",
                 "recursive_budget_limits",
             ],
             "raw_instruction_included": False,
@@ -186,6 +252,20 @@ def _preview(value: str, *, limit: int = 160) -> str:
     if len(normalized) <= limit:
         return normalized
     return f"{normalized[: limit - 3]}..."
+
+
+def _safe_actor(value: str, *, limit: int = 80) -> str:
+    normalized = " ".join(str(value or "operator").split())
+    if not normalized:
+        return "operator"
+    return normalized[:limit]
+
+
+def _handoff_receipt_count(metadata: dict[str, Any], *, default: int = 0) -> int:
+    try:
+        return int(metadata.get("handoff_receipts_recorded", default))
+    except (TypeError, ValueError):
+        return default
 
 
 def _subagent_board_summary(board: dict[str, Any]) -> dict[str, Any]:
@@ -218,5 +298,8 @@ def _subagent_card_summary(card: dict[str, Any]) -> dict[str, Any]:
         "delegation_type": metadata.get("delegation_type"),
         "instructions_tainted": bool(metadata.get("instructions_tainted", True)),
         "approval_gate": metadata.get("approval_gate", "tool_catalog_required"),
+        "handoff_receipt": metadata.get("handoff_receipt"),
+        "handoff_receipts_recorded": _handoff_receipt_count(metadata),
+        "last_handoff_receipt": metadata.get("last_handoff_receipt"),
         "raw_instruction_forwarded_to_model": bool(metadata.get("raw_instruction_forwarded_to_model", False)),
     }

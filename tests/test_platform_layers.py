@@ -894,6 +894,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(delegation_cards[0]["task_id"], "parent-task")
             self.assertEqual(delegation_cards[0]["metadata"]["delegation_type"], "subagent")
             self.assertTrue(delegation_cards[0]["metadata"]["instructions_tainted"])
+            self.assertEqual(delegation_cards[0]["metadata"]["handoff_receipts_recorded"], 1)
             self.assertFalse(delegation_cards[0]["metadata"]["raw_instruction_forwarded_to_model"])
             subagent_status = orchestrator.kanban.subagent_status()
             self.assertEqual(subagent_status["status"], "delegation_queue_ready")
@@ -904,8 +905,26 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(subagent_status["active_roles"], ["Researcher"])
             self.assertEqual(subagent_status["cards"][0]["id"], approved_delegate["card_id"])
             self.assertTrue(subagent_status["cards"][0]["instructions_tainted"])
+            self.assertIn("handoff_receipts", subagent_status["implemented_controls"])
+            self.assertNotIn("handoff_receipts", subagent_status["remaining_depth_work"])
             self.assertFalse(subagent_status["cards"][0]["raw_instruction_forwarded_to_model"])
             self.assertFalse(subagent_status["raw_instruction_included"])
+            handoff = orchestrator.kanban.move_subagent_delegation(
+                approved_delegate["card_id"],
+                "in_progress",
+                actor="operator",
+                reason="do not store this raw reason",
+            )
+            self.assertTrue(handoff["ok"])
+            self.assertEqual(handoff["receipt"]["from_lane"], "ready")
+            self.assertEqual(handoff["receipt"]["to_lane"], "in_progress")
+            self.assertTrue(handoff["receipt"]["reason_included"])
+            self.assertFalse(handoff["receipt"]["raw_reason_included"])
+            self.assertFalse(handoff["receipt"]["raw_instruction_included"])
+            subagent_status = orchestrator.kanban.subagent_status()
+            self.assertEqual(subagent_status["in_progress_cards"], 1)
+            self.assertEqual(subagent_status["cards"][0]["handoff_receipt"], "subagent.handoff_recorded")
+            self.assertEqual(subagent_status["cards"][0]["handoff_receipts_recorded"], 2)
             kanban_tool = orchestrator.tools.execute("kanban_create", {"title": "Review connector parity", "description": "Track remaining stubs"}, approved=True, task_id="parent-task")
             self.assertTrue(kanban_tool["ok"])
             self.assertEqual(orchestrator.kanban.list_cards(kanban_tool["board_id"])[0]["title"], "Review connector parity")

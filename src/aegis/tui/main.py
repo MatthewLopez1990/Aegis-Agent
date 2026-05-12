@@ -3176,7 +3176,7 @@ class AegisTui(cmd.Cmd):
         self.do_models("route alias/fast")
 
     def do_agents(self, arg: str) -> None:
-        """agents [status|delegate <role> <task> [--approved]] -- show or queue subagent delegations."""
+        """agents [status|delegate <role> <task> [--approved]|handoff <card-id> <lane> [reason]] -- manage subagent delegations."""
         parts = shlex.split(arg)
         if parts and parts[0] == "delegate":
             approved = "--approved" in parts[1:]
@@ -3192,6 +3192,18 @@ class AegisTui(cmd.Cmd):
             )
             _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
             return
+        if parts and parts[0] == "handoff":
+            if len(parts) < 3:
+                print("usage: agents handoff <card-id> <lane> [reason]")
+                return
+            result = self.orchestrator.kanban.move_subagent_delegation(
+                parts[1],
+                parts[2],
+                actor="tui-operator",
+                reason=" ".join(parts[3:]),
+            )
+            _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
+            return
         dashboard = build_product_dashboard(self.orchestrator)
         _print_json(
             {
@@ -3201,7 +3213,7 @@ class AegisTui(cmd.Cmd):
                 "skills": len(self.orchestrator.skills.list_public()),
                 "subagent_tool": next((tool for tool in self.orchestrator.tool_catalog.list() if tool["name"] == "subagent_delegate"), None),
                 "subagent_delegations": dashboard["subagent_delegations"],
-                "remaining_depth_work": ["isolated_parallel_runtime", "agent_profile_lifecycle", "handoff_receipts"],
+                "remaining_depth_work": dashboard["subagent_delegations"]["remaining_depth_work"],
             }
         )
 

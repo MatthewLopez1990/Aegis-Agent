@@ -700,9 +700,28 @@ const renderSubagents = (payload) => {
   setList("subagent-cards", payload.cards || [], (x) => ({
     title: x.title,
     detail: x.description_preview || "No preview",
-    meta: `${x.lane} · ${x.owner || "unassigned"} · tainted ${x.instructions_tainted ? "yes" : "no"}`,
+    meta: `${x.lane} · ${x.owner || "unassigned"} · tainted ${x.instructions_tainted ? "yes" : "no"} · receipts ${x.handoff_receipts_recorded || 0}`,
+    actions: subagentLaneActions(x),
     tone: x.lane === "done" ? "ready" : x.lane === "blocked" ? "attention" : "",
   }), "No subagent delegation cards");
+};
+
+const subagentLaneActions = (card) => {
+  const nextLane = {
+    backlog: "ready",
+    ready: "in_progress",
+    in_progress: "review",
+    review: "done",
+    blocked: "ready",
+  }[card.lane];
+  const actions = [];
+  if (nextLane) {
+    actions.push(`<button type="button" class="secondary" data-subagent-card="${escapeHtml(card.id)}" data-subagent-lane="${escapeHtml(nextLane)}">${text(nextLane.replaceAll("_", " "))}</button>`);
+  }
+  if (!["blocked", "done"].includes(card.lane)) {
+    actions.push(`<button type="button" class="secondary" data-subagent-card="${escapeHtml(card.id)}" data-subagent-lane="blocked">Block</button>`);
+  }
+  return actions.join("");
 };
 
 const renderSubagentOutput = (payload) => {
@@ -3578,6 +3597,19 @@ document.getElementById("subagent-output").addEventListener("click", async (even
     body: JSON.stringify({ ...state.pendingSubagentDelegation, approval_id: approvalId }),
   });
   state.pendingSubagentDelegation = null;
+  renderSubagentOutput(result);
+  renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
+  await refresh();
+});
+
+document.getElementById("subagent-cards").addEventListener("click", async (event) => {
+  const card = event.target.dataset.subagentCard;
+  const lane = event.target.dataset.subagentLane;
+  if (!card || !lane) return;
+  const result = await api("/subagents/handoff", {
+    method: "POST",
+    body: JSON.stringify({ card_id: card, lane, actor: "web-operator" }),
+  });
   renderSubagentOutput(result);
   renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
   await refresh();

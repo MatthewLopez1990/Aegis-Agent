@@ -705,6 +705,24 @@ class LocalStore:
             if cursor.rowcount == 0:
                 raise KeyError(card_id)
 
+    def update_kanban_card_metadata(self, card_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
+        existing = self.get_kanban_card(card_id)
+        if not existing:
+            raise KeyError(card_id)
+        merged = json.loads(existing.get("metadata_json") or "{}")
+        merged.update(metadata)
+        with self.connect() as db:
+            cursor = db.execute(
+                "UPDATE kanban_cards SET metadata_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(merged), now_utc(), card_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(card_id)
+        updated = self.get_kanban_card(card_id)
+        if not updated:
+            raise KeyError(card_id)
+        return updated
+
     def get_kanban_board(self, board_id: str) -> dict[str, Any] | None:
         with self.connect() as db:
             row = db.execute("SELECT * FROM kanban_boards WHERE id = ?", (board_id,)).fetchone()

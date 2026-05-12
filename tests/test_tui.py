@@ -937,6 +937,8 @@ class TuiTests(unittest.TestCase):
                 tui.onecmd("agents")
                 tui.onecmd("agents delegate Researcher Compare provider auth gaps")
                 tui.onecmd("agents delegate Researcher Compare provider auth gaps --approved")
+                card_id = tui.orchestrator.kanban.subagent_status()["cards"][0]["id"]
+                tui.onecmd(f"agents handoff {card_id} in_progress reviewed")
                 tui.onecmd("approvals")
 
             rendered = output.getvalue()
@@ -947,7 +949,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn('"subagent_delegate"', rendered)
             self.assertIn('"subagent_delegations"', rendered)
             self.assertIn('"execution_mode": "durable_card_queue"', rendered)
-            self.assertIn('"ready_cards": 1', rendered)
+            self.assertIn('"in_progress_cards": 1', rendered)
+            self.assertIn('"handoff_receipts_recorded": 2', rendered)
             self.assertIn(tui.session["id"][:8], rendered)
             self.assertIn(f"session open {tui.session['id']}", rendered)
             self.assertIn(tui.session["title"], rendered)

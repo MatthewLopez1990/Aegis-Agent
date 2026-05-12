@@ -656,6 +656,12 @@ def build_parser() -> argparse.ArgumentParser:
     agents_delegate.add_argument("--approved", action="store_true")
     agents_delegate.add_argument("--task-id")
     agents_delegate.add_argument("--limit", type=int, default=20)
+    agents_handoff = agents_sub.add_parser("handoff", help="Record an operator handoff by moving a subagent delegation card")
+    agents_handoff.add_argument("card_id")
+    agents_handoff.add_argument("lane", choices=("backlog", "ready", "in_progress", "review", "blocked", "done"))
+    agents_handoff.add_argument("--actor", default="operator")
+    agents_handoff.add_argument("--reason", default="")
+    agents_handoff.add_argument("--limit", type=int, default=20)
 
     mcp = subcommands.add_parser("mcp", help="Manage governed MCP server registrations")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
@@ -1601,6 +1607,9 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 approved=args.approved,
                 task_id=args.task_id,
             )
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
+        if args.agents_command == "handoff":
+            result = orchestrator.kanban.move_subagent_delegation(args.card_id, args.lane, actor=args.actor, reason=args.reason)
             return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
 
     if args.command == "mcp":

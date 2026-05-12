@@ -377,6 +377,39 @@ class CliTests(unittest.TestCase):
             self.assertFalse(delegated["raw_instruction_forwarded_to_model"])
             self.assertEqual(delegated["subagents"]["ready_cards"], 1)
             self.assertEqual(delegated["subagents"]["cards"][0]["parent_task_id"], "parent-task")
+            self.assertIn("handoff_receipts", delegated["subagents"]["implemented_controls"])
+            self.assertNotIn("handoff_receipts", delegated["subagents"]["remaining_depth_work"])
+
+            handed_off = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "handoff",
+                        delegated["card_id"],
+                        "in_progress",
+                        "--actor",
+                        "cli-operator",
+                        "--reason",
+                        "reviewed raw private handoff reason",
+                    ]
+                )
+            )
+            self.assertTrue(handed_off["ok"])
+            self.assertEqual(handed_off["receipt"]["from_lane"], "ready")
+            self.assertEqual(handed_off["receipt"]["to_lane"], "in_progress")
+            self.assertTrue(handed_off["receipt"]["reason_included"])
+            self.assertFalse(handed_off["receipt"]["raw_reason_included"])
+            self.assertFalse(handed_off["receipt"]["raw_instruction_included"])
+            self.assertFalse(handed_off["receipt"]["autonomous_runtime"])
+            self.assertEqual(handed_off["subagents"]["ready_cards"], 0)
+            self.assertEqual(handed_off["subagents"]["in_progress_cards"], 1)
+            self.assertEqual(handed_off["subagents"]["cards"][0]["handoff_receipt"], "subagent.handoff_recorded")
+            self.assertEqual(handed_off["subagents"]["cards"][0]["handoff_receipts_recorded"], 2)
+            audit_text = (data_dir / "audit.jsonl").read_text(encoding="utf-8")
+            self.assertIn("subagent.handoff_recorded", audit_text)
+            self.assertNotIn("reviewed raw private handoff reason", audit_text)
 
     def test_enterprise_readiness_reports_memory_improvement_and_tui_flags(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
