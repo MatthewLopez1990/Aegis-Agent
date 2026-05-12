@@ -696,7 +696,7 @@ const refresh = async () => {
 
 const renderSubagents = (payload) => {
   const summary = document.getElementById("subagent-summary");
-  summary.textContent = `${payload.open_cards || 0} open · ${payload.ready_cards || 0} ready · ${payload.in_progress_cards || 0} active · ${payload.done_cards || 0} done · autonomous runtime ${payload.autonomous_runtime ? "enabled" : "blocked"}`;
+  summary.textContent = `${payload.open_cards || 0} open · ${payload.ready_cards || 0} ready · ${payload.in_progress_cards || 0} active · ${payload.done_cards || 0} done · profiles ${payload.enabled_profile_count || 0}/${payload.profile_count || 0} · autonomous runtime ${payload.autonomous_runtime ? "enabled" : "blocked"}`;
   setList("subagent-cards", payload.cards || [], (x) => ({
     title: x.title,
     detail: x.description_preview || "No preview",

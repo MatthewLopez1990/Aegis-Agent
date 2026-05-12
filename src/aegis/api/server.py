@@ -451,6 +451,9 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
             if path == "/subagents/status":
                 self._json(orchestrator.kanban.subagent_status(limit=_limit(query, default=20)))
                 return
+            if path == "/subagents/profiles":
+                self._json({"profiles": orchestrator.kanban.list_subagent_profiles(), "subagents": orchestrator.kanban.subagent_status(limit=_limit(query, default=20))})
+                return
             match = re.fullmatch(r"/tasks/([^/]+)", path)
             if match:
                 self._json(orchestrator.status(match.group(1)))
@@ -1577,6 +1580,26 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     actor=str(payload.get("actor", "api-operator")),
                     reason=str(payload.get("reason", "")),
                 )
+                self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
+                return
+            if path == "/subagents/profiles":
+                payload = self._read_json()
+                result = orchestrator.kanban.create_subagent_profile(
+                    str(_required(payload, "name")),
+                    role=str(payload["role"]) if payload.get("role") else None,
+                    tool_allowlist=_optional_str_list(payload, "tool_allowlist") or (),
+                    max_parallel_cards=int(payload.get("max_parallel_cards", 1)),
+                    recursive_depth_limit=int(payload.get("recursive_depth_limit", 0)),
+                    network_policy=str(payload.get("network_policy", "disabled")),
+                    workspace_scope=str(payload.get("workspace_scope", "current_workspace")),
+                    actor=str(payload.get("actor", "api-operator")),
+                )
+                self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
+                return
+            match_profile_disable = re.fullmatch(r"/subagents/profiles/([^/]+)/disable", path)
+            if match_profile_disable:
+                payload = self._read_json()
+                result = orchestrator.kanban.disable_subagent_profile(unquote(match_profile_disable.group(1)), actor=str(payload.get("actor", "api-operator")))
                 self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
                 return
             match_approval_approve = re.fullmatch(r"/approvals/([^/]+)/approve", path)

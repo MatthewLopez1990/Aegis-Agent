@@ -935,6 +935,8 @@ class TuiTests(unittest.TestCase):
                 tui.onecmd("""tools run contacts_write '{"operation":"create","contact":{"displayName":"Local User"}}'""")
                 tui.onecmd("""tools run contacts_write '{"operation":"create","contact":{"displayName":"Local User"}}' --approved""")
                 tui.onecmd("agents")
+                tui.onecmd("agents profile-create Researcher --tool web_search")
+                tui.onecmd("agents profiles")
                 tui.onecmd("agents delegate Researcher Compare provider auth gaps")
                 tui.onecmd("agents delegate Researcher Compare provider auth gaps --approved")
                 card_id = tui.orchestrator.kanban.subagent_status()["cards"][0]["id"]
@@ -949,6 +951,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn('"subagent_delegate"', rendered)
             self.assertIn('"subagent_delegations"', rendered)
             self.assertIn('"execution_mode": "durable_card_queue"', rendered)
+            self.assertIn('"agent_profile_lifecycle"', rendered)
+            self.assertIn('"profile_id": "researcher"', rendered)
             self.assertIn('"in_progress_cards": 1', rendered)
             self.assertIn('"handoff_receipts_recorded": 2', rendered)
             self.assertIn(tui.session["id"][:8], rendered)

@@ -662,6 +662,22 @@ def build_parser() -> argparse.ArgumentParser:
     agents_handoff.add_argument("--actor", default="operator")
     agents_handoff.add_argument("--reason", default="")
     agents_handoff.add_argument("--limit", type=int, default=20)
+    agents_profiles = agents_sub.add_parser("profiles", help="List durable subagent profiles")
+    agents_profiles.add_argument("--limit", type=int, default=20)
+    agents_profile_create = agents_sub.add_parser("profile-create", help="Create or update a governed subagent profile")
+    agents_profile_create.add_argument("name")
+    agents_profile_create.add_argument("--role")
+    agents_profile_create.add_argument("--tool", action="append", default=[])
+    agents_profile_create.add_argument("--max-parallel-cards", type=int, default=1)
+    agents_profile_create.add_argument("--recursive-depth-limit", type=int, default=0)
+    agents_profile_create.add_argument("--network-policy", choices=("disabled", "allowlisted"), default="disabled")
+    agents_profile_create.add_argument("--workspace-scope", default="current_workspace")
+    agents_profile_create.add_argument("--actor", default="operator")
+    agents_profile_create.add_argument("--limit", type=int, default=20)
+    agents_profile_disable = agents_sub.add_parser("profile-disable", help="Disable a governed subagent profile")
+    agents_profile_disable.add_argument("profile_id")
+    agents_profile_disable.add_argument("--actor", default="operator")
+    agents_profile_disable.add_argument("--limit", type=int, default=20)
 
     mcp = subcommands.add_parser("mcp", help="Manage governed MCP server registrations")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
@@ -1610,6 +1626,23 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
         if args.agents_command == "handoff":
             result = orchestrator.kanban.move_subagent_delegation(args.card_id, args.lane, actor=args.actor, reason=args.reason)
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
+        if args.agents_command == "profiles":
+            return {"profiles": orchestrator.kanban.list_subagent_profiles(), "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
+        if args.agents_command == "profile-create":
+            result = orchestrator.kanban.create_subagent_profile(
+                args.name,
+                role=args.role,
+                tool_allowlist=args.tool,
+                max_parallel_cards=args.max_parallel_cards,
+                recursive_depth_limit=args.recursive_depth_limit,
+                network_policy=args.network_policy,
+                workspace_scope=args.workspace_scope,
+                actor=args.actor,
+            )
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
+        if args.agents_command == "profile-disable":
+            result = orchestrator.kanban.disable_subagent_profile(args.profile_id, actor=args.actor)
             return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
 
     if args.command == "mcp":

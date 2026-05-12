@@ -342,6 +342,30 @@ class CliTests(unittest.TestCase):
             self.assertEqual(initial["status"], "no_delegations")
             self.assertFalse(initial["autonomous_runtime"])
 
+            profile = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "profile-create",
+                        "Researcher",
+                        "--tool",
+                        "web_search",
+                        "--max-parallel-cards",
+                        "2",
+                    ]
+                )
+            )
+            self.assertTrue(profile["ok"])
+            self.assertTrue(profile["created"])
+            self.assertEqual(profile["profile"]["id"], "researcher")
+            self.assertEqual(profile["profile"]["tool_allowlist"], ["web_search"])
+            self.assertEqual(profile["profile"]["recursive_depth_limit"], 0)
+            self.assertFalse(profile["profile"]["autonomous_runtime"])
+            self.assertIn("agent_profile_lifecycle", profile["subagents"]["implemented_controls"])
+            self.assertNotIn("agent_profile_lifecycle", profile["subagents"]["remaining_depth_work"])
+
             gated = dispatch(
                 parser.parse_args(
                     [
@@ -377,6 +401,8 @@ class CliTests(unittest.TestCase):
             self.assertFalse(delegated["raw_instruction_forwarded_to_model"])
             self.assertEqual(delegated["subagents"]["ready_cards"], 1)
             self.assertEqual(delegated["subagents"]["cards"][0]["parent_task_id"], "parent-task")
+            self.assertEqual(delegated["subagents"]["cards"][0]["profile_id"], "researcher")
+            self.assertEqual(delegated["subagents"]["cards"][0]["profile_snapshot"]["tool_allowlist"], ["web_search"])
             self.assertIn("handoff_receipts", delegated["subagents"]["implemented_controls"])
             self.assertNotIn("handoff_receipts", delegated["subagents"]["remaining_depth_work"])
 
@@ -410,6 +436,9 @@ class CliTests(unittest.TestCase):
             audit_text = (data_dir / "audit.jsonl").read_text(encoding="utf-8")
             self.assertIn("subagent.handoff_recorded", audit_text)
             self.assertNotIn("reviewed raw private handoff reason", audit_text)
+            disabled_profile = dispatch(parser.parse_args(["--data-dir", str(data_dir), "agents", "profile-disable", "researcher"]))
+            self.assertTrue(disabled_profile["ok"])
+            self.assertFalse(disabled_profile["profile"]["enabled"])
 
     def test_enterprise_readiness_reports_memory_improvement_and_tui_flags(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -58,6 +58,7 @@ class WebGuiBrowserSmokeTests(unittest.TestCase):
         self.assertIn('api("/subagents/status?limit=12")', app_js)
         self.assertIn('api("/subagents/delegate"', app_js)
         self.assertIn('api("/subagents/handoff"', app_js)
+        self.assertIn("payload.enabled_profile_count", app_js)
         self.assertIn('document.getElementById("subagent-form").addEventListener("submit"', app_js)
         self.assertIn('document.getElementById("subagent-cards").addEventListener("click"', app_js)
         self.assertIn('data-subagent-approved', app_js)

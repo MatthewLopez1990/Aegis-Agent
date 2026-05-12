@@ -674,6 +674,24 @@ class LocalStore:
                 (row["id"], row["name"], row.get("created_at", timestamp), row.get("updated_at", timestamp), json.dumps(row.get("metadata", {}))),
             )
 
+    def update_kanban_board_metadata(self, board_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
+        existing = self.get_kanban_board(board_id)
+        if not existing:
+            raise KeyError(board_id)
+        merged = json.loads(existing.get("metadata_json") or "{}")
+        merged.update(metadata)
+        with self.connect() as db:
+            cursor = db.execute(
+                "UPDATE kanban_boards SET metadata_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(merged), now_utc(), board_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(board_id)
+        updated = self.get_kanban_board(board_id)
+        if not updated:
+            raise KeyError(board_id)
+        return updated
+
     def insert_kanban_card(self, row: dict[str, Any]) -> None:
         timestamp = now_utc()
         with self.connect() as db:

@@ -15,6 +15,7 @@ from aegis.security.taint import RiskLevel, now_utc
 DEFAULT_LANES = ("backlog", "ready", "in_progress", "review", "blocked", "done")
 SUBAGENT_DELEGATION_BOARD_PURPOSE = "subagent_delegations"
 SUBAGENT_DELEGATION_BOARD_NAME = "Subagent Delegations"
+SUBAGENT_DEFAULT_PROFILE_ID = "operator-default"
 
 
 class KanbanManager:
@@ -141,8 +142,76 @@ class KanbanManager:
                 "isolation": "card_per_delegate",
                 "execution_mode": "durable_card_queue",
                 "autonomous_runtime": False,
+                "profile_lifecycle": "durable_board_metadata",
+                "subagent_profiles": {SUBAGENT_DEFAULT_PROFILE_ID: _default_subagent_profile(now_utc())},
             },
         )
+
+    def list_subagent_profiles(self) -> list[dict[str, Any]]:
+        board = self.subagent_delegation_board(create=False)
+        if board is None:
+            return []
+        return [_profile_summary(profile) for profile in _profiles_from_board(board).values()]
+
+    def create_subagent_profile(
+        self,
+        name: str,
+        *,
+        role: str | None = None,
+        tool_allowlist: list[str] | tuple[str, ...] | None = None,
+        max_parallel_cards: int = 1,
+        recursive_depth_limit: int = 0,
+        network_policy: str = "disabled",
+        workspace_scope: str = "current_workspace",
+        actor: str = "operator",
+    ) -> dict[str, Any]:
+        profile = _build_subagent_profile(
+            name,
+            role=role,
+            tool_allowlist=tuple(tool_allowlist or ()),
+            max_parallel_cards=max_parallel_cards,
+            recursive_depth_limit=recursive_depth_limit,
+            network_policy=network_policy,
+            workspace_scope=workspace_scope,
+        )
+        board = self.subagent_delegation_board(create=True)
+        assert board is not None
+        profiles = _profiles_from_board(board)
+        created = profile["id"] not in profiles
+        if not created:
+            profile["created_at"] = profiles[profile["id"]].get("created_at", profile["created_at"])
+        profiles[profile["id"]] = profile
+        self.store.update_kanban_board_metadata(
+            board["id"],
+            {
+                "profile_lifecycle": "durable_board_metadata",
+                "subagent_profiles": profiles,
+            },
+        )
+        event_type = "subagent.profile_created" if created else "subagent.profile_updated"
+        self.audit_logger.append(event_type, {"profile": _profile_summary(profile), "actor": _safe_actor(actor), "raw_secret_values_included": False})
+        return {"ok": True, "created": created, "profile": _profile_summary(profile), "profiles": [_profile_summary(row) for row in profiles.values()]}
+
+    def disable_subagent_profile(self, profile_id: str, *, actor: str = "operator") -> dict[str, Any]:
+        board = self.subagent_delegation_board(create=False)
+        if board is None:
+            raise KeyError(profile_id)
+        profiles = _profiles_from_board(board)
+        normalized_id = _profile_id(profile_id)
+        if normalized_id not in profiles:
+            raise KeyError(profile_id)
+        profile = dict(profiles[normalized_id])
+        profile["enabled"] = False
+        profile["status"] = "disabled"
+        profile["updated_at"] = now_utc()
+        profile["disabled_by"] = _safe_actor(actor)
+        profiles[normalized_id] = profile
+        self.store.update_kanban_board_metadata(board["id"], {"subagent_profiles": profiles})
+        self.audit_logger.append(
+            "subagent.profile_disabled",
+            {"profile_id": normalized_id, "actor": _safe_actor(actor), "raw_secret_values_included": False},
+        )
+        return {"ok": True, "profile": _profile_summary(profile), "profiles": [_profile_summary(row) for row in profiles.values()]}
 
     def add_subagent_delegation(self, *, role: str, task: str, task_id: str | None = None) -> dict[str, Any]:
         role = role.strip()
@@ -151,6 +220,8 @@ class KanbanManager:
             raise ValueError("subagent delegation requires non-empty role and task")
         board = self.subagent_delegation_board(create=True)
         assert board is not None
+        profiles = _profiles_from_board(board)
+        profile = _select_profile_for_role(profiles, role)
         return self.add_card(
             board["id"],
             title=f"{role}: {task[:80]}",
@@ -162,6 +233,9 @@ class KanbanManager:
             metadata={
                 "delegation_type": "subagent",
                 "role": role,
+                "profile_id": profile["id"],
+                "profile_status": "matched" if _profile_id(role) == profile["id"] and profile.get("enabled", True) else "default_profile",
+                "profile_snapshot": _profile_summary(profile),
                 "source_tool": "subagent_delegate",
                 "isolation": "durable_card",
                 "instructions_tainted": True,
@@ -187,7 +261,9 @@ class KanbanManager:
         board = self.subagent_delegation_board(create=False)
         lanes = {lane: 0 for lane in DEFAULT_LANES}
         cards: list[dict[str, Any]] = []
+        profiles: list[dict[str, Any]] = []
         if board is not None:
+            profiles = [_profile_summary(profile) for profile in _profiles_from_board(board).values()]
             cards = self.list_cards(board["id"])
             for card in cards:
                 lane = str(card.get("lane", ""))
@@ -211,6 +287,9 @@ class KanbanManager:
             "blocked_cards": lanes["blocked"],
             "done_cards": lanes["done"],
             "active_roles": active_roles,
+            "profiles": profiles,
+            "profile_count": len(profiles),
+            "enabled_profile_count": len([profile for profile in profiles if profile.get("enabled")]),
             "cards": safe_cards,
             "implemented_controls": [
                 "approval_required_delegation",
@@ -219,10 +298,10 @@ class KanbanManager:
                 "audit_receipts",
                 "operator_lane_control",
                 "handoff_receipts",
+                "agent_profile_lifecycle",
             ],
             "remaining_depth_work": [
                 "isolated_parallel_runtime",
-                "agent_profile_lifecycle",
                 "recursive_budget_limits",
             ],
             "raw_instruction_included": False,
@@ -261,6 +340,10 @@ def _safe_actor(value: str, *, limit: int = 80) -> str:
     return normalized[:limit]
 
 
+def _safe_label(value: str, *, limit: int = 120) -> str:
+    return " ".join(str(value or "").split())[:limit]
+
+
 def _handoff_receipt_count(metadata: dict[str, Any], *, default: int = 0) -> int:
     try:
         return int(metadata.get("handoff_receipts_recorded", default))
@@ -268,7 +351,123 @@ def _handoff_receipt_count(metadata: dict[str, Any], *, default: int = 0) -> int
         return default
 
 
+def _profile_id(name: str) -> str:
+    normalized = "".join(char.lower() if char.isalnum() else "-" for char in str(name).strip())
+    normalized = "-".join(part for part in normalized.split("-") if part)
+    if not normalized:
+        raise ValueError("subagent profile name is required")
+    return normalized[:64]
+
+
+def _safe_tool_allowlist(values: tuple[str, ...]) -> list[str]:
+    tools: list[str] = []
+    for value in values:
+        tool = _safe_label(value, limit=80)
+        if not tool:
+            continue
+        tools.append(tool)
+    return sorted(set(tools))[:50]
+
+
+def _default_subagent_profile(timestamp: str) -> dict[str, Any]:
+    return {
+        "profile_schema": "aegis.subagent.profile.v1",
+        "id": SUBAGENT_DEFAULT_PROFILE_ID,
+        "name": "Operator Default",
+        "role": "Operator",
+        "enabled": True,
+        "status": "enabled",
+        "tool_allowlist": [],
+        "max_parallel_cards": 1,
+        "recursive_depth_limit": 0,
+        "network_policy": "disabled",
+        "workspace_scope": "current_workspace",
+        "autonomous_runtime": False,
+        "raw_instruction_forwarded_to_model": False,
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    }
+
+
+def _build_subagent_profile(
+    name: str,
+    *,
+    role: str | None,
+    tool_allowlist: tuple[str, ...],
+    max_parallel_cards: int,
+    recursive_depth_limit: int,
+    network_policy: str,
+    workspace_scope: str,
+) -> dict[str, Any]:
+    timestamp = now_utc()
+    if recursive_depth_limit != 0:
+        raise ValueError("subagent recursive depth must remain 0 until autonomous isolation is enabled")
+    if max_parallel_cards < 1 or max_parallel_cards > 20:
+        raise ValueError("subagent max_parallel_cards must be between 1 and 20")
+    if network_policy not in {"disabled", "allowlisted"}:
+        raise ValueError("subagent network_policy must be disabled or allowlisted")
+    profile_name = _safe_label(name)
+    profile_id = _profile_id(profile_name)
+    return {
+        "profile_schema": "aegis.subagent.profile.v1",
+        "id": profile_id,
+        "name": profile_name,
+        "role": _safe_label(role or profile_name),
+        "enabled": True,
+        "status": "enabled",
+        "tool_allowlist": _safe_tool_allowlist(tool_allowlist),
+        "max_parallel_cards": int(max_parallel_cards),
+        "recursive_depth_limit": recursive_depth_limit,
+        "network_policy": network_policy,
+        "workspace_scope": _safe_label(workspace_scope, limit=160) or "current_workspace",
+        "autonomous_runtime": False,
+        "raw_instruction_forwarded_to_model": False,
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    }
+
+
+def _profiles_from_board(board: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    metadata = board.get("metadata", {})
+    raw_profiles = metadata.get("subagent_profiles")
+    profiles = raw_profiles if isinstance(raw_profiles, dict) else {}
+    if SUBAGENT_DEFAULT_PROFILE_ID not in profiles:
+        profiles = {SUBAGENT_DEFAULT_PROFILE_ID: _default_subagent_profile(str(board.get("created_at") or now_utc())), **profiles}
+    return {str(key): dict(value) for key, value in profiles.items() if isinstance(value, dict)}
+
+
+def _select_profile_for_role(profiles: dict[str, dict[str, Any]], role: str) -> dict[str, Any]:
+    role_id = _profile_id(role)
+    matched = profiles.get(role_id)
+    if matched and matched.get("enabled", True):
+        return matched
+    default = profiles.get(SUBAGENT_DEFAULT_PROFILE_ID)
+    if default:
+        return default
+    return _default_subagent_profile(now_utc())
+
+
+def _profile_summary(profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": profile.get("id"),
+        "name": profile.get("name"),
+        "role": profile.get("role"),
+        "enabled": bool(profile.get("enabled", True)),
+        "status": profile.get("status", "enabled" if profile.get("enabled", True) else "disabled"),
+        "tool_allowlist": list(profile.get("tool_allowlist") or []),
+        "max_parallel_cards": int(profile.get("max_parallel_cards", 1)),
+        "recursive_depth_limit": int(profile.get("recursive_depth_limit", 0)),
+        "network_policy": profile.get("network_policy", "disabled"),
+        "workspace_scope": profile.get("workspace_scope", "current_workspace"),
+        "autonomous_runtime": bool(profile.get("autonomous_runtime", False)),
+        "raw_instruction_forwarded_to_model": bool(profile.get("raw_instruction_forwarded_to_model", False)),
+        "created_at": profile.get("created_at"),
+        "updated_at": profile.get("updated_at"),
+    }
+
+
 def _subagent_board_summary(board: dict[str, Any]) -> dict[str, Any]:
+    profiles = _profiles_from_board(board)
     return {
         "id": board["id"],
         "name": board["name"],
@@ -278,6 +477,8 @@ def _subagent_board_summary(board: dict[str, Any]) -> dict[str, Any]:
             "isolation": board.get("metadata", {}).get("isolation"),
             "execution_mode": board.get("metadata", {}).get("execution_mode"),
             "autonomous_runtime": bool(board.get("metadata", {}).get("autonomous_runtime", False)),
+            "profile_lifecycle": board.get("metadata", {}).get("profile_lifecycle"),
+            "profile_count": len(profiles),
         },
     }
 
@@ -292,6 +493,9 @@ def _subagent_card_summary(card: dict[str, Any]) -> dict[str, Any]:
         "risk_level": card.get("risk_level"),
         "task_id": card.get("task_id"),
         "parent_task_id": metadata.get("parent_task_id"),
+        "profile_id": metadata.get("profile_id"),
+        "profile_status": metadata.get("profile_status"),
+        "profile_snapshot": metadata.get("profile_snapshot"),
         "created_at": card.get("created_at"),
         "updated_at": card.get("updated_at"),
         "description_preview": _preview(str(card.get("description", ""))),

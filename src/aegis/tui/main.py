@@ -3176,8 +3176,26 @@ class AegisTui(cmd.Cmd):
         self.do_models("route alias/fast")
 
     def do_agents(self, arg: str) -> None:
-        """agents [status|delegate <role> <task> [--approved]|handoff <card-id> <lane> [reason]] -- manage subagent delegations."""
+        """agents [status|profiles|profile-create|delegate|handoff] -- manage subagent delegations."""
         parts = shlex.split(arg)
+        if parts and parts[0] == "profiles":
+            _print_json({"profiles": self.orchestrator.kanban.list_subagent_profiles(), "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
+            return
+        if parts and parts[0] == "profile-create":
+            if len(parts) < 2:
+                print("usage: agents profile-create <name> [--role role] [--tool tool]")
+                return
+            options = _parse_subagent_profile_options(parts[2:])
+            result = self.orchestrator.kanban.create_subagent_profile(parts[1], actor="tui-operator", **options)
+            _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
+            return
+        if parts and parts[0] == "profile-disable":
+            if len(parts) < 2:
+                print("usage: agents profile-disable <profile-id>")
+                return
+            result = self.orchestrator.kanban.disable_subagent_profile(parts[1], actor="tui-operator")
+            _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
+            return
         if parts and parts[0] == "delegate":
             approved = "--approved" in parts[1:]
             delegate_parts = [part for part in parts[1:] if part != "--approved"]
@@ -4907,6 +4925,46 @@ def _plugin_inventory_payload(orchestrator: Any) -> dict[str, Any]:
         "hooks": orchestrator.hooks.list_hooks(),
         "raw_secret_values_included": False,
     }
+
+
+def _parse_subagent_profile_options(parts: list[str]) -> dict[str, Any]:
+    options: dict[str, Any] = {
+        "role": None,
+        "tool_allowlist": [],
+        "max_parallel_cards": 1,
+        "recursive_depth_limit": 0,
+        "network_policy": "disabled",
+        "workspace_scope": "current_workspace",
+    }
+    index = 0
+    while index < len(parts):
+        part = parts[index]
+        if part == "--role":
+            options["role"] = _next_required(parts, index, "--role")
+            index += 2
+            continue
+        if part == "--tool":
+            options["tool_allowlist"].append(_next_required(parts, index, "--tool"))
+            index += 2
+            continue
+        if part == "--max-parallel-cards":
+            options["max_parallel_cards"] = int(_next_required(parts, index, "--max-parallel-cards"))
+            index += 2
+            continue
+        if part == "--recursive-depth-limit":
+            options["recursive_depth_limit"] = int(_next_required(parts, index, "--recursive-depth-limit"))
+            index += 2
+            continue
+        if part == "--network-policy":
+            options["network_policy"] = _next_required(parts, index, "--network-policy")
+            index += 2
+            continue
+        if part == "--workspace-scope":
+            options["workspace_scope"] = _next_required(parts, index, "--workspace-scope")
+            index += 2
+            continue
+        raise ValueError(f"unknown profile option: {part}")
+    return options
 
 
 def _parse_hook_add_args(parts: list[str]) -> dict[str, Any]:
