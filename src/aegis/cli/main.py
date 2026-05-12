@@ -463,6 +463,11 @@ def build_parser() -> argparse.ArgumentParser:
     remote_control_relay_pull.add_argument("--approved", action="store_true", help="Approve one outbound relay action pull")
     remote_control_relay_pull.add_argument("--limit", type=int, default=10, help="Maximum action envelopes to pull")
     remote_control_relay_pull.add_argument("--dry-run", action="store_true", help="Pull and validate queued actions without executing them")
+    remote_control_relay_directory = remote_control_sub.add_parser("relay-directory", help="Publish one sanitized scoped directory snapshot to a registered relay")
+    remote_control_relay_directory.add_argument("--pairing-id", required=True, help="Registered pairing id")
+    remote_control_relay_directory.add_argument("--relay-auth-secret", required=True, help="Brokered secret name for relay bearer auth")
+    remote_control_relay_directory.add_argument("--approved", action="store_true", help="Approve one outbound relay directory snapshot")
+    remote_control_relay_directory.add_argument("--limit", type=int, default=10, help="Maximum session-scoped tasks to publish")
     remote_control_relay_action = remote_control_sub.add_parser("relay-action", help="Execute a registered relay-authenticated task action")
     remote_control_relay_action.add_argument("--pairing-id", required=True, help="Registered pairing id")
     remote_control_relay_action.add_argument("--task-id", required=True, help="Task id to control through the relay proxy")
@@ -1407,6 +1412,43 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 },
             )
             return {**pulled, "dry_run": args.dry_run, "executed_action_count": len(executed_actions), "executed_actions": executed_actions}
+        if args.remote_control_command == "relay-directory":
+            broker = SecretsBroker(config.secrets_path)
+            handle = broker.request_handle(
+                name=args.relay_auth_secret,
+                requester="remote_control_relay",
+                reason="publish scoped remote-control directory to relay",
+                scopes=("remote_control:relay",),
+            )
+            relay_auth_token = broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+            orchestrator = build_orchestrator(data_dir=config.data_dir)
+            pairing = registry.public_pairing(args.pairing_id)
+            directory = build_remote_control_directory(
+                pairing,
+                store=orchestrator.store,
+                limit=args.limit,
+            )
+            result = registry.publish_relay_directory(
+                args.pairing_id,
+                directory=directory,
+                relay_auth_token=relay_auth_token,
+                allowlist=config.network_allowlist,
+                approved=args.approved,
+            )
+            orchestrator.audit_logger.append(
+                "remote_control.relay_directory_published",
+                {
+                    "pairing_id": result["pairing"]["id"],
+                    "relay_target": result["relay_target"],
+                    "scope": result["directory_scope"].get("type"),
+                    "task_count": result["directory_task_count"],
+                    "pairing_token_relayed": False,
+                    "relay_auth_token_captured": False,
+                    "raw_secret_values_included": False,
+                    "source": "cli",
+                },
+            )
+            return result
         if args.remote_control_command == "relay-action":
             broker = SecretsBroker(config.secrets_path)
             handle = broker.request_handle(

@@ -477,7 +477,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
         def _do_POST(self) -> None:
             parsed = urlparse(self.path)
             path = parsed.path
-            if path in {"/remote-control/pair", "/remote-control/revoke", "/remote-control/relay", "/remote-control/relay/pull"}:
+            if path in {"/remote-control/pair", "/remote-control/revoke", "/remote-control/relay", "/remote-control/relay/pull", "/remote-control/relay/directory"}:
                 self._authorize_local_mutation()
             elif path == "/remote-control/relay/action":
                 pass
@@ -644,6 +644,44 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     },
                 )
                 self._json({**pulled, "dry_run": dry_run, "executed_action_count": len(executed_actions), "executed_actions": executed_actions})
+                return
+            if path == "/remote-control/relay/directory":
+                payload = self._read_json()
+                relay_secret = str(_required(payload, "relay_auth_secret"))
+                handle = orchestrator.secrets_broker.request_handle(
+                    name=relay_secret,
+                    requester="remote_control_relay",
+                    reason="publish scoped remote-control directory to relay",
+                    scopes=("remote_control:relay",),
+                )
+                relay_auth_token = orchestrator.secrets_broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                pairing = remote_control.public_pairing(str(_required(payload, "pairing_id")))
+                directory = build_remote_control_directory(
+                    pairing,
+                    store=orchestrator.store,
+                    limit=int(payload.get("limit", 10)),
+                )
+                result = remote_control.publish_relay_directory(
+                    str(_required(payload, "pairing_id")),
+                    directory=directory,
+                    relay_auth_token=relay_auth_token,
+                    allowlist=orchestrator.config.network_allowlist,
+                    approved=bool(payload.get("approved", False)),
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.relay_directory_published",
+                    {
+                        "pairing_id": result["pairing"]["id"],
+                        "relay_target": result["relay_target"],
+                        "scope": result["directory_scope"].get("type"),
+                        "task_count": result["directory_task_count"],
+                        "pairing_token_relayed": False,
+                        "relay_auth_token_captured": False,
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(result)
                 return
             if path == "/remote-control/relay/action":
                 require_allowed_host(self.headers, allowed_hosts=allowed_hosts)

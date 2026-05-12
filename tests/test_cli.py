@@ -248,6 +248,21 @@ class CliTests(unittest.TestCase):
                             ]
                         )
                     )
+                    relay_directory = dispatch(
+                        parser.parse_args(
+                            [
+                                "--data-dir",
+                                str(data_dir),
+                                "remote-control",
+                                "relay-directory",
+                                "--pairing-id",
+                                pair["pairing"]["id"],
+                                "--relay-auth-secret",
+                                "AEGIS_REMOTE_RELAY_TOKEN",
+                                "--approved",
+                            ]
+                        )
+                    )
                     relay_pull = dispatch(
                         parser.parse_args(
                             [
@@ -312,6 +327,14 @@ class CliTests(unittest.TestCase):
             self.assertTrue(registered_relay["relay_action_proxy_enabled"])
             self.assertFalse(registered_relay["pairing_token_relayed"])
             self.assertNotIn("relay-raw-secret", json.dumps(registered_relay, sort_keys=True))
+            self.assertEqual(relay_directory["status"], "relay_directory_published")
+            self.assertEqual(relay_directory["directory_scope"]["type"], "task")
+            self.assertEqual(relay_directory["directory_task_count"], 1)
+            self.assertFalse(relay_directory["pairing_token_relayed"])
+            self.assertFalse(relay_directory["relay_auth_token_captured"])
+            self.assertFalse(relay_directory["user_request_included"])
+            self.assertNotIn("send message relay controlled", json.dumps(relay_directory, sort_keys=True))
+            self.assertNotIn("relay-raw-secret", json.dumps(relay_directory, sort_keys=True))
             self.assertEqual(relay_pull["status"], "relay_actions_pulled")
             self.assertEqual(relay_pull["executed_action_count"], 1)
             self.assertEqual(relay_pull["executed_actions"][0]["result"]["id"], relay_task["id"])

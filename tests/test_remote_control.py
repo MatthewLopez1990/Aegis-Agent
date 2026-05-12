@@ -136,6 +136,8 @@ class RemoteControlPairingTests(unittest.TestCase):
                         ]
                     }
                 )
+            if body.get("type") == "aegis.remote_control.directory":
+                return FakeResponse({"ok": True, "published": True})
             return FakeResponse()
 
         with patch("aegis.remote_control._private_network_error", return_value=None):
@@ -191,12 +193,63 @@ class RemoteControlPairingTests(unittest.TestCase):
         self.assertFalse(pull_body["pairing_token_included"])
         self.assertNotIn(created["token"], rendered_pulled)
         self.assertNotIn("relay-raw-secret", rendered_pulled)
+        directory_payload = {
+            "status": "remote_directory_available",
+            "mode": "scoped_remote_directory",
+            "scope": {"type": "task", "task_id": "task-1"},
+            "task_count": 1,
+            "tasks": [
+                {
+                    "id": "task-1",
+                    "status": "paused",
+                    "metadata_only": True,
+                    "allowed_actions": ["status", "pause", "shell"],
+                    "links": {"status": "/remote-control/tasks/task-1?token=secret"},
+                    "user_request": "hidden prompt",
+                }
+            ],
+            "pairing_token_relayed": False,
+            "raw_secret_values_included": False,
+            "user_request_included": False,
+            "plan_receipt_included": False,
+        }
+        with patch("aegis.remote_control._private_network_error", return_value=None):
+            with patch("aegis.remote_control._open_without_redirects", side_effect=fake_open):
+                directory_published = registry.publish_relay_directory(
+                    created["pairing"]["id"],
+                    directory=directory_payload,
+                    relay_auth_token="relay-raw-secret",
+                    allowlist=("example.com",),
+                    approved=True,
+                    now=now + timedelta(seconds=2),
+                )
+        directory_body = json.loads(captured["requests"][-1].data.decode("utf-8"))
+        rendered_directory = json.dumps(directory_published, sort_keys=True)
+        rendered_directory_body = json.dumps(directory_body, sort_keys=True)
+        self.assertEqual(directory_published["status"], "relay_directory_published")
+        self.assertEqual(directory_published["mode"], "approved_relay_directory_snapshot")
+        self.assertEqual(directory_published["directory_task_count"], 1)
+        self.assertEqual(directory_body["type"], "aegis.remote_control.directory")
+        self.assertEqual(directory_body["directory"]["scope"]["type"], "task")
+        self.assertEqual(directory_body["directory"]["tasks"][0]["allowed_actions"], ["status", "pause"])
+        self.assertEqual(directory_body["directory"]["tasks"][0]["links"]["status"], "/remote-control/tasks/task-1")
+        self.assertFalse(directory_body["pairing_token_included"])
+        self.assertFalse(directory_body["relay_auth_token_included"])
+        self.assertFalse(directory_body["user_request_included"])
+        self.assertFalse(directory_published["relay_auth_token_captured"])
+        self.assertNotIn(created["token"], rendered_directory)
+        self.assertNotIn("hidden prompt", rendered_directory_body)
+        self.assertNotIn("token=secret", rendered_directory_body)
+        self.assertNotIn("relay-raw-secret", rendered_directory)
+        self.assertNotIn(created["token"], rendered_directory_body)
+        self.assertNotIn("relay-raw-secret", rendered_directory_body)
+        self.assertEqual(registry.public_pairing(created["pairing"]["id"], now=now + timedelta(seconds=3))["relay_last_directory_publish_at"], (now + timedelta(seconds=2)).isoformat())
         with patch("aegis.remote_control._open_without_redirects", side_effect=fake_open):
             revoked = registry.revoke(
                 created["pairing"]["id"],
                 relay_auth_token="relay-raw-secret",
                 notify_relay=True,
-                now=now + timedelta(seconds=2),
+                now=now + timedelta(seconds=4),
             )
         revoked_body = json.loads(captured["requests"][-1].data.decode("utf-8"))
         rendered_revoked = json.dumps(revoked, sort_keys=True)
