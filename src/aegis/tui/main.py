@@ -3080,13 +3080,15 @@ class AegisTui(cmd.Cmd):
                 "status": "connector_surface_ready" if github else "not_configured",
                 "github_connector": github,
                 "telemetry_sent": False,
-                "live_gap": "Live PR comment writes and autofix posting require a governed GitHub connector credential, repository scope, approval, and receipt redaction before provider writes.",
+                "live_gap": "Live PR provider writes still require a configured governed GitHub credential, repository scope, approval, and receipt redaction.",
                 "read_surface": "github_pr operation=comments supports mock comments and allowlisted GitHub-compatible PR comments JSON endpoints.",
                 "autofix_surface": "github_pr operation=autofix_plan converts review comments into local, human-reviewed patch plans without auto-apply or provider writes.",
+                "autofix_response_surface": "github_pr operation=autofix_response posts an approved redacted autofix response through the same governed comment connector when live writes are configured.",
                 "next_actions": [
                     "connectors",
                     "tools run github_pr '{\"operation\":\"comments\"}' --approved",
                     "tools run github_pr '{\"operation\":\"autofix_plan\"}' --approved",
+                    "tools run github_pr '{\"operation\":\"autofix_response\",\"action_items\":[]}' --approved",
                     "tools run github_pr '{\"operation\":\"comments\",\"provider_url\":\"https://api.github.com/repos/OWNER/REPO/pulls/NUMBER/comments\"}' --approved",
                 ],
             }

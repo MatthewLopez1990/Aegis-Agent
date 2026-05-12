@@ -1310,6 +1310,26 @@ class BuiltinToolExecutor:
         requested = str(params.get("operation", "read")).lower()
         connector = self.connectors.get("github")
         if name == "github_pr":
+            if requested in {"autofix_response", "autofix_comment", "autofix_report", "post_autofix", "provider_autofix"}:
+                write_params = {key: value for key, value in params.items() if key != "operation"}
+                write_params["body"] = _github_pr_autofix_response_body(params)
+                result = connector.write(ConnectorRequest(operation="comment_on_pull_request", params=write_params, scopes=("write",), approved=approved))
+                mode = result.data.get("mode", "mock" if result.data.get("mock") else None)
+                return {
+                    "ok": result.ok,
+                    "operation": "pr_autofix_provider_response",
+                    "connector": result.connector,
+                    "mode": mode,
+                    "status": "autofix_response_recorded" if result.ok else "autofix_response_blocked",
+                    "auto_apply": False,
+                    "provider_writes_performed": bool(result.ok and mode == "live_write"),
+                    "mock_write_recorded": bool(result.ok and result.data.get("mock")),
+                    "raw_secret_values_included": False,
+                    "accepted": result.data.get("accepted", {}),
+                    **_connector_activation_fields(result),
+                    "rollback": result.rollback,
+                    "error": result.error,
+                }
             if requested in {"autofix", "autofix_plan", "review_autofix", "fix_plan"}:
                 if params.get("provider_url") or params.get("api_url"):
                     comments = self._execute_github_live_read(
@@ -2184,6 +2204,44 @@ def _github_autofix_action(text: str) -> str:
     if "revocation" in lowered or "expiry" in lowered or "expire" in lowered:
         return "check_lifecycle_and_state_transition"
     return "inspect_and_patch_referenced_code"
+
+
+def _github_pr_autofix_response_body(params: dict[str, Any]) -> str:
+    explicit_body = str(params.get("body") or params.get("comment") or "").strip()
+    if explicit_body:
+        return str(redact(explicit_body))[:4000]
+    action_items = params.get("action_items")
+    plan = params.get("autofix_plan")
+    if not isinstance(action_items, list) and isinstance(plan, dict):
+        action_items = plan.get("action_items")
+    if not isinstance(action_items, list):
+        action_items = []
+    lines = [
+        "Aegis PR autofix response",
+        "",
+        "Status: local patch plan prepared; this approved response is the only provider write.",
+        "Auto-apply: false",
+        "Provider writes before this response: false",
+        "Required controls: human review, workspace diff review, tests before commit, approval before provider write.",
+        "",
+        "Action items:",
+    ]
+    rendered_items = 0
+    for item in action_items[:20]:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "unscoped")[:160]
+        line = item.get("line")
+        location = f"{path}:{line}" if line else path
+        recommended = str(item.get("recommended_action") or "inspect_and_patch_referenced_code")[:120]
+        summary = str(item.get("summary") or "")[:180]
+        comment_id = item.get("comment_id")
+        prefix = f"- comment {comment_id} at {location}" if comment_id is not None else f"- {location}"
+        lines.append(f"{prefix}: {recommended}" + (f" - {summary}" if summary else ""))
+        rendered_items += 1
+    if rendered_items == 0:
+        lines.append("- No review action items were supplied.")
+    return str(redact("\n".join(lines)))[:4000]
 
 
 def _normalize_gitlab_record(decoded: dict[str, Any], *, kind: str) -> dict[str, Any]:

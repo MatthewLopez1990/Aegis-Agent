@@ -658,6 +658,24 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertFalse(pr_autofix_plan["auto_apply"])
             self.assertFalse(pr_autofix_plan["provider_writes_performed"])
             self.assertEqual(pr_autofix_plan["action_items"][0]["path"], "src/aegis/example.py")
+            pending_pr_autofix_response = orchestrator.tools.execute(
+                "github_pr",
+                {"operation": "autofix_response", "action_items": pr_autofix_plan["action_items"]},
+            )
+            self.assertEqual(pending_pr_autofix_response["status"], "approval_required")
+            self.assertEqual(pending_pr_autofix_response["tool"], "github_pr")
+            pr_autofix_response = orchestrator.tools.execute(
+                "github_pr",
+                {"operation": "autofix_response", "action_items": pr_autofix_plan["action_items"]},
+                approved=True,
+            )
+            self.assertTrue(pr_autofix_response["ok"])
+            self.assertEqual(pr_autofix_response["operation"], "pr_autofix_provider_response")
+            self.assertEqual(pr_autofix_response["status"], "autofix_response_recorded")
+            self.assertTrue(pr_autofix_response["mock_write_recorded"])
+            self.assertFalse(pr_autofix_response["provider_writes_performed"])
+            self.assertFalse(pr_autofix_response["raw_secret_values_included"])
+            self.assertIn("body", pr_autofix_response["accepted"]["param_keys"])
             with patch.object(
                 orchestrator.connectors.get("http"),
                 "read",

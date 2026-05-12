@@ -376,6 +376,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("Remote Control", alias_commands)
             self.assertIn("github_pr operation=comments", alias_commands)
             self.assertIn("github_pr operation=autofix_plan", alias_commands)
+            self.assertIn("github_pr operation=autofix_response", alias_commands)
             self.assertIn('"evaluation_readiness"', alias_commands)
             self.assertIn("recorded_for_session_context", alias_commands)
             self.assertIn("captured_local_only", alias_commands)
