@@ -204,6 +204,9 @@ AGENTS_COMMANDS = ("status", "profiles", "profile-create", "profile-disable", "d
 REMOTE_CONTROL_COMMANDS = ("pair", "directory", "revoke", "relay", "relay-directory", "relay-notify", "relay-pull", "relay-action")
 SESSION_COMMANDS = ("new", "open", "rename", "set-model", "set-personality", "activate", "archive", "pause", "append", "history", "tasks", "compact")
 TASKS_COMMANDS = ("all", "session")
+QUEUE_COMMANDS = ("status", "show", "list", "active", "pending", "all", "session", "submit")
+BUSY_COMMANDS = ("status", "queue", "steer", "interrupt", "pause", "resume")
+ACTIVE_WORK_STATUSES_TUI = ("pending", "planned", "running", "waiting_approval", "paused")
 SECURITY_COMMANDS = (
     "profile",
     "bundles",
@@ -3458,38 +3461,86 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_queue(self, arg: str) -> None:
-        """queue [request] -- submit a queued governed task or show active work queue metadata."""
-        request = arg.strip()
-        if request:
-            result = self.orchestrator.submit_task(request, session_id=self.session["id"])
-            self.last_task_id = result["id"]
-            _print_json(
-                {
-                    "status": "queued_task_submitted",
-                    "task_id": result["id"],
-                    "active_session_id": self.session.get("id"),
-                    "raw_task_request_included": False,
-                    "next_actions": [f"status {result['id']}", f"events {result['id']}", "queue"],
-                }
-            )
-            _print_task_result(result)
+        """queue [status|all|session <id>|submit <request>|request] -- show or submit governed work."""
+        parts = shlex.split(arg)
+        if parts and parts[0] == "submit":
+            request = " ".join(parts[1:]).strip()
+            if not request:
+                print("queue submit requires a request")
+                return
+            self._submit_queued_task(request)
             return
-        rows = self.orchestrator.store.list_tasks(limit=12, session_id=self.session["id"])
-        status_counts: dict[str, int] = {}
-        for row in rows:
-            status = str(row.get("status") or "unknown")
-            status_counts[status] = status_counts.get(status, 0) + 1
+        queue_words = {"status", "show", "list", "active", "pending", "all", "session"}
+        status_words = {"pending", "planned", "running", "waiting", "waiting_approval", "paused"}
+        if not parts or parts[0] in queue_words or parts[0] in status_words or parts[0].startswith("--"):
+            self._print_queue(parts)
+            return
+        self._submit_queued_task(arg.strip())
+
+    def _submit_queued_task(self, request: str) -> None:
+        result = self.orchestrator.submit_task(request, session_id=self.session["id"])
+        self.last_task_id = result["id"]
         _print_json(
             {
-                "status": "metadata_only",
+                "status": "queued_task_submitted",
+                "task_id": result["id"],
                 "active_session_id": self.session.get("id"),
-                "recent_task_count": len(rows),
-                "status_counts": status_counts,
-                "latest_task_ids": [_short_id(row.get("id", "")) for row in rows[:8]],
-                "raw_task_requests_included": False,
-                "next_actions": ["tasks", "events <task_id>", "evaluation queue", "batch"],
+                "raw_task_request_included": False,
+                "next_actions": [f"status {result['id']}", f"events {result['id']}", "queue"],
             }
         )
+        _print_task_result(result)
+
+    def _print_queue(self, parts: list[str]) -> None:
+        limit = int(_option_value(parts, "--limit") or "12")
+        requested_status = _option_value(parts, "--status")
+        positional = _positional_without_flags(parts, {"--limit": 1, "--status": 1})
+        if positional and positional[0] in {"status", "show", "list", "active"}:
+            positional = positional[1:]
+        session_id: str | None = self.session["id"]
+        scope = "session"
+        statuses: set[str] = set(ACTIVE_WORK_STATUSES_TUI)
+        if requested_status:
+            statuses = {_normalize_queue_status(requested_status)}
+        if positional:
+            head = positional[0]
+            if head == "all":
+                session_id = None
+                scope = "all"
+            elif head == "session":
+                session_id = positional[1] if len(positional) > 1 else self.session["id"]
+                scope = "session"
+            elif head in {"pending", "planned", "running", "waiting", "waiting_approval", "paused"}:
+                statuses = set(ACTIVE_WORK_STATUSES_TUI) if head == "pending" else {_normalize_queue_status(head)}
+        rows = _queue_rows(self.orchestrator, limit=limit, session_id=session_id, statuses=statuses)
+        counts = _status_counts(rows)
+        _print_json(
+            {
+                "status": "active_queue",
+                "scope": scope,
+                "active_session_id": self.session.get("id"),
+                "queue_task_count": len(rows),
+                "status_counts": counts,
+                "raw_task_requests_included": False,
+                "next_actions": ["busy status", "busy interrupt <task_id>", "approve <approval_id>", "resume <task_id>"],
+            }
+        )
+        if rows:
+            print(
+                _table(
+                    [_queue_task_row(self.orchestrator, row) for row in rows],
+                    (
+                        ("id", "short_id", 10),
+                        ("status", "status", 18),
+                        ("risk", "risk_level", 10),
+                        ("session", "session_label", 20),
+                        ("next", "next_actions", 120),
+                        ("updated", "updated_at", 22),
+                    ),
+                )
+            )
+        else:
+            print("queue empty")
 
     def do_routines(self, arg: str) -> None:
         """routines -- show scheduled automation surfaces."""
@@ -3721,13 +3772,40 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_busy(self, arg: str) -> None:
-        """busy -- show active/busy task indicators without raw requests."""
+        """busy [status|queue|steer|interrupt|pause|resume] -- inspect or control active work."""
+        parts = shlex.split(arg)
+        action = parts[0] if parts else "status"
+        if action in {"status", "show"}:
+            self._print_busy_status()
+            return
+        if action == "queue":
+            self._print_queue(parts[1:])
+            return
+        if action == "steer":
+            instruction = " ".join(parts[1:]).strip()
+            if not instruction:
+                self.do_steer("")
+                return
+            self.do_steer(instruction)
+            return
+        if action in {"interrupt", "cancel", "stop"}:
+            self._busy_task_control(parts[1:], control="cancel")
+            return
+        if action == "pause":
+            self._busy_task_control(parts[1:], control="pause")
+            return
+        if action == "resume":
+            self._busy_task_control(parts[1:], control="resume")
+            return
+        print("usage: busy [status|queue|steer <instruction>|interrupt [task_id] [reason]|pause [task_id] [reason]|resume [task_id]]")
+
+    def _print_busy_status(self) -> None:
         dashboard = build_product_dashboard(self.orchestrator)
         runtime = dashboard["runtime"]
         active_rows = dashboard.get("active_work_tasks", [])
         _print_json(
             {
-                "status": "metadata_only",
+                "status": "active_work_status",
                 "busy": bool(runtime.get("active_work_count")),
                 "active_task_count": runtime.get("active_work_count", 0),
                 "running_task_count": runtime.get("running_task_count", 0),
@@ -3735,9 +3813,44 @@ class AegisTui(cmd.Cmd):
                 "paused_task_count": runtime.get("paused_task_count", 0),
                 "active_task_ids": [_short_id(row.get("id", "")) for row in active_rows[:8]],
                 "raw_task_requests_included": False,
-                "next_actions": ["tasks", "approvals", "events <task_id>"],
+                "next_actions": ["busy queue", "busy interrupt <task_id>", "approvals", "events <task_id>"],
             }
         )
+
+    def _busy_task_control(self, parts: list[str], *, control: str) -> None:
+        task_id = parts[0] if parts else _default_busy_task_id(self.orchestrator, session_id=self.session.get("id"))
+        reason = " ".join(parts[1:]) if parts else ""
+        if not task_id:
+            print("no active task")
+            return
+        try:
+            task = self.orchestrator.status(task_id)
+            task_session_id = task.get("session_id") or self.session["id"]
+            if control == "cancel":
+                result = self.orchestrator.cancel_task(task_id, session_id=task_session_id, actor="tui-user", reason=reason or "busy interrupt")
+                status = "busy_interrupt_applied"
+            elif control == "pause":
+                result = self.orchestrator.pause_task(task_id, session_id=task_session_id, actor="tui-user", reason=reason or "busy pause")
+                status = "busy_pause_applied"
+            else:
+                result = self.orchestrator.resume_task(task_id, session_id=task_session_id)
+                status = "busy_resume_requested"
+        except KeyError:
+            print(f"task not found: {task_id}")
+            return
+        except PermissionError as exc:
+            print(f"busy {control} blocked: {exc}")
+            return
+        _print_json(
+            {
+                "status": status,
+                "task_id": task_id,
+                "control": control,
+                "raw_task_request_included": False,
+                "next_actions": ["busy queue", f"events {task_id}", f"timeline {task_id}"],
+            }
+        )
+        _print_task_result(result)
 
     def do_theme(self, arg: str) -> None:
         """theme -- show UI theme metadata."""
@@ -5913,6 +6026,9 @@ SLASH_SUBCOMMANDS: dict[str, tuple[str, ...]] = {
     "rc": REMOTE_CONTROL_COMMANDS,
     "session": SESSION_COMMANDS,
     "tasks": TASKS_COMMANDS,
+    "queue": QUEUE_COMMANDS,
+    "q": QUEUE_COMMANDS,
+    "busy": BUSY_COMMANDS,
     "security": SECURITY_COMMANDS,
     "channel": CHANNEL_COMMANDS,
     "evaluation": EVALUATION_COMMANDS,
@@ -5931,6 +6047,21 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("memory", "review-digest"): ("--limit", "--owner", "--scope"),
     ("memory", "recertify"): ("--max-age-days", "--limit", "--dry-run", "--owner", "--scope"),
     ("task", "submit"): ("--path",),
+    ("queue", "status"): ("--limit", "--status"),
+    ("queue", "show"): ("--limit", "--status"),
+    ("queue", "list"): ("--limit", "--status"),
+    ("queue", "active"): ("--limit", "--status"),
+    ("queue", "pending"): ("--limit", "--status"),
+    ("queue", "all"): ("--limit", "--status"),
+    ("queue", "session"): ("--limit", "--status"),
+    ("q", "status"): ("--limit", "--status"),
+    ("q", "show"): ("--limit", "--status"),
+    ("q", "list"): ("--limit", "--status"),
+    ("q", "active"): ("--limit", "--status"),
+    ("q", "pending"): ("--limit", "--status"),
+    ("q", "all"): ("--limit", "--status"),
+    ("q", "session"): ("--limit", "--status"),
+    ("busy", "queue"): ("--limit", "--status"),
     ("session", "new"): ("--model", "--personality"),
     ("schedule", "run-due"): ("--limit", "--now"),
     ("hooks", "add"): ("--id", "--enabled", "--approval-required", "--no-approval-required", "--timeout", "--max-output-bytes"),
@@ -6267,6 +6398,85 @@ def _task_list_row(orchestrator: Any, row: dict[str, Any]) -> dict[str, Any]:
         task_ref = _short_id(task_id)
         next_actions.extend([f"status {task_ref}", f"events {task_ref}", f"timeline {task_ref}"])
     return {**row, "short_id": _short_id(row.get("id", "")), "session_label": session_label, "next_actions": "; ".join(next_actions)}
+
+
+def _queue_rows(orchestrator: Any, *, limit: int, session_id: str | None, statuses: set[str]) -> list[dict[str, Any]]:
+    rows = orchestrator.store.list_tasks(limit=1000, session_id=session_id)
+    active_rows = [row for row in rows if str(row.get("status") or "") in statuses]
+    return active_rows[: max(0, limit)]
+
+
+def _normalize_queue_status(status: str) -> str:
+    normalized = status.strip().lower().replace("-", "_")
+    if normalized == "waiting":
+        return "waiting_approval"
+    return normalized
+
+
+def _status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        status = str(row.get("status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _queue_task_row(orchestrator: Any, row: dict[str, Any]) -> dict[str, Any]:
+    task_id = str(row.get("id") or "")
+    status = str(row.get("status") or "")
+    session_label = ""
+    if row.get("session_id"):
+        try:
+            session = orchestrator.status(task_id).get("session")
+        except KeyError:
+            session = None
+        if isinstance(session, dict):
+            session_label = f"{_short_id(session.get('id', row.get('session_id', '')))} {session.get('title') or ''}".strip()
+        else:
+            session_label = _short_id(row.get("session_id", ""))
+    checkpoint = _row_checkpoint(row)
+    approval_id = checkpoint.get("approval_id")
+    next_actions: list[str] = []
+    if approval_id and status == "waiting_approval":
+        next_actions.extend([f"approval {approval_id}", f"approve {approval_id}", f"resume {task_id}"])
+    elif status in {"waiting_approval", "paused"}:
+        next_actions.append(f"resume {task_id}")
+    if status in set(ACTIVE_WORK_STATUSES_TUI) - {"paused"}:
+        next_actions.append(f"pause {task_id}")
+    if status in set(ACTIVE_WORK_STATUSES_TUI):
+        next_actions.append(f"busy interrupt {task_id}")
+    next_actions.extend([f"events {task_id}", f"timeline {task_id}"])
+    return {
+        "id": task_id,
+        "short_id": _short_id(task_id),
+        "status": status,
+        "risk_level": row.get("risk_level", ""),
+        "session_label": session_label,
+        "next_actions": "; ".join(next_actions[:5]),
+        "updated_at": row.get("updated_at", ""),
+    }
+
+
+def _row_checkpoint(row: dict[str, Any]) -> dict[str, Any]:
+    checkpoint = row.get("checkpoint")
+    if isinstance(checkpoint, dict):
+        return checkpoint
+    checkpoint_json = row.get("checkpoint_json")
+    if isinstance(checkpoint_json, str) and checkpoint_json:
+        try:
+            decoded = json.loads(checkpoint_json)
+        except json.JSONDecodeError:
+            return {}
+        return decoded if isinstance(decoded, dict) else {}
+    return {}
+
+
+def _default_busy_task_id(orchestrator: Any, *, session_id: str | None) -> str | None:
+    session_rows = _queue_rows(orchestrator, limit=1, session_id=session_id, statuses=set(ACTIVE_WORK_STATUSES_TUI)) if session_id else []
+    rows = session_rows or _queue_rows(orchestrator, limit=1, session_id=None, statuses=set(ACTIVE_WORK_STATUSES_TUI))
+    if not rows:
+        return None
+    return str(rows[0].get("id") or "") or None
 
 
 def _approval_with_session(orchestrator: Any, approval: dict[str, Any]) -> dict[str, Any]:

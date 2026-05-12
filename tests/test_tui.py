@@ -284,6 +284,10 @@ class TuiTests(unittest.TestCase):
             self.assertIn("--enable", tui.completedefault("--", "/plugins install-marketplace remote.plugin --", len("/plugins install-marketplace remote.plugin "), len("/plugins install-marketplace remote.plugin --")))
             self.assertIn("--force", tui.completedefault("--", "/plugins update-marketplace remote.plugin --", len("/plugins update-marketplace remote.plugin "), len("/plugins update-marketplace remote.plugin --")))
             self.assertIn("--approved", tui.completedefault("--", "/plugins update-marketplace remote.plugin --", len("/plugins update-marketplace remote.plugin "), len("/plugins update-marketplace remote.plugin --")))
+            self.assertIn("queue", tui.completedefault("q", "/busy q", len("/busy "), len("/busy q")))
+            self.assertIn("interrupt", tui.completedefault("i", "/busy i", len("/busy "), len("/busy i")))
+            self.assertIn("pending", tui.completedefault("p", "/queue p", len("/queue "), len("/queue p")))
+            self.assertIn("--limit", tui.completedefault("--", "/queue all --", len("/queue all "), len("/queue all --")))
             self.assertIn("--dry-run", tui.completedefault("--", "/curator run --", len("/curator run "), len("/curator run --")))
             self.assertIn("openclaw-memory-preview", tui.complete_migrate("openclaw", "migrate openclaw", len("migrate "), len("migrate openclaw")))
             self.assertIn("candidate", tui.complete_repair("ca", "repair ca", len("repair "), len("repair ca")))
@@ -512,7 +516,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn('"mouse_support": "not_enabled"', alias_commands)
             self.assertIn('"allowed_commands"', alias_commands)
             self.assertIn('"routines"', alias_commands)
-            self.assertIn('"latest_task_ids"', alias_commands)
+            self.assertIn('"status": "active_queue"', alias_commands)
             self.assertIn('"mode": "skill_inventory_metadata"', alias_commands)
             self.assertIn('"status": "curator_status"', alias_commands)
             self.assertIn('"status": "curator_run_dry_run"', alias_commands)
@@ -668,10 +672,36 @@ class TuiTests(unittest.TestCase):
                 tui.onecmd("busy")
 
             rendered = output.getvalue()
+            self.assertIn('"status": "active_work_status"', rendered)
             self.assertIn('"active_task_count": 1', rendered)
             self.assertIn('"waiting_task_count": 1', rendered)
             self.assertIn('"raw_task_requests_included": false', rendered)
             self.assertIn("[WORK:1]", tui._render_dashboard())
+
+    def test_tui_queue_and_busy_controls_active_work_without_raw_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tui = AegisTui(data_dir=root / ".aegis", workspace=root)
+            result = tui.orchestrator.submit_task("send message hello", session_id=tui.session["id"])
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                tui.onecmd("/queue")
+                tui.onecmd("/busy queue --limit 5")
+                tui.onecmd("/busy steer keep moving but do not leak")
+                tui.onecmd("/busy interrupt")
+
+            rendered = output.getvalue()
+            self.assertIn('"status": "active_queue"', rendered)
+            self.assertIn('"queue_task_count": 1', rendered)
+            self.assertIn("waiting_approval", rendered)
+            self.assertIn("busy interrupt", rendered)
+            self.assertIn('"status": "steering_updated"', rendered)
+            self.assertIn('"status": "busy_interrupt_applied"', rendered)
+            self.assertIn("cancelled", rendered)
+            self.assertIn('"raw_task_requests_included": false', rendered)
+            self.assertNotIn("send message hello", rendered)
+            self.assertEqual(tui.orchestrator.status(result["id"])["status"], "cancelled")
 
     def test_context_debug_prompt_and_save_do_not_dump_raw_session_content(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
