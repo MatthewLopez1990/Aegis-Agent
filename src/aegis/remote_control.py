@@ -26,6 +26,7 @@ REMOTE_CONTROL_RELAY_REQUIRED_CONTROLS = (
     "brokered_relay_auth",
     "relay_origin_allowlist",
     "scoped_pairing_token_exchange",
+    "relay_action_authorization",
     "push_delivery_approval",
     "audit_receipts_without_tokens",
     "revocation_and_expiry_propagation",
@@ -35,6 +36,7 @@ REMOTE_CONTROL_RELAY_VERIFICATION_GATES = (
     "relay_token_redaction",
     "origin_allowlist_enforced",
     "pairing_scope_preserved",
+    "relay_action_proxy_authorized",
     "revocation_blocks_relayed_actions",
 )
 
@@ -74,6 +76,7 @@ class RemoteControlPairingRegistry:
             "created_at": created_at.isoformat(),
             "expires_at": (created_at + timedelta(seconds=ttl)).isoformat(),
             "revoked_at": None,
+            "relay_registration": None,
         }
         self._pairings[pairing_id] = pairing
         self._save()
@@ -105,6 +108,11 @@ class RemoteControlPairingRegistry:
             for pairing in self._pairings.values()
         ]
         active_count = sum(1 for pairing in pairings if pairing["status"] == "active")
+        relay_action_count = sum(
+            1
+            for pairing in pairings
+            if pairing["status"] == "active" and pairing.get("relay_action_proxy_enabled")
+        )
         return {
             "status": "local_pairing_available",
             "mode": "local_or_trusted_access_layer",
@@ -112,6 +120,7 @@ class RemoteControlPairingRegistry:
             "default_expires_in_seconds": DEFAULT_PAIRING_TTL_SECONDS,
             "max_expires_in_seconds": MAX_PAIRING_TTL_SECONDS,
             "active_pairing_count": active_count,
+            "active_relay_action_proxy_count": relay_action_count,
             "pairings": pairings,
             "control_surface": [
                 "remote task status",
@@ -119,9 +128,9 @@ class RemoteControlPairingRegistry:
                 "remote task resume",
                 "remote task pause",
                 "remote task cancel",
+                "registered relay action proxy",
             ],
             "blocked_until_relay": [
-                "relayed_action_proxy",
                 "mobile_push_delivery",
                 "cloud_session_directory",
             ],
@@ -172,8 +181,8 @@ class RemoteControlPairingRegistry:
             ],
             "next_steps": [
                 "Register an active pairing with an allowlisted relay using a brokered credential handle.",
-                "Preserve local pairing scope, expiry, revocation, host checks, and audit receipts through the relay.",
-                "Add relayed action proxy, mobile push delivery, cloud directory, and revocation-propagation tests before broad off-device delivery.",
+                "Preserve local pairing scope, expiry, revocation, host checks, and audit receipts through relayed actions.",
+                "Add mobile push delivery, cloud directory, and relay revocation propagation tests before broad off-device delivery.",
             ],
         }
 
@@ -245,10 +254,19 @@ class RemoteControlPairingRegistry:
         with response_context as response:
             response_status = response.getcode() if hasattr(response, "getcode") else None
             response_body = response.read(2048)
+        pairing["relay_registration"] = {
+            "relay_target": relay_target,
+            "relay_auth_sha256": _token_hash(relay_auth_token),
+            "registered_at": checked_at.isoformat(),
+            "pairing_token_relayed": False,
+            "raw_secret_values_included": False,
+        }
+        self._save()
         return {
             "status": "relay_registered",
             "mode": "approved_outbound_relay_registration",
             "outbound_relay_enabled": True,
+            "relay_action_proxy_enabled": True,
             "relay_configured": True,
             "relay_target": relay_target,
             "relay_url_redacted": True,
@@ -263,13 +281,51 @@ class RemoteControlPairingRegistry:
                 "brokered_relay_auth",
                 "relay_origin_allowlist",
                 "scoped_pairing_token_exchange",
+                "relay_action_authorization",
                 "audit_receipts_without_tokens",
                 "local_revocation",
             ],
             "remaining_controls": [
-                "push_delivery_approval",
-                "revocation_and_expiry_propagation",
+                "mobile_push_delivery_approval",
+                "cloud_session_directory",
             ],
+        }
+
+    def authorize_relay_action(
+        self,
+        pairing_id: str,
+        relay_auth_token: str,
+        *,
+        action: str,
+        task_id: str,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        self._load()
+        checked_at = _utc_now(now)
+        pairing = self._pairings.get(pairing_id)
+        if pairing is None:
+            return None
+        relay_registration = pairing.get("relay_registration")
+        if not isinstance(relay_registration, dict):
+            return None
+        stored_hash = str(relay_registration.get("relay_auth_sha256") or "")
+        if not stored_hash or not secrets.compare_digest(stored_hash, _token_hash(relay_auth_token)):
+            return None
+        public_pairing = self._public_pairing(pairing, now=checked_at)
+        if public_pairing["status"] != "active":
+            return None
+        allowed_actions = set(public_pairing.get("allowed_actions") or ())
+        if action not in allowed_actions:
+            return None
+        scoped_task = public_pairing.get("task_id")
+        if scoped_task and scoped_task != task_id:
+            return None
+        return {
+            "pairing": public_pairing,
+            "relay_target": str(relay_registration.get("relay_target") or ""),
+            "relay_registered_at": relay_registration.get("registered_at"),
+            "pairing_token_relayed": False,
+            "raw_secret_values_included": False,
         }
 
     def authorize(self, token: str, *, now: datetime | None = None) -> dict[str, Any] | None:
@@ -344,6 +400,7 @@ class RemoteControlPairingRegistry:
                 "created_at": str(row.get("created_at") or _utc_now(None).isoformat()),
                 "expires_at": str(row.get("expires_at") or _utc_now(None).isoformat()),
                 "revoked_at": _optional_clean_string(row.get("revoked_at")),
+                "relay_registration": _normalize_relay_registration(row.get("relay_registration")),
             }
         self._pairings = pairings
 
@@ -373,6 +430,8 @@ class RemoteControlPairingRegistry:
             status = "expired"
         else:
             status = "active"
+        relay_registration = pairing.get("relay_registration")
+        relay_registered = isinstance(relay_registration, dict) and bool(relay_registration.get("relay_auth_sha256"))
         return {
             "id": pairing["id"],
             "label": pairing["label"],
@@ -383,6 +442,9 @@ class RemoteControlPairingRegistry:
             "expires_at": pairing["expires_at"],
             "revoked_at": revoked_at,
             "status": status,
+            "relay_registered": relay_registered,
+            "relay_target": str(relay_registration.get("relay_target") or "") if isinstance(relay_registration, dict) else None,
+            "relay_action_proxy_enabled": bool(status == "active" and relay_registered),
         }
 
 
@@ -408,6 +470,22 @@ def _optional_clean_string(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _normalize_relay_registration(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    relay_target = _optional_clean_string(value.get("relay_target"))
+    relay_auth_sha256 = _optional_clean_string(value.get("relay_auth_sha256"))
+    if not relay_target or not relay_auth_sha256:
+        return None
+    return {
+        "relay_target": relay_target,
+        "relay_auth_sha256": relay_auth_sha256,
+        "registered_at": str(value.get("registered_at") or _utc_now(None).isoformat()),
+        "pairing_token_relayed": False,
+        "raw_secret_values_included": False,
+    }
 
 
 def _token_hash(token: str) -> str:

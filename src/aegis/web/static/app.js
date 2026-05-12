@@ -1573,7 +1573,7 @@ const renderRemoteControlOutput = (payload) => {
 
 const renderRemoteControlRelay = (payload = {}) => {
   const summary = document.getElementById("remote-control-relay-summary");
-  summary.textContent = `${payload.status || "relay_preflight"} · outbound ${payload.outbound_relay_enabled ? "enabled" : "blocked"} · target ${payload.relay_target || "not configured"}`;
+  summary.textContent = `${payload.status || "relay_preflight"} · outbound ${payload.outbound_relay_enabled ? "enabled" : "blocked"} · relay action ${payload.relay_action_proxy_enabled ? "enabled" : "blocked"} · target ${payload.relay_target || "not configured"}`;
   setList("remote-control-relay", payload.blockers || [], (x) => ({
     title: x.control,
     detail: x.detail,

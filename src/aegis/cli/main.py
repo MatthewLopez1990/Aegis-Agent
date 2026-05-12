@@ -427,6 +427,13 @@ def build_parser() -> argparse.ArgumentParser:
     remote_control_relay.add_argument("--pairing-id", help="Active pairing id to register with the relay")
     remote_control_relay.add_argument("--relay-auth-secret", help="Brokered secret name for relay bearer auth")
     remote_control_relay.add_argument("--approved", action="store_true", help="Approve one outbound relay registration")
+    remote_control_relay_action = remote_control_sub.add_parser("relay-action", help="Execute a registered relay-authenticated task action")
+    remote_control_relay_action.add_argument("--pairing-id", required=True, help="Registered pairing id")
+    remote_control_relay_action.add_argument("--task-id", required=True, help="Task id to control through the relay proxy")
+    remote_control_relay_action.add_argument("--action", required=True, choices=["status", "events", "resume", "pause", "cancel"], help="Scoped remote-control action")
+    remote_control_relay_action.add_argument("--relay-auth-secret", required=True, help="Brokered secret name for relay bearer auth")
+    remote_control_relay_action.add_argument("--session-id", help="Optional session id for resume/pause/cancel")
+    remote_control_relay_action.add_argument("--reason", default="", help="Optional reason for pause/cancel")
 
     models = subcommands.add_parser("model", help="Manage model routes and usage")
     model_sub = models.add_subparsers(dest="model_command", required=True)
@@ -1157,6 +1164,71 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 )
                 return result
             return registry.relay_preflight(relay_url=args.relay_url)
+        if args.remote_control_command == "relay-action":
+            broker = SecretsBroker(config.secrets_path)
+            handle = broker.request_handle(
+                name=args.relay_auth_secret,
+                requester="remote_control_relay",
+                reason="authorize registered remote-control relay action proxy",
+                scopes=("remote_control:relay",),
+            )
+            relay_auth_token = broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+            relay_auth = registry.authorize_relay_action(
+                args.pairing_id,
+                relay_auth_token,
+                action=args.action,
+                task_id=args.task_id,
+            )
+            if relay_auth is None:
+                raise PermissionError("missing or invalid remote-control relay authorization")
+            orchestrator = build_orchestrator(data_dir=config.data_dir)
+            actor = f"remote-control-relay:{relay_auth['pairing'].get('label') or relay_auth['pairing']['id']}"
+            if args.action == "status":
+                action_result = orchestrator.status(args.task_id)
+            elif args.action == "events":
+                action_result = orchestrator.evidence.run_events(args.task_id)
+            elif args.action == "resume":
+                action_result = orchestrator.resume_task(args.task_id, session_id=args.session_id, actor=actor)
+            elif args.action == "pause":
+                action_result = orchestrator.pause_task(
+                    args.task_id,
+                    session_id=args.session_id,
+                    actor=actor,
+                    reason=args.reason or "remote control relay pause",
+                )
+            else:
+                action_result = orchestrator.cancel_task(
+                    args.task_id,
+                    session_id=args.session_id,
+                    actor=actor,
+                    reason=args.reason or "remote control relay cancel",
+                )
+            orchestrator.audit_logger.append(
+                "remote_control.relay_action",
+                {
+                    "pairing_id": relay_auth["pairing"]["id"],
+                    "relay_target": relay_auth["relay_target"],
+                    "task_id": args.task_id,
+                    "action": args.action,
+                    "actor": actor,
+                    "pairing_token_relayed": False,
+                    "relay_auth_token_captured": False,
+                    "raw_secret_values_included": False,
+                    "source": "cli",
+                },
+            )
+            return {
+                "status": "relay_action_proxied",
+                "mode": "approved_relay_action_proxy",
+                "action": args.action,
+                "task_id": args.task_id,
+                "pairing": relay_auth["pairing"],
+                "relay_target": relay_auth["relay_target"],
+                "pairing_token_relayed": False,
+                "relay_auth_token_captured": False,
+                "raw_secret_values_included": False,
+                "result": action_result,
+            }
 
     if args.command == "model":
         registry = _model_registry(config)

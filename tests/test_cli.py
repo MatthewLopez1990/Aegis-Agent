@@ -125,6 +125,7 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             parser = build_parser()
             data_dir = Path(temp) / ".aegis"
+            relay_task = build_orchestrator(data_dir=data_dir, workspace=Path(temp)).submit_task("send message relay controlled")
 
             status = dispatch(parser.parse_args(["--data-dir", str(data_dir), "remote-control", "status"]))
             pair = dispatch(
@@ -137,7 +138,7 @@ class CliTests(unittest.TestCase):
                         "--label",
                         "phone",
                         "--task-id",
-                        "task-1",
+                        relay_task["id"],
                         "--allowed-actions",
                         "status,pause,shell",
                         "--expires-in-seconds",
@@ -192,6 +193,26 @@ class CliTests(unittest.TestCase):
                             ]
                         )
                     )
+            relay_action = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "remote-control",
+                        "relay-action",
+                        "--pairing-id",
+                        pair["pairing"]["id"],
+                        "--task-id",
+                        relay_task["id"],
+                        "--action",
+                        "pause",
+                        "--relay-auth-secret",
+                        "AEGIS_REMOTE_RELAY_TOKEN",
+                        "--reason",
+                        "Relay operator pause",
+                    ]
+                )
+            )
             revoked = dispatch(parser.parse_args(["--data-dir", str(data_dir), "remote-control", "revoke", pair["pairing"]["id"]]))
 
             self.assertEqual(status["relay_preflight"]["status"], "relay_blocked_preflight")
@@ -206,10 +227,17 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("token=secret", json.dumps(relay, sort_keys=True))
             self.assertEqual(registered_relay["status"], "relay_registered")
             self.assertEqual(registered_relay["relay_target"], "https://example.com/aegis-relay")
+            self.assertTrue(registered_relay["relay_action_proxy_enabled"])
             self.assertFalse(registered_relay["pairing_token_relayed"])
             self.assertNotIn("relay-raw-secret", json.dumps(registered_relay, sort_keys=True))
+            self.assertEqual(relay_action["status"], "relay_action_proxied")
+            self.assertEqual(relay_action["mode"], "approved_relay_action_proxy")
+            self.assertEqual(relay_action["result"]["status"], "paused")
+            self.assertFalse(relay_action["pairing_token_relayed"])
+            self.assertFalse(relay_action["relay_auth_token_captured"])
             self.assertEqual(revoked["pairing"]["status"], "revoked")
             self.assertNotIn(pair["token"], (data_dir / "remote_control_pairings.json").read_text(encoding="utf-8"))
+            self.assertNotIn("relay-raw-secret", (data_dir / "remote_control_pairings.json").read_text(encoding="utf-8"))
             self.assertNotIn(pair["token"], (data_dir / "audit.jsonl").read_text(encoding="utf-8"))
             self.assertNotIn("relay-raw-secret", (data_dir / "audit.jsonl").read_text(encoding="utf-8"))
 

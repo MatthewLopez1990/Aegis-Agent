@@ -13,8 +13,10 @@ import unittest
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
+from unittest.mock import patch
 
 from aegis.api.server import _allowed_hosts, _allowed_origins, authorize_local_request, require_allowed_host
+from aegis.remote_control import RemoteControlPairingRegistry
 from aegis.research.harness import ResearchHarness
 from aegis.security.taint import TrustClass
 from aegis.skills.manifest import SkillManifest
@@ -513,6 +515,52 @@ class ApiServerSecurityTests(unittest.TestCase):
                 remote_status_paired = _json_get(port, "/remote-control/status", remote_token=remote_token)
                 remote_task_status = _json_get(port, f"/remote-control/tasks/{remote_control_task['id']}", remote_token=remote_token)
                 remote_task_events = _json_get(port, f"/remote-control/tasks/{remote_control_task['id']}/events", remote_token=remote_token)
+
+                class FakeRelayResponse:
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, exc_type, exc, traceback):
+                        return False
+
+                    def getcode(self) -> int:
+                        return 202
+
+                    def read(self, limit: int) -> bytes:
+                        return b'{"ok":true,"token":"relay-raw-secret"}'
+
+                with patch("aegis.remote_control._private_network_error", return_value=None):
+                    with patch("aegis.remote_control._open_without_redirects", return_value=FakeRelayResponse()):
+                        relay_proxy_registration = RemoteControlPairingRegistry(data_dir / "remote_control_pairings.json").relay_pairing(
+                            remote_pair["pairing"]["id"],
+                            relay_url="https://example.com/aegis-relay?token=secret",
+                            allowlist=("example.com",),
+                            relay_auth_token="relay-raw-secret",
+                            approved=True,
+                        )
+                remote_relay_action = _json_post(
+                    port,
+                    "/remote-control/relay/action",
+                    {
+                        "pairing_id": remote_pair["pairing"]["id"],
+                        "task_id": remote_control_task["id"],
+                        "action": "pause",
+                        "session_id": web_session["id"],
+                        "reason": "Relayed operator pause",
+                    },
+                    bearer_token="relay-raw-secret",
+                )
+                with self.assertRaises(HTTPError) as remote_relay_bad_secret_error:
+                    _json_post(
+                        port,
+                        "/remote-control/relay/action",
+                        {
+                            "pairing_id": remote_pair["pairing"]["id"],
+                            "task_id": remote_control_task["id"],
+                            "action": "cancel",
+                        },
+                        bearer_token="wrong-secret",
+                    )
                 with self.assertRaises(HTTPError) as remote_dashboard_error:
                     _json_get(port, "/dashboard", remote_token=remote_token)
                 with self.assertRaises(HTTPError) as remote_wrong_scope_error:
@@ -973,6 +1021,16 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(remote_status_paired["status"], "remote_pairing_active")
                 self.assertEqual(remote_task_status["id"], remote_control_task["id"])
                 self.assertEqual(remote_task_events["task_id"], remote_control_task["id"])
+                self.assertEqual(relay_proxy_registration["status"], "relay_registered")
+                self.assertTrue(relay_proxy_registration["relay_action_proxy_enabled"])
+                self.assertFalse(relay_proxy_registration["pairing_token_relayed"])
+                self.assertEqual(remote_relay_action["status"], "relay_action_proxied")
+                self.assertEqual(remote_relay_action["mode"], "approved_relay_action_proxy")
+                self.assertEqual(remote_relay_action["action"], "pause")
+                self.assertEqual(remote_relay_action["result"]["status"], "paused")
+                self.assertFalse(remote_relay_action["pairing_token_relayed"])
+                self.assertFalse(remote_relay_action["relay_auth_token_captured"])
+                self.assertEqual(remote_relay_bad_secret_error.exception.code, 403)
                 self.assertEqual(remote_dashboard_error.exception.code, 403)
                 self.assertEqual(remote_wrong_scope_error.exception.code, 403)
                 self.assertEqual(remote_paused_task["id"], remote_control_task["id"])
@@ -980,7 +1038,9 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(remote_pair_replay_error.exception.code, 403)
                 self.assertEqual(remote_revoked["pairing"]["status"], "revoked")
                 self.assertEqual(revoked_remote_error.exception.code, 403)
+                self.assertNotIn("relay-raw-secret", (data_dir / "remote_control_pairings.json").read_text(encoding="utf-8"))
                 self.assertNotIn(remote_token, (data_dir / "audit.jsonl").read_text(encoding="utf-8"))
+                self.assertNotIn("relay-raw-secret", (data_dir / "audit.jsonl").read_text(encoding="utf-8"))
                 self.assertEqual(model_route["identifier"], "ollama/llama3")
                 self.assertEqual(model_alias["alias"], "webfast")
                 self.assertEqual(model_fallbacks["fallbacks"], ["lmstudio/local"])
@@ -1268,12 +1328,22 @@ def _bytes_get(port: int, path: str, *, token: str | None = None) -> tuple[bytes
         return response.read(), response.headers
 
 
-def _json_post(port: int, path: str, payload: dict[str, object], *, token: str | None = None, remote_token: str | None = None) -> dict[str, object]:
+def _json_post(
+    port: int,
+    path: str,
+    payload: dict[str, object],
+    *,
+    token: str | None = None,
+    remote_token: str | None = None,
+    bearer_token: str | None = None,
+) -> dict[str, object]:
     headers = {"Content-Type": "application/json"}
     if token is not None:
         headers["X-Aegis-Token"] = token
     if remote_token is not None:
         headers["X-Aegis-Remote-Token"] = remote_token
+    if bearer_token is not None:
+        headers["Authorization"] = f"Bearer {bearer_token}"
     request = Request(
         f"http://127.0.0.1:{port}{path}",
         data=json.dumps(payload).encode("utf-8"),

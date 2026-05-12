@@ -107,6 +107,12 @@ class RemoteControlPairingTests(unittest.TestCase):
         self.assertNotIn("relay-raw-secret", rendered_body)
         self.assertNotIn("relay-raw-secret", rendered_result)
         self.assertNotIn("token=secret", rendered_result)
+        self.assertEqual(registry.authorize_relay_action(created["pairing"]["id"], "relay-raw-secret", action="pause", task_id="task-1", now=now)["pairing"]["id"], created["pairing"]["id"])
+        self.assertIsNone(registry.authorize_relay_action(created["pairing"]["id"], "wrong-secret", action="pause", task_id="task-1", now=now))
+        self.assertIsNone(registry.authorize_relay_action(created["pairing"]["id"], "relay-raw-secret", action="cancel", task_id="task-1", now=now))
+        self.assertIsNone(registry.authorize_relay_action(created["pairing"]["id"], "relay-raw-secret", action="pause", task_id="other-task", now=now))
+        registry.revoke(created["pairing"]["id"], now=now + timedelta(seconds=1))
+        self.assertIsNone(registry.authorize_relay_action(created["pairing"]["id"], "relay-raw-secret", action="pause", task_id="task-1", now=now + timedelta(seconds=2)))
 
     def test_relay_preflight_rejects_non_https_targets(self) -> None:
         registry = RemoteControlPairingRegistry()

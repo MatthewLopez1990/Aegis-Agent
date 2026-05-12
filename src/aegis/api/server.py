@@ -458,6 +458,8 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
             path = parsed.path
             if path in {"/remote-control/pair", "/remote-control/revoke", "/remote-control/relay"}:
                 self._authorize_local_mutation()
+            elif path == "/remote-control/relay/action":
+                pass
             elif re.fullmatch(r"/remote-control/tasks/[^/]+/(resume|pause|cancel)", path):
                 pass
             elif path != "/channels/webhook":
@@ -538,6 +540,64 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     },
                 )
                 self._json(result)
+                return
+            if path == "/remote-control/relay/action":
+                require_allowed_host(self.headers, allowed_hosts=allowed_hosts)
+                origin = self.headers.get("Origin")
+                if origin and origin not in allowed_origins:
+                    raise PermissionError("origin is not allowed")
+                payload = self._read_json()
+                action = str(_required(payload, "action")).strip().lower().replace("-", "_")
+                task_id = str(_required(payload, "task_id"))
+                relay_auth = remote_control.authorize_relay_action(
+                    str(_required(payload, "pairing_id")),
+                    _authorization_bearer(self.headers),
+                    action=action,
+                    task_id=task_id,
+                )
+                if relay_auth is None:
+                    raise PermissionError("missing or invalid remote-control relay authorization")
+                actor = f"remote-control-relay:{relay_auth['pairing'].get('label') or relay_auth['pairing']['id']}"
+                if action == "status":
+                    result = orchestrator.status(task_id)
+                elif action == "events":
+                    result = orchestrator.evidence.run_events(task_id)
+                elif action == "resume":
+                    result = orchestrator.resume_task(task_id, session_id=payload.get("session_id"), actor=actor)
+                elif action == "pause":
+                    result = orchestrator.pause_task(task_id, session_id=payload.get("session_id"), actor=actor, reason=str(payload.get("reason", "remote control relay pause")))
+                elif action == "cancel":
+                    result = orchestrator.cancel_task(task_id, session_id=payload.get("session_id"), actor=actor, reason=str(payload.get("reason", "remote control relay cancel")))
+                else:
+                    raise PermissionError("remote-control relay action is not allowed")
+                orchestrator.audit_logger.append(
+                    "remote_control.relay_action",
+                    {
+                        "pairing_id": relay_auth["pairing"]["id"],
+                        "relay_target": relay_auth["relay_target"],
+                        "task_id": task_id,
+                        "action": action,
+                        "actor": actor,
+                        "pairing_token_relayed": False,
+                        "relay_auth_token_captured": False,
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(
+                    {
+                        "status": "relay_action_proxied",
+                        "mode": "approved_relay_action_proxy",
+                        "action": action,
+                        "task_id": task_id,
+                        "pairing": relay_auth["pairing"],
+                        "relay_target": relay_auth["relay_target"],
+                        "pairing_token_relayed": False,
+                        "relay_auth_token_captured": False,
+                        "raw_secret_values_included": False,
+                        "result": result,
+                    }
+                )
                 return
             match_remote_action = re.fullmatch(r"/remote-control/tasks/([^/]+)/(resume|pause|cancel)", path)
             if match_remote_action:
@@ -2149,6 +2209,13 @@ def authorize_local_request(headers: Any, *, token: str, allowed_hosts: set[str]
     supplied = headers.get("X-Aegis-Token", "")
     if not secrets.compare_digest(supplied, token):
         raise PermissionError("missing or invalid local API token")
+
+
+def _authorization_bearer(headers: Any) -> str:
+    value = str(headers.get("Authorization", "") or "")
+    if not value.lower().startswith("bearer "):
+        return ""
+    return value[7:].strip()
 
 
 def authorize_remote_control_request(
