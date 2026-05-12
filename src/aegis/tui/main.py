@@ -2508,12 +2508,33 @@ class AegisTui(cmd.Cmd):
             return
         if parts and parts[0] == "revoke":
             if len(parts) < 2:
-                print("usage: remote-control revoke <pairing_id>")
+                print("usage: remote-control revoke <pairing_id> [--relay-auth-secret <secret_name> --approved]")
                 return
             registry = RemoteControlPairingRegistry(
                 self.orchestrator.config.data_dir / "remote_control_pairings.json"
             )
-            result = registry.revoke(parts[1])
+            relay_auth_token = None
+            relay_secret = _option_value(parts, "--relay-auth-secret")
+            if relay_secret or "--approved" in parts:
+                if not relay_secret or "--approved" not in parts:
+                    print("usage: remote-control revoke <pairing_id> [--relay-auth-secret <secret_name> --approved]")
+                    return
+                try:
+                    handle = self.orchestrator.secrets_broker.request_handle(
+                        name=relay_secret,
+                        requester="remote_control_relay",
+                        reason="propagate scoped remote-control relay revocation",
+                        scopes=("remote_control:relay",),
+                    )
+                    relay_auth_token = self.orchestrator.secrets_broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                except KeyError as exc:
+                    print(f"remote-control revoke error: {exc}")
+                    return
+            try:
+                result = registry.revoke(parts[1], relay_auth_token=relay_auth_token, notify_relay=bool(relay_auth_token))
+            except (PermissionError, ValueError, KeyError) as exc:
+                print(f"remote-control revoke error: {exc}")
+                return
             self.orchestrator.audit_logger.append(
                 "remote_control.pairing_revoked",
                 {
@@ -2521,6 +2542,7 @@ class AegisTui(cmd.Cmd):
                     "label": result["pairing"]["label"],
                     "session_id": result["pairing"].get("session_id"),
                     "token_captured": False,
+                    "relay_revocation_propagated": result["relay_revocation_propagated"],
                     "source": "tui",
                 },
             )
@@ -5312,12 +5334,15 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("plugin", "update-marketplace"): ("--catalog-path", "--enable", "--disable", "--force"),
     ("curator", "run"): ("--dry-run",),
     ("remote-control", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
+    ("remote-control", "revoke"): ("--relay-auth-secret", "--approved"),
     ("remote-control", "relay"): ("--relay-url", "--pairing-id", "--relay-auth-secret", "--approved"),
     ("remote-control", "relay-action"): ("--pairing-id", "--task-id", "--action", "--relay-auth-secret", "--session-id", "--reason"),
     ("remote_control", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
+    ("remote_control", "revoke"): ("--relay-auth-secret", "--approved"),
     ("remote_control", "relay"): ("--relay-url", "--pairing-id", "--relay-auth-secret", "--approved"),
     ("remote_control", "relay-action"): ("--pairing-id", "--task-id", "--action", "--relay-auth-secret", "--session-id", "--reason"),
     ("rc", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
+    ("rc", "revoke"): ("--relay-auth-secret", "--approved"),
     ("rc", "relay"): ("--relay-url", "--pairing-id", "--relay-auth-secret", "--approved"),
     ("rc", "relay-action"): ("--pairing-id", "--task-id", "--action", "--relay-auth-secret", "--session-id", "--reason"),
 }

@@ -21,7 +21,7 @@ Commands:
 - `history [session_id] [--limit N]`, `title [name]`, `topic [off|help|session_id]`, `compress|compact [keep_last]`
 - `background <request>` / `bg <request>`
 - `fast [request]`, `goal`, `batch`, `queue` / `q`, `loop`, `plan`, `branch`, `fork`, `context`, `copy`, `export`, `rename [title]`, `save`, `prompt`, `steer [instruction]`, `stop [task_id]`, `continue [task_id]`, `checkpoint`, `rewind`, `retry`, `undo`, `snapshot`, `snap`
-- `remote-control [name|pair|revoke|relay]` / `rc [name|pair|revoke|relay]`, `handoff [platform]`, `remote-env`, `teleport`, `tp`, `mobile`, `desktop`, `app`, `web-setup`
+- `remote-control [name|pair|revoke|relay]` / `rc [name|pair|revoke|relay]`, including `revoke <pairing-id> [--relay-auth-secret name --approved]` for approved relay revocation propagation; `handoff [platform]`, `remote-env`, `teleport`, `tp`, `mobile`, `desktop`, `app`, `web-setup`
 - `agents [status|delegate <role> <task> [--approved]]`
 - CLI `task list [--session-id <session_id>] [--limit N]`
 - `approvals`

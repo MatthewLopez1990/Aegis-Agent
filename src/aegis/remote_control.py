@@ -144,7 +144,6 @@ class RemoteControlPairingRegistry:
             {"control": "brokered_relay_auth", "detail": "relay credentials must use brokered handles and must not expose raw tokens"},
             {"control": "relay_origin_allowlist", "detail": "remote origins must be allowlisted before off-device access"},
             {"control": "push_delivery_approval", "detail": "mobile push delivery requires an approved channel adapter"},
-            {"control": "revocation_and_expiry_propagation", "detail": "remote relays must honor local pairing expiry and revocation"},
         ]
         if relay_target is None and relay_url:
             blockers.insert(0, {"control": "relay_url_validation", "detail": "relay URL must use https"})
@@ -168,6 +167,7 @@ class RemoteControlPairingRegistry:
                 "host_and_origin_checks",
                 "scoped_task_actions",
                 "local_revocation",
+                "approved_relay_revocation_propagation",
             ],
             "blockers": blockers,
             "verification_gates": list(REMOTE_CONTROL_RELAY_VERIFICATION_GATES),
@@ -182,7 +182,7 @@ class RemoteControlPairingRegistry:
             "next_steps": [
                 "Register an active pairing with an allowlisted relay using a brokered credential handle.",
                 "Preserve local pairing scope, expiry, revocation, host checks, and audit receipts through relayed actions.",
-                "Add mobile push delivery, cloud directory, and relay revocation propagation tests before broad off-device delivery.",
+                "Add mobile push delivery and cloud directory tests before broad off-device delivery.",
             ],
         }
 
@@ -284,6 +284,7 @@ class RemoteControlPairingRegistry:
                 "relay_action_authorization",
                 "audit_receipts_without_tokens",
                 "local_revocation",
+                "approved_relay_revocation_propagation",
             ],
             "remaining_controls": [
                 "mobile_push_delivery_approval",
@@ -362,7 +363,14 @@ class RemoteControlPairingRegistry:
             return None
         return pairing
 
-    def revoke(self, pairing_id: str, *, now: datetime | None = None) -> dict[str, Any]:
+    def revoke(
+        self,
+        pairing_id: str,
+        *,
+        now: datetime | None = None,
+        relay_auth_token: str | None = None,
+        notify_relay: bool = False,
+    ) -> dict[str, Any]:
         self._load()
         pairing = self._pairings.get(pairing_id)
         if pairing is None:
@@ -370,8 +378,75 @@ class RemoteControlPairingRegistry:
         revoked_at = _utc_now(now)
         if pairing.get("revoked_at") is None:
             pairing["revoked_at"] = revoked_at.isoformat()
-            self._save()
-        return {"status": "revoked", "pairing": self._public_pairing(pairing, now=revoked_at)}
+        relay_result = self._notify_relay_revocation(pairing, relay_auth_token=relay_auth_token or "", now=revoked_at) if notify_relay else {}
+        self._save()
+        return {
+            "status": "revoked",
+            "pairing": self._public_pairing(pairing, now=revoked_at),
+            "relay_revocation_available": _relay_registered(pairing),
+            "relay_revocation_propagated": bool(relay_result),
+            **relay_result,
+            "pairing_token_relayed": False,
+            "raw_secret_values_included": False,
+        }
+
+    def _notify_relay_revocation(
+        self,
+        pairing: dict[str, Any],
+        *,
+        relay_auth_token: str,
+        now: datetime,
+    ) -> dict[str, Any]:
+        relay_registration = pairing.get("relay_registration")
+        if not isinstance(relay_registration, dict):
+            raise ValueError("remote-control relay revocation requires a registered relay")
+        if not relay_auth_token.strip():
+            raise ValueError("remote-control relay revocation requires a brokered relay auth token")
+        stored_hash = str(relay_registration.get("relay_auth_sha256") or "")
+        if not stored_hash or not secrets.compare_digest(stored_hash, _token_hash(relay_auth_token)):
+            raise PermissionError("remote-control relay revocation auth does not match registration")
+        relay_target = str(relay_registration.get("relay_target") or "")
+        payload = {
+            "type": "aegis.remote_control.revocation",
+            "version": 1,
+            "sent_at": now.isoformat(),
+            "pairing_id": pairing["id"],
+            "revoked_at": pairing.get("revoked_at") or now.isoformat(),
+            "pairing_token_included": False,
+            "raw_secret_values_included": False,
+            "required_controls": ["revocation_and_expiry_propagation", "audit_receipts_without_tokens"],
+        }
+        request = Request(
+            relay_target,
+            data=json.dumps(payload, sort_keys=True).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {relay_auth_token}",
+                "Content-Type": "application/json",
+                "User-Agent": "Aegis-Agent/0.1",
+            },
+            method="POST",
+        )
+        try:
+            response_context = _open_without_redirects(request, timeout=10)
+        except HTTPError as exc:
+            if 300 <= exc.code < 400:
+                raise ValueError("HTTP redirects are not followed for remote-control relay revocation") from exc
+            raise ValueError(f"remote-control relay revocation failed with status {exc.code}") from exc
+        except URLError as exc:
+            raise ValueError(f"remote-control relay revocation failed: {exc.reason}") from exc
+        with response_context as response:
+            response_status = response.getcode() if hasattr(response, "getcode") else None
+            response_body = response.read(2048)
+        relay_registration["revocation_relayed_at"] = now.isoformat()
+        relay_registration["revocation_response_status"] = response_status
+        relay_registration["pairing_token_relayed"] = False
+        relay_registration["raw_secret_values_included"] = False
+        return {
+            "relay_target": relay_target,
+            "relay_response_status": response_status,
+            "relay_response_bytes": len(response_body),
+            "relay_auth_secret_used": True,
+        }
 
     def _load(self) -> None:
         if self.store_path is None or not self.store_path.exists():
@@ -432,6 +507,7 @@ class RemoteControlPairingRegistry:
             status = "active"
         relay_registration = pairing.get("relay_registration")
         relay_registered = isinstance(relay_registration, dict) and bool(relay_registration.get("relay_auth_sha256"))
+        relay_revocation_relayed_at = str(relay_registration.get("revocation_relayed_at") or "") if isinstance(relay_registration, dict) else ""
         return {
             "id": pairing["id"],
             "label": pairing["label"],
@@ -445,6 +521,8 @@ class RemoteControlPairingRegistry:
             "relay_registered": relay_registered,
             "relay_target": str(relay_registration.get("relay_target") or "") if isinstance(relay_registration, dict) else None,
             "relay_action_proxy_enabled": bool(status == "active" and relay_registered),
+            "relay_revocation_propagated": bool(relay_revocation_relayed_at),
+            "relay_revocation_relayed_at": relay_revocation_relayed_at or None,
         }
 
 
@@ -479,13 +557,23 @@ def _normalize_relay_registration(value: Any) -> dict[str, Any] | None:
     relay_auth_sha256 = _optional_clean_string(value.get("relay_auth_sha256"))
     if not relay_target or not relay_auth_sha256:
         return None
-    return {
+    normalized = {
         "relay_target": relay_target,
         "relay_auth_sha256": relay_auth_sha256,
         "registered_at": str(value.get("registered_at") or _utc_now(None).isoformat()),
         "pairing_token_relayed": False,
         "raw_secret_values_included": False,
     }
+    if value.get("revocation_relayed_at"):
+        normalized["revocation_relayed_at"] = str(value["revocation_relayed_at"])
+    if value.get("revocation_response_status") is not None:
+        normalized["revocation_response_status"] = int(value["revocation_response_status"])
+    return normalized
+
+
+def _relay_registered(pairing: dict[str, Any]) -> bool:
+    relay_registration = pairing.get("relay_registration")
+    return isinstance(relay_registration, dict) and bool(relay_registration.get("relay_auth_sha256"))
 
 
 def _token_hash(token: str) -> str:

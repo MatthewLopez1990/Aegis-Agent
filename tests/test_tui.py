@@ -300,6 +300,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("relay-action", tui.complete_remote_control("relay-a", "remote_control relay-a", len("remote_control "), len("remote_control relay-a")))
             self.assertIn("revoke", tui.complete_remote_control("rev", "remote_control rev", len("remote_control "), len("remote_control rev")))
             self.assertIn("--task-id", tui.completedefault("--", "/remote-control pair --", len("/remote-control pair "), len("/remote-control pair --")))
+            self.assertIn("--relay-auth-secret", tui.completedefault("--", "/remote-control revoke pairing --", len("/remote-control revoke pairing "), len("/remote-control revoke pairing --")))
             self.assertIn("--approved", tui.completedefault("--", "/remote-control relay --", len("/remote-control relay "), len("/remote-control relay --")))
             self.assertIn("--action", tui.completedefault("--", "/remote-control relay-action --", len("/remote-control relay-action "), len("/remote-control relay-action --")))
             self.assertIn("append", tui.complete_session("ap", "session ap", len("session "), len("session ap")))

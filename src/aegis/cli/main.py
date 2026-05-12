@@ -438,6 +438,8 @@ def build_parser() -> argparse.ArgumentParser:
     remote_control_pair.add_argument("--port", type=int, default=8765, help="Local API port to render in endpoint hints")
     remote_control_revoke = remote_control_sub.add_parser("revoke", help="Revoke a local remote-control pairing")
     remote_control_revoke.add_argument("pairing_id")
+    remote_control_revoke.add_argument("--relay-auth-secret", help="Brokered secret name used to propagate relay revocation")
+    remote_control_revoke.add_argument("--approved", action="store_true", help="Approve one outbound relay revocation notice")
     remote_control_relay = remote_control_sub.add_parser("relay", help="Show outbound relay preflight blockers or register an approved pairing")
     remote_control_relay.add_argument("--relay-url")
     remote_control_relay.add_argument("--pairing-id", help="Active pairing id to register with the relay")
@@ -1193,7 +1195,19 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             )
             return result
         if args.remote_control_command == "revoke":
-            result = registry.revoke(args.pairing_id)
+            relay_auth_token = None
+            if args.relay_auth_secret or args.approved:
+                if not args.relay_auth_secret or not args.approved:
+                    raise ValueError("relay revocation propagation requires --relay-auth-secret and --approved")
+                broker = SecretsBroker(config.secrets_path)
+                handle = broker.request_handle(
+                    name=args.relay_auth_secret,
+                    requester="remote_control_relay",
+                    reason="propagate scoped remote-control relay revocation",
+                    scopes=("remote_control:relay",),
+                )
+                relay_auth_token = broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+            result = registry.revoke(args.pairing_id, relay_auth_token=relay_auth_token, notify_relay=bool(relay_auth_token))
             AuditLogger(config.audit_log_path).append(
                 "remote_control.pairing_revoked",
                 {
@@ -1201,6 +1215,7 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                     "label": result["pairing"]["label"],
                     "session_id": result["pairing"].get("session_id"),
                     "token_captured": False,
+                    "relay_revocation_propagated": result["relay_revocation_propagated"],
                     "source": "cli",
                 },
             )

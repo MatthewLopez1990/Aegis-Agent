@@ -498,7 +498,23 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 return
             if path == "/remote-control/revoke":
                 payload = self._read_json()
-                result = remote_control.revoke(str(_required(payload, "pairing_id")))
+                relay_auth_token = None
+                if payload.get("relay_auth_secret") or payload.get("approved"):
+                    if not bool(payload.get("approved", False)):
+                        raise PermissionError("remote-control relay revocation requires explicit approval")
+                    relay_secret = str(_required(payload, "relay_auth_secret"))
+                    handle = orchestrator.secrets_broker.request_handle(
+                        name=relay_secret,
+                        requester="remote_control_relay",
+                        reason="propagate scoped remote-control relay revocation",
+                        scopes=("remote_control:relay",),
+                    )
+                    relay_auth_token = orchestrator.secrets_broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                result = remote_control.revoke(
+                    str(_required(payload, "pairing_id")),
+                    relay_auth_token=relay_auth_token,
+                    notify_relay=bool(relay_auth_token),
+                )
                 orchestrator.audit_logger.append(
                     "remote_control.pairing_revoked",
                     {
@@ -506,6 +522,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                         "label": result["pairing"]["label"],
                         "session_id": result["pairing"].get("session_id"),
                         "token_captured": False,
+                        "relay_revocation_propagated": result["relay_revocation_propagated"],
                     },
                 )
                 self._json(result)
