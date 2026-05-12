@@ -29,6 +29,7 @@ from aegis.security.policy_profile import activate_due_policy_rollouts, apply_po
 from aegis.security.taint import RiskLevel, Sensitivity, TrustClass
 from aegis.skills.signing import DEFAULT_SKILL_SIGNING_KEY
 from aegis.tools.executor import ToolExecutionError
+from aegis.tui.main import COMMAND_MENU_GROUPS, TOP_LEVEL_COMMANDS
 
 
 _TERMINAL_TASK_STATUSES = {"completed", "failed", "blocked", "cancelled"}
@@ -63,6 +64,94 @@ def _hooks_payload(orchestrator: Any) -> dict[str, Any]:
         "allowed_executables": list(orchestrator.config.allowed_shell_commands),
         "raw_secret_values_included": False,
     }
+
+
+def _web_command_catalog(orchestrator: Any) -> dict[str, Any]:
+    command_rows: dict[str, dict[str, Any]] = {}
+    top_level = {command.replace("_", "-") for command in TOP_LEVEL_COMMANDS}
+    for group, commands in COMMAND_MENU_GROUPS:
+        for label, detail in commands:
+            for token in _command_label_tokens(label, top_level):
+                command_rows.setdefault(
+                    token,
+                    {
+                        "command": token,
+                        "label": f"/{token}",
+                        "detail": detail,
+                        "kind": "palette",
+                        "section": _command_group_section(group),
+                        "group": group.lower(),
+                        "source": "tui",
+                    },
+                )
+    for command in sorted(top_level):
+        command_rows.setdefault(
+            command,
+            {
+                "command": command,
+                "label": f"/{command}",
+                "detail": "TUI command available from the local governed runtime",
+                "kind": "palette",
+                "section": "settings",
+                "group": "all",
+                "source": "tui",
+            },
+        )
+    skill_rows: list[dict[str, Any]] = []
+    for skill in orchestrator.skills.list_public():
+        if not skill.get("enabled"):
+            continue
+        for command in _skill_slash_labels(str(skill.get("id") or "")):
+            skill_rows.append(
+                {
+                    "command": command,
+                    "label": f"/{command}",
+                    "detail": f"Skill: {skill.get('name') or skill.get('id')}",
+                    "kind": "palette",
+                    "section": "tools",
+                    "group": "skills",
+                    "source": "skill",
+                }
+            )
+    return {
+        "status": "command_catalog",
+        "mode": "read_only_navigation",
+        "commands": [*sorted(command_rows.values(), key=lambda row: str(row["command"])), *skill_rows],
+        "groups": [{"name": group.lower(), "label": group, "command_count": len(commands)} for group, commands in COMMAND_MENU_GROUPS],
+        "skill_command_count": len(skill_rows),
+        "generic_command_execution_enabled": False,
+        "raw_secret_values_included": False,
+    }
+
+
+def _command_label_tokens(label: str, top_level: set[str]) -> list[str]:
+    tokens: list[str] = []
+    for match in re.findall(r"[A-Za-z][A-Za-z0-9_.-]*", label):
+        token = match.replace("_", "-").lower()
+        if token in top_level and token not in tokens:
+            tokens.append(token)
+    return tokens
+
+
+def _command_group_section(group: str) -> str:
+    return {
+        "Operate": "activity",
+        "Govern": "security",
+        "Build": "models",
+        "Explore": "automation",
+    }.get(group, "settings")
+
+
+def _skill_slash_labels(skill_id: str) -> tuple[str, ...]:
+    normalized = re.sub(r"[^a-z0-9]+", "-", skill_id.lower()).strip("-")
+    labels = [normalized]
+    if skill_id and all(part.isalnum() or part in "._-" for part in skill_id):
+        labels.append(skill_id)
+    seen: list[str] = []
+    for label in labels:
+        if label and label not in seen:
+            seen.append(label)
+    return tuple(seen)
 
 
 def _plugins_payload(orchestrator: Any) -> dict[str, Any]:
@@ -218,6 +307,9 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 return
             if path == "/dashboard":
                 self._json(build_product_dashboard(orchestrator))
+                return
+            if path == "/commands":
+                self._json(_web_command_catalog(orchestrator))
                 return
             if path == "/connectors":
                 self._json({"connectors": orchestrator.connectors.list()})

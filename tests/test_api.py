@@ -363,6 +363,9 @@ class ApiServerSecurityTests(unittest.TestCase):
                 with self.assertRaises(HTTPError) as remote_directory_error:
                     _json_get(port, "/remote-control/directory")
                 self.assertEqual(remote_directory_error.exception.code, 403)
+                with self.assertRaises(HTTPError) as commands_error:
+                    _json_get(port, "/commands")
+                self.assertEqual(commands_error.exception.code, 403)
 
                 token = _json_get(port, "/auth")["token"]
                 remote_status_initial = _json_get(port, "/remote-control/status", token=token)
@@ -388,6 +391,7 @@ class ApiServerSecurityTests(unittest.TestCase):
                 artifact_bytes, artifact_headers = _bytes_get(port, "/tool-artifacts/fixture.txt", token=token)
                 browser_artifact_bytes, browser_artifact_headers = _bytes_get(port, "/browser-artifacts/fixture.txt", token=token)
                 dashboard = _json_get(port, "/dashboard", token=token)
+                command_catalog = _json_get(port, "/commands", token=token)
                 sessions = _json_get(port, "/sessions", token=token)
                 policy = _json_get(port, "/policy", token=token)
                 policy_bundles = _json_get(port, "/policy/bundles", token=token)
@@ -990,6 +994,13 @@ class ApiServerSecurityTests(unittest.TestCase):
                     _json_post(port, f"/sessions/{web_session['id']}/compact", {"keep_last": -1}, token=token)
 
                 self.assertEqual(dashboard["product"]["name"], "Aegis Agent")
+                command_names = {row["command"] for row in command_catalog["commands"]}
+                self.assertEqual(command_catalog["status"], "command_catalog")
+                self.assertEqual(command_catalog["mode"], "read_only_navigation")
+                self.assertFalse(command_catalog["generic_command_execution_enabled"])
+                self.assertIn("debug", command_names)
+                self.assertIn("remote-control", command_names)
+                self.assertIn("aegis-project-summary", command_names)
                 self.assertIn("sessions", sessions)
                 self.assertEqual(policy["profile"]["raw_secret_exposure"], "deny")
                 self.assertIn("raw_secret_exposure", policy["immutable_deny"])

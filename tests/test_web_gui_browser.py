@@ -129,6 +129,8 @@ if (frames.length !== 2 || frames[1].event !== "task" || frames[1].data.status !
         self.assertIn('id="slash-palette"', markup)
         self.assertIn(".slash-palette-row.active", styles)
         self.assertIn("WEB_SLASH_COMMANDS", script)
+        self.assertIn('api("/commands")', script)
+        self.assertIn("mergeWebSlashCommands", script)
         self.assertIn("privacy-settings", script)
         self.assertIn("setup-bedrock", script)
         self.assertIn("setup-vertex", script)
@@ -157,7 +159,7 @@ if (catalogStart < 0 || catalogEnd < 0 || helperStart < 0 || helperEnd < 0) {
   throw new Error("slash palette helpers not found");
 }
 const api = {};
-eval(`${source.slice(catalogStart, catalogEnd)}\n${source.slice(helperStart, helperEnd)}\napi.matches = slashCommandMatches;\napi.parse = parseTaskSlashCommand;`);
+eval(`${source.slice(catalogStart, catalogEnd)}\n${source.slice(helperStart, helperEnd)}\napi.matches = slashCommandMatches;\napi.parse = parseTaskSlashCommand;\napi.merge = mergeWebSlashCommands;\napi.commands = () => webSlashCommands;`);
 const su = api.matches("su").map((entry) => entry.command);
 if (su[0] !== "submit" || !su.includes("resume") || su.includes("settings")) {
   throw new Error(`/su fuzzy matches are wrong: ${JSON.stringify(su)}`);
@@ -189,6 +191,23 @@ if (!ultra.includes("commands")) {
 const release = api.matches("release").map((entry) => entry.command);
 if (!release.includes("settings")) {
   throw new Error(`/release-notes alias did not resolve to settings: ${JSON.stringify(release)}`);
+}
+api.merge([
+  { command: "debug", label: "/debug", detail: "TUI diagnostics", kind: "palette", source: "tui" },
+  { command: "submit", label: "/submit duplicate", detail: "duplicate should be ignored", kind: "palette" },
+  { command: "aegis-project-summary", label: "/aegis-project-summary", detail: "Skill command", kind: "palette", source: "skill" },
+]);
+const debug = api.parse("/debug");
+if (debug.kind !== "palette" || debug.command !== "debug") {
+  throw new Error(`/debug catalog command parsed incorrectly: ${JSON.stringify(debug)}`);
+}
+const skill = api.matches("aegis-project").map((entry) => entry.command);
+if (!skill.includes("aegis-project-summary")) {
+  throw new Error(`dynamic skill slash command missing: ${JSON.stringify(skill)}`);
+}
+const submitCount = api.commands().filter((entry) => entry.command === "submit").length;
+if (submitCount !== 1) {
+  throw new Error(`core submit command duplicated: ${submitCount}`);
 }
 """
         result = subprocess.run((node, "-e", node_script, str(app_js)), capture_output=True, text=True, timeout=5, check=False)

@@ -60,6 +60,38 @@ const WEB_SLASH_COMMANDS = [
   { command: "commands", aliases: ["help", "keybindings", "autofix-pr", "simplify", "ultraplan", "ultrareview"], label: "/commands", detail: "Show slash command suggestions", kind: "palette" },
 ];
 
+let webSlashCommands = WEB_SLASH_COMMANDS.slice();
+
+const normalizeWebSlashCommand = (entry) => {
+  const command = String(entry?.command || "").replace(/^\/+/, "").trim();
+  if (!command) return null;
+  return {
+    command,
+    aliases: Array.isArray(entry.aliases) ? entry.aliases.map((alias) => String(alias).replace(/^\/+/, "").trim()).filter(Boolean) : [],
+    label: entry.label || `/${command}`,
+    detail: entry.detail || "Open governed local command metadata",
+    kind: entry.kind || "palette",
+    section: entry.section || "settings",
+    source: entry.source || "web",
+    acceptsRequest: Boolean(entry.acceptsRequest),
+  };
+};
+
+const mergeWebSlashCommands = (commands = []) => {
+  const merged = WEB_SLASH_COMMANDS.map((entry) => ({ ...entry }));
+  const knownTerms = new Set(merged.flatMap((entry) => slashCommandTerms(entry)));
+  commands
+    .map(normalizeWebSlashCommand)
+    .filter(Boolean)
+    .forEach((entry) => {
+      const terms = slashCommandTerms(entry);
+      if (terms.some((term) => knownTerms.has(term))) return;
+      terms.forEach((term) => knownTerms.add(term));
+      merged.push(entry);
+    });
+  webSlashCommands = merged;
+};
+
 const api = async (url, options = {}) => {
   const method = String(options.method || "GET").toUpperCase();
   const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
@@ -106,7 +138,7 @@ const slashMatchRank = (prefix, entry) => {
 };
 
 const slashCommandMatches = (prefix) =>
-  WEB_SLASH_COMMANDS
+  webSlashCommands
     .filter((entry) => slashMatchRank(prefix, entry)[0] < 9)
     .sort((left, right) => {
       const leftRank = slashMatchRank(prefix, left);
@@ -116,7 +148,7 @@ const slashCommandMatches = (prefix) =>
 
 const slashCommandForToken = (token) => {
   const normalized = String(token || "").replace(/^\/+/, "").toLowerCase();
-  return WEB_SLASH_COMMANDS.find((entry) => slashCommandTerms(entry).includes(normalized)) || null;
+  return webSlashCommands.find((entry) => slashCommandTerms(entry).includes(normalized)) || null;
 };
 
 const parseTaskSlashCommand = (rawValue) => {
@@ -326,6 +358,7 @@ const refresh = async () => {
       evaluationTrends,
       evaluationDelta,
       evaluationReadiness,
+      commandCatalog,
     ] = await Promise.all([
       api("/dashboard"),
       api("/remote-control/status"),
@@ -366,8 +399,10 @@ const refresh = async () => {
       api("/evaluation/trends?limit=20"),
       api("/evaluation/delta"),
       api("/evaluation/readiness?limit=20&include_live_gaps=1"),
+      api("/commands"),
     ]);
 
+    mergeWebSlashCommands(commandCatalog.commands || []);
     syncPendingSkillEnableApprovals([...(approvedApprovals.approvals || []), ...(approvals.approvals || [])]);
     renderMetrics(dashboard);
     renderRemoteControlRelay(remoteControlRelay);
