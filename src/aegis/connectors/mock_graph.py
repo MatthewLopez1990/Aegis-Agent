@@ -13,6 +13,7 @@ from aegis.audit.logger import redact
 from aegis.connectors.base import ConnectorRequest, ConnectorResult, ConnectorSpec, live_connector_activation, require_scope
 from aegis.connectors.http import _open_without_redirects, _private_network_error, _validate_url
 from aegis.connectors.mock_service import MockServiceConnector
+from aegis.connectors.rate_limit import InMemoryRateLimiter
 from aegis.security.secrets_broker import SecretsBroker
 from aegis.security.taint import RiskLevel, Sensitivity
 
@@ -26,11 +27,13 @@ class MockGraphConnector(MockServiceConnector):
         live_email_writes: bool | None = None,
         live_contact_writes: bool | None = None,
         secrets_broker: SecretsBroker | None = None,
+        rate_limits: dict[str, Any] | None = None,
+        rate_limiter: InMemoryRateLimiter | None = None,
     ) -> None:
         super().__init__(
             name="mock_graph",
             operations=("read_profile", "read_calendar", "search_contacts"),
-            write_operations=("draft_email", "send_email", "create_event", "create_contact", "update_contact"),
+            write_operations=("draft_email", "send_email", "create_event", "create_contact", "update_contact", "rollback_event", "rollback_contact"),
             sample_data={
                 "tenant": "mock",
                 "profile": {"displayName": "Local User"},
@@ -43,9 +46,11 @@ class MockGraphConnector(MockServiceConnector):
         self.live_email_writes = live_calendar_writes if live_email_writes is None else live_email_writes
         self.live_contact_writes = live_calendar_writes if live_contact_writes is None else live_contact_writes
         self.secrets_broker = secrets_broker or SecretsBroker()
+        self._rate_limiter = rate_limiter or InMemoryRateLimiter()
+        configured_rate_limits = rate_limits or self.spec.rate_limits
         self.spec = ConnectorSpec(
             name="mock_graph",
-            version="0.2.0",
+            version="0.3.0",
             auth_type="brokered_token",
             required_scopes=("read",),
             optional_scopes=("write",),
@@ -59,16 +64,20 @@ class MockGraphConnector(MockServiceConnector):
                 "create_event": RiskLevel.HIGH,
                 "create_contact": RiskLevel.HIGH,
                 "update_contact": RiskLevel.HIGH,
+                "rollback_event": RiskLevel.HIGH,
+                "rollback_contact": RiskLevel.HIGH,
                 "dry_run": RiskLevel.MEDIUM,
             },
-            rate_limits=self.spec.rate_limits,
+            rate_limits=configured_rate_limits,
             data_sensitivity=Sensitivity.INTERNAL,
             default_mode="mock_read_only",
-            approval_required=("draft_email", "send_email", "create_event", "create_contact", "update_contact"),
+            approval_required=("draft_email", "send_email", "create_event", "create_contact", "update_contact", "rollback_event", "rollback_contact"),
             operation_scopes=self.spec.operation_scopes,
         )
 
     def write(self, request: ConnectorRequest) -> ConnectorResult:
+        if request.operation in {"rollback_event", "rollback_contact"}:
+            return self.rollback(request)
         if not self._is_live_write_request(request):
             return super().write(request)
         require_scope(request, "write", connector=self.spec.name)
@@ -128,8 +137,19 @@ class MockGraphConnector(MockServiceConnector):
                 payload = _contact_payload(request.operation, request.params)
         except (KeyError, ValueError) as exc:
             return ConnectorResult(self.spec.name, request.operation, False, {}, error=str(exc))
+        rate_limit = self._check_live_rate_limit(domain=domain, operation=request.operation)
+        if not rate_limit["allowed"]:
+            return ConnectorResult(
+                self.spec.name,
+                request.operation,
+                False,
+                {"mode": "live_write", "domain": domain, "rate_limit": rate_limit},
+                rollback="no action performed",
+                error=f"{_write_label(request.operation)} live write rate limit exceeded",
+            )
         live_result = _send_graph_write(operation=request.operation, url=url, token=token, payload=payload)
         accepted = _summarize_params({"url": url, "payload": payload, "token_secret": token_secret})
+        rollback_receipt = _rollback_offer_receipt(request.operation, payload)
         return ConnectorResult(
             self.spec.name,
             request.operation,
@@ -140,8 +160,107 @@ class MockGraphConnector(MockServiceConnector):
                 "status": live_result["http_status"],
                 "mode": "live_write",
                 "accepted": accepted,
+                "rate_limit": rate_limit,
+                "rollback_receipt": rollback_receipt,
             },
-            rollback=f"provider-specific {_write_label(request.operation)} rollback required",
+            rollback=f"{rollback_receipt['rollback_operation']} available with approval" if rollback_receipt["rollback_available"] else f"provider-specific {_write_label(request.operation)} rollback required",
+            error=live_result.get("error"),
+        )
+
+    def rollback(self, request: ConnectorRequest) -> ConnectorResult:
+        require_scope(request, "write", connector=self.spec.name)
+        operation = _rollback_operation_for(request.operation)
+        if operation is None:
+            return ConnectorResult(self.spec.name, "rollback", False, {}, rollback="no action performed", error=f"graph rollback is not available for {request.operation}")
+        url = str(request.params.get("api_url") or request.params.get("provider_url") or "")
+        parsed = urlparse(url)
+        domain = parsed.hostname or ""
+        enabled = self._live_enabled_for_operation(operation)
+        if not request.approved:
+            return ConnectorResult(
+                self.spec.name,
+                operation,
+                False,
+                {"activation": live_connector_activation(connector=self.spec.name, operation=operation, enabled=enabled, approved=False, allowlist=self.allowlist, domain=domain)},
+                rollback="no action performed",
+                error=f"{_write_label(operation)} rollback requires approval",
+            )
+        if not enabled:
+            return ConnectorResult(
+                self.spec.name,
+                operation,
+                False,
+                {"activation": live_connector_activation(connector=self.spec.name, operation=operation, enabled=False, approved=True, allowlist=self.allowlist, domain=domain)},
+                rollback="no action performed",
+                error=f"{_write_label(operation)} live writes are disabled",
+            )
+        validation_error = _validate_url(parsed)
+        if validation_error:
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error=validation_error)
+        if parsed.scheme != "https":
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error=f"{_write_label(operation)} rollback requires https")
+        if not self._allowed(domain):
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error=f"domain {domain!r} is not allowlisted")
+        private_error = _private_network_error(domain)
+        if private_error:
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error=private_error)
+        token_secret = str(request.params.get("token_secret") or "GRAPH_TOKEN")
+        scope = _write_scope(operation)
+        handle = self.secrets_broker.request_handle(
+            name=token_secret,
+            requester="graph_connector",
+            reason=f"{_write_label(operation)} {operation}",
+            scopes=(scope,),
+        )
+        if not handle.present:
+            return ConnectorResult(
+                self.spec.name,
+                operation,
+                False,
+                {"activation": live_connector_activation(connector=self.spec.name, operation=operation, enabled=True, approved=True, allowlist=self.allowlist, domain=domain, token_present=False)},
+                rollback="no action performed",
+                error=f"secret {token_secret!r} is not configured",
+            )
+        try:
+            token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="graph_connector")
+            payload = _rollback_payload(operation, request.params)
+        except (KeyError, ValueError) as exc:
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error=str(exc))
+        rate_limit = self._check_live_rate_limit(domain=domain, operation=operation)
+        if not rate_limit["allowed"]:
+            return ConnectorResult(
+                self.spec.name,
+                operation,
+                False,
+                {"mode": "live_rollback", "domain": domain, "rate_limit": rate_limit},
+                rollback="no action performed",
+                error=f"{_write_label(operation)} rollback rate limit exceeded",
+            )
+        live_result = _send_graph_write(operation=operation, url=url, token=token, payload=payload)
+        receipt = {
+            "receipt_schema": "graph_rollback_receipt_v1",
+            "rollback_operation": operation,
+            "resource_type": "calendar_event" if operation == "rollback_event" else "contact",
+            "resource_ref_hash": _resource_ref_hash(payload),
+            "http_status": live_result["http_status"],
+            "rate_limit": rate_limit,
+            "raw_secret_values_included": False,
+            "raw_response_body_included": False,
+        }
+        return ConnectorResult(
+            self.spec.name,
+            operation,
+            live_result["ok"],
+            {
+                "url": url,
+                "domain": domain,
+                "status": live_result["http_status"],
+                "mode": "live_rollback",
+                "accepted": _summarize_params({"url": url, "payload": payload, "token_secret": token_secret}),
+                "rollback_receipt": receipt,
+                "rate_limit": rate_limit,
+            },
+            rollback="rollback executed" if live_result["ok"] else "rollback attempted but provider rejected it",
             error=live_result.get("error"),
         )
 
@@ -158,13 +277,20 @@ class MockGraphConnector(MockServiceConnector):
         return any(domain == allowed or domain.endswith(f".{allowed}") for allowed in self.allowlist)
 
     def _live_enabled_for_operation(self, operation: str) -> bool:
-        if operation == "create_event":
+        if operation in {"create_event", "rollback_event"}:
             return self.live_calendar_writes
         if operation in {"draft_email", "send_email"}:
             return self.live_email_writes
-        if operation in {"create_contact", "update_contact"}:
+        if operation in {"create_contact", "update_contact", "rollback_contact"}:
             return self.live_contact_writes
         return False
+
+    def _check_live_rate_limit(self, *, domain: str, operation: str) -> dict[str, int | bool]:
+        per_minute = _positive_int(self.spec.rate_limits.get("per_minute"))
+        if per_minute is None:
+            return {"allowed": True, "limit": 0, "window_seconds": 60, "remaining": 0, "retry_after_seconds": 0}
+        decision = self._rate_limiter.check(f"{self.spec.name}:{domain}:{operation}", limit=per_minute, window_seconds=60)
+        return decision.to_dict()
 
     @staticmethod
     def _is_live_write_request(request: ConnectorRequest) -> bool:
@@ -220,12 +346,58 @@ def _contact_payload(operation: str, params: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _rollback_operation_for(operation: str) -> str | None:
+    if operation in {"create_event", "rollback_event"}:
+        return "rollback_event"
+    if operation in {"create_contact", "rollback_contact"}:
+        return "rollback_contact"
+    return None
+
+
+def _rollback_payload(operation: str, params: dict[str, Any]) -> dict[str, Any]:
+    resource = params.get("event" if operation == "rollback_event" else "contact", {})
+    if not isinstance(resource, dict):
+        raise ValueError(f"{_write_label(operation)} rollback payload must be an object")
+    payload = {key: resource[key] for key in ("id", "event_id", "contact_id", "email") if key in resource}
+    for key in ("id", "event_id", "contact_id", "email"):
+        if key in params and key not in payload:
+            payload[key] = params[key]
+    if not payload:
+        raise ValueError(f"{_write_label(operation)} rollback requires id, event_id, contact_id, or email")
+    payload["rollback_reason"] = "Aegis rollback approved by local operator"
+    return payload
+
+
+def _rollback_offer_receipt(operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+    rollback_operation = _rollback_operation_for(operation)
+    available = rollback_operation is not None and bool(_resource_ref_hash(payload))
+    return {
+        "receipt_schema": "graph_rollback_offer_v1",
+        "rollback_available": available,
+        "rollback_operation": rollback_operation if available else None,
+        "resource_type": "calendar_event" if rollback_operation == "rollback_event" else "contact" if rollback_operation == "rollback_contact" else None,
+        "resource_ref_hash": _resource_ref_hash(payload) if available else None,
+        "requires_approval": True,
+        "raw_secret_values_included": False,
+        "raw_response_body_included": False,
+    }
+
+
+def _resource_ref_hash(payload: dict[str, Any]) -> str:
+    for key in ("id", "event_id", "contact_id", "email"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return ""
+
+
 def _send_graph_write(*, operation: str, url: str, token: str, payload: dict[str, Any]) -> dict[str, Any]:
-    body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    method = _method_for_operation(operation)
+    body = None if method == "DELETE" else json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     http_request = Request(
         url,
         data=body,
-        method=_method_for_operation(operation),
+        method=method,
         headers={
             "Accept": "application/json",
             "Authorization": f"Bearer {token}",
@@ -250,7 +422,7 @@ def _send_graph_write(*, operation: str, url: str, token: str, payload: dict[str
 def _write_label(operation: str) -> str:
     if operation in {"draft_email", "send_email"}:
         return "email"
-    if operation in {"create_contact", "update_contact"}:
+    if operation in {"create_contact", "update_contact", "rollback_contact"}:
         return "contact"
     return "calendar"
 
@@ -258,13 +430,23 @@ def _write_label(operation: str) -> str:
 def _write_scope(operation: str) -> str:
     if operation in {"draft_email", "send_email"}:
         return "mail:write"
-    if operation in {"create_contact", "update_contact"}:
+    if operation in {"create_contact", "update_contact", "rollback_contact"}:
         return "contacts:write"
     return "calendar:write"
 
 
 def _method_for_operation(operation: str) -> str:
+    if operation in {"rollback_event", "rollback_contact"}:
+        return "DELETE"
     return "PATCH" if operation == "update_contact" else "POST"
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _summarize_params(params: dict[str, Any]) -> dict[str, Any]:

@@ -744,6 +744,82 @@ class ConnectorTests(unittest.TestCase):
         self.assertFalse(live.data["accepted"]["raw_secret_values_included"])
         self.assertFalse(live.data["accepted"]["raw_response_body_included"])
 
+    def test_graph_live_write_rate_limit_and_calendar_rollback_receipt(self) -> None:
+        broker = SecretsBroker()
+        broker.store_secret(name="GRAPH_TOKEN", value="graph_raw_secret")
+        connector = MockGraphConnector(
+            allowlist=("example.com",),
+            live_calendar_writes=True,
+            secrets_broker=broker,
+            rate_limits={"per_minute": 1},
+        )
+
+        class FakeResponse:
+            def __init__(self, status: int) -> None:
+                self.status = status
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self, limit: int) -> bytes:
+                return b"{}"
+
+        captured: dict[str, list[dict[str, object]]] = {"requests": []}
+
+        def fake_open(request, timeout):
+            method = request.get_method()
+            captured["requests"].append(
+                {
+                    "url": request.full_url,
+                    "method": method,
+                    "authorization": request.headers.get("Authorization"),
+                    "body": request.data.decode("utf-8") if request.data else "",
+                }
+            )
+            return FakeResponse(204 if method == "DELETE" else 201)
+
+        params = {
+            "api_url": "https://example.com/v1.0/me/events/event-1",
+            "event": {"id": "event-1", "subject": "Planning", "body": {"content": "token=abc123"}},
+        }
+        with patch("aegis.connectors.mock_graph._open_without_redirects", side_effect=fake_open):
+            live = connector.write(ConnectorRequest(operation="create_event", params=params, scopes=("write",), approved=True))
+            limited = connector.write(ConnectorRequest(operation="create_event", params=params, scopes=("write",), approved=True))
+            unapproved_rollback = connector.rollback(ConnectorRequest(operation="create_event", params=params, scopes=("write",)))
+            rollback = connector.rollback(ConnectorRequest(operation="create_event", params=params, scopes=("write",), approved=True))
+
+        rendered_limited = json.dumps(limited.data, sort_keys=True)
+        rendered_rollback = json.dumps(rollback.data, sort_keys=True)
+        self.assertTrue(live.ok)
+        self.assertEqual(live.data["rate_limit"]["limit"], 1)
+        self.assertEqual(live.data["rollback_receipt"]["receipt_schema"], "graph_rollback_offer_v1")
+        self.assertTrue(live.data["rollback_receipt"]["rollback_available"])
+        self.assertEqual(live.data["rollback_receipt"]["rollback_operation"], "rollback_event")
+        self.assertFalse(limited.ok)
+        self.assertIn("rate limit", limited.error or "")
+        self.assertFalse(limited.data["rate_limit"]["allowed"])
+        self.assertFalse(unapproved_rollback.ok)
+        self.assertIn("approval", unapproved_rollback.error or "")
+        self.assertTrue(rollback.ok)
+        self.assertEqual(rollback.operation, "rollback_event")
+        self.assertEqual(rollback.data["mode"], "live_rollback")
+        self.assertEqual(rollback.data["rollback_receipt"]["receipt_schema"], "graph_rollback_receipt_v1")
+        self.assertEqual(rollback.data["rollback_receipt"]["resource_type"], "calendar_event")
+        self.assertFalse(rollback.data["rollback_receipt"]["raw_secret_values_included"])
+        self.assertFalse(rollback.data["rollback_receipt"]["raw_response_body_included"])
+        self.assertEqual(len(captured["requests"]), 2)
+        self.assertEqual(captured["requests"][0]["method"], "POST")
+        self.assertEqual(captured["requests"][0]["authorization"], "Bearer graph_raw_secret")
+        self.assertEqual(captured["requests"][1]["method"], "DELETE")
+        self.assertEqual(captured["requests"][1]["authorization"], "Bearer graph_raw_secret")
+        self.assertNotIn("graph_raw_secret", rendered_limited)
+        self.assertNotIn("abc123", rendered_limited)
+        self.assertNotIn("graph_raw_secret", rendered_rollback)
+        self.assertNotIn("abc123", rendered_rollback)
+
     def test_graph_email_live_write_requires_approval_secret_and_summarizes_payload(self) -> None:
         broker = SecretsBroker()
         connector = MockGraphConnector(allowlist=("example.com",), live_email_writes=True, secrets_broker=broker)

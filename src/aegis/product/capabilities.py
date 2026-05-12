@@ -485,6 +485,7 @@ def _live_gap_backlog(
                 "connector_abuse.write_without_scope",
                 "live_connector_receipts.redacted_write_summary",
                 "live_connector_rate_limit.exceeded",
+                "graph.calendar_rollback_receipt",
                 "service_desk.rollback_close_ticket_receipt",
             ],
             "configured_provider_count": len(configured_providers),
@@ -877,12 +878,12 @@ def _live_connector_operator_checklist(
         {
             "control": "runtime_rate_limits",
             "state": "partial",
-            "detail": "Service-desk live writes enforce an in-memory per-operation rate limit; remaining live adapters must add provider-specific limits before promotion.",
+            "detail": "Service-desk and Microsoft Graph live writes enforce in-memory per-operation rate limits; remaining live adapters must add provider-specific limits before promotion.",
         },
         {
             "control": "rollback_receipts",
             "state": "partial",
-            "detail": "Service-desk close-ticket live writes expose an approved rollback_close_ticket receipt/action; remaining live adapters still require provider-specific rollback paths.",
+            "detail": "Service-desk close-ticket and Microsoft Graph calendar/contact create live writes expose approved rollback receipts/actions; remaining live adapters still require provider-specific rollback paths.",
         },
         {
             "control": "mock_fallback",
