@@ -556,6 +556,128 @@ class ModelAuthTests(unittest.TestCase):
             self.assertNotIn("gho_copilot_secret", audit_text)
             self.assertNotIn("copilot-api-secret", audit_text)
 
+    def test_google_gemini_oauth_login_brokers_tokens_and_invokes_cloudcode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {"AEGIS_GOOGLE_GEMINI_OAUTH_CLIENT_ID": "test-google-client-id", "AEGIS_GOOGLE_GEMINI_OAUTH_CLIENT_SECRET": "test-google-client-secret"}, clear=True):
+            root = Path(temp)
+            secret_path = root / ".aegis" / "secrets.json"
+            audit_path = root / ".aegis" / "audit.jsonl"
+            broker = SecretsBroker(secret_path)
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(audit_path), broker)
+
+            class FakeResponse:
+                def __init__(self, payload: dict[str, object]) -> None:
+                    self.payload = payload
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self) -> bytes:
+                    return json.dumps(self.payload).encode("utf-8")
+
+            captured_auth: list[tuple[str, str]] = []
+
+            def fake_auth_open(request, timeout):
+                body = request.data.decode("utf-8")
+                captured_auth.append((request.full_url, body))
+                self.assertEqual(request.full_url, "https://oauth2.googleapis.com/token")
+                return FakeResponse(
+                    {
+                        "access_token": "google-access-secret",
+                        "refresh_token": "google-refresh-secret",
+                        "expires_in": 3600,
+                        "token_type": "Bearer",
+                        "scope": "https://www.googleapis.com/auth/cloud-platform",
+                    }
+                )
+
+            with (
+                patch("aegis.models.registry._oauth_pkce_pair", return_value=("verifier-123", "challenge-123")),
+                patch("aegis.models.registry._google_gemini_collect_authorization_code", return_value=("code-123", "http://127.0.0.1:8085/oauth2callback")),
+                patch("aegis.models.registry._open_auth_request", fake_auth_open),
+            ):
+                login = registry.login_provider_external("google-gemini-oauth", method="oauth", run_external=True, timeout_seconds=5)
+
+            self.assertEqual(login["target"], "Google Gemini OAuth / Code Assist")
+            self.assertEqual(login["status"], "external_login_verified")
+            self.assertEqual(login["auth_source"], "oauth_device_flow")
+            self.assertTrue(login["oauth_token_brokered"])
+            self.assertFalse(login["token_captured"])
+            self.assertNotIn("google-access-secret", json.dumps(login))
+            self.assertNotIn("google-refresh-secret", json.dumps(login))
+            self.assertEqual(broker.resolve_stored_secret("GOOGLE_GEMINI_OAUTH_ACCESS_TOKEN"), "google-access-secret")
+            self.assertEqual(broker.resolve_stored_secret("GOOGLE_GEMINI_OAUTH_REFRESH_TOKEN"), "google-refresh-secret")
+            self.assertIn("grant_type=authorization_code", captured_auth[0][1])
+            self.assertIn("code=code-123", captured_auth[0][1])
+            self.assertIn("code_verifier=verifier-123", captured_auth[0][1])
+            self.assertIn("client_id=test-google-client-id", captured_auth[0][1])
+
+            status = registry.auth_status("google-gemini-oauth")
+            self.assertTrue(status["auth_configured"])
+            self.assertEqual(status["auth_source"], "oauth_device_flow")
+            targets = registry.auth_targets()
+            by_target = {row["target"]: row for row in targets["targets"]}
+            self.assertEqual(by_target["Google Gemini OAuth / Code Assist"]["status"], "external_login_verified")
+            self.assertEqual(by_target["Google Gemini OAuth / Code Assist"]["bridge_status"], "oauth_device_flow_ready")
+            self.assertTrue(by_target["Google Gemini OAuth / Code Assist"]["oauth_token_brokered"])
+            self.assertNotIn("Google Gemini OAuth / Code Assist", targets["subscription_bridge_targets"])
+
+            route = registry.route("google-gemini-oauth/gemini-2.5-flash")
+            self.assertEqual(route.auth_method, "oauth_token")
+            route.auth_metadata["expires_at"] = "2000-01-01T00:00:00+00:00"
+            captured_model: list[tuple[str, dict[str, str], dict[str, object] | str]] = []
+
+            def fake_model_open(request, timeout):
+                headers = {key.lower(): value for key, value in request.header_items()}
+                payload: dict[str, object] | str
+                if request.data and headers.get("content-type") == "application/x-www-form-urlencoded":
+                    payload = request.data.decode("utf-8")
+                else:
+                    payload = json.loads(request.data.decode("utf-8")) if request.data else {}
+                captured_model.append((request.full_url, headers, payload))
+                if request.full_url == "https://oauth2.googleapis.com/token":
+                    self.assertIn("grant_type=refresh_token", str(payload))
+                    self.assertIn("refresh_token=google-refresh-secret", str(payload))
+                    return FakeResponse({"access_token": "google-access-refreshed", "refresh_token": "google-refresh-rotated", "expires_in": 3600})
+                self.assertEqual(headers["authorization"], "Bearer google-access-refreshed")
+                if request.full_url.endswith("/v1internal:loadCodeAssist"):
+                    return FakeResponse({"response": {"currentTier": {"id": "free-tier"}, "cloudaicompanionProject": "cloud-project-123"}})
+                self.assertEqual(request.full_url, "https://cloudcode-pa.googleapis.com/v1internal:generateContent")
+                self.assertIsInstance(payload, dict)
+                self.assertEqual(payload["project"], "cloud-project-123")
+                self.assertEqual(payload["model"], "gemini-2.5-flash")
+                self.assertEqual(payload["request"]["contents"][0]["parts"][0]["text"], "hello from aegis")
+                return FakeResponse(
+                    {
+                        "response": {
+                            "candidates": [{"content": {"parts": [{"text": "gemini oauth response"}]}}],
+                            "usageMetadata": {"promptTokenCount": 5, "candidatesTokenCount": 3},
+                        }
+                    }
+                )
+
+            with patch("aegis.models.client._open_model_request", fake_model_open):
+                result = LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello from aegis"}])
+
+            self.assertEqual(result.content, "gemini oauth response")
+            self.assertEqual(result.input_tokens, 5)
+            self.assertEqual(result.output_tokens, 3)
+            self.assertEqual(result.raw_usage["source"], "oauth_device_flow")
+            self.assertEqual(result.raw_usage["bridge"], "google_gemini_cloudcode_generate_content")
+            self.assertEqual(result.raw_usage["project_source"], "discovered")
+            self.assertEqual(broker.resolve_stored_secret("GOOGLE_GEMINI_OAUTH_ACCESS_TOKEN"), "google-access-refreshed")
+            self.assertEqual(broker.resolve_stored_secret("GOOGLE_GEMINI_OAUTH_REFRESH_TOKEN"), "google-refresh-rotated")
+            self.assertEqual([entry[0] for entry in captured_model], ["https://oauth2.googleapis.com/token", "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist", "https://cloudcode-pa.googleapis.com/v1internal:generateContent"])
+
+            audit_text = audit_path.read_text(encoding="utf-8")
+            self.assertIn("model.auth_external_login_requested", audit_text)
+            self.assertNotIn("google-access-secret", audit_text)
+            self.assertNotIn("google-refresh-secret", audit_text)
+            self.assertNotIn("google-access-refreshed", audit_text)
+            self.assertNotIn("google-refresh-rotated", audit_text)
+
     def test_subscription_auth_reports_missing_official_cli_without_token_capture(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
             root = Path(temp)
@@ -1094,6 +1216,9 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(by_target["GitHub Copilot"]["external_command"], "GitHub browser OAuth device-code login")
             self.assertEqual(by_target["GitHub Copilot"]["invocation_bridge"], "copilot_oauth_chat_completions")
             self.assertEqual(by_target["Google Gemini"]["status"], "api_key_ready")
+            self.assertEqual(by_target["Google Gemini OAuth / Code Assist"]["status"], "oauth_device_flow_available")
+            self.assertEqual(by_target["Google Gemini OAuth / Code Assist"]["external_command"], "Google browser OAuth PKCE login")
+            self.assertEqual(by_target["Google Gemini OAuth / Code Assist"]["invocation_bridge"], "google_gemini_cloudcode_generate_content")
             self.assertEqual(by_target["Google Vertex AI / Gemini cloud identity"]["status"], "official_cli_bridge_available")
             self.assertEqual(by_target["Google Vertex AI / Gemini cloud identity"]["external_command"], "gcloud auth login --update-adc")
             self.assertEqual(by_target["Google Vertex AI / Gemini cloud identity"]["external_status_command"], "gcloud auth list --filter=status:ACTIVE --format=value(account)")

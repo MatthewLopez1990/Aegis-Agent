@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
@@ -14,12 +15,14 @@ import secrets
 import subprocess
 import tempfile
 import sys
+import threading
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import uuid4
+import webbrowser
 
 from aegis.audit.logger import AuditLogger
 from aegis.memory.store import LocalStore
@@ -62,6 +65,7 @@ DYNAMIC_MODEL_ID_PROVIDERS = {
     "azure-foundry",
     "aws-bedrock",
     "google",
+    "google-gemini-oauth",
     "qwen",
     "github-copilot",
     "arcee",
@@ -521,6 +525,39 @@ class ModelRegistry:
                 },
             )
             return status
+        if profile.get("oauth_device_flow") == "google_gemini_pkce":
+            status = _google_gemini_oauth_status_template(profile)
+            if run_external:
+                status.update(_run_google_gemini_oauth_login_flow(profile, self.secrets_broker, timeout_seconds=timeout_seconds))
+            elif verify_external:
+                status.update(_verify_google_gemini_oauth_link(profile, self.secrets_broker, self._external_auth_link(str(profile.get("provider") or name), normalized_method)))
+            if status.get("external_status_verified"):
+                status.update(
+                    {
+                        "status": "external_login_verified",
+                        "auth_configured": True,
+                        "auth_source": "oauth_device_flow",
+                        "aegis_bridge_status": "oauth_device_flow_ready",
+                        "token_captured": False,
+                        "token_capture_supported": False,
+                    }
+                )
+                self._remember_external_auth_link(str(status["provider"]), normalized_method, status)
+            self.audit_logger.append(
+                "model.auth_external_login_requested",
+                {
+                    "provider": status["provider"],
+                    "target": status["target"],
+                    "method": status["method"],
+                    "status": status["status"],
+                    "external_command": status.get("external_command"),
+                    "external_login_attempted": status["external_login_attempted"],
+                    "external_login_exit_code": status["external_login_exit_code"],
+                    "token_captured": False,
+                    "oauth_token_brokered": bool(status.get("oauth_token_brokered", False)),
+                },
+            )
+            return status
         command_argv = _external_command_argv(profile)
         executable_path = shutil.which(command_argv[0]) if command_argv else None
         status = {
@@ -852,6 +889,9 @@ class ModelRegistry:
                     "refresh_token_secret": link.get("refresh_token_secret"),
                     "agent_key_secret": link.get("agent_key_secret"),
                     "agent_key_expires_at": link.get("agent_key_expires_at"),
+                    "inference_base_url": link.get("inference_base_url", status.get("inference_base_url")),
+                    "invocation_bridge": link.get("invocation_bridge", status.get("invocation_bridge")),
+                    "project_id": link.get("project_id"),
                 }
             )
         return status
@@ -924,6 +964,7 @@ class ModelRegistry:
             "oauth_token_brokered",
             "agent_key_brokered",
             "raw_browser_token_captured",
+            "project_id",
         ):
             value = status.get(key)
             if value is not None:
@@ -1017,6 +1058,19 @@ GITHUB_COPILOT_OAUTH_PORTAL_BASE_URL = "https://github.com"
 GITHUB_COPILOT_OAUTH_TOKEN_SECRET = "GITHUB_COPILOT_OAUTH_TOKEN"
 GITHUB_COPILOT_DEVICE_AUTH_POLL_INTERVAL_CAP_SECONDS = 1
 
+GOOGLE_GEMINI_OAUTH_CLIENT_ID_ENV = "AEGIS_GOOGLE_GEMINI_OAUTH_CLIENT_ID"
+GOOGLE_GEMINI_OAUTH_CLIENT_SECRET_ENV = "AEGIS_GOOGLE_GEMINI_OAUTH_CLIENT_SECRET"
+GOOGLE_GEMINI_OAUTH_SCOPE = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile"
+GOOGLE_GEMINI_OAUTH_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
+GOOGLE_GEMINI_OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_GEMINI_OAUTH_ACCESS_TOKEN_SECRET = "GOOGLE_GEMINI_OAUTH_ACCESS_TOKEN"
+GOOGLE_GEMINI_OAUTH_REFRESH_TOKEN_SECRET = "GOOGLE_GEMINI_OAUTH_REFRESH_TOKEN"
+GOOGLE_GEMINI_OAUTH_REFRESH_SKEW_SECONDS = 60
+GOOGLE_GEMINI_CLOUDCODE_BASE_URL = "https://cloudcode-pa.googleapis.com"
+GOOGLE_GEMINI_OAUTH_REDIRECT_HOST = "127.0.0.1"
+GOOGLE_GEMINI_OAUTH_REDIRECT_PORT = 8085
+GOOGLE_GEMINI_OAUTH_CALLBACK_PATH = "/oauth2callback"
+
 
 EXTERNAL_AUTH_HANDOFF_PROFILES: dict[str, dict[str, Any]] = {
     "github-copilot": {
@@ -1099,6 +1153,38 @@ EXTERNAL_AUTH_HANDOFF_PROFILES: dict[str, dict[str, Any]] = {
             "Run model auth login google --method cloud-identity --run-external from a local terminal to use the official gcloud account flow and update Application Default Credentials.",
             "Configure models.google_vertex_project and models.google_vertex_location, then route google/<model-id> after verifying the official gcloud account flow.",
             "Do not paste Google OAuth access tokens, refresh tokens, ADC JSON, or browser session cookies into Aegis.",
+        ],
+    },
+    "google-gemini-oauth": {
+        "target": "Google Gemini OAuth / Code Assist",
+        "aliases": ("google-gemini-oauth", "gemini-oauth", "google-gemini-cli", "gemini-cli"),
+        "provider": "google-gemini-oauth",
+        "method": "oauth",
+        "account_surface": "Google Gemini CLI / Code Assist OAuth",
+        "external_command": "Google browser OAuth PKCE login",
+        "external_command_argv": (),
+        "external_status_command": "brokered Google Gemini OAuth token",
+        "external_status_command_argv": (),
+        "oauth_device_flow": "google_gemini_pkce",
+        "portal_base_url": "https://accounts.google.com",
+        "inference_base_url": GOOGLE_GEMINI_CLOUDCODE_BASE_URL,
+        "client_id_env": GOOGLE_GEMINI_OAUTH_CLIENT_ID_ENV,
+        "client_secret_env": GOOGLE_GEMINI_OAUTH_CLIENT_SECRET_ENV,
+        "scope": GOOGLE_GEMINI_OAUTH_SCOPE,
+        "access_token_secret": GOOGLE_GEMINI_OAUTH_ACCESS_TOKEN_SECRET,
+        "refresh_token_secret": GOOGLE_GEMINI_OAUTH_REFRESH_TOKEN_SECRET,
+        "refresh_skew_seconds": GOOGLE_GEMINI_OAUTH_REFRESH_SKEW_SECONDS,
+        "aegis_bridge_status": "oauth_device_flow_available",
+        "invocation_bridge": "google_gemini_cloudcode_generate_content",
+        "provider_token_source": "official Google Gemini CLI desktop OAuth PKCE flow",
+        "setup_required": f"set {GOOGLE_GEMINI_OAUTH_CLIENT_ID_ENV} and {GOOGLE_GEMINI_OAUTH_CLIENT_SECRET_ENV} from an authorized Google OAuth desktop client",
+        "interactive": True,
+        "next_steps": [
+            f"Set {GOOGLE_GEMINI_OAUTH_CLIENT_ID_ENV} and {GOOGLE_GEMINI_OAUTH_CLIENT_SECRET_ENV} for an authorized Google OAuth desktop client.",
+            "Run model auth login google-gemini-oauth --method oauth --run-external and approve the Google browser PKCE prompt.",
+            "Route google-gemini-oauth/<model-id> after verification to use the brokered Cloud Code Assist generateContent bridge.",
+            "Google treats third-party use of the Gemini CLI OAuth client as policy-risky; prefer a Gemini API key for the lowest-risk path.",
+            "Do not paste Google browser cookies, access tokens, refresh tokens, ADC JSON, or Gemini CLI credential files into Aegis.",
         ],
     },
     "qwen-oauth": {
@@ -1336,6 +1422,13 @@ MODEL_PROVIDER_AUTH_TARGETS: tuple[dict[str, Any], ...] = (
         "external_command": "gemini",
         "external_login_instruction": "/auth",
         "account_surface": "Google Gemini CLI / Gemini Code Assist",
+    },
+    {
+        "target": "Google Gemini OAuth / Code Assist",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "google-gemini-oauth",
+        "required_auth": ("oauth",),
+        "account_surface": "Google Gemini CLI / Code Assist OAuth",
     },
     {
         "target": "Mistral",
@@ -1858,6 +1951,268 @@ def _verify_github_copilot_oauth_link(profile: dict[str, Any], secrets_broker: S
             if key in {"portal_base_url", "client_id", "scope", "token_type", "invocation_bridge"}
         },
     }
+
+
+def _google_gemini_oauth_status_template(profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "provider": profile.get("provider") or "google-gemini-oauth",
+        "target": profile["target"],
+        "method": profile["method"],
+        "status": "external_login_required",
+        "auth_configured": False,
+        "auth_source": None,
+        "token_captured": False,
+        "token_capture_supported": False,
+        "raw_browser_token_captured": False,
+        "oauth_token_brokered": False,
+        "external_command_argv": [],
+        "external_command_available": True,
+        "external_command_path": None,
+        "external_login_attempted": False,
+        "external_login_exit_code": None,
+        "external_login_error": None,
+        "external_status_checked": False,
+        "external_status_verified": False,
+        "client_id_configured": bool(os.environ.get(GOOGLE_GEMINI_OAUTH_CLIENT_ID_ENV, "").strip()),
+        "client_secret_configured": bool(os.environ.get(GOOGLE_GEMINI_OAUTH_CLIENT_SECRET_ENV, "").strip()),
+        **_handoff_profile_public_fields(profile),
+    }
+
+
+def _run_google_gemini_oauth_login_flow(profile: dict[str, Any], secrets_broker: SecretsBroker, *, timeout_seconds: float | None) -> dict[str, Any]:
+    scope = str(profile.get("scope") or GOOGLE_GEMINI_OAUTH_SCOPE)
+    verifier, challenge = _oauth_pkce_pair()
+    state = secrets.token_urlsafe(16)
+    redirect_uri = f"http://{GOOGLE_GEMINI_OAUTH_REDIRECT_HOST}:{GOOGLE_GEMINI_OAUTH_REDIRECT_PORT}{GOOGLE_GEMINI_OAUTH_CALLBACK_PATH}"
+    try:
+        client_id = _google_gemini_oauth_client_id(profile)
+        client_secret = _google_gemini_oauth_client_secret(profile)
+        code, redirect_uri = _google_gemini_collect_authorization_code(
+            client_id=client_id,
+            scope=scope,
+            verifier=verifier,
+            challenge=challenge,
+            state=state,
+            timeout_seconds=timeout_seconds,
+        )
+        token_payload = _google_gemini_exchange_code(
+            code=code,
+            verifier=verifier,
+            redirect_uri=redirect_uri,
+            client_id=client_id,
+            client_secret=client_secret,
+            timeout_seconds=timeout_seconds,
+        )
+        access_token = _required_oauth_value(token_payload, "access_token", "Google Gemini OAuth token response")
+        refresh_token = _required_oauth_value(token_payload, "refresh_token", "Google Gemini OAuth token response")
+    except TimeoutError as exc:
+        return {
+            "status": "external_login_timeout",
+            "external_login_attempted": True,
+            "external_login_exit_code": None,
+            "external_login_error": str(exc),
+            "external_status_checked": False,
+            "external_status_verified": False,
+        }
+    except (RuntimeError, ValueError, OSError) as exc:
+        return {
+            "status": "external_login_failed",
+            "external_login_attempted": True,
+            "external_login_exit_code": None,
+            "external_login_error": str(exc),
+            "external_status_checked": True,
+            "external_status_verified": False,
+        }
+
+    access_secret = str(profile.get("access_token_secret") or GOOGLE_GEMINI_OAUTH_ACCESS_TOKEN_SECRET)
+    refresh_secret = str(profile.get("refresh_token_secret") or GOOGLE_GEMINI_OAUTH_REFRESH_TOKEN_SECRET)
+    secrets_broker.store_secret(name=access_secret, value=access_token)
+    secrets_broker.store_secret(name=refresh_secret, value=refresh_token)
+    now = datetime.now(timezone.utc)
+    expires_at = _oauth_ttl_expiry(token_payload.get("expires_in"), now=now)
+    return {
+        "status": "external_login_verified",
+        "auth_configured": True,
+        "auth_source": "oauth_device_flow",
+        "aegis_bridge_status": "oauth_device_flow_ready",
+        "external_login_attempted": True,
+        "external_login_exit_code": 0,
+        "external_login_error": None,
+        "external_status_checked": True,
+        "external_status_verified": True,
+        "token_captured": False,
+        "token_capture_supported": False,
+        "raw_browser_token_captured": False,
+        "oauth_token_brokered": True,
+        "access_token_secret": access_secret,
+        "refresh_token_secret": refresh_secret,
+        "inference_base_url": str(profile.get("inference_base_url") or GOOGLE_GEMINI_CLOUDCODE_BASE_URL).rstrip("/"),
+        "client_id": client_id,
+        "scope": str(token_payload.get("scope") or scope),
+        "token_type": str(token_payload.get("token_type") or "Bearer"),
+        "expires_at": expires_at.isoformat(),
+        "expires_in": max(0, int(expires_at.timestamp() - now.timestamp())),
+        "refresh_skew_seconds": int(profile.get("refresh_skew_seconds") or GOOGLE_GEMINI_OAUTH_REFRESH_SKEW_SECONDS),
+        "invocation_bridge": str(profile.get("invocation_bridge") or "google_gemini_cloudcode_generate_content"),
+        "client_id_configured": True,
+        "client_secret_configured": True,
+    }
+
+
+def _verify_google_gemini_oauth_link(profile: dict[str, Any], secrets_broker: SecretsBroker, link: dict[str, Any] | None) -> dict[str, Any]:
+    access_secret = str((link or {}).get("access_token_secret") or profile.get("access_token_secret") or GOOGLE_GEMINI_OAUTH_ACCESS_TOKEN_SECRET)
+    refresh_secret = str((link or {}).get("refresh_token_secret") or profile.get("refresh_token_secret") or GOOGLE_GEMINI_OAUTH_REFRESH_TOKEN_SECRET)
+    verified = link is not None and secrets_broker.has_secret(access_secret) and secrets_broker.has_secret(refresh_secret)
+    return {
+        "external_status_checked": True,
+        "external_status_verified": verified,
+        "status": "external_login_verified" if verified else "external_login_required",
+        "auth_configured": verified,
+        "auth_source": "oauth_device_flow" if verified else None,
+        "aegis_bridge_status": "oauth_device_flow_ready" if verified else "oauth_device_flow_available",
+        "oauth_token_brokered": verified,
+        "access_token_secret": access_secret,
+        "refresh_token_secret": refresh_secret,
+        **{
+            key: value
+            for key, value in (link or {}).items()
+            if key in {"inference_base_url", "client_id", "scope", "token_type", "expires_at", "expires_in", "refresh_skew_seconds", "invocation_bridge", "project_id"}
+        },
+    }
+
+
+def _google_gemini_collect_authorization_code(
+    *,
+    client_id: str,
+    scope: str,
+    verifier: str,
+    challenge: str,
+    state: str,
+    timeout_seconds: float | None,
+) -> tuple[str, str]:
+    del verifier
+    server, redirect_uri = _google_gemini_callback_server(state)
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": scope,
+        "state": state,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "access_type": "offline",
+        "prompt": "consent",
+    }
+    auth_url = f"{GOOGLE_GEMINI_OAUTH_AUTH_URL}?{urlencode(params)}#aegis"
+    print(f"Google Gemini OAuth: open {auth_url}", file=sys.stderr)
+    try:
+        webbrowser.open(auth_url, new=1, autoraise=True)
+    except Exception:
+        pass
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        wait_seconds = max(1.0, float(timeout_seconds or 300.0))
+        if not _GoogleGeminiOAuthCallback.ready.wait(timeout=wait_seconds):
+            raise TimeoutError("Google Gemini OAuth timed out before callback completed")
+        if _GoogleGeminiOAuthCallback.error:
+            raise RuntimeError(f"Google Gemini OAuth authorization failed: {_GoogleGeminiOAuthCallback.error}")
+        if not _GoogleGeminiOAuthCallback.code:
+            raise RuntimeError("Google Gemini OAuth callback did not include an authorization code")
+        return str(_GoogleGeminiOAuthCallback.code), redirect_uri
+    finally:
+        try:
+            server.shutdown()
+        finally:
+            server.server_close()
+        thread.join(timeout=2.0)
+
+
+class _GoogleGeminiOAuthCallback(BaseHTTPRequestHandler):
+    expected_state: str = ""
+    code: str | None = None
+    error: str | None = None
+    ready = threading.Event()
+
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A002, N802
+        return
+
+    def do_GET(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        if parsed.path != GOOGLE_GEMINI_OAUTH_CALLBACK_PATH:
+            self.send_response(404)
+            self.end_headers()
+            return
+        params = parse_qs(parsed.query)
+        state = (params.get("state") or [""])[0]
+        if state != type(self).expected_state:
+            type(self).error = "state_mismatch"
+            self._respond(400, "Google Gemini OAuth state mismatch. Return to Aegis.")
+        elif (params.get("error") or [""])[0]:
+            type(self).error = (params.get("error") or ["authorization_failed"])[0]
+            self._respond(400, "Google Gemini OAuth authorization failed. Return to Aegis.")
+        else:
+            type(self).code = (params.get("code") or [""])[0] or None
+            self._respond(200, "Google Gemini OAuth complete. You can close this tab.")
+        type(self).ready.set()
+
+    def _respond(self, status: int, message: str) -> None:
+        payload = f"<!doctype html><meta charset=\"utf-8\"><title>Aegis</title><p>{message}</p>".encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+
+def _google_gemini_callback_server(state: str) -> tuple[HTTPServer, str]:
+    _GoogleGeminiOAuthCallback.expected_state = state
+    _GoogleGeminiOAuthCallback.code = None
+    _GoogleGeminiOAuthCallback.error = None
+    _GoogleGeminiOAuthCallback.ready = threading.Event()
+    try:
+        server = HTTPServer((GOOGLE_GEMINI_OAUTH_REDIRECT_HOST, GOOGLE_GEMINI_OAUTH_REDIRECT_PORT), _GoogleGeminiOAuthCallback)
+    except OSError:
+        server = HTTPServer((GOOGLE_GEMINI_OAUTH_REDIRECT_HOST, 0), _GoogleGeminiOAuthCallback)
+    port = int(server.server_address[1])
+    return server, f"http://{GOOGLE_GEMINI_OAUTH_REDIRECT_HOST}:{port}{GOOGLE_GEMINI_OAUTH_CALLBACK_PATH}"
+
+
+def _google_gemini_oauth_client_id(profile: dict[str, Any]) -> str:
+    value = str(profile.get("client_id") or os.environ.get(GOOGLE_GEMINI_OAUTH_CLIENT_ID_ENV, "")).strip()
+    if not value:
+        raise RuntimeError(f"Google Gemini OAuth requires {GOOGLE_GEMINI_OAUTH_CLIENT_ID_ENV}")
+    return value
+
+
+def _google_gemini_oauth_client_secret(profile: dict[str, Any]) -> str:
+    value = str(profile.get("client_secret") or os.environ.get(GOOGLE_GEMINI_OAUTH_CLIENT_SECRET_ENV, "")).strip()
+    if not value:
+        raise RuntimeError(f"Google Gemini OAuth requires {GOOGLE_GEMINI_OAUTH_CLIENT_SECRET_ENV}")
+    return value
+
+
+def _google_gemini_exchange_code(*, code: str, verifier: str, redirect_uri: str, client_id: str, client_secret: str, timeout_seconds: float | None) -> dict[str, Any]:
+    return _post_auth_form(
+        GOOGLE_GEMINI_OAUTH_TOKEN_URL,
+        {
+            "grant_type": "authorization_code",
+            "code": code,
+            "code_verifier": verifier,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": redirect_uri,
+        },
+        timeout_seconds=timeout_seconds,
+        label="Google Gemini OAuth",
+    )
+
+
+def _oauth_pkce_pair() -> tuple[str, str]:
+    verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return verifier, challenge
 
 
 def _github_copilot_request_device_code(*, portal_base_url: str, client_id: str, scope: str, timeout_seconds: float | None) -> dict[str, Any]:
@@ -2457,6 +2812,8 @@ def _handoff_profile_public_fields(profile: dict[str, Any]) -> dict[str, Any]:
         "portal_base_url",
         "inference_base_url",
         "client_id",
+        "client_id_env",
+        "client_secret_env",
         "scope",
         "access_token_secret",
         "refresh_token_secret",
@@ -2464,6 +2821,7 @@ def _handoff_profile_public_fields(profile: dict[str, Any]) -> dict[str, Any]:
         "agent_key_min_ttl_seconds",
         "refresh_skew_seconds",
         "invocation_bridge",
+        "project_id",
         "interactive",
         "next_steps",
     }
@@ -2510,6 +2868,32 @@ def default_providers(
             "google",
             "cloud_identity",
             {"vertex_project": google_vertex_project, "vertex_location": google_vertex_location},
+        ),
+        ModelProviderSpec(
+            "google-gemini-oauth",
+            ("gemini-3-pro-preview", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "*"),
+            None,
+            GOOGLE_GEMINI_CLOUDCODE_BASE_URL,
+            False,
+            True,
+            True,
+            True,
+            0.0,
+            0.0,
+            1000000,
+            "google",
+            "oauth",
+            {
+                "auth_surface": "oauth_device",
+                "inference_base_url": GOOGLE_GEMINI_CLOUDCODE_BASE_URL,
+                "access_token_secret": GOOGLE_GEMINI_OAUTH_ACCESS_TOKEN_SECRET,
+                "refresh_token_secret": GOOGLE_GEMINI_OAUTH_REFRESH_TOKEN_SECRET,
+                "refresh_skew_seconds": GOOGLE_GEMINI_OAUTH_REFRESH_SKEW_SECONDS,
+                "client_id_env": GOOGLE_GEMINI_OAUTH_CLIENT_ID_ENV,
+                "client_secret_env": GOOGLE_GEMINI_OAUTH_CLIENT_SECRET_ENV,
+                "project_id": google_vertex_project or "",
+                "invocation_bridge": "google_gemini_cloudcode_generate_content",
+            },
         ),
         ModelProviderSpec("mistral", ("mistral-large", "mistral-medium", "mistral-small", "codestral"), "MISTRAL_API_KEY", "https://api.mistral.ai/v1", False, True, False, False, 2.0, 6.0, 32000, "mistral"),
         ModelProviderSpec("cohere", ("command-r-plus", "command-r"), "COHERE_API_KEY", "https://api.cohere.com/v2", False, True, False, False, 3.0, 15.0, 128000, "cohere"),

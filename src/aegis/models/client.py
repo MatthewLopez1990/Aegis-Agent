@@ -16,9 +16,17 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from uuid import uuid4
 
 from aegis.models.registry import (
     GITHUB_COPILOT_OAUTH_TOKEN_SECRET,
+    GOOGLE_GEMINI_CLOUDCODE_BASE_URL,
+    GOOGLE_GEMINI_OAUTH_ACCESS_TOKEN_SECRET,
+    GOOGLE_GEMINI_OAUTH_CLIENT_ID_ENV,
+    GOOGLE_GEMINI_OAUTH_CLIENT_SECRET_ENV,
+    GOOGLE_GEMINI_OAUTH_REFRESH_SKEW_SECONDS,
+    GOOGLE_GEMINI_OAUTH_REFRESH_TOKEN_SECRET,
+    GOOGLE_GEMINI_OAUTH_TOKEN_URL,
     ModelRoute,
     NOUS_OAUTH_ACCESS_TOKEN_SECRET,
     NOUS_OAUTH_AGENT_KEY_MIN_TTL_SECONDS,
@@ -115,6 +123,8 @@ class LiveModelClient:
             if route.auth_method == "oauth_token":
                 return self._chat_github_copilot_oauth(route, messages, temperature=temperature)
             return self._chat_github_copilot_cli(route, messages, temperature=temperature)
+        if route.provider.provider == "google-gemini-oauth":
+            return self._chat_google_gemini_oauth(route, messages, temperature=temperature)
         if route.provider.provider == "minimax-oauth":
             return self._chat_minimax_oauth(route, messages, temperature=temperature)
         if route.provider.provider == "minimax-token-plan":
@@ -887,6 +897,58 @@ class LiveModelClient:
             raw_usage=dict(usage),
         )
 
+    def _chat_google_gemini_oauth(
+        self,
+        route: ModelRoute,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+    ) -> ModelInvocationResult:
+        if route.auth_method != "oauth_token":
+            raise ValueError("google-gemini-oauth provider requires verified Google Gemini OAuth login")
+        if route.provider.base_url is None:
+            raise ValueError("google-gemini-oauth provider has no base URL")
+        access_token = self._resolve_google_gemini_oauth_access_token(route)
+        project_id, project_source = self._google_gemini_project_context(route, access_token)
+        system, contents = _google_messages(messages)
+        request_payload: dict[str, Any] = {
+            "contents": contents,
+            "generationConfig": {"temperature": temperature},
+        }
+        if system:
+            request_payload["systemInstruction"] = {"parts": [{"text": system}]}
+        response = self._post_json(
+            f"{route.provider.base_url.rstrip('/')}/v1internal:generateContent",
+            payload={
+                "project": project_id,
+                "model": route.model,
+                "user_prompt_id": str(uuid4()),
+                "request": request_payload,
+            },
+            headers=_google_gemini_cloudcode_headers(access_token, model=route.model),
+        )
+        payload = _google_gemini_response_payload(response)
+        candidates = payload.get("candidates", [])
+        first = candidates[0] if candidates and isinstance(candidates[0], dict) else {}
+        content = first.get("content", {}) if isinstance(first.get("content", {}), dict) else {}
+        usage = payload.get("usageMetadata", {}) if isinstance(payload.get("usageMetadata", {}), dict) else {}
+        raw_usage = dict(usage)
+        raw_usage.update(
+            {
+                "source": "oauth_device_flow",
+                "bridge": "google_gemini_cloudcode_generate_content",
+                "project_source": project_source,
+            }
+        )
+        return ModelInvocationResult(
+            provider=route.provider.provider,
+            model=route.model,
+            content=_google_parts_text(content.get("parts", [])),
+            input_tokens=int(usage.get("promptTokenCount", 0) or 0),
+            output_tokens=int(usage.get("candidatesTokenCount", 0) or 0),
+            raw_usage=raw_usage,
+        )
+
     def _chat_google(
         self,
         route: ModelRoute,
@@ -1124,10 +1186,62 @@ class LiveModelClient:
             self.secrets_broker.store_secret(name=refresh_secret, value=rotated_refresh)
         return access_token
 
+    def _resolve_google_gemini_oauth_access_token(self, route: ModelRoute) -> str:
+        metadata = {**route.provider.metadata, **route.auth_metadata}
+        access_secret = str(metadata.get("access_token_secret") or GOOGLE_GEMINI_OAUTH_ACCESS_TOKEN_SECRET)
+        refresh_secret = str(metadata.get("refresh_token_secret") or GOOGLE_GEMINI_OAUTH_REFRESH_TOKEN_SECRET)
+        if not _oauth_expires_soon(str(metadata.get("expires_at") or ""), int(metadata.get("refresh_skew_seconds") or GOOGLE_GEMINI_OAUTH_REFRESH_SKEW_SECONDS)):
+            return self.secrets_broker.resolve_stored_secret(access_secret)
+        refresh_token = self.secrets_broker.resolve_stored_secret(refresh_secret)
+        payload = self._post_form(
+            GOOGLE_GEMINI_OAUTH_TOKEN_URL,
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": _google_gemini_oauth_client_id(metadata),
+                "client_secret": _google_gemini_oauth_client_secret(metadata),
+            },
+        )
+        access_token = str(payload.get("access_token") or "").strip()
+        if not access_token:
+            raise RuntimeError("Google Gemini OAuth refresh response did not include access_token")
+        self.secrets_broker.store_secret(name=access_secret, value=access_token)
+        rotated_refresh = str(payload.get("refresh_token") or "").strip()
+        if rotated_refresh:
+            self.secrets_broker.store_secret(name=refresh_secret, value=rotated_refresh)
+        route.auth_metadata["expires_at"] = _expires_at_from_ttl(payload.get("expires_in"))
+        return access_token
+
     def _resolve_github_copilot_oauth_token(self, route: ModelRoute) -> str:
         metadata = {**route.provider.metadata, **route.auth_metadata}
         access_secret = str(metadata.get("access_token_secret") or GITHUB_COPILOT_OAUTH_TOKEN_SECRET)
         return self.secrets_broker.resolve_stored_secret(access_secret)
+
+    def _google_gemini_project_context(self, route: ModelRoute, access_token: str) -> tuple[str, str]:
+        metadata = {**route.provider.metadata, **route.auth_metadata}
+        configured_project = str(metadata.get("project_id") or "").strip()
+        if configured_project:
+            return configured_project, "configured"
+        base_url = str(metadata.get("inference_base_url") or route.provider.base_url or GOOGLE_GEMINI_CLOUDCODE_BASE_URL).rstrip("/")
+        headers = _google_gemini_cloudcode_headers(access_token, model=route.model)
+        load_payload = {"metadata": _google_gemini_code_assist_metadata()}
+        loaded = self._post_json(f"{base_url}/v1internal:loadCodeAssist", payload=load_payload, headers=headers)
+        project = _google_gemini_project_id(loaded)
+        if project:
+            route.auth_metadata["project_id"] = project
+            return project, "discovered"
+        tier = _google_gemini_tier_id(loaded)
+        if not tier:
+            onboarded = self._post_json(
+                f"{base_url}/v1internal:onboardUser",
+                payload={"tierId": "free-tier", "metadata": _google_gemini_code_assist_metadata()},
+                headers=headers,
+            )
+            project = _google_gemini_project_id(onboarded)
+            if project:
+                route.auth_metadata["project_id"] = project
+                return project, "onboarded"
+        raise RuntimeError("Google Gemini OAuth could not resolve a Code Assist project")
 
     def _exchange_github_copilot_token(self, raw_token: str) -> str:
         token = raw_token.strip()
@@ -1234,6 +1348,20 @@ def _anthropic_messages(messages: list[dict[str, str]]) -> tuple[str, list[dict[
     if not routed:
         routed.append({"role": "user", "content": "[no user content]"})
     return "\n\n".join(system_parts), routed
+
+
+def _google_gemini_oauth_client_id(metadata: dict[str, Any]) -> str:
+    value = str(metadata.get("client_id") or os.environ.get(GOOGLE_GEMINI_OAUTH_CLIENT_ID_ENV, "")).strip()
+    if not value:
+        raise RuntimeError(f"Google Gemini OAuth requires {GOOGLE_GEMINI_OAUTH_CLIENT_ID_ENV}")
+    return value
+
+
+def _google_gemini_oauth_client_secret(metadata: dict[str, Any]) -> str:
+    value = str(metadata.get("client_secret") or os.environ.get(GOOGLE_GEMINI_OAUTH_CLIENT_SECRET_ENV, "")).strip()
+    if not value:
+        raise RuntimeError(f"Google Gemini OAuth requires {GOOGLE_GEMINI_OAUTH_CLIENT_SECRET_ENV}")
+    return value
 
 
 def _oauth_expires_soon(expires_at: str, skew_seconds: int) -> bool:
@@ -1458,6 +1586,52 @@ def _google_parts_text(parts: Any) -> str:
     if not isinstance(parts, list):
         return ""
     return "\n".join(str(part.get("text", "")).strip() for part in parts if isinstance(part, dict) and str(part.get("text", "")).strip()).strip()
+
+
+def _google_gemini_cloudcode_headers(access_token: str, *, model: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": f"google-api-nodejs-client/9.15.1 (gzip) model/{model}",
+        "X-Goog-Api-Client": "gl-node/24.0.0",
+        "x-activity-request-id": str(uuid4()),
+    }
+
+
+def _google_gemini_code_assist_metadata() -> dict[str, str]:
+    return {
+        "duetProject": "",
+        "ideType": "IDE_UNSPECIFIED",
+        "platform": "PLATFORM_UNSPECIFIED",
+        "pluginType": "GEMINI",
+    }
+
+
+def _google_gemini_response_payload(response: dict[str, Any]) -> dict[str, Any]:
+    wrapped = response.get("response")
+    if isinstance(wrapped, dict):
+        return wrapped
+    return response
+
+
+def _google_gemini_project_id(response: dict[str, Any]) -> str:
+    payload = _google_gemini_response_payload(response)
+    for key in ("cloudaicompanionProject", "cloudAiCompanionProject", "project", "projectId"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _google_gemini_tier_id(response: dict[str, Any]) -> str:
+    payload = _google_gemini_response_payload(response)
+    tier = payload.get("currentTier")
+    if isinstance(tier, dict):
+        value = tier.get("id")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
 
 
 def _google_vertex_generate_content_url(*, project: str, location: str, model: str) -> str:

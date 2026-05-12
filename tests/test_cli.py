@@ -1971,6 +1971,18 @@ class CliTests(unittest.TestCase):
 
             with patch("aegis.models.registry._open_auth_request", fake_github_auth_open):
                 github_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "github-copilot", "--method", "oauth-device", "--run-external"]))
+
+            def fake_google_oauth_open(request, timeout):
+                self.assertEqual(request.full_url, "https://oauth2.googleapis.com/token")
+                return FakeGitHubResponse({"access_token": "google-access-secret", "refresh_token": "google-refresh-secret", "expires_in": 3600, "token_type": "Bearer"})
+
+            with (
+                patch.dict(os.environ, {"AEGIS_GOOGLE_GEMINI_OAUTH_CLIENT_ID": "test-google-client-id", "AEGIS_GOOGLE_GEMINI_OAUTH_CLIENT_SECRET": "test-google-client-secret"}),
+                patch("aegis.models.registry._oauth_pkce_pair", return_value=("verifier-123", "challenge-123")),
+                patch("aegis.models.registry._google_gemini_collect_authorization_code", return_value=("code-123", "http://127.0.0.1:8085/oauth2callback")),
+                patch("aegis.models.registry._open_auth_request", fake_google_oauth_open),
+            ):
+                google_oauth_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "google-gemini-oauth", "--method", "oauth", "--run-external"]))
             aws_login_completed = subprocess.CompletedProcess(("aws", "sso", "login"), 0)
             aws_status_completed = subprocess.CompletedProcess(("aws", "sts", "get-caller-identity"), 0, stdout='{"Account":"123456789012"}\n', stderr="")
             with (
@@ -2034,6 +2046,12 @@ class CliTests(unittest.TestCase):
             self.assertEqual(github_login["auth"]["auth_source"], "oauth_device_flow")
             self.assertTrue(github_login["auth"]["oauth_token_brokered"])
             self.assertFalse(github_login["auth"]["token_captured"])
+            self.assertEqual(google_oauth_login["auth"]["target"], "Google Gemini OAuth / Code Assist")
+            self.assertEqual(google_oauth_login["auth"]["method"], "oauth")
+            self.assertEqual(google_oauth_login["auth"]["status"], "external_login_verified")
+            self.assertEqual(google_oauth_login["auth"]["auth_source"], "oauth_device_flow")
+            self.assertTrue(google_oauth_login["auth"]["oauth_token_brokered"])
+            self.assertFalse(google_oauth_login["auth"]["token_captured"])
             self.assertEqual(aws_run.call_args_list[0].args[0], ("aws", "sso", "login"))
             self.assertEqual(aws_run.call_args_list[1].args[0], ("aws", "sts", "get-caller-identity"))
             self.assertEqual(aws_login["auth"]["target"], "AWS Bedrock")
@@ -2065,6 +2083,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(target_rows_after["OpenAI Codex / ChatGPT subscription"]["status"], "subscription_cli_ready")
             self.assertEqual(target_rows_after["GitHub Copilot"]["status"], "external_login_verified")
             self.assertEqual(target_rows_after["GitHub Copilot"]["bridge_status"], "oauth_device_flow_ready")
+            self.assertEqual(target_rows_after["Google Gemini OAuth / Code Assist"]["status"], "external_login_verified")
+            self.assertEqual(target_rows_after["Google Gemini OAuth / Code Assist"]["bridge_status"], "oauth_device_flow_ready")
             self.assertEqual(target_rows_after["AWS Bedrock"]["status"], "external_login_verified")
             self.assertEqual(target_rows_after["AWS Bedrock"]["bridge_status"], "official_cli_link_verified")
             self.assertEqual(target_rows_after["Google Gemini CLI subscription"]["status"], "subscription_cli_ready")
@@ -2077,11 +2097,14 @@ class CliTests(unittest.TestCase):
             self.assertEqual(target_rows_after_logout["GitHub Copilot"]["status"], "oauth_device_flow_available")
             self.assertEqual(target_rows["Claude Code subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(target_rows["Google Gemini CLI subscription"]["status"], "official_cli_bridge_available")
+            self.assertEqual(target_rows["Google Gemini OAuth / Code Assist"]["status"], "oauth_device_flow_available")
             self.assertEqual(target_rows["Qwen Code Coding Plan subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(target_rows["GitHub Copilot"]["status"], "oauth_device_flow_available")
             self.assertEqual(target_rows["DeepSeek"]["status"], "api_key_ready")
             self.assertNotIn("sk-deepseek-test", json.dumps(deepseek_login, sort_keys=True))
             self.assertNotIn("gho_copilot_secret", json.dumps(github_login, sort_keys=True))
+            self.assertNotIn("google-access-secret", json.dumps(google_oauth_login, sort_keys=True))
+            self.assertNotIn("google-refresh-secret", json.dumps(google_oauth_login, sort_keys=True))
 
     def test_hooks_cli_registers_lists_and_runs_governed_hook(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

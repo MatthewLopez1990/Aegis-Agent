@@ -1057,6 +1057,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(auth_targets["OpenAI API"]["status"], "api_key_ready")
             self.assertEqual(auth_targets["Claude Code subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(auth_targets["Google Gemini CLI subscription"]["status"], "official_cli_bridge_available")
+            self.assertEqual(auth_targets["Google Gemini OAuth / Code Assist"]["status"], "oauth_device_flow_available")
             self.assertEqual(auth_targets["GitHub Copilot"]["status"], "oauth_device_flow_available")
             self.assertEqual(auth_targets["DeepSeek"]["status"], "api_key_ready")
             self.assertEqual(auth_targets["Hugging Face"]["status"], "api_key_ready")
@@ -1075,6 +1076,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(backlog["model_provider_auth_login_parity"]["status"], "auth_parity_gap_tracked")
             self.assertIn("Claude Code subscription", backlog["model_provider_auth_login_parity"]["subscription_bridge_targets"])
             self.assertIn("Google Gemini CLI subscription", backlog["model_provider_auth_login_parity"]["subscription_bridge_targets"])
+            self.assertIn("Google Gemini OAuth / Code Assist", backlog["model_provider_auth_login_parity"]["subscription_bridge_targets"])
             self.assertIn("Qwen Code Coding Plan subscription", backlog["model_provider_auth_login_parity"]["subscription_bridge_targets"])
             self.assertIn("GitHub Copilot", backlog["model_provider_auth_login_parity"]["subscription_bridge_targets"])
             auth_checklist = {item["control"]: item for item in backlog["model_provider_auth_login_parity"]["operator_checklist"]}

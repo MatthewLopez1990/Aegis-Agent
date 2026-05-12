@@ -32,6 +32,7 @@ class WebGuiBrowserSmokeTests(unittest.TestCase):
         self.assertIn('id="model-auth-output"', markup)
         self.assertIn('value="oauth_device"', markup)
         self.assertIn('value="github-copilot"', markup)
+        self.assertIn('value="google-gemini-oauth"', markup)
         self.assertIn('id="subagent-form"', markup)
         self.assertIn('id="subagent-role"', markup)
         self.assertIn('id="subagent-task"', markup)
