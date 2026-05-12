@@ -32,6 +32,7 @@ TOP_LEVEL_COMMANDS = (
     "approval",
     "approvals",
     "audit",
+    "add-dir",
     "agents",
     "backends",
     "batch",
@@ -39,6 +40,7 @@ TOP_LEVEL_COMMANDS = (
     "bg",
     "boards",
     "browser",
+    "bug",
     "cancel",
     "capabilities",
     "channel",
@@ -47,6 +49,7 @@ TOP_LEVEL_COMMANDS = (
     "compress",
     "config",
     "connectors",
+    "cost",
     "dashboard",
     "deny",
     "desktop",
@@ -80,6 +83,7 @@ TOP_LEVEL_COMMANDS = (
     "personality",
     "plugin",
     "plugins",
+    "pr_comments",
     "provider",
     "rc",
     "reload-plugins",
@@ -105,6 +109,7 @@ TOP_LEVEL_COMMANDS = (
     "submit",
     "tasks",
     "teleport",
+    "terminal-setup",
     "timeline",
     "title",
     "toolsets",
@@ -112,6 +117,7 @@ TOP_LEVEL_COMMANDS = (
     "undo",
     "update",
     "usage",
+    "vim",
     "voice",
     "web-setup",
 )
@@ -144,7 +150,9 @@ SECURITY_COMMANDS = (
 CHANNEL_COMMANDS = ("render", "receive", "resolve-approval", "send-webhook", "send-email", "send-chat-webhook", "events")
 EVALUATION_COMMANDS = ("queue", "review", "trends", "delta", "readiness")
 SLASH_COMMAND_ALIASES = {
+    "add-dir": "add_dir",
     "bg": "background",
+    "pr-comments": "pr_comments",
     "rc": "remote_control",
     "remote-control": "remote_control",
     "remote-env": "remote_env",
@@ -152,6 +160,7 @@ SLASH_COMMAND_ALIASES = {
     "reload-mcp": "reload_mcp",
     "reload_mcp": "reload_mcp",
     "reload-plugins": "reload_plugins",
+    "terminal-setup": "terminal_setup",
     "web-setup": "web_setup",
     "set-home": "sethome",
 }
@@ -269,6 +278,8 @@ class AegisTui(cmd.Cmd):
         )
         self.last_task_id: str | None = None
         self.browser_session_id: str | None = None
+        self.additional_dirs: list[Path] = []
+        self.vim_mode_enabled = False
         self._shield_frame_index = 0
         self._refresh_prompt()
         self.intro = self._render_home()
@@ -2106,6 +2117,43 @@ class AegisTui(cmd.Cmd):
         """usage -- show model usage summary."""
         self.do_models("usage")
 
+    def do_cost(self, arg: str) -> None:
+        """cost -- Claude-style alias for model usage and estimated cost."""
+        self.do_models("usage")
+
+    def do_add_dir(self, arg: str) -> None:
+        """add_dir <path> -- record an additional working directory request for the active session."""
+        raw_path = arg.strip()
+        if not raw_path:
+            print("usage: add-dir <path>")
+            return
+        requested = Path(raw_path).expanduser()
+        resolved = (self.workspace / requested).resolve() if not requested.is_absolute() else requested.resolve()
+        exists = resolved.exists()
+        if resolved not in self.additional_dirs:
+            self.additional_dirs.append(resolved)
+        self.orchestrator.sessions.add_message(
+            self.session["id"],
+            role="user",
+            content=f"Additional working directory requested: {resolved}",
+            trust_class=TrustClass.USER_DIRECTIVE,
+            metadata={"source": "tui_add_dir", "submitted": False, "path": str(resolved), "exists": exists},
+        )
+        self.orchestrator.audit_logger.append(
+            "tui.add_dir_requested",
+            {"session_id": self.session["id"], "path": str(resolved), "exists": exists, "active_filesystem_scope": False},
+        )
+        _print_json(
+            {
+                "status": "recorded_for_session_context",
+                "path": str(resolved),
+                "exists": exists,
+                "active_filesystem_scope": False,
+                "additional_dirs": [str(path) for path in self.additional_dirs],
+                "detail": "Aegis recorded the extra directory as trusted session context; multi-root filesystem connector scopes remain a governed backend gap.",
+            }
+        )
+
     def do_model(self, arg: str) -> None:
         """model [args] -- Claude/Hermes-style alias for models."""
         self.do_models(arg or "providers")
@@ -2137,6 +2185,25 @@ class AegisTui(cmd.Cmd):
                 "model_providers": dashboard["runtime"]["model_providers"],
                 "live_gap_areas": [item["area"] for item in dashboard.get("live_gap_backlog", [])],
                 "security_controls": dashboard["security_controls"],
+            }
+        )
+
+    def do_bug(self, arg: str) -> None:
+        """bug [summary] -- capture a local bug report without sending telemetry."""
+        summary = arg.strip()
+        if not summary:
+            print("usage: bug <summary>")
+            return
+        self.orchestrator.audit_logger.append(
+            "tui.bug_report_captured",
+            {"session_id": self.session["id"], "summary": summary, "telemetry_sent": False},
+        )
+        _print_json(
+            {
+                "status": "captured_local_only",
+                "telemetry_sent": False,
+                "summary": summary,
+                "next_actions": ["repair readiness", "repair generate-candidate <proposal_id>", "review"],
             }
         )
 
@@ -2237,6 +2304,19 @@ class AegisTui(cmd.Cmd):
             }
         )
 
+    def do_terminal_setup(self, arg: str) -> None:
+        """terminal_setup -- show multiline and terminal keybinding readiness."""
+        _print_json(
+            {
+                "status": "inline_terminal_ready",
+                "prompt_wrapping": "enabled",
+                "slash_autocomplete": "enabled",
+                "literal_newline_input": "pending_terminal_keybinding",
+                "shift_enter": "terminal_specific_binding_required",
+                "detail": "The live TUI wraps long input lines in-place; literal multiline editing needs terminal-specific keybinding support before it is enabled by default.",
+            }
+        )
+
     def do_desktop(self, arg: str) -> None:
         """desktop -- show desktop wrapper readiness."""
         self.do_remote_control(arg)
@@ -2244,6 +2324,19 @@ class AegisTui(cmd.Cmd):
     def do_plugin(self, arg: str) -> None:
         """plugin -- alias for plugins."""
         self.do_plugins(arg)
+
+    def do_pr_comments(self, arg: str) -> None:
+        """pr_comments -- show pull request comment integration readiness."""
+        github = next((row for row in self.orchestrator.connectors.status() if row.get("name") == "github"), None)
+        _print_json(
+            {
+                "status": "connector_surface_ready" if github else "not_configured",
+                "github_connector": github,
+                "telemetry_sent": False,
+                "live_gap": "Live PR comment read/write requires a governed GitHub connector credential, repository scope, and receipt redaction before automatic ingestion.",
+                "next_actions": ["connectors", "tools run github_issue_read '{\"query\":\"repo pull request comments\"}'", "review"],
+            }
+        )
 
     def do_reload_plugins(self, arg: str) -> None:
         """reload_plugins -- show plugin reload readiness."""
@@ -2296,6 +2389,17 @@ class AegisTui(cmd.Cmd):
             self.do_session(f"set-personality {arg.strip()}")
             return
         _print_json({"session_id": self.session.get("id"), "personality": self.session.get("personality")})
+
+    def do_vim(self, arg: str) -> None:
+        """vim -- toggle vim-mode readiness metadata for the current TUI session."""
+        self.vim_mode_enabled = not self.vim_mode_enabled
+        _print_json(
+            {
+                "status": "enabled" if self.vim_mode_enabled else "disabled",
+                "mode": "metadata_only",
+                "detail": "Aegis records vim-mode preference for this TUI session; full modal readline editing is still terminal-backend work.",
+            }
+        )
 
     def do_diff(self, arg: str) -> None:
         """diff -- show guarded diff workflow status."""
@@ -3147,6 +3251,7 @@ def _command_reference() -> str:
             "session new|open       Create or switch conversation sessions",
             "session history|tasks  Show active session transcript or tasks",
             "new|reset|clear        Session reset and screen controls",
+            "add-dir <path>         Record extra working directory context",
             "history|title|compress Active session transcript helpers",
             "background|bg <req>    Submit a governed task from the deck",
             "fast [request]         Inspect fast route or submit a quick governed task",
@@ -3164,6 +3269,7 @@ def _command_reference() -> str:
             "permissions            Claude-style policy posture alias",
             "security-review        Security review posture alias",
             "doctor|config|init     Runtime diagnosis, config paths, and init status",
+            "bug <summary>          Capture a local-only bug report",
             "hooks                  Guarded lifecycle hook readiness",
             "dashboard              Runtime command deck",
             "menu                   Grouped command menu",
@@ -3171,6 +3277,7 @@ def _command_reference() -> str:
             "capabilities           Capability groups",
             "connectors             Connector health",
             "channels               Channel adapters",
+            "pr_comments            Pull request comment integration readiness",
             "channel render <c> <t>  Render outbound channel payload",
             "channel receive <c> <t> Normalize inbound channel payload",
             "channel resolve-approval <event> <approval>",
@@ -3179,6 +3286,7 @@ def _command_reference() -> str:
             "models|model           Model providers",
             "login|logout <provider> Model auth aliases",
             "effort [level]         Guarded reasoning-effort status",
+            "cost                   Model usage and estimated cost",
             "provider|usage         Model provider and usage aliases",
             "models auth methods|targets|login|logout <provider>",
             "tools                  Governed tool catalog",
@@ -3212,6 +3320,7 @@ def _command_reference() -> str:
             "browser extract|inspect|screenshot|render|click <selector>|fill <json>",
             "boards                 Work boards and cards",
             "backends|sandbox       Execution backend sandbox posture",
+            "terminal-setup|vim     Terminal keybinding and vim-mode readiness",
             "diff|review            Guarded diff and review workflow surfaces",
             "update|restart         Operator-controlled update/restart readiness",
             "audit                  Audit tail",
@@ -3255,6 +3364,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         "Operate",
         (
             ("new|reset|clear", "session reset and screen controls"),
+            ("add-dir <path>", "record extra working directory context"),
             ("submit <request>", "start a governed task"),
             ("background|bg <request>", "start a governed task without leaving the deck"),
             ("dashboard", "runtime command deck"),
@@ -3275,6 +3385,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("security", "policy posture"),
             ("permissions|security-review", "Claude-style policy and security review aliases"),
             ("doctor|config|init", "runtime diagnostics, local paths, and initialization status"),
+            ("bug <summary>", "local-only bug report capture"),
             ("hooks", "guarded lifecycle hook readiness"),
             ("audit|evidence|timeline|events", "receipts and replay"),
         ),
@@ -3284,7 +3395,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         (
             ("model|models|provider|usage", "provider routes, auth, and usage"),
             ("login|logout <provider>", "model auth login/logout aliases"),
-            ("effort [level]", "guarded reasoning-effort metadata"),
+            ("effort|cost", "guarded reasoning-effort metadata and usage cost"),
             ("tools run <name> <json>", "safe tool execution"),
             ("toolsets", "tool catalog grouped by permission and risk"),
             ("skills [hub query]", "governed skill hub"),
@@ -3301,9 +3412,10 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("remote-control|rc|remote-env|teleport|mobile|desktop", "local-first remote-control readiness"),
             ("web-setup", "local web control-plane setup"),
             ("connectors|channels|platforms", "integration surfaces"),
+            ("pr_comments", "pull request comment integration readiness"),
             ("browser session|render", "sandboxed browser work"),
             ("boards|backends|sandbox", "work and execution planes"),
-            ("voice", "optional interaction readiness"),
+            ("voice|terminal-setup|vim", "optional interaction and terminal readiness"),
             ("rollback|diff|review", "guarded rollback, diff, and review status"),
             ("update|restart", "operator-controlled update and restart readiness"),
         ),
@@ -3528,17 +3640,20 @@ def _next_command_hint(command: str) -> str:
         "dashboard": "/menu",
         "tasks": "/events <id>",
         "session": "/session history",
+        "add-dir": "/session history",
         "status": "/timeline <id>",
         "approvals": "/approval <id>",
         "approval": "/approve <id>",
         "approve": "/resume <id>",
         "security": "/audit",
+        "bug": "/repair readiness",
         "audit": "/evidence <id>",
         "model": "/models auth targets",
         "models": "/models route <id>",
         "login": "/models auth targets",
         "logout": "/models auth methods",
         "effort": "/model",
+        "cost": "/models usage",
         "tools": "/tools run <name> <json>",
         "skills": "/skills hub <query>",
         "plugin": "/plugins",
@@ -3551,8 +3666,10 @@ def _next_command_hint(command: str) -> str:
         "web-setup": "/remote-control",
         "capabilities": "/connectors",
         "connectors": "/channels",
+        "pr_comments": "/connectors",
         "browser": "/browser sessions",
         "boards": "/backends",
+        "terminal-setup": "/vim",
         "rollback": "/repair readiness",
     }
     return hints.get(root, "/help")

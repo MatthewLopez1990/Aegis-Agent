@@ -17,6 +17,7 @@ Commands:
 - `cancel [task_id] [reason]`
 - `tasks [all|session <session_id>] [--limit N]`
 - `new [title]`, `reset [title]`, `clear`
+- `add-dir <path>`
 - `history [session_id] [--limit N]`, `title [name]`, `compress [keep_last]`
 - `background <request>` / `bg <request>`
 - `fast [request]`, `goal`, `batch`, `loop`, `stop [task_id]`, `retry`, `undo`
@@ -27,8 +28,9 @@ Commands:
 - `approve <approval_id> [--actor name] [--reason text] [--admin]`
 - `deny <approval_id> [--actor name] [--reason text] [--admin]`
 - `doctor`, `config`, `init`
-- `permissions`, `security-review`, `hooks`
+- `permissions`, `security-review`, `bug <summary>`, `hooks`
 - `connectors`
+- `pr_comments`
 - `channels`
 - `channel render <channel> <text>`
 - `channel receive <channel> <text>`
@@ -42,7 +44,7 @@ Commands:
 - `model [args]`
 - `login [provider [subscription]]`
 - `logout <provider>`
-- `effort [level]`
+- `effort [level]`, `cost`
 - `models list`
 - `models route <identifier>`
 - `models alias <alias> <identifier>`
@@ -102,6 +104,7 @@ Commands:
 - `boards`
 - `backends`, `sandbox`
 - `voice`
+- `terminal-setup`, `vim`
 - `rollback`
 - `diff`, `review`, `update`, `restart`
 - `platforms`
@@ -112,7 +115,7 @@ Commands:
 
 The TUI uses the same orchestrator, policy gate, approval queue, audit logger, and context firewall as the CLI/API.
 Policies can require admin approval; use `approve <approval_id> --admin` for those gates.
-It starts with a compact control surface that shows the animated Aegis shield, active audit/approval/session/model/workspace flags, and only the next useful navigation prompts. The full posture still lives behind `dashboard`. Plain text submits a task, `/` opens a Codex-style command palette, slash aliases such as `/tasks`, `/bg`, `/model`, `/doctor`, and `/rc` dispatch directly, `/mem`-style prefixes render filtered options, and fuzzy prefix matching means entries like `/su` suggest both `/submit` and `/resume`. `menu operate|govern|build|explore` opens nested command groups, tab completion covers top-level commands plus common subcommands and selected flags, and local readline history persists in `.aegis/tui_history` with private file permissions. The identity banner rotates through deterministic ASCII shield frames so tests and CI remain stable while interactive operators get a stronger command-deck signal. Claude/Hermes-style convenience aliases such as `/login`, `/logout`, `/permissions`, `/security-review`, `/remote-env`, `/web-setup`, `/plugin`, `/sandbox`, `/loop`, and `/hooks` route to the existing governed Aegis surfaces instead of bypassing policy, audit, or approval gates. `remote-control`/`rc` is a guarded readiness/status surface in this slice: it points operators at the local web control plane and records the remaining secure controls needed before off-device mobile/browser relay is allowed, including short-lived pairing tokens, outbound relay, approval prompts, and audit receipts. `models auth targets`, `capabilities`, and the web model panel now expose the Hermes/Claude provider-login parity ledger, including API-key-ready providers, local providers, optional official-CLI subscription login handoff, and provider-native OAuth/cloud-identity bridges that still need governed implementation.
+It starts with a compact control surface that shows the animated Aegis shield, active audit/approval/session/model/workspace flags, and only the next useful navigation prompts. The full posture still lives behind `dashboard`. Plain text submits a task, `/` opens a Codex-style command palette, slash aliases such as `/tasks`, `/bg`, `/model`, `/doctor`, and `/rc` dispatch directly, `/mem`-style prefixes render filtered options, and fuzzy prefix matching means entries like `/su` suggest both `/submit` and `/resume`. `menu operate|govern|build|explore` opens nested command groups, tab completion covers top-level commands plus common subcommands and selected flags, and local readline history persists in `.aegis/tui_history` with private file permissions. The identity banner rotates through deterministic ASCII shield frames so tests and CI remain stable while interactive operators get a stronger command-deck signal. Claude/Hermes-style convenience aliases such as `/add-dir`, `/bug`, `/cost`, `/login`, `/logout`, `/permissions`, `/pr_comments`, `/security-review`, `/terminal-setup`, `/vim`, `/remote-env`, `/web-setup`, `/plugin`, `/sandbox`, `/loop`, and `/hooks` route to the existing governed Aegis surfaces instead of bypassing policy, audit, or approval gates. `remote-control`/`rc` is a guarded readiness/status surface in this slice: it points operators at the local web control plane and records the remaining secure controls needed before off-device mobile/browser relay is allowed, including short-lived pairing tokens, outbound relay, approval prompts, and audit receipts. `models auth targets`, `capabilities`, and the web model panel now expose the Hermes/Claude provider-login parity ledger, including API-key-ready providers, local providers, optional official-CLI subscription login handoff, and provider-native OAuth/cloud-identity bridges that still need governed implementation.
 Task lists, task cards, evidence, and timeline views show the linked session when a task belongs to a conversation.
 Resume attempts write explicit audit events with redacted session ids plus readable context refs, so evidence and timeline views can show which original context was used after approval without weakening audit redaction. Distinct resume outcomes, including intermediate `waiting_approval`, approved, and denied states, are appended back to the original session transcript. When a TUI resume command targets a task from another active conversation, the TUI switches its active session back to that originating transcript after the resume result is recorded.
 Approval queues and approval details also show linked session context for task-bound approvals and direct runtime session ids for browser approvals. In the TUI, approval rows and detail views include copyable next steps plus chat-style phrases such as `approve`, `yes proceed`, `deny`, `no do not do that`, and `let's revert` when those intents are safe for the current approval state. The web approval detail card collects actor, reason, and admin-decision metadata before approving or denying, the same decision payload is used by inline transcript approval actions, and the approval panel keeps a bounded recent decision history for approved and denied gates.
