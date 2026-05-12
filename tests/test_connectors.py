@@ -1191,14 +1191,53 @@ class ConnectorTests(unittest.TestCase):
         self.assertTrue(written.ok)
         self.assertEqual(written.data["mode"], "live_write")
         self.assertEqual(written.data["status"], 204)
+        self.assertTrue(written.data["rate_limit"]["allowed"])
         self.assertEqual(written.data["accepted"]["payload_keys"], ["token"])
         self.assertEqual(written.data["accepted"]["receipt_schema"], "redacted_payload_summary_v1")
         self.assertFalse(written.data["accepted"]["raw_secret_values_included"])
         self.assertFalse(written.data["accepted"]["raw_response_body_included"])
+        self.assertEqual(written.data["rollback_receipt"]["receipt_schema"], "generic_rest_rollback_offer_v1")
+        self.assertFalse(written.data["rollback_receipt"]["rollback_available"])
+        self.assertFalse(written.data["rollback_receipt"]["raw_secret_values_included"])
+        self.assertFalse(written.data["rollback_receipt"]["raw_response_body_included"])
         self.assertNotIn("abc123", json.dumps(written.data, sort_keys=True))
         self.assertEqual(captured["method"], "POST")
         self.assertEqual(captured["url"], "https://example.com/hook")
         self.assertIn("abc123", captured["body"])
+
+    def test_generic_rest_live_write_rate_limit_blocks_second_write(self) -> None:
+        connector = GenericRestConnector(allowlist=("example.com",), live_writes=True, rate_limits={"per_minute": 1})
+        calls: list[object] = []
+
+        class FakeResponse:
+            status = 202
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self, limit: int) -> bytes:
+                return b""
+
+        def fake_open(request, timeout):
+            calls.append(request)
+            return FakeResponse()
+
+        params = {"url": "https://example.com/hook", "payload": {"token": "rest_raw_secret"}}
+        with patch("aegis.connectors.rest._private_network_error", return_value=None), patch("aegis.connectors.rest._open_without_redirects", fake_open):
+            written = connector.write(ConnectorRequest(operation="post", params=params, scopes=("write",), approved=True))
+            limited = connector.write(ConnectorRequest(operation="post", params=params, scopes=("write",), approved=True))
+
+        rendered_limited = json.dumps(limited.data, sort_keys=True)
+        self.assertTrue(written.ok)
+        self.assertEqual(written.data["rate_limit"]["limit"], 1)
+        self.assertFalse(limited.ok)
+        self.assertIn("rate limit", limited.error or "")
+        self.assertFalse(limited.data["rate_limit"]["allowed"])
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("rest_raw_secret", rendered_limited)
 
     def test_generic_rest_live_write_blocks_unsafe_targets_before_network(self) -> None:
         connector = GenericRestConnector(allowlist=("example.com", "localhost"), live_writes=True)
