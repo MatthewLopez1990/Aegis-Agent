@@ -525,9 +525,11 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
 
         self.assertIn('id="tool-run-presets"', markup)
         self.assertIn('id="mcp-server-transport"', markup)
+        self.assertIn('id="mcp-server-token-secret"', markup)
         self.assertIn('value="streamable-http"', markup)
         self.assertIn("TOOL_RUN_PRESETS", script)
         self.assertIn('transport: document.getElementById("mcp-server-transport").value', script)
+        self.assertIn('token_secret: document.getElementById("mcp-server-token-secret").value || undefined', script)
         self.assertIn('x.metadata?.transport || "stdio"', script)
         self.assertIn('name: "service_ticket_read"', script)
         self.assertIn('name: "github_issue"', script)

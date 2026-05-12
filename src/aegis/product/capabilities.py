@@ -306,7 +306,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "guarded remote-control readiness",
                 "approved outbound remote-control relay registration",
                 "approved remote-control relay action proxy",
-                "allowlisted Streamable HTTP MCP",
+                "allowlisted brokered-bearer Streamable HTTP MCP",
             ],
             "security_delta": "Aegis treats all external outputs as tainted data and requires approval for high-impact actions by default.",
             "live_gap": "API-key-ready Hermes providers including Hugging Face, NVIDIA NIM, Vercel AI Gateway, OpenCode, Kilo Code, Ollama Cloud, Arcee, GMI, StepFun, Xiaomi, Tencent TokenHub, Kimi China, and MiniMax China are routable alongside brokered Nous Portal OAuth, MiniMax Token Plan, brokered MiniMax OAuth, brokered Google Gemini OAuth / Code Assist, verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, Google Vertex AI, AWS Bedrock, and Azure Foundry cloud-identity bridges; remaining provider-native gaps are broader OAuth/account bridges beyond the implemented targets.",

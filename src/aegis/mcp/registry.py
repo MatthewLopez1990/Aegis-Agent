@@ -16,13 +16,15 @@ from aegis.memory.store import LocalStore
 from aegis.mcp.client import McpStdioClient, McpStreamableHttpClient, McpToolCallResult
 from aegis.security.context_firewall import ContextFirewall
 from aegis.security.policy_engine import PolicyDecisionType, PolicyEngine, PolicyRequest
+from aegis.security.secrets_broker import SecretsBroker
 from aegis.security.taint import RiskLevel, Sensitivity, TrustClass, now_utc
 
 
 class McpRegistry:
-    def __init__(self, store: LocalStore, audit_logger: AuditLogger) -> None:
+    def __init__(self, store: LocalStore, audit_logger: AuditLogger, secrets_broker: SecretsBroker | None = None) -> None:
         self.store = store
         self.audit_logger = audit_logger
+        self.secrets_broker = secrets_broker or SecretsBroker()
 
     def register_server(
         self,
@@ -35,8 +37,11 @@ class McpRegistry:
         approval_required: bool = True,
         metadata: dict[str, Any] | None = None,
         network_allowlist: tuple[str, ...] = (),
+        auth_token_secret: str | None = None,
     ) -> dict[str, Any]:
         normalized_transport = _normalize_transport(transport)
+        if auth_token_secret and normalized_transport != "streamable_http":
+            raise ValueError("brokered bearer-token auth is only supported for Streamable HTTP MCP servers")
         if normalized_transport == "streamable_http":
             _parse_mcp_http_endpoint(
                 command,
@@ -53,12 +58,19 @@ class McpRegistry:
             "approval_required": approval_required,
             "created_at": now_utc(),
             "updated_at": now_utc(),
-            "metadata": {**(metadata or {}), "transport": normalized_transport},
+            "metadata": _server_metadata(metadata, transport=normalized_transport, auth_token_secret=auth_token_secret),
         }
         self.store.insert_mcp_server(row)
         self.audit_logger.append(
             "mcp.server_registered",
-            {"id": row["id"], "name": name, "enabled": enabled, "approval_required": approval_required, "transport": normalized_transport},
+            {
+                "id": row["id"],
+                "name": name,
+                "enabled": enabled,
+                "approval_required": approval_required,
+                "transport": normalized_transport,
+                "auth": _auth_audit_summary(row["metadata"]),
+            },
         )
         return row
 
@@ -69,8 +81,17 @@ class McpRegistry:
         allowed_executables: tuple[str, ...],
         transport: str = "stdio",
         network_allowlist: tuple[str, ...] = (),
+        auth_token_secret: str | None = None,
     ) -> list[dict[str, Any]]:
-        client, audit_target = _client_for_transport(command, transport=transport, allowed_executables=allowed_executables, network_allowlist=network_allowlist)
+        client, audit_target = _client_for_transport(
+            command,
+            transport=transport,
+            allowed_executables=allowed_executables,
+            network_allowlist=network_allowlist,
+            secrets_broker=self.secrets_broker,
+            auth_token_secret=auth_token_secret,
+            requester="mcp:discovery",
+        )
         raw_tools = client.list_tools()
         tools: list[dict[str, Any]] = []
         for raw_tool in raw_tools:
@@ -102,8 +123,17 @@ class McpRegistry:
         allowed_executables: tuple[str, ...],
         transport: str = "stdio",
         network_allowlist: tuple[str, ...] = (),
+        auth_token_secret: str | None = None,
     ) -> dict[str, Any]:
-        client, audit_target = _client_for_transport(command, transport=transport, allowed_executables=allowed_executables, network_allowlist=network_allowlist)
+        client, audit_target = _client_for_transport(
+            command,
+            transport=transport,
+            allowed_executables=allowed_executables,
+            network_allowlist=network_allowlist,
+            secrets_broker=self.secrets_broker,
+            auth_token_secret=auth_token_secret,
+            requester="mcp:discovery",
+        )
         capabilities = client.capabilities()
         self.audit_logger.append(
             "mcp.capabilities_discovered",
@@ -119,6 +149,7 @@ class McpRegistry:
         allowed_executables: tuple[str, ...],
         transport: str = "stdio",
         network_allowlist: tuple[str, ...] = (),
+        auth_token_secret: str | None = None,
         include_tools: tuple[str, ...] = (),
         exclude_tools: tuple[str, ...] = (),
         include_resources: bool = True,
@@ -133,6 +164,7 @@ class McpRegistry:
             allowed_executables=allowed_executables,
             transport=normalized_transport,
             network_allowlist=network_allowlist,
+            auth_token_secret=auth_token_secret,
         )
         discovered = (
             self.discover_tools(
@@ -140,6 +172,7 @@ class McpRegistry:
                 allowed_executables=allowed_executables,
                 transport=normalized_transport,
                 network_allowlist=network_allowlist,
+                auth_token_secret=auth_token_secret,
             )
             if "tools" in capabilities or not capabilities
             else []
@@ -190,6 +223,7 @@ class McpRegistry:
             approval_required=approval_required,
             metadata={**(metadata or {}), "discovery": discovery_metadata},
             network_allowlist=network_allowlist,
+            auth_token_secret=auth_token_secret,
         )
 
     def list_servers(self) -> list[dict[str, Any]]:
@@ -221,6 +255,19 @@ class McpRegistry:
         self.store.delete_mcp_server(row["id"])
         self.audit_logger.append("mcp.server_removed", {"id": row["id"], "name": row["name"]})
         return row
+
+    def configure_auth_token(self, server: str, *, token_secret: str) -> dict[str, Any]:
+        row = self.get_server(server)
+        if str(row.get("metadata", {}).get("transport") or "stdio") != "streamable_http":
+            raise ValueError("brokered bearer-token auth is only supported for Streamable HTTP MCP servers")
+        metadata = _server_metadata(row.get("metadata", {}), transport=str(row.get("metadata", {}).get("transport") or "stdio"), auth_token_secret=token_secret)
+        updated = {**row, "metadata": metadata}
+        self.store.insert_mcp_server(updated)
+        self.audit_logger.append(
+            "mcp.auth_configured",
+            {"id": row["id"], "name": row["name"], "transport": metadata["transport"], "auth": _auth_audit_summary(metadata)},
+        )
+        return self.get_server(row["id"])
 
     def virtual_tools(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
@@ -312,7 +359,12 @@ class McpRegistry:
             self.audit_logger.append("mcp.call_blocked", {"server": row["name"], "tool": tool, "decision": decision.decision.value, "reason": "; ".join(decision.reasons)}, task_id=task_id)
             raise PermissionError("; ".join(decision.reasons))
         tool_metadata = _metadata_virtual_tools(row.get("metadata", {})).get(tool, {})
-        client, audit_target = _client_for_row(row, allowed_executables=allowed_executables, network_allowlist=network_allowlist)
+        client, audit_target = _client_for_row(
+            row,
+            allowed_executables=allowed_executables,
+            network_allowlist=network_allowlist,
+            secrets_broker=self.secrets_broker,
+        )
         result = _call_mcp_utility(client, str(tool_metadata.get("utility")), arguments) if tool_metadata.get("utility") else client.call_tool(tool, arguments)
         context_item = ContextFirewall().label_content(
             json.dumps(result, sort_keys=True),
@@ -330,12 +382,23 @@ class McpRegistry:
         return call
 
 
-def _client_for_row(row: dict[str, Any], *, allowed_executables: tuple[str, ...], network_allowlist: tuple[str, ...]) -> tuple[Any, dict[str, Any]]:
+def _client_for_row(
+    row: dict[str, Any],
+    *,
+    allowed_executables: tuple[str, ...],
+    network_allowlist: tuple[str, ...],
+    secrets_broker: SecretsBroker,
+) -> tuple[Any, dict[str, Any]]:
+    metadata = row.get("metadata", {}) if isinstance(row.get("metadata", {}), dict) else {}
+    auth = metadata.get("auth", {}) if isinstance(metadata.get("auth", {}), dict) else {}
     return _client_for_transport(
         str(row["command"]),
-        transport=str(row.get("metadata", {}).get("transport") or "stdio"),
+        transport=str(metadata.get("transport") or "stdio"),
         allowed_executables=allowed_executables,
         network_allowlist=network_allowlist,
+        secrets_broker=secrets_broker,
+        auth_token_secret=str(auth.get("token_secret") or "") or None,
+        requester=f"mcp:{row['id']}",
     )
 
 
@@ -345,6 +408,9 @@ def _client_for_transport(
     transport: str,
     allowed_executables: tuple[str, ...],
     network_allowlist: tuple[str, ...],
+    secrets_broker: SecretsBroker,
+    auth_token_secret: str | None,
+    requester: str,
 ) -> tuple[Any, dict[str, Any]]:
     normalized = _normalize_transport(transport)
     if normalized == "stdio":
@@ -352,7 +418,42 @@ def _client_for_transport(
         return McpStdioClient(argv), {"transport": "stdio", "executable": Path(argv[0]).name}
     endpoint = _parse_mcp_http_endpoint(command, network_allowlist=network_allowlist, enforce_allowlist=True, verify_network=True)
     domain = urlparse(endpoint).hostname or ""
-    return McpStreamableHttpClient(endpoint), {"transport": "streamable_http", "domain": domain}
+    bearer_token = _resolve_mcp_bearer_token(secrets_broker, auth_token_secret=auth_token_secret, requester=requester)
+    return (
+        McpStreamableHttpClient(endpoint, authorization_bearer=bearer_token),
+        {"transport": "streamable_http", "domain": domain, "auth": "brokered_bearer" if auth_token_secret else "none"},
+    )
+
+
+def _server_metadata(metadata: dict[str, Any] | None, *, transport: str, auth_token_secret: str | None) -> dict[str, Any]:
+    merged = {**(metadata or {}), "transport": transport}
+    if auth_token_secret:
+        merged["auth"] = {
+            "type": "bearer_token",
+            "token_secret": auth_token_secret,
+            "source": "brokered_local_secret",
+            "raw_secret_values_stored_in_registry": False,
+        }
+    return merged
+
+
+def _auth_audit_summary(metadata: dict[str, Any]) -> dict[str, Any]:
+    auth = metadata.get("auth", {}) if isinstance(metadata, dict) else {}
+    if not isinstance(auth, dict) or not auth.get("type"):
+        return {"type": "none", "token_secret_configured": False}
+    return {"type": str(auth.get("type")), "source": str(auth.get("source") or ""), "token_secret_configured": bool(auth.get("token_secret"))}
+
+
+def _resolve_mcp_bearer_token(secrets_broker: SecretsBroker, *, auth_token_secret: str | None, requester: str) -> str | None:
+    if not auth_token_secret:
+        return None
+    handle = secrets_broker.request_handle(
+        name=auth_token_secret,
+        requester=requester,
+        reason="authorize Streamable HTTP MCP request",
+        scopes=("mcp:streamable_http",),
+    )
+    return secrets_broker.resolve_for_authorized_tool(handle, requester=requester)
 
 
 def _normalize_transport(transport: str) -> str:

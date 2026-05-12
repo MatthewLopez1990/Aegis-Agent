@@ -197,7 +197,7 @@ CURATOR_COMMANDS = ("status", "run", "pin", "unpin", "archive", "restore", "paus
 REPAIR_COMMANDS = ("readiness", "review", "approve", "reject", "candidate", "generate-candidate", "synthesis-prompt", "synthesize-candidate", "review-candidate", "apply-candidate", "rollback-candidate", "attempt")
 SCHEDULE_COMMANDS = ("create", "memory-review-digest", "memory-review-escalation", "evaluation-run", "evaluation-suite", "due", "approve", "activate", "pause", "run-due")
 BROWSER_COMMANDS = ("session", "sessions", "close", "navigate", "extract", "inspect", "table", "screenshot", "render", "click", "fill")
-MCP_COMMANDS = ("list", "register", "call")
+MCP_COMMANDS = ("list", "register", "auth", "call")
 HOOK_COMMANDS = ("list", "add", "enable", "disable", "remove", "run")
 AGENTS_COMMANDS = ("status", "delegate")
 REMOTE_CONTROL_COMMANDS = ("pair", "revoke", "relay", "relay-pull", "relay-action")
@@ -1441,11 +1441,12 @@ class AegisTui(cmd.Cmd):
             return
         if command == "register":
             if len(parts) < 3:
-                print("usage: mcp register <name> <command-or-endpoint> <tool,tool>|--discover [--transport stdio|streamable-http] [--tool name] [--exclude-tool name] [--no-resources] [--no-prompts] [--enable] [--no-approval]")
+                print("usage: mcp register <name> <command-or-endpoint> <tool,tool>|--discover [--transport stdio|streamable-http] [--token-secret name] [--tool name] [--exclude-tool name] [--no-resources] [--no-prompts] [--enable] [--no-approval]")
                 return
             enabled = "--enable" in parts[3:]
             approval_required = "--no-approval" not in parts[3:]
             transport = (_option_values(parts, "--transport") or ["stdio"])[0]
+            token_secret = (_option_values(parts, "--token-secret") or [None])[0]
             if "--discover" in parts[3:]:
                 include_tools = tuple(_option_values(parts, "--tool"))
                 exclude_tools = tuple(_option_values(parts, "--exclude-tool"))
@@ -1459,6 +1460,7 @@ class AegisTui(cmd.Cmd):
                             allowed_executables=self.orchestrator.config.allowed_shell_commands,
                             transport=transport,
                             network_allowlist=self.orchestrator.config.network_allowlist,
+                            auth_token_secret=token_secret,
                             include_tools=include_tools,
                             exclude_tools=exclude_tools,
                             include_resources=include_resources,
@@ -1472,7 +1474,7 @@ class AegisTui(cmd.Cmd):
                     print(f"mcp discovery failed: {exc}")
                 return
             if len(parts) < 4:
-                print("usage: mcp register <name> <command-or-endpoint> <tool,tool>|--discover [--transport stdio|streamable-http] [--tool name] [--exclude-tool name] [--no-resources] [--no-prompts] [--enable] [--no-approval]")
+                print("usage: mcp register <name> <command-or-endpoint> <tool,tool>|--discover [--transport stdio|streamable-http] [--token-secret name] [--tool name] [--exclude-tool name] [--no-resources] [--no-prompts] [--enable] [--no-approval]")
                 return
             tools = tuple(item.strip() for item in parts[3].split(",") if item.strip())
             _print_json(
@@ -1485,10 +1487,17 @@ class AegisTui(cmd.Cmd):
                     approval_required=approval_required,
                     metadata={"source": "tui"},
                     network_allowlist=self.orchestrator.config.network_allowlist,
+                    auth_token_secret=token_secret,
                 )
             )
             return
-        print("usage: mcp list | mcp register <name> <command-or-endpoint> <tool,tool>|--discover [--transport stdio|streamable-http] [--tool name] [--exclude-tool name] [--no-resources] [--no-prompts] [--enable] [--no-approval] | mcp call <server> <tool> <json-arguments> [--approved]")
+        if command == "auth":
+            if len(parts) >= 4 and parts[1] == "token":
+                _print_json(self.orchestrator.mcp.configure_auth_token(parts[2], token_secret=parts[3]))
+                return
+            print("usage: mcp auth token <server> <token-secret>")
+            return
+        print("usage: mcp list | mcp register <name> <command-or-endpoint> <tool,tool>|--discover [--transport stdio|streamable-http] [--token-secret name] [--tool name] [--exclude-tool name] [--no-resources] [--no-prompts] [--enable] [--no-approval] | mcp auth token <server> <token-secret> | mcp call <server> <tool> <json-arguments> [--approved]")
 
     def do_repairs(self, arg: str) -> None:
         """repairs [status] -- list self-repair proposals."""
@@ -5433,7 +5442,7 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("hooks", "run"): ("--approved", "--context-json"),
     ("agents", "delegate"): ("--approved",),
     ("mcp", "call"): ("--approved",),
-    ("mcp", "register"): ("--discover", "--transport", "--tool", "--exclude-tool", "--no-resources", "--no-prompts", "--enable", "--no-approval"),
+    ("mcp", "register"): ("--discover", "--transport", "--token-secret", "--tool", "--exclude-tool", "--no-resources", "--no-prompts", "--enable", "--no-approval"),
     ("plugins", "fetch-manifest"): ("--catalog-path",),
     ("plugin", "fetch-manifest"): ("--catalog-path",),
     ("plugins", "fetch-bundle"): ("--catalog-path", "--key-name"),

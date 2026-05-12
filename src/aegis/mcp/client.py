@@ -139,11 +139,13 @@ class McpStreamableHttpClient:
         timeout_seconds: float = 10.0,
         max_response_bytes: int = 1_000_000,
         protocol_version: str = MCP_PROTOCOL_VERSION,
+        authorization_bearer: str | None = None,
     ) -> None:
         self.endpoint_url = endpoint_url
         self.timeout_seconds = timeout_seconds
         self.max_response_bytes = max_response_bytes
         self.protocol_version = protocol_version
+        self.authorization_bearer = authorization_bearer
         self._negotiated_protocol_version = protocol_version
         self._session_id: str | None = None
         self._next_id = 1
@@ -246,6 +248,8 @@ class McpStreamableHttpClient:
         }
         if self._session_id:
             headers["Mcp-Session-Id"] = self._session_id
+        if self.authorization_bearer:
+            headers["Authorization"] = f"Bearer {self.authorization_bearer}"
         request = Request(self.endpoint_url, data=body, headers=headers, method="POST")
         try:
             response_context = _open_without_redirects(request, timeout=self.timeout_seconds)

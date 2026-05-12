@@ -118,6 +118,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(checklist["network_allowlist"]["state"], "required_per_domain")
             self.assertEqual(checklist["human_approval"]["state"], "enforced")
             self.assertEqual(checklist["receipt_redaction"]["state"], "enforced")
+
             self.assertEqual(checklist["promotion_scope"]["state"], "not_started")
             browser_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "browser_and_media_depth")
             self.assertIn("disabled_live_browser_denial", browser_gap["verification_gates"])
@@ -134,6 +135,36 @@ class CliTests(unittest.TestCase):
             self.assertEqual(backend_checklist["scope_limits"]["state"], "enforced")
             self.assertEqual(backend_checklist["rollback_receipts"]["state"], "enforced")
             self.assertEqual(backend_checklist["provider_lifecycle_depth"]["state"], "not_started")
+
+    def test_mcp_cli_registers_streamable_http_with_brokered_token_secret(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            data_dir = Path(temp) / ".aegis"
+
+            registered = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "mcp",
+                        "register",
+                        "remote",
+                        "http://127.0.0.1:1/mcp",
+                        "--transport",
+                        "streamable-http",
+                        "--tool",
+                        "echo",
+                        "--token-secret",
+                        "MCP_REMOTE_TOKEN",
+                    ]
+                )
+            )
+            configured = dispatch(parser.parse_args(["--data-dir", str(data_dir), "mcp", "auth", "token", "remote", "MCP_REMOTE_TOKEN"]))
+            listed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "mcp", "list"]))
+
+            self.assertEqual(registered["metadata"]["transport"], "streamable_http")
+            self.assertEqual(configured["metadata"]["auth"]["token_secret"], "MCP_REMOTE_TOKEN")
+            self.assertEqual(listed["servers"][0]["metadata"]["auth"]["type"], "bearer_token")
 
     def test_remote_control_relay_command_reports_blocked_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

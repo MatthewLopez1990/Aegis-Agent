@@ -887,16 +887,21 @@ class TuiTests(unittest.TestCase):
 
             with redirect_stdout(output):
                 tui.onecmd("mcp register fake 'python3 /tmp/fake_mcp.py' echo,search")
+                tui.onecmd("mcp register remote http://127.0.0.1:1/mcp echo --transport streamable-http --token-secret MCP_REMOTE_TOKEN")
                 tui.onecmd("mcp list")
 
             rendered = output.getvalue()
             servers = tui.orchestrator.mcp.list_servers()
-            self.assertEqual(servers[0]["name"], "fake")
-            self.assertFalse(servers[0]["enabled"])
-            self.assertTrue(servers[0]["approval_required"])
-            self.assertEqual(servers[0]["allowed_tools"], ["echo", "search"])
-            self.assertEqual(servers[0]["metadata"]["transport"], "stdio")
+            by_name = {server["name"]: server for server in servers}
+            self.assertEqual(by_name["fake"]["name"], "fake")
+            self.assertFalse(by_name["fake"]["enabled"])
+            self.assertTrue(by_name["fake"]["approval_required"])
+            self.assertEqual(by_name["fake"]["allowed_tools"], ["echo", "search"])
+            self.assertEqual(by_name["fake"]["metadata"]["transport"], "stdio")
+            self.assertEqual(by_name["remote"]["metadata"]["transport"], "streamable_http")
+            self.assertEqual(by_name["remote"]["metadata"]["auth"]["token_secret"], "MCP_REMOTE_TOKEN")
             self.assertIn('"name": "fake"', rendered)
+            self.assertIn('"name": "remote"', rendered)
             self.assertIn('"enabled": false', rendered)
             self.assertIn('"approval_required": true', rendered)
 

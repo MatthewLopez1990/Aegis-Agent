@@ -2437,6 +2437,7 @@ document.getElementById("mcp-server-form").addEventListener("submit", async (eve
       name: document.getElementById("mcp-server-name").value || "local-mcp",
       command: document.getElementById("mcp-server-command").value,
       transport: document.getElementById("mcp-server-transport").value,
+      token_secret: document.getElementById("mcp-server-token-secret").value || undefined,
       allowed_tools: tools,
       enabled: false,
       approval_required: true,

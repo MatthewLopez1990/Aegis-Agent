@@ -1355,6 +1355,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                             allowed_executables=orchestrator.config.allowed_shell_commands,
                             transport=str(payload.get("transport") or "stdio"),
                             network_allowlist=orchestrator.config.network_allowlist,
+                            auth_token_secret=_optional_str(payload, "token_secret"),
                             include_tools=tuple(str(tool) for tool in tools),
                             exclude_tools=tuple(str(tool) for tool in exclude_tools),
                             include_resources=bool(payload.get("resources", True)),
@@ -1375,8 +1376,13 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                         approval_required=bool(payload.get("approval_required", True)),
                         metadata={"source": "web-console"},
                         network_allowlist=orchestrator.config.network_allowlist,
+                        auth_token_secret=_optional_str(payload, "token_secret"),
                     )
                 )
+                return
+            if path == "/mcp/auth/token":
+                payload = self._read_json()
+                self._json(orchestrator.mcp.configure_auth_token(str(_required(payload, "server")), token_secret=str(_required(payload, "token_secret"))))
                 return
             if path == "/mcp/call":
                 payload = self._read_json()

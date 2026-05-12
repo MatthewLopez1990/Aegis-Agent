@@ -663,6 +663,7 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_register.add_argument("--exclude-tool", action="append", default=[])
     mcp_register.add_argument("--discover", action="store_true")
     mcp_register.add_argument("--transport", default="stdio", choices=("stdio", "streamable-http", "streamable_http", "http"))
+    mcp_register.add_argument("--token-secret", help="Brokered bearer-token secret for Streamable HTTP MCP")
     mcp_register.add_argument("--no-resources", action="store_true", help="Do not register MCP resource utility wrappers during discovery")
     mcp_register.add_argument("--no-prompts", action="store_true", help="Do not register MCP prompt utility wrappers during discovery")
     mcp_register.add_argument("--enable", action="store_true")
@@ -672,6 +673,11 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_call.add_argument("tool")
     mcp_call.add_argument("--arguments", default="{}")
     mcp_call.add_argument("--approved", action="store_true")
+    mcp_auth = mcp_sub.add_parser("auth", help="Configure brokered MCP server auth")
+    mcp_auth_sub = mcp_auth.add_subparsers(dest="mcp_auth_command", required=True)
+    mcp_auth_token = mcp_auth_sub.add_parser("token", help="Attach a brokered bearer-token secret to a Streamable HTTP MCP server")
+    mcp_auth_token.add_argument("server")
+    mcp_auth_token.add_argument("token_secret")
     mcp_sub.add_parser("list", help="List MCP servers")
 
     hooks = subcommands.add_parser("hooks", help="Manage governed local lifecycle hooks")
@@ -1584,6 +1590,7 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                     allowed_executables=config.allowed_shell_commands,
                     transport=args.transport,
                     network_allowlist=config.network_allowlist,
+                    auth_token_secret=args.token_secret,
                     include_tools=tuple(args.tool),
                     exclude_tools=tuple(args.exclude_tool),
                     include_resources=not args.no_resources,
@@ -1601,7 +1608,11 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 approval_required=not args.no_approval,
                 metadata={"source": "cli"},
                 network_allowlist=config.network_allowlist,
+                auth_token_secret=args.token_secret,
             )
+        if args.mcp_command == "auth":
+            if args.mcp_auth_command == "token":
+                return registry.configure_auth_token(args.server, token_secret=args.token_secret)
         if args.mcp_command == "call":
             orchestrator = build_orchestrator(data_dir=args.data_dir)
             return orchestrator.tools.execute(
@@ -1977,14 +1988,14 @@ def _kanban_manager(config: Any) -> KanbanManager:
 def _mcp_registry(config: Any) -> McpRegistry:
     store = LocalStore(config.database_path)
     audit = AuditLogger(config.audit_log_path)
-    return McpRegistry(store, audit)
+    return McpRegistry(store, audit, SecretsBroker(config.secrets_path))
 
 
 def _plugin_manager(config: Any) -> PluginManager:
     store = LocalStore(config.database_path)
     audit = AuditLogger(config.audit_log_path)
     skills = SkillRegistry(store, audit, SecretsBroker(config.secrets_path))
-    mcp = McpRegistry(store, audit)
+    mcp = McpRegistry(store, audit, SecretsBroker(config.secrets_path))
     hooks = HookManager(config.data_dir / "hooks.json", audit, allowed_executables=config.allowed_shell_commands, workspace=Path.cwd())
     return PluginManager(config.data_dir / "plugins.json", audit, skills=skills, mcp=mcp, hooks=hooks, secrets_broker=SecretsBroker(config.secrets_path))
 

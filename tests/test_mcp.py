@@ -213,6 +213,39 @@ class McpTests(unittest.TestCase):
             finally:
                 server.close()
 
+    def test_streamable_http_mcp_uses_brokered_bearer_token_without_audit_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            server = _HttpMcpFixture(expected_bearer="mcp-token-123")
+            try:
+                orchestrator = build_orchestrator(data_dir=root / ".aegis", workspace=root)
+                orchestrator.secrets_broker.store_secret(name="MCP_REMOTE_TOKEN", value="mcp-token-123")
+                row = orchestrator.mcp.register_discovered_server(
+                    name="remote-auth-api",
+                    command=server.url,
+                    allowed_executables=(),
+                    transport="streamable-http",
+                    network_allowlist=("127.0.0.1",),
+                    auth_token_secret="MCP_REMOTE_TOKEN",
+                    include_tools=("echo",),
+                    enabled=True,
+                    metadata={"source": "test"},
+                )
+
+                self.assertEqual(row["metadata"]["auth"]["type"], "bearer_token")
+                self.assertTrue(row["metadata"]["auth"]["token_secret"])
+                result = orchestrator.tools.execute("mcp_remote_auth_api_echo", {"text": "hello"}, approved=True)
+
+                self.assertEqual(result["status"], "completed")
+                self.assertEqual(result["result"]["content"][0]["text"], "hello")
+                self.assertTrue(server.authorization_headers)
+                self.assertTrue(all(header == "Bearer mcp-token-123" for header in server.authorization_headers))
+                audit_text = (root / ".aegis" / "audit.jsonl").read_text(encoding="utf-8")
+                self.assertIn('"auth": "brokered_bearer"', audit_text)
+                self.assertNotIn("mcp-token-123", audit_text)
+            finally:
+                server.close()
+
     def test_streamable_http_mcp_blocks_unallowlisted_and_insecure_remote_targets(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -275,9 +308,11 @@ class McpTests(unittest.TestCase):
                 registry.call_tool(server="fake", tool="echo", arguments={}, approved=True, allowed_executables=("python3",))
 
 class _HttpMcpFixture:
-    def __init__(self) -> None:
+    def __init__(self, *, expected_bearer: str | None = None) -> None:
+        self.expected_bearer = expected_bearer
         self.accept_headers: list[str] = []
         self.session_headers: list[str] = []
+        self.authorization_headers: list[str] = []
         handler = self._handler()
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -297,6 +332,13 @@ class _HttpMcpFixture:
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
                 fixture.accept_headers.append(self.headers.get("Accept", ""))
+                authorization = self.headers.get("Authorization", "")
+                if fixture.expected_bearer is not None:
+                    fixture.authorization_headers.append(authorization)
+                    if authorization != f"Bearer {fixture.expected_bearer}":
+                        self.send_response(401)
+                        self.end_headers()
+                        return
                 method = payload.get("method")
                 if method != "initialize":
                     fixture.session_headers.append(self.headers.get("Mcp-Session-Id", ""))

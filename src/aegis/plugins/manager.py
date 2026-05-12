@@ -480,9 +480,11 @@ class PluginManager:
                     name=name,
                     command=str(_required(server_spec, "command")),
                     allowed_tools=tuple(str(tool) for tool in tools),
+                    transport=str(server_spec.get("transport") or "stdio"),
                     enabled=bool(enable and default_enabled),
                     approval_required=bool(server_spec.get("approval_required", True)),
                     metadata={"source": "plugin", "plugin_id": plugin_id},
+                    auth_token_secret=str(server_spec["token_secret"]) if server_spec.get("token_secret") else None,
                 )
                 installed_resources.append(
                     {
