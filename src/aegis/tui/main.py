@@ -361,6 +361,7 @@ class AegisTui(cmd.Cmd):
         self.additional_dirs: list[Path] = []
         self.vim_mode_enabled = False
         self._shield_frame_index = 0
+        self._quick_dispatch_stack: list[str] = []
         self._refresh_prompt()
         self.intro = self._render_home()
 
@@ -422,7 +423,7 @@ class AegisTui(cmd.Cmd):
         return None
 
     def completenames(self, text: str, *ignored: Any) -> list[str]:
-        labels = tuple([*TOP_LEVEL_COMMANDS, *self._skill_slash_commands().keys()])
+        labels = tuple([*TOP_LEVEL_COMMANDS, *self._quick_slash_commands().keys(), *self._skill_slash_commands().keys()])
         return _complete_options(labels, text)
 
     def completedefault(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
@@ -430,6 +431,9 @@ class AegisTui(cmd.Cmd):
         stripped = line.lstrip()
         if stripped.startswith("/") and " " not in stripped[:endidx].strip():
             for label in self._complete_skill_slash_labels(text.lstrip("/")):
+                if label not in labels:
+                    labels.append(label)
+            for label in self._complete_quick_slash_labels(text.lstrip("/")):
                 if label not in labels:
                     labels.append(label)
         return labels
@@ -3691,6 +3695,8 @@ class AegisTui(cmd.Cmd):
                 rest = command[len(name) :].strip()
                 return bool(self.onecmd(f"{canonical} {rest}".strip()))
             rest = command[len(name) :].strip()
+            if self._dispatch_quick_slash(name, rest):
+                return
             if self._dispatch_skill_slash(name, rest):
                 return
             matches = _slash_matches(name)
@@ -3761,7 +3767,97 @@ class AegisTui(cmd.Cmd):
         dashboard = build_product_dashboard(self.orchestrator)
         width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
         flags = _dashboard_status_flags(dashboard["runtime"], self.session, workspace=self.workspace)
-        return _slash_palette(width, prefix=prefix, status_flags=flags, dynamic_matches=self._dynamic_skill_palette_matches(prefix))
+        return _slash_palette(
+            width,
+            prefix=prefix,
+            status_flags=flags,
+            quick_matches=self._dynamic_quick_palette_matches(prefix),
+            dynamic_matches=self._dynamic_skill_palette_matches(prefix),
+        )
+
+    def _quick_slash_commands(self) -> dict[str, Any]:
+        commands: dict[str, Any] = {}
+        reserved = {command.replace("_", "-") for command in TOP_LEVEL_COMMANDS}
+        reserved.update(SLASH_COMMAND_ALIASES.keys())
+        reserved.update(self._skill_slash_commands().keys())
+        for label, command in self.orchestrator.config.quick_commands.items():
+            normalized = label.strip().lower()
+            if not normalized or normalized in reserved:
+                continue
+            commands[normalized] = command
+        return dict(sorted(commands.items()))
+
+    def _complete_quick_slash_labels(self, prefix: str) -> list[str]:
+        normalized = prefix.strip().lstrip("/").lower()
+        labels: list[str] = []
+        for label in self._quick_slash_commands():
+            if not normalized or _fuzzy_match(normalized, label):
+                labels.append(f"/{label}")
+        return labels
+
+    def _dynamic_quick_palette_matches(self, prefix: str) -> list[tuple[str, str]]:
+        normalized = prefix.strip().lstrip("/").lower()
+        rows: list[tuple[str, str]] = []
+        for label, command in self._quick_slash_commands().items():
+            if command.kind == "alias":
+                detail = f"quick alias - {command.target}"
+                haystack = " ".join((label, detail))
+            else:
+                detail = "quick exec - approval gated"
+                haystack = " ".join((label, detail, command.command))
+            if normalized and not _fuzzy_match(normalized, haystack):
+                continue
+            rows.append((label, detail))
+        return sorted(rows, key=lambda row: (0 if row[0].startswith(normalized) else 1, row[0]))[:6]
+
+    def _dispatch_quick_slash(self, command_name: str, arg: str) -> bool:
+        normalized = command_name.lower()
+        quick_command = self._quick_slash_commands().get(normalized)
+        if quick_command is None:
+            return False
+        if normalized in self._quick_dispatch_stack:
+            print(f"quick command recursion blocked: /{normalized}")
+            return True
+        if quick_command.kind == "alias":
+            target = quick_command.target.strip()
+            if not target.startswith("/"):
+                print(f"quick command invalid alias target: /{normalized}")
+                return True
+            self._quick_dispatch_stack.append(normalized)
+            try:
+                self.onecmd(" ".join(part for part in (target, arg.strip()) if part))
+            finally:
+                self._quick_dispatch_stack.pop()
+            return True
+        if quick_command.kind == "exec":
+            try:
+                parts = shlex.split(arg)
+            except ValueError as exc:
+                print(f"quick command args invalid: {exc}")
+                return True
+            approved = "--approved" in parts
+            extras = [part for part in parts if part != "--approved"]
+            if extras:
+                print("quick command exec only accepts --approved; edit config.toml to change the command")
+                return True
+            try:
+                result = self.orchestrator.tools.execute("shell", {"command": quick_command.command}, approved=approved)
+            except (PermissionError, ValueError, RuntimeError) as exc:
+                print(f"quick command exec blocked: {exc}")
+                return True
+            _print_json(
+                {
+                    "status": "quick_command_executed",
+                    "command": f"/{normalized}",
+                    "kind": "exec",
+                    "approved": approved,
+                    "result": redact(result),
+                    "raw_secret_values_included": False,
+                }
+            )
+            return True
+        print(f"quick command type unsupported: {quick_command.kind}")
+        return True
 
     def _skill_slash_commands(self) -> dict[str, str]:
         commands: dict[str, str] = {}
@@ -4892,10 +4988,12 @@ def _slash_palette(
     *,
     prefix: str = "",
     status_flags: list[str] | None = None,
+    quick_matches: list[tuple[str, str]] | None = None,
     dynamic_matches: list[tuple[str, str]] | None = None,
 ) -> str:
     prefix = prefix.strip().lstrip("/")
     matches = _slash_matches(prefix)
+    quick_matches = quick_matches or []
     dynamic_matches = dynamic_matches or []
     lines: list[str] = [
         "Slash Command Palette",
@@ -4910,14 +5008,21 @@ def _slash_palette(
     if matches:
         for command, detail in matches[:12]:
             lines.append(f"{_slash_palette_label(command, prefix):<38} {detail}  -> {_next_command_hint(command)}")
-    if dynamic_matches:
+    if quick_matches:
         if matches:
+            lines.append("")
+        lines.append("Quick commands:")
+        for command, detail in quick_matches:
+            next_hint = "/tools" if "exec" in detail else detail.removeprefix("quick alias - ")
+            lines.append(f"/{command:<37} {detail}  -> {next_hint}")
+    if dynamic_matches:
+        if matches or quick_matches:
             lines.append("")
         lines.append("Enabled skill commands:")
         for command, detail in dynamic_matches:
             lines.append(f"/{command:<37} {detail}  -> /skills")
     else:
-        if not matches:
+        if not matches and not quick_matches:
             lines.append("No direct matches. Try /dashboard, /tasks, /memory, /approvals, or /menu.")
     lines.extend(("", "Nested menus:", "  /menu operate   /menu govern   /menu build   /menu explore"))
     return _boxed_lines("Slash Command Palette", lines, width)

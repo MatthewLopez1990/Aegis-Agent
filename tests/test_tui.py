@@ -490,6 +490,60 @@ class TuiTests(unittest.TestCase):
             slash_hint, _ = _live_input_block("aegis> ", "/su", 80)
             self.assertIn("suggest /submit /resume", slash_hint)
 
+    def test_tui_dispatches_configured_quick_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[quick_commands.where]",
+                        'type = "exec"',
+                        'command = "pwd"',
+                        "[quick_commands.routes]",
+                        'type = "alias"',
+                        'target = "/models"',
+                        "[quick_commands.spin]",
+                        'type = "alias"',
+                        'target = "/spin"',
+                        "[quick_commands.models]",
+                        'type = "alias"',
+                        'target = "/dashboard"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            tui = AegisTui(data_dir=data_dir, workspace=root)
+
+            self.assertIn("where", tui.completenames("whe"))
+            self.assertIn("routes", tui.completenames("rou"))
+            self.assertIn("/where", tui.completedefault("whe", "/whe", 1, 4))
+            self.assertIn("/routes", tui.completedefault("rou", "/rou", 1, 4))
+            self.assertNotIn("models", tui._quick_slash_commands())
+            quick_rendered = tui._render_slash_palette("whe")
+            self.assertIn("Quick commands:", quick_rendered)
+            self.assertIn("/where", quick_rendered)
+            self.assertIn("quick exec - approval gated", quick_rendered)
+
+            output = io.StringIO()
+            with redirect_stdout(output):
+                tui.onecmd("/routes")
+                tui.onecmd("/where")
+                tui.onecmd("/where extra")
+                tui.onecmd("/where --approved")
+                tui.onecmd("/spin")
+
+            rendered = output.getvalue()
+            self.assertIn("provider", rendered)
+            self.assertIn('"status": "quick_command_executed"', rendered)
+            self.assertIn('"command": "/where"', rendered)
+            self.assertIn('"status": "approval_required"', rendered)
+            self.assertIn("quick command exec only accepts --approved", rendered)
+            self.assertIn('"returncode": 0', rendered)
+            self.assertIn(str(root), rendered)
+            self.assertIn("quick command recursion blocked: /spin", rendered)
+
     def test_clear_starts_fresh_session_and_btw_alias_submits_background_task(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

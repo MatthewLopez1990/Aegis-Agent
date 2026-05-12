@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 import tomllib
 
 from aegis.config.defaults import (
@@ -75,6 +76,13 @@ class ExecutionConfig:
 
 
 @dataclass(frozen=True)
+class QuickCommandConfig:
+    kind: str
+    command: str = ""
+    target: str = ""
+
+
+@dataclass(frozen=True)
 class AegisConfig:
     data_dir: Path
     database_path: Path
@@ -95,6 +103,7 @@ class AegisConfig:
     policy_profile: PolicyProfile = field(default_factory=PolicyProfile.secure_default)
     memory_retention: MemoryRetentionConfig = field(default_factory=MemoryRetentionConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    quick_commands: dict[str, QuickCommandConfig] = field(default_factory=dict)
 
 
 def load_config(data_dir: str | Path | None = None, config_path: str | Path | None = None) -> AegisConfig:
@@ -112,6 +121,7 @@ def load_config(data_dir: str | Path | None = None, config_path: str | Path | No
     models = raw.get("models", {}) if isinstance(raw.get("models", {}), dict) else {}
     execution = raw.get("execution", {}) if isinstance(raw.get("execution", {}), dict) else {}
     memory = raw.get("memory", {}) if isinstance(raw.get("memory", {}), dict) else {}
+    quick_commands_raw = raw.get("quick_commands", {}) if isinstance(raw.get("quick_commands", {}), dict) else {}
     channels = raw.get("channels", {}) if isinstance(raw.get("channels", {}), dict) else {}
     webhook = channels.get("webhook", {}) if isinstance(channels.get("webhook", {}), dict) else {}
     email = channels.get("email", {}) if isinstance(channels.get("email", {}), dict) else {}
@@ -218,6 +228,7 @@ def load_config(data_dir: str | Path | None = None, config_path: str | Path | No
         policy_profile=policy_profile,
         memory_retention=memory_retention,
         execution=execution_config,
+        quick_commands=_quick_commands(quick_commands_raw),
     )
 
 
@@ -248,6 +259,13 @@ def write_default_config(data_dir: str | Path | None = None) -> Path:
                     "# azure_foundry_base_url = \"https://YOUR-RESOURCE-NAME.openai.azure.com/openai/v1\"",
                     "# google_vertex_project = \"YOUR-GCP-PROJECT-ID\"",
                     "# google_vertex_location = \"us-central1\"",
+                    "",
+                    "# [quick_commands.status]",
+                    "# type = \"exec\"",
+                    "# command = \"pwd\"",
+                    "# [quick_commands.models]",
+                    "# type = \"alias\"",
+                    "# target = \"/models\"",
                     "",
                     "[execution]",
                     'enabled_backends = ["local"]',
@@ -356,6 +374,31 @@ def _enabled_backends(value: object) -> tuple[str, ...]:
     if "local" not in normalized:
         normalized.insert(0, "local")
     return tuple(normalized)
+
+
+def _quick_commands(raw: dict[str, object]) -> dict[str, QuickCommandConfig]:
+    commands: dict[str, QuickCommandConfig] = {}
+    for raw_name, raw_entry in raw.items():
+        name = str(raw_name).strip().lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,79}", name):
+            raise ValueError("quick command names must be 1-80 lowercase letters, digits, dot, underscore, or dash")
+        if not isinstance(raw_entry, dict):
+            raise ValueError(f"quick command {name!r} must be a TOML table")
+        kind = str(raw_entry.get("type") or "").strip().lower()
+        if kind == "exec":
+            command = str(raw_entry.get("command") or "").strip()
+            if not command:
+                raise ValueError(f"quick command {name!r} requires command")
+            commands[name] = QuickCommandConfig(kind=kind, command=command)
+            continue
+        if kind == "alias":
+            target = str(raw_entry.get("target") or "").strip()
+            if not target.startswith("/"):
+                raise ValueError(f"quick command {name!r} alias target must start with /")
+            commands[name] = QuickCommandConfig(kind=kind, target=target)
+            continue
+        raise ValueError(f"quick command {name!r} type must be exec or alias")
+    return commands
 
 
 def _memory_escalation_routes(value: dict[object, object]) -> dict[str, dict[str, object]]:
