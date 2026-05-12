@@ -29,7 +29,7 @@ from aegis.models.registry import ModelRegistry
 from aegis.personality.context import ContextFileLoader, PERSONALITY_NAMES
 from aegis.plugins.manager import PluginManager
 from aegis.product.capabilities import build_product_dashboard
-from aegis.remote_control import RemoteControlPairingRegistry, build_remote_control_directory
+from aegis.remote_control import RemoteControlPairingRegistry, build_remote_control_directory, build_remote_control_notification
 from aegis.research.harness import ResearchHarness
 from aegis.scheduler.manager import ScheduleManager
 from aegis.security.policy_profile import activate_due_policy_rollouts, apply_policy_bundle, diff_policy_bundle, export_policy_bundle, import_policy_bundle, list_policy_bundles, list_policy_promotions, list_policy_rollouts, promote_policy_bundle, rollback_policy_bundle, schedule_policy_bundle
@@ -468,6 +468,12 @@ def build_parser() -> argparse.ArgumentParser:
     remote_control_relay_directory.add_argument("--relay-auth-secret", required=True, help="Brokered secret name for relay bearer auth")
     remote_control_relay_directory.add_argument("--approved", action="store_true", help="Approve one outbound relay directory snapshot")
     remote_control_relay_directory.add_argument("--limit", type=int, default=10, help="Maximum session-scoped tasks to publish")
+    remote_control_relay_notify = remote_control_sub.add_parser("relay-notify", help="Publish one sanitized relay notification for mobile or gateway clients")
+    remote_control_relay_notify.add_argument("--pairing-id", required=True, help="Registered pairing id")
+    remote_control_relay_notify.add_argument("--relay-auth-secret", required=True, help="Brokered secret name for relay bearer auth")
+    remote_control_relay_notify.add_argument("--event", default="directory-updated", help="Notification event, such as directory-updated or task-updated")
+    remote_control_relay_notify.add_argument("--task-id", help="Optional task id to include as sanitized metadata")
+    remote_control_relay_notify.add_argument("--approved", action="store_true", help="Approve one outbound relay notification")
     remote_control_relay_action = remote_control_sub.add_parser("relay-action", help="Execute a registered relay-authenticated task action")
     remote_control_relay_action.add_argument("--pairing-id", required=True, help="Registered pairing id")
     remote_control_relay_action.add_argument("--task-id", required=True, help="Task id to control through the relay proxy")
@@ -1442,6 +1448,44 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                     "relay_target": result["relay_target"],
                     "scope": result["directory_scope"].get("type"),
                     "task_count": result["directory_task_count"],
+                    "pairing_token_relayed": False,
+                    "relay_auth_token_captured": False,
+                    "raw_secret_values_included": False,
+                    "source": "cli",
+                },
+            )
+            return result
+        if args.remote_control_command == "relay-notify":
+            broker = SecretsBroker(config.secrets_path)
+            handle = broker.request_handle(
+                name=args.relay_auth_secret,
+                requester="remote_control_relay",
+                reason="publish scoped remote-control notification to relay",
+                scopes=("remote_control:relay",),
+            )
+            relay_auth_token = broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+            orchestrator = build_orchestrator(data_dir=config.data_dir)
+            pairing = registry.public_pairing(args.pairing_id)
+            notification = build_remote_control_notification(
+                pairing,
+                store=orchestrator.store,
+                event=args.event,
+                task_id=args.task_id,
+            )
+            result = registry.publish_relay_notification(
+                args.pairing_id,
+                notification=notification,
+                relay_auth_token=relay_auth_token,
+                allowlist=config.network_allowlist,
+                approved=args.approved,
+            )
+            orchestrator.audit_logger.append(
+                "remote_control.relay_notification_published",
+                {
+                    "pairing_id": result["pairing"]["id"],
+                    "relay_target": result["relay_target"],
+                    "event": result["notification_event"],
+                    "task_id": result["notification"].get("task_id"),
                     "pairing_token_relayed": False,
                     "relay_auth_token_captured": False,
                     "raw_secret_values_included": False,

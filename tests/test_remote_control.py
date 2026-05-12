@@ -138,6 +138,8 @@ class RemoteControlPairingTests(unittest.TestCase):
                 )
             if body.get("type") == "aegis.remote_control.directory":
                 return FakeResponse({"ok": True, "published": True})
+            if body.get("type") == "aegis.remote_control.notification":
+                return FakeResponse({"ok": True, "notified": True})
             return FakeResponse()
 
         with patch("aegis.remote_control._private_network_error", return_value=None):
@@ -244,12 +246,55 @@ class RemoteControlPairingTests(unittest.TestCase):
         self.assertNotIn(created["token"], rendered_directory_body)
         self.assertNotIn("relay-raw-secret", rendered_directory_body)
         self.assertEqual(registry.public_pairing(created["pairing"]["id"], now=now + timedelta(seconds=3))["relay_last_directory_publish_at"], (now + timedelta(seconds=2)).isoformat())
+        notification_payload = {
+            "status": "remote_notification_available",
+            "mode": "scoped_remote_notification",
+            "event": "task-updated",
+            "task_id": "task-1",
+            "task": {
+                "id": "task-1",
+                "status": "paused",
+                "metadata_only": True,
+                "allowed_actions": ["status", "pause", "shell"],
+                "links": {"status": "/remote-control/tasks/task-1?token=secret"},
+                "user_request": "hidden prompt",
+            },
+            "pairing_token_relayed": False,
+            "raw_secret_values_included": False,
+            "user_request_included": False,
+            "plan_receipt_included": False,
+        }
+        with patch("aegis.remote_control._private_network_error", return_value=None):
+            with patch("aegis.remote_control._open_without_redirects", side_effect=fake_open):
+                notification_published = registry.publish_relay_notification(
+                    created["pairing"]["id"],
+                    notification=notification_payload,
+                    relay_auth_token="relay-raw-secret",
+                    allowlist=("example.com",),
+                    approved=True,
+                    now=now + timedelta(seconds=3),
+                )
+        notification_body = json.loads(captured["requests"][-1].data.decode("utf-8"))
+        rendered_notification = json.dumps(notification_published, sort_keys=True)
+        rendered_notification_body = json.dumps(notification_body, sort_keys=True)
+        self.assertEqual(notification_published["status"], "relay_notification_published")
+        self.assertEqual(notification_published["notification_event"], "task_updated")
+        self.assertEqual(notification_body["type"], "aegis.remote_control.notification")
+        self.assertEqual(notification_body["notification"]["task"]["links"]["status"], "/remote-control/tasks/task-1")
+        self.assertFalse(notification_body["pairing_token_included"])
+        self.assertFalse(notification_body["relay_auth_token_included"])
+        self.assertFalse(notification_published["relay_auth_token_captured"])
+        self.assertNotIn(created["token"], rendered_notification)
+        self.assertNotIn("relay-raw-secret", rendered_notification)
+        self.assertNotIn("hidden prompt", rendered_notification_body)
+        self.assertNotIn("token=secret", rendered_notification_body)
+        self.assertEqual(registry.public_pairing(created["pairing"]["id"], now=now + timedelta(seconds=4))["relay_last_notification_publish_at"], (now + timedelta(seconds=3)).isoformat())
         with patch("aegis.remote_control._open_without_redirects", side_effect=fake_open):
             revoked = registry.revoke(
                 created["pairing"]["id"],
                 relay_auth_token="relay-raw-secret",
                 notify_relay=True,
-                now=now + timedelta(seconds=4),
+                now=now + timedelta(seconds=5),
             )
         revoked_body = json.loads(captured["requests"][-1].data.decode("utf-8"))
         rendered_revoked = json.dumps(revoked, sort_keys=True)

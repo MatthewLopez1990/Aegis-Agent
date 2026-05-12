@@ -22,6 +22,15 @@ MIN_PAIRING_TTL_SECONDS = 60
 MAX_PAIRING_TTL_SECONDS = 3600
 DEFAULT_ALLOWED_TASK_ACTIONS = ("status", "events", "resume", "pause", "cancel")
 MAX_REMOTE_DIRECTORY_TASKS = 25
+REMOTE_CONTROL_RELAY_NOTIFICATION_EVENTS = (
+    "pairing_ready",
+    "directory_updated",
+    "task_updated",
+    "task_waiting",
+    "approval_requested",
+    "task_completed",
+    "task_failed",
+)
 REMOTE_CONTROL_RELAY_REQUIRED_CONTROLS = (
     "explicit_operator_enablement",
     "brokered_relay_auth",
@@ -133,6 +142,7 @@ class RemoteControlPairingRegistry:
                 "registered relay action pull",
                 "registered relay action proxy",
                 "registered relay directory publish",
+                "registered relay notification publish",
             ],
             "blocked_until_relay": [
                 "mobile_push_delivery",
@@ -172,6 +182,7 @@ class RemoteControlPairingRegistry:
                 "local_revocation",
                 "approved_relay_revocation_propagation",
                 "approved_relay_action_pull",
+                "approved_relay_notification_publish",
                 "approved_relay_directory_publish",
                 "scoped_remote_directory",
             ],
@@ -294,6 +305,7 @@ class RemoteControlPairingRegistry:
                 "approved_relay_revocation_propagation",
                 "approved_relay_action_pull",
                 "approved_relay_directory_publish",
+                "approved_relay_notification_publish",
             ],
             "remaining_controls": [
                 "mobile_push_delivery_approval",
@@ -400,6 +412,113 @@ class RemoteControlPairingRegistry:
             "directory_scope": sanitized_directory.get("scope", {}),
             "directory_task_count": int(sanitized_directory.get("task_count") or 0),
             "directory": sanitized_directory,
+            "pairing_token_relayed": False,
+            "relay_auth_secret_used": True,
+            "relay_auth_token_captured": False,
+            "user_request_included": False,
+            "plan_receipt_included": False,
+            "raw_secret_values_included": False,
+        }
+
+    def publish_relay_notification(
+        self,
+        pairing_id: str,
+        *,
+        notification: dict[str, Any],
+        relay_auth_token: str,
+        allowlist: tuple[str, ...],
+        approved: bool = False,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if not approved:
+            raise PermissionError("remote-control relay notification publish requires explicit approval")
+        self._load()
+        checked_at = _utc_now(now)
+        pairing = self._pairings.get(pairing_id)
+        if pairing is None:
+            raise KeyError(pairing_id)
+        relay_registration = pairing.get("relay_registration")
+        if not isinstance(relay_registration, dict):
+            raise ValueError("remote-control relay notification publish requires a registered relay")
+        if not relay_auth_token.strip():
+            raise ValueError("remote-control relay notification publish requires a brokered relay auth token")
+        stored_hash = str(relay_registration.get("relay_auth_sha256") or "")
+        if not stored_hash or not secrets.compare_digest(stored_hash, _token_hash(relay_auth_token)):
+            raise PermissionError("remote-control relay notification publish auth does not match registration")
+        public_pairing = self._public_pairing(pairing, now=checked_at)
+        if public_pairing["status"] != "active":
+            raise ValueError("remote-control relay notification publish requires an active pairing")
+        if not isinstance(notification, dict) or notification.get("status") != "remote_notification_available":
+            raise ValueError("remote-control relay notification publish requires a sanitized notification payload")
+        if notification.get("pairing_token_relayed") or notification.get("raw_secret_values_included") or notification.get("user_request_included") or notification.get("plan_receipt_included"):
+            raise ValueError("remote-control relay notification publish requires redacted metadata-only notification state")
+        notification_pairing = notification.get("pairing")
+        if isinstance(notification_pairing, dict) and str(notification_pairing.get("id") or "") != pairing["id"]:
+            raise ValueError("remote-control relay notification pairing does not match registration")
+        sanitized_notification = _sanitize_remote_notification_for_relay(notification, pairing=public_pairing)
+        relay_target = str(relay_registration.get("relay_target") or "")
+        parsed = urlparse(relay_target)
+        validation_error = _validate_url(parsed)
+        if validation_error:
+            raise ValueError(validation_error)
+        if parsed.scheme != "https":
+            raise ValueError("remote-control relay URL must use https")
+        domain = parsed.hostname or ""
+        if not _allowed_domain(domain, allowlist):
+            raise ValueError(f"domain {domain!r} is not allowlisted")
+        private_error = _private_network_error(domain)
+        if private_error:
+            raise ValueError(private_error)
+        payload = {
+            "type": "aegis.remote_control.notification",
+            "version": 1,
+            "sent_at": checked_at.isoformat(),
+            "pairing_id": pairing["id"],
+            "pairing": public_pairing,
+            "notification": sanitized_notification,
+            "pairing_token_included": False,
+            "relay_auth_token_included": False,
+            "user_request_included": False,
+            "plan_receipt_included": False,
+            "raw_secret_values_included": False,
+            "required_controls": ["scoped_remote_notification", "audit_receipts_without_tokens"],
+        }
+        request = Request(
+            relay_target,
+            data=json.dumps(payload, sort_keys=True).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {relay_auth_token}",
+                "Content-Type": "application/json",
+                "User-Agent": "Aegis-Agent/0.1",
+            },
+            method="POST",
+        )
+        try:
+            response_context = _open_without_redirects(request, timeout=10)
+        except HTTPError as exc:
+            if 300 <= exc.code < 400:
+                raise ValueError("HTTP redirects are not followed for remote-control relay notification publish") from exc
+            raise ValueError(f"remote-control relay notification publish failed with status {exc.code}") from exc
+        except URLError as exc:
+            raise ValueError(f"remote-control relay notification publish failed: {exc.reason}") from exc
+        with response_context as response:
+            response_status = response.getcode() if hasattr(response, "getcode") else None
+            response_body = response.read(2048)
+        relay_registration["last_notification_publish_at"] = checked_at.isoformat()
+        relay_registration["last_notification_publish_response_status"] = response_status
+        relay_registration["last_notification_publish_event"] = sanitized_notification["event"]
+        relay_registration["pairing_token_relayed"] = False
+        relay_registration["raw_secret_values_included"] = False
+        self._save()
+        return {
+            "status": "relay_notification_published",
+            "mode": "approved_relay_notification",
+            "pairing": public_pairing,
+            "relay_target": relay_target,
+            "relay_response_status": response_status,
+            "relay_response_bytes": len(response_body),
+            "notification_event": sanitized_notification["event"],
+            "notification": sanitized_notification,
             "pairing_token_relayed": False,
             "relay_auth_secret_used": True,
             "relay_auth_token_captured": False,
@@ -741,6 +860,7 @@ class RemoteControlPairingRegistry:
         relay_revocation_relayed_at = str(relay_registration.get("revocation_relayed_at") or "") if isinstance(relay_registration, dict) else ""
         relay_last_pull_at = str(relay_registration.get("last_pull_at") or "") if isinstance(relay_registration, dict) else ""
         relay_last_directory_publish_at = str(relay_registration.get("last_directory_publish_at") or "") if isinstance(relay_registration, dict) else ""
+        relay_last_notification_publish_at = str(relay_registration.get("last_notification_publish_at") or "") if isinstance(relay_registration, dict) else ""
         return {
             "id": pairing["id"],
             "label": pairing["label"],
@@ -756,8 +876,10 @@ class RemoteControlPairingRegistry:
             "relay_action_proxy_enabled": bool(status == "active" and relay_registered),
             "relay_action_pull_enabled": bool(status == "active" and relay_registered),
             "relay_directory_publish_enabled": bool(status == "active" and relay_registered),
+            "relay_notification_enabled": bool(status == "active" and relay_registered),
             "relay_last_pull_at": relay_last_pull_at or None,
             "relay_last_directory_publish_at": relay_last_directory_publish_at or None,
+            "relay_last_notification_publish_at": relay_last_notification_publish_at or None,
             "relay_revocation_propagated": bool(relay_revocation_relayed_at),
             "relay_revocation_relayed_at": relay_revocation_relayed_at or None,
         }
@@ -800,6 +922,49 @@ def build_remote_control_directory(
     }
 
 
+def build_remote_control_notification(
+    pairing: dict[str, Any],
+    *,
+    store: Any,
+    event: str = "directory-updated",
+    task_id: str | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    checked_at = _utc_now(now)
+    if pairing.get("status") != "active":
+        raise ValueError("remote-control notification requires an active pairing")
+    normalized_event = _normalize_relay_notification_event(event)
+    scoped_task = _optional_clean_string(pairing.get("task_id"))
+    requested_task = _optional_clean_string(task_id)
+    if scoped_task and requested_task and scoped_task != requested_task:
+        raise ValueError("remote-control notification task is outside pairing scope")
+    selected_task = requested_task or scoped_task
+    task: dict[str, Any] | None = None
+    if selected_task:
+        row = store.get_task(selected_task)
+        if row:
+            task = _remote_directory_task(row, pairing)
+    return {
+        "status": "remote_notification_available",
+        "mode": "scoped_remote_notification",
+        "checked_at": checked_at.isoformat(),
+        "pairing": pairing,
+        "event": normalized_event,
+        "task_id": selected_task,
+        "session_id": _optional_clean_string(pairing.get("session_id")) or (task or {}).get("session_id"),
+        "task": task,
+        "pairing_token_relayed": False,
+        "raw_secret_values_included": False,
+        "user_request_included": False,
+        "plan_receipt_included": False,
+        "notification_controls": [
+            "active_pairing_required",
+            "metadata_only",
+            "no_user_request_plan_or_receipt",
+        ],
+    }
+
+
 def _sanitize_remote_directory_for_relay(directory: dict[str, Any], *, pairing: dict[str, Any]) -> dict[str, Any]:
     scope_source = directory.get("scope") if isinstance(directory.get("scope"), dict) else {}
     scope = {
@@ -812,32 +977,9 @@ def _sanitize_remote_directory_for_relay(directory: dict[str, Any], *, pairing: 
     task_source = directory.get("tasks", [])
     if isinstance(task_source, list):
         for item in task_source[:MAX_REMOTE_DIRECTORY_TASKS]:
-            if not isinstance(item, dict):
-                continue
-            task_id = _optional_clean_string(item.get("id")) or ""
-            allowed_source = item.get("allowed_actions", [])
-            if not isinstance(allowed_source, list):
-                allowed_source = []
-            requested_actions = {str(candidate) for candidate in allowed_source if isinstance(candidate, str)}
-            allowed_actions = [
-                action
-                for action in DEFAULT_ALLOWED_TASK_ACTIONS
-                if action in requested_actions
-            ]
-            links = _remote_directory_links(task_id, allowed_actions) if task_id else {}
-            tasks.append(
-                {
-                    "id": task_id,
-                    "status": str(item.get("status") or "unknown")[:80],
-                    "risk_level": str(item.get("risk_level") or "unknown")[:80],
-                    "session_id": _optional_clean_string(item.get("session_id")),
-                    "created_at": str(item.get("created_at") or "")[:80],
-                    "updated_at": str(item.get("updated_at") or "")[:80],
-                    "allowed_actions": allowed_actions,
-                    "links": links,
-                    "metadata_only": True,
-                }
-            )
+            task = _sanitize_remote_directory_task(item)
+            if task:
+                tasks.append(task)
     return {
         "status": "remote_directory_available",
         "mode": "scoped_remote_directory",
@@ -861,6 +1003,67 @@ def _sanitize_remote_directory_for_relay(directory: dict[str, Any], *, pairing: 
     }
 
 
+def _sanitize_remote_notification_for_relay(notification: dict[str, Any], *, pairing: dict[str, Any]) -> dict[str, Any]:
+    event = _normalize_relay_notification_event(str(notification.get("event") or "directory_updated"))
+    task_source = notification.get("task") if isinstance(notification.get("task"), dict) else None
+    task = _sanitize_remote_directory_task(task_source) if task_source else None
+    task_id = _optional_clean_string(notification.get("task_id")) or (task or {}).get("id")
+    scoped_task = _optional_clean_string(pairing.get("task_id"))
+    if scoped_task and task_id and scoped_task != task_id:
+        raise ValueError("remote-control relay notification task does not match pairing scope")
+    session_id = _optional_clean_string(notification.get("session_id")) or (task or {}).get("session_id")
+    scoped_session = _optional_clean_string(pairing.get("session_id"))
+    if scoped_session and session_id and scoped_session != session_id:
+        raise ValueError("remote-control relay notification session does not match pairing scope")
+    return {
+        "status": "remote_notification_available",
+        "mode": "scoped_remote_notification",
+        "checked_at": str(notification.get("checked_at") or _utc_now(None).isoformat()),
+        "event": event,
+        "pairing": pairing,
+        "task_id": task_id,
+        "session_id": session_id,
+        "task": task,
+        "metadata_only": True,
+        "pairing_token_relayed": False,
+        "raw_secret_values_included": False,
+        "user_request_included": False,
+        "plan_receipt_included": False,
+        "notification_controls": [
+            "active_pairing_required",
+            "scoped_remote_notification",
+            "no_user_request_plan_or_receipt",
+        ],
+    }
+
+
+def _sanitize_remote_directory_task(item: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(item, dict):
+        return None
+    task_id = _optional_clean_string(item.get("id")) or ""
+    allowed_source = item.get("allowed_actions", [])
+    if not isinstance(allowed_source, list):
+        allowed_source = []
+    requested_actions = {str(candidate) for candidate in allowed_source if isinstance(candidate, str)}
+    allowed_actions = [
+        action
+        for action in DEFAULT_ALLOWED_TASK_ACTIONS
+        if action in requested_actions
+    ]
+    links = _remote_directory_links(task_id, allowed_actions) if task_id else {}
+    return {
+        "id": task_id,
+        "status": str(item.get("status") or "unknown")[:80],
+        "risk_level": str(item.get("risk_level") or "unknown")[:80],
+        "session_id": _optional_clean_string(item.get("session_id")),
+        "created_at": str(item.get("created_at") or "")[:80],
+        "updated_at": str(item.get("updated_at") or "")[:80],
+        "allowed_actions": allowed_actions,
+        "links": links,
+        "metadata_only": True,
+    }
+
+
 def _clamp_directory_limit(limit: int) -> int:
     return max(1, min(int(limit), MAX_REMOTE_DIRECTORY_TASKS))
 
@@ -870,6 +1073,14 @@ def _safe_int(value: Any, *, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _normalize_relay_notification_event(event: str) -> str:
+    normalized = str(event or "").strip().lower().replace("-", "_")
+    if normalized not in REMOTE_CONTROL_RELAY_NOTIFICATION_EVENTS:
+        allowed = ", ".join(REMOTE_CONTROL_RELAY_NOTIFICATION_EVENTS)
+        raise ValueError(f"unsupported remote-control relay notification event {event!r}; allowed: {allowed}")
+    return normalized
 
 
 def _remote_directory_scope(pairing: dict[str, Any]) -> dict[str, Any]:
@@ -1002,6 +1213,12 @@ def _normalize_relay_registration(value: Any) -> dict[str, Any] | None:
         normalized["last_directory_publish_response_status"] = int(value["last_directory_publish_response_status"])
     if value.get("last_directory_publish_task_count") is not None:
         normalized["last_directory_publish_task_count"] = int(value["last_directory_publish_task_count"])
+    if value.get("last_notification_publish_at"):
+        normalized["last_notification_publish_at"] = str(value["last_notification_publish_at"])
+    if value.get("last_notification_publish_response_status") is not None:
+        normalized["last_notification_publish_response_status"] = int(value["last_notification_publish_response_status"])
+    if value.get("last_notification_publish_event"):
+        normalized["last_notification_publish_event"] = str(value["last_notification_publish_event"])
     return normalized
 
 

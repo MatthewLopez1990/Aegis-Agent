@@ -22,7 +22,7 @@ from aegis.memory.models import MemoryType
 from aegis.migration.openclaw import preview_hermes_memory_import, preview_openclaw_memory_import
 from aegis.product.capabilities import build_product_dashboard
 from aegis.research.harness import ResearchHarness
-from aegis.remote_control import REMOTE_CONTROL_TOKEN_HEADER, RemoteControlPairingRegistry, build_remote_control_directory
+from aegis.remote_control import REMOTE_CONTROL_TOKEN_HEADER, RemoteControlPairingRegistry, build_remote_control_directory, build_remote_control_notification
 from aegis.scheduler.worker import ScheduleWorker
 from aegis.security.policy_engine import PolicyDecision, PolicyRequest
 from aegis.security.policy_profile import activate_due_policy_rollouts, apply_policy_bundle, apply_policy_bundle_text, diff_policy_bundle, diff_policy_bundle_text, import_policy_bundle_text, list_policy_bundles, list_policy_promotions, list_policy_rollouts, policy_profile_to_dict, promote_policy_bundle, rollback_policy_bundle, schedule_policy_bundle
@@ -477,7 +477,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
         def _do_POST(self) -> None:
             parsed = urlparse(self.path)
             path = parsed.path
-            if path in {"/remote-control/pair", "/remote-control/revoke", "/remote-control/relay", "/remote-control/relay/pull", "/remote-control/relay/directory"}:
+            if path in {"/remote-control/pair", "/remote-control/revoke", "/remote-control/relay", "/remote-control/relay/pull", "/remote-control/relay/directory", "/remote-control/relay/notify"}:
                 self._authorize_local_mutation()
             elif path == "/remote-control/relay/action":
                 pass
@@ -675,6 +675,45 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                         "relay_target": result["relay_target"],
                         "scope": result["directory_scope"].get("type"),
                         "task_count": result["directory_task_count"],
+                        "pairing_token_relayed": False,
+                        "relay_auth_token_captured": False,
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(result)
+                return
+            if path == "/remote-control/relay/notify":
+                payload = self._read_json()
+                relay_secret = str(_required(payload, "relay_auth_secret"))
+                handle = orchestrator.secrets_broker.request_handle(
+                    name=relay_secret,
+                    requester="remote_control_relay",
+                    reason="publish scoped remote-control notification to relay",
+                    scopes=("remote_control:relay",),
+                )
+                relay_auth_token = orchestrator.secrets_broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                pairing = remote_control.public_pairing(str(_required(payload, "pairing_id")))
+                notification = build_remote_control_notification(
+                    pairing,
+                    store=orchestrator.store,
+                    event=str(payload.get("event") or "directory-updated"),
+                    task_id=str(payload["task_id"]) if payload.get("task_id") else None,
+                )
+                result = remote_control.publish_relay_notification(
+                    str(_required(payload, "pairing_id")),
+                    notification=notification,
+                    relay_auth_token=relay_auth_token,
+                    allowlist=orchestrator.config.network_allowlist,
+                    approved=bool(payload.get("approved", False)),
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.relay_notification_published",
+                    {
+                        "pairing_id": result["pairing"]["id"],
+                        "relay_target": result["relay_target"],
+                        "event": result["notification_event"],
+                        "task_id": result["notification"].get("task_id"),
                         "pairing_token_relayed": False,
                         "relay_auth_token_captured": False,
                         "raw_secret_values_included": False,
