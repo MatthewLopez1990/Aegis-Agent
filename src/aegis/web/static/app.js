@@ -427,7 +427,7 @@ const refresh = async () => {
     setList("mcp-servers", mcpServers.servers, (x) => ({
       title: x.name,
       detail: x.command,
-      meta: `${x.enabled ? "enabled" : "disabled"} · ${x.approval_required ? "approval required" : "approval optional"} · ${x.allowed_tools.join(", ") || "no tools"}`,
+      meta: `${x.metadata?.transport || "stdio"} · ${x.enabled ? "enabled" : "disabled"} · ${x.approval_required ? "approval required" : "approval optional"} · ${x.allowed_tools.join(", ") || "no tools"}`,
     }), "No MCP servers");
     setList("schedules", schedules.schedules, (x) => ({
       title: x.name,
@@ -2436,6 +2436,7 @@ document.getElementById("mcp-server-form").addEventListener("submit", async (eve
     body: JSON.stringify({
       name: document.getElementById("mcp-server-name").value || "local-mcp",
       command: document.getElementById("mcp-server-command").value,
+      transport: document.getElementById("mcp-server-transport").value,
       allowed_tools: tools,
       enabled: false,
       approval_required: true,

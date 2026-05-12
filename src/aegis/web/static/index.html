@@ -488,7 +488,11 @@
           </div>
           <form id="mcp-server-form" class="inline-form two-col">
             <input id="mcp-server-name" placeholder="local-search">
-            <input id="mcp-server-command" placeholder="python3 /path/to/server.py">
+            <input id="mcp-server-command" placeholder="python3 /path/to/server.py or https://host/mcp">
+            <select id="mcp-server-transport" aria-label="MCP transport">
+              <option value="stdio">stdio</option>
+              <option value="streamable-http">streamable-http</option>
+            </select>
             <input id="mcp-server-tools" placeholder="search,echo">
             <button type="submit">Register</button>
           </form>

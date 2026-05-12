@@ -82,7 +82,7 @@ Dashboard fields for audit: `enterprise_readiness`, `memory_readiness`, `self_im
 
 ### MCP and Migration
 
-- MCP server registry stores disabled-by-default server definitions with allowed tool lists and approval requirements, and can run approved one-shot stdio tool calls with executable allowlists and tainted outputs.
+- MCP server registry stores disabled-by-default server definitions with allowed tool lists and approval requirements, and can run approved one-shot stdio and Streamable HTTP tool calls with executable or network allowlists plus tainted outputs.
 - OpenClaw/Hermes migration inspection is dry-run by default and blocks direct secret import. Memory preview commands parse supported memory/session files into sanitized review-required candidate records without persistence, classify likely memory types, preserve untrusted provenance, and block secret-like content. Separate memory commit commands persist only unblocked reviewed candidates through the governed memory manager while preserving platform/path/entry provenance and reviewer metadata. Local SQLite schema migrations expose checksum-verified status, dry-run plans, private SQLite backups, no-network PostgreSQL/MySQL schema plans, and private operator-runner bundles with checksum-stamped SQL files for external staging reviews.
 
 ## Safety Delta Over Hermes/OpenClaw Defaults

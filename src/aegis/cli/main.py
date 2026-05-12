@@ -662,6 +662,7 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_register.add_argument("--tool", action="append", default=[])
     mcp_register.add_argument("--exclude-tool", action="append", default=[])
     mcp_register.add_argument("--discover", action="store_true")
+    mcp_register.add_argument("--transport", default="stdio", choices=("stdio", "streamable-http", "streamable_http", "http"))
     mcp_register.add_argument("--no-resources", action="store_true", help="Do not register MCP resource utility wrappers during discovery")
     mcp_register.add_argument("--no-prompts", action="store_true", help="Do not register MCP prompt utility wrappers during discovery")
     mcp_register.add_argument("--enable", action="store_true")
@@ -1581,6 +1582,8 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                     name=args.name,
                     command=args.server_command,
                     allowed_executables=config.allowed_shell_commands,
+                    transport=args.transport,
+                    network_allowlist=config.network_allowlist,
                     include_tools=tuple(args.tool),
                     exclude_tools=tuple(args.exclude_tool),
                     include_resources=not args.no_resources,
@@ -1593,8 +1596,11 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 name=args.name,
                 command=args.server_command,
                 allowed_tools=tuple(args.tool),
+                transport=args.transport,
                 enabled=args.enable,
                 approval_required=not args.no_approval,
+                metadata={"source": "cli"},
+                network_allowlist=config.network_allowlist,
             )
         if args.mcp_command == "call":
             orchestrator = build_orchestrator(data_dir=args.data_dir)

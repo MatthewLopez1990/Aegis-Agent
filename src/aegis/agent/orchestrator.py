@@ -152,6 +152,7 @@ class AgentOrchestrator:
             PolicyEngine(profile=config.policy_profile),
             mcp_registry=self.mcp,
             allowed_executables=config.allowed_shell_commands,
+            network_allowlist=config.network_allowlist,
             browser_controller=self.browser,
             kanban_manager=self.kanban,
             execution_backends=self.execution_backends,

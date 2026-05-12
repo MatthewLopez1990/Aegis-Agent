@@ -62,6 +62,7 @@ class BuiltinToolExecutor:
         *,
         mcp_registry: McpRegistry | None = None,
         allowed_executables: tuple[str, ...] = (),
+        network_allowlist: tuple[str, ...] = (),
         browser_controller: BrowserController | None = None,
         kanban_manager: KanbanManager | None = None,
         execution_backends: ExecutionBackendRegistry | None = None,
@@ -76,6 +77,7 @@ class BuiltinToolExecutor:
         self.catalog = ToolCatalog()
         self.mcp_registry = mcp_registry
         self.allowed_executables = allowed_executables
+        self.network_allowlist = network_allowlist
         self.browser = browser_controller
         self.kanban = kanban_manager
         self.execution_backends = execution_backends
@@ -231,6 +233,7 @@ class BuiltinToolExecutor:
                 task_id=task_id,
                 policy_engine=self.policy_engine,
                 allowed_executables=self.allowed_executables,
+                network_allowlist=self.network_allowlist,
             )
             result = call.to_dict()
         elif name == "subagent_delegate":
@@ -287,6 +290,7 @@ class BuiltinToolExecutor:
             task_id=task_id,
             policy_engine=self.policy_engine,
             allowed_executables=self.allowed_executables,
+            network_allowlist=self.network_allowlist,
         )
         result = {
             "status": "completed",
