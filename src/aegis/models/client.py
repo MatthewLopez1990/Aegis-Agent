@@ -112,6 +112,8 @@ class LiveModelClient:
             return self._chat_claude_subscription_cli(route, messages, temperature=temperature)
         if route.provider.provider == "qwen":
             return self._chat_qwen_subscription_cli(route, messages, temperature=temperature)
+        if route.provider.provider == "google":
+            return self._chat_gemini_subscription_cli(route, messages, temperature=temperature)
         raise ValueError(f"subscription CLI invocation is not implemented for provider {route.provider.provider!r}")
 
     def _chat_codex_subscription_cli(
@@ -273,6 +275,58 @@ class LiveModelClient:
             input_tokens=max(1, len(prompt) // 4),
             output_tokens=max(1, len(content) // 4),
             raw_usage={"source": "subscription_cli", "bridge": "qwen_headless_json", "token_counts": "estimated"},
+        )
+
+    def _chat_gemini_subscription_cli(
+        self,
+        route: ModelRoute,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+    ) -> ModelInvocationResult:
+        executable_path = shutil.which("gemini")
+        if executable_path is None:
+            raise RuntimeError("official Gemini CLI is not installed")
+        prompt = _subscription_cli_prompt(messages, provider="gemini", temperature=temperature)
+        with tempfile.TemporaryDirectory(prefix="aegis-gemini-model-") as temp:
+            temp_dir = Path(temp)
+            command = (
+                executable_path,
+                "-p",
+                prompt,
+                "--output-format=json",
+                "--approval-mode=plan",
+                "--sandbox",
+                "--skip-trust",
+                f"--model={_gemini_cli_model(route.model)}",
+            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    text=True,
+                    capture_output=True,
+                    timeout=self.timeout_seconds,
+                    check=False,
+                    cwd=temp_dir,
+                )  # noqa: S603 - argv is a fixed official provider CLI bridge.
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("official Gemini CLI model invocation timed out") from exc
+            except OSError as exc:
+                raise RuntimeError(f"official Gemini CLI model invocation failed: {exc}") from exc
+        if completed.returncode != 0:
+            raise RuntimeError(f"official Gemini CLI model invocation exited with {completed.returncode}")
+        content, usage = _gemini_json_result(completed.stdout)
+        if not content:
+            raise RuntimeError("official Gemini CLI model invocation returned no final message")
+        raw_usage = dict(usage)
+        raw_usage.update({"source": "subscription_cli", "bridge": "gemini_prompt_json", "token_counts": "estimated"})
+        return ModelInvocationResult(
+            provider=route.provider.provider,
+            model=route.model,
+            content=content,
+            input_tokens=max(1, len(prompt) // 4),
+            output_tokens=max(1, len(content) // 4),
+            raw_usage=raw_usage,
         )
 
     def _chat_github_copilot_cli(
@@ -892,6 +946,33 @@ def _qwen_message_text(message: Any) -> str:
         elif isinstance(part, str) and part.strip():
             parts.append(part.strip())
     return "\n".join(parts).strip()
+
+
+def _gemini_json_result(raw: str) -> tuple[str, dict[str, Any]]:
+    if not raw.strip():
+        return "", {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("official Gemini CLI model invocation returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("official Gemini CLI model invocation returned invalid JSON")
+    error = payload.get("error")
+    if isinstance(error, dict) and error:
+        message = str(error.get("message") or error.get("details") or "unknown Gemini CLI error")
+        raise RuntimeError(f"official Gemini CLI model invocation returned an error: {message}")
+    response = payload.get("response")
+    content = response.strip() if isinstance(response, str) else ""
+    stats = payload.get("stats")
+    return content, dict(stats) if isinstance(stats, dict) else {}
+
+
+def _gemini_cli_model(model: str) -> str:
+    if model == "gemini-pro":
+        return "pro"
+    if model == "gemini-flash":
+        return "flash"
+    return model
 
 
 def _copilot_prompt_command(executable_path: str, *, prompt: str, model: str) -> tuple[str, ...]:

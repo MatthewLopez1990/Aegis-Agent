@@ -124,6 +124,7 @@ class ModelAuthTests(unittest.TestCase):
             anthropic = providers["anthropic"]
             openrouter = providers["openrouter"]
             qwen = providers["qwen"]
+            google = providers["google"]
             aws_bedrock = providers["aws-bedrock"]
 
             self.assertEqual(openai["auth_methods"], ["api_key", "subscription"])
@@ -139,7 +140,11 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(qwen["auth_methods"], ["api_key", "subscription", "oauth"])
             self.assertEqual(qwen["subscription_auth"]["external_command"], "qwen auth coding-plan")
             self.assertEqual(qwen["subscription_auth"]["external_status_command"], "qwen auth status")
-            self.assertIn("cloud_identity", providers["google"]["auth_methods"])
+            self.assertIn("cloud_identity", google["auth_methods"])
+            self.assertIn("subscription", google["auth_methods"])
+            self.assertEqual(google["subscription_auth"]["external_command"], "gemini")
+            self.assertEqual(google["subscription_auth"]["external_login_instruction"], "/auth")
+            self.assertEqual(google["subscription_auth"]["invocation_bridge"], "gemini_prompt_json")
             self.assertTrue(aws_bedrock["auth_required"])
             self.assertEqual(aws_bedrock["auth_methods"], ["cloud_identity"])
             self.assertFalse(aws_bedrock["auth_configured"])
@@ -377,6 +382,87 @@ class ModelAuthTests(unittest.TestCase):
             self.assertIn("model.auth_subscription_login_requested", audit_text)
             self.assertNotIn("sk-sp-", audit_text)
             self.assertNotIn("qwen_refresh_token", audit_text)
+
+    def test_verified_gemini_cli_subscription_can_invoke_without_token_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            secret_path = root / ".aegis" / "secrets.json"
+            audit_path = root / ".aegis" / "audit.jsonl"
+            broker = SecretsBroker(secret_path)
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(audit_path), broker)
+
+            login_completed = subprocess.CompletedProcess(("gemini",), 0)
+            status_command = (
+                "gemini",
+                "-p",
+                "Respond with OK only.",
+                "--output-format=json",
+                "--approval-mode=plan",
+                "--sandbox",
+                "--skip-trust",
+            )
+            status_completed = subprocess.CompletedProcess(
+                status_command,
+                0,
+                stdout='{"response":"OK","stats":{"models":{"gemini-2.5-flash":{"tokens":{"prompt":4,"response":1}}}}}\n',
+                stderr="",
+            )
+            with (
+                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/gemini"),
+                patch("aegis.models.registry.subprocess.run", side_effect=(login_completed, status_completed)) as auth_run,
+            ):
+                login = registry.login_provider_subscription("google", run_external=True)
+
+            self.assertEqual(auth_run.call_args_list[0].args[0], ("gemini",))
+            self.assertEqual(auth_run.call_args_list[1].args[0], status_command)
+            self.assertTrue(Path(auth_run.call_args_list[1].kwargs["cwd"]).name.startswith("aegis-gemini-auth-status-"))
+            self.assertEqual(login["status"], "external_login_verified")
+            self.assertEqual(login["invocation_bridge"], "gemini_prompt_json")
+            self.assertFalse(secret_path.exists())
+            self.assertTrue(registry.auth_status("google")["auth_configured"])
+            self.assertTrue(registry.auth_status("google")["subscription_auth_configured"])
+            self.assertEqual(registry.auth_status("google")["auth_source"], "subscription_cli")
+            target_rows = {row["target"]: row for row in registry.auth_targets()["targets"]}
+            self.assertEqual(target_rows["Google Gemini CLI subscription"]["status"], "subscription_cli_ready")
+
+            route = registry.route("google/gemini-2.5-flash")
+            self.assertEqual(route.auth_method, "subscription_cli")
+            self.assertIsNone(route.secret_handle_id)
+
+            def fake_gemini_prompt(command, **kwargs):
+                self.assertEqual(command[0], "/usr/bin/gemini")
+                self.assertEqual(command[1], "-p")
+                self.assertIn("[USER]\nhello from aegis", command[2])
+                self.assertIn("--output-format=json", command)
+                self.assertIn("--approval-mode=plan", command)
+                self.assertIn("--sandbox", command)
+                self.assertIn("--skip-trust", command)
+                self.assertIn("--model=gemini-2.5-flash", command)
+                self.assertTrue(kwargs["cwd"].name.startswith("aegis-gemini-model-"))
+                self.assertNotIn("input", kwargs)
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout='{"response":"gemini cli response","stats":{"models":{"gemini-2.5-flash":{"tokens":{"prompt":9,"response":5}}}}}\n',
+                    stderr="",
+                )
+
+            with (
+                patch("aegis.models.client.shutil.which", return_value="/usr/bin/gemini"),
+                patch("aegis.models.client.subprocess.run", side_effect=fake_gemini_prompt) as run,
+            ):
+                result = LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello from aegis"}])
+
+            self.assertEqual(result.content, "gemini cli response")
+            self.assertEqual(result.raw_usage["source"], "subscription_cli")
+            self.assertEqual(result.raw_usage["bridge"], "gemini_prompt_json")
+            run.assert_called_once()
+
+            audit_text = audit_path.read_text(encoding="utf-8")
+            self.assertIn("model.auth_subscription_login_requested", audit_text)
+            self.assertNotIn("GOOGLE_REFRESH_TOKEN", audit_text)
+            self.assertNotIn("ya29.", audit_text)
+            self.assertNotIn("session_cookie", audit_text)
 
     def test_verified_github_copilot_cli_can_invoke_without_token_import(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
@@ -840,6 +926,10 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(by_target["Google Vertex AI / Gemini cloud identity"]["status"], "official_cli_bridge_available")
             self.assertEqual(by_target["Google Vertex AI / Gemini cloud identity"]["external_command"], "gcloud auth login --update-adc")
             self.assertEqual(by_target["Google Vertex AI / Gemini cloud identity"]["external_status_command"], "gcloud auth list --filter=status:ACTIVE --format=value(account)")
+            self.assertEqual(by_target["Google Gemini CLI subscription"]["status"], "official_cli_bridge_available")
+            self.assertEqual(by_target["Google Gemini CLI subscription"]["external_command"], "gemini")
+            self.assertEqual(by_target["Google Gemini CLI subscription"]["external_status_command"], 'gemini -p "Respond with OK only." --output-format=json --approval-mode=plan --sandbox --skip-trust')
+            self.assertEqual(by_target["Google Gemini CLI subscription"]["external_login_instruction"], "/auth")
             self.assertEqual(by_target["DeepSeek"]["status"], "api_key_ready")
             self.assertEqual(by_target["MiniMax"]["status"], "api_key_ready")
             self.assertEqual(by_target["MiniMax OAuth"]["status"], "manual_provider_handoff_only")

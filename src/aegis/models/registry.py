@@ -8,6 +8,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import tempfile
 from typing import Any
 from uuid import uuid4
 
@@ -203,6 +204,9 @@ class ModelRegistry:
                 subscription_profile = provider.get("subscription_auth") if isinstance(provider.get("subscription_auth"), dict) else {}
                 if subscription_profile and "subscription" in required_auth:
                     target_row["external_command"] = subscription_profile.get("external_command", target_row.get("external_command"))
+                    target_row["external_status_command"] = subscription_profile.get("external_status_command", target_row.get("external_status_command"))
+                    target_row["external_login_instruction"] = subscription_profile.get("external_login_instruction", target_row.get("external_login_instruction"))
+                    target_row["invocation_bridge"] = subscription_profile.get("invocation_bridge", target_row.get("invocation_bridge"))
                     target_row["bridge_status"] = subscription_profile.get("aegis_bridge_status", "not_implemented")
                     target_row["account_surface"] = subscription_profile.get("account_surface", target_row.get("account_surface"))
                 elif handoff_profile is not None:
@@ -989,6 +993,32 @@ SUBSCRIPTION_AUTH_PROFILES: dict[str, dict[str, Any]] = {
             "Do not paste Qwen OAuth tokens, Coding Plan API keys, or Qwen settings.json contents into Aegis.",
         ],
     },
+    "google": {
+        "account_surface": "Google Gemini CLI / Gemini Code Assist",
+        "external_command": "gemini",
+        "external_command_argv": ("gemini",),
+        "external_status_command": 'gemini -p "Respond with OK only." --output-format=json --approval-mode=plan --sandbox --skip-trust',
+        "external_status_command_argv": (
+            "gemini",
+            "-p",
+            "Respond with OK only.",
+            "--output-format=json",
+            "--approval-mode=plan",
+            "--sandbox",
+            "--skip-trust",
+        ),
+        "external_login_instruction": "/auth",
+        "requires": "Google account or Gemini Code Assist entitlement configured in the official Gemini CLI",
+        "provider_token_source": "official Gemini CLI credential store",
+        "aegis_bridge_status": "official_cli_bridge_available",
+        "invocation_bridge": "gemini_prompt_json",
+        "interactive": True,
+        "next_steps": [
+            "Run model auth login google --subscription --run-external or sign in with gemini directly and use /auth, then use --verify-external to record the non-secret bridge link.",
+            "Use model auth login google --api-key-stdin for direct Gemini API calls, gcloud cloud identity for Vertex AI, or the verified Gemini CLI bridge for isolated gemini -p invocation.",
+            "Do not paste Google OAuth access tokens, refresh tokens, ADC JSON, or browser session cookies into Aegis.",
+        ],
+    },
 }
 
 
@@ -1065,6 +1095,15 @@ MODEL_PROVIDER_AUTH_TARGETS: tuple[dict[str, Any], ...] = (
         "aegis_provider": "google",
         "required_auth": ("cloud_identity",),
         "account_surface": "Google Cloud / Vertex AI",
+    },
+    {
+        "target": "Google Gemini CLI subscription",
+        "platforms": ("Hermes Agent", "Gemini CLI parity"),
+        "aegis_provider": "google",
+        "required_auth": ("subscription",),
+        "external_command": "gemini",
+        "external_login_instruction": "/auth",
+        "account_surface": "Google Gemini CLI / Gemini Code Assist",
     },
     {
         "target": "Mistral",
@@ -1283,7 +1322,12 @@ def _run_external_status_command(profile: dict[str, Any], *, timeout_seconds: fl
             "external_status_exit_code": None,
             "external_status_error": f"executable not found: {command_argv[0]}",
         }
+    cwd: str | None = None
+    temp_dir: tempfile.TemporaryDirectory[str] | None = None
     try:
+        if command_argv[0] == "gemini":
+            temp_dir = tempfile.TemporaryDirectory(prefix="aegis-gemini-auth-status-")
+            cwd = temp_dir.name
         completed = subprocess.run(
             command_argv,
             timeout=timeout_seconds,
@@ -1291,6 +1335,7 @@ def _run_external_status_command(profile: dict[str, Any], *, timeout_seconds: fl
             capture_output=True,
             text=True,
             env=_external_status_env(command_argv),
+            cwd=cwd,
         )  # noqa: S603 - argv is a hardcoded provider status command.
     except subprocess.TimeoutExpired:
         return {
@@ -1310,6 +1355,9 @@ def _run_external_status_command(profile: dict[str, Any], *, timeout_seconds: fl
             "external_status_exit_code": None,
             "external_status_error": str(exc),
         }
+    finally:
+        if temp_dir is not None:
+            temp_dir.cleanup()
     return {
         "external_status_checked": True,
         "external_status_verified": completed.returncode == 0,
@@ -1395,7 +1443,7 @@ def default_providers(
         ModelProviderSpec("anthropic", ("claude-opus", "claude-sonnet-4.6", "claude-haiku"), "ANTHROPIC_API_KEY", "https://api.anthropic.com/v1", False, True, True, False, 3.0, 15.0, 200000, "anthropic"),
         ModelProviderSpec(
             "google",
-            ("gemini-pro", "gemini-flash"),
+            ("gemini-pro", "gemini-flash", "gemini-2.5-pro", "gemini-3-pro-preview", "gemini-2.5-flash", "gemini-2.5-flash-lite"),
             "GOOGLE_API_KEY",
             "https://generativelanguage.googleapis.com/v1beta",
             False,

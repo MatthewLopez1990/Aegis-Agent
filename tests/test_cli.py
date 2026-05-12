@@ -82,6 +82,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result["model_provider_auth_parity"]["status"], "auth_parity_gap_tracked")
             auth_targets = {row["target"]: row for row in result["model_provider_auth_parity"]["targets"]}
             self.assertEqual(auth_targets["Claude Code subscription"]["status"], "official_cli_bridge_available")
+            self.assertEqual(auth_targets["Google Gemini CLI subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(auth_targets["Qwen Code Coding Plan subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(auth_targets["GitHub Copilot"]["status"], "official_cli_bridge_available")
             self.assertTrue(any(item["area"] == "model_provider_auth_login_parity" for item in result["live_gap_backlog"]))
@@ -1946,6 +1947,22 @@ class CliTests(unittest.TestCase):
                 patch("aegis.models.registry.subprocess.run", side_effect=(aws_login_completed, aws_status_completed)) as aws_run,
             ):
                 aws_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "aws-bedrock", "--method", "cloud-identity", "--run-external"]))
+            gemini_status_command = (
+                "gemini",
+                "-p",
+                "Respond with OK only.",
+                "--output-format=json",
+                "--approval-mode=plan",
+                "--sandbox",
+                "--skip-trust",
+            )
+            gemini_login_completed = subprocess.CompletedProcess(("gemini",), 0)
+            gemini_status_completed = subprocess.CompletedProcess(gemini_status_command, 0, stdout='{"response":"OK","stats":{}}\n', stderr="")
+            with (
+                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/gemini"),
+                patch("aegis.models.registry.subprocess.run", side_effect=(gemini_login_completed, gemini_status_completed)) as gemini_run,
+            ):
+                gemini_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "google", "--subscription", "--run-external"]))
             google_login_completed = subprocess.CompletedProcess(("gcloud", "auth", "login", "--update-adc"), 0)
             google_status_completed = subprocess.CompletedProcess(
                 ("gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"),
@@ -1992,6 +2009,13 @@ class CliTests(unittest.TestCase):
             self.assertEqual(aws_login["auth"]["method"], "cloud_identity")
             self.assertEqual(aws_login["auth"]["status"], "external_login_verified")
             self.assertFalse(aws_login["auth"]["token_captured"])
+            self.assertEqual(gemini_run.call_args_list[0].args[0], ("gemini",))
+            self.assertEqual(gemini_run.call_args_list[1].args[0], gemini_status_command)
+            self.assertEqual(gemini_login["auth"]["provider"], "google")
+            self.assertEqual(gemini_login["auth"]["method"], "subscription")
+            self.assertEqual(gemini_login["auth"]["status"], "external_login_verified")
+            self.assertEqual(gemini_login["auth"]["invocation_bridge"], "gemini_prompt_json")
+            self.assertFalse(gemini_login["auth"]["token_captured"])
             self.assertEqual(google_run.call_args_list[0].args[0], ("gcloud", "auth", "login", "--update-adc"))
             self.assertEqual(google_run.call_args_list[1].args[0], ("gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"))
             self.assertEqual(google_login["auth"]["target"], "Google Vertex AI / Gemini cloud identity")
@@ -2012,6 +2036,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(target_rows_after["GitHub Copilot"]["bridge_status"], "official_cli_link_verified")
             self.assertEqual(target_rows_after["AWS Bedrock"]["status"], "external_login_verified")
             self.assertEqual(target_rows_after["AWS Bedrock"]["bridge_status"], "official_cli_link_verified")
+            self.assertEqual(target_rows_after["Google Gemini CLI subscription"]["status"], "subscription_cli_ready")
+            self.assertEqual(target_rows_after["Google Gemini CLI subscription"]["bridge_status"], "official_cli_bridge_ready")
             self.assertEqual(target_rows_after["Google Vertex AI / Gemini cloud identity"]["status"], "external_login_verified")
             self.assertEqual(target_rows_after["Google Vertex AI / Gemini cloud identity"]["bridge_status"], "official_cli_link_verified")
             self.assertIn("GitHub Copilot", targets_after["auth_targets"]["verified_external_auth_targets"])
@@ -2019,6 +2045,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("Google Vertex AI / Gemini cloud identity", targets_after["auth_targets"]["verified_external_auth_targets"])
             self.assertEqual(target_rows_after_logout["GitHub Copilot"]["status"], "official_cli_bridge_available")
             self.assertEqual(target_rows["Claude Code subscription"]["status"], "official_cli_bridge_available")
+            self.assertEqual(target_rows["Google Gemini CLI subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(target_rows["Qwen Code Coding Plan subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(target_rows["GitHub Copilot"]["status"], "official_cli_bridge_available")
             self.assertEqual(target_rows["DeepSeek"]["status"], "api_key_ready")
