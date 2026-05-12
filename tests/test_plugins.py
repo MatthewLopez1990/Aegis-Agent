@@ -5,7 +5,9 @@ import os
 import stat
 import tempfile
 import unittest
+from hashlib import sha256
 from pathlib import Path
+from unittest.mock import patch
 
 from aegis.audit.logger import AuditLogger
 from aegis.hooks.manager import HookManager
@@ -127,6 +129,53 @@ class PluginManagerTests(unittest.TestCase):
             self.assertIn("remote_code_download", updates["blocked_operations"])
             self.assertFalse(updates["raw_secret_values_included"])
             self.assertNotIn("token=", serialized)
+
+    def test_plugin_marketplace_fetches_verified_manifest_for_review_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            body = json.dumps({"id": "remote.plugin", "name": "Remote Plugin", "version": "1.2.0"}).encode("utf-8")
+            digest = sha256(body).hexdigest()
+            catalog_path = root / "marketplace.json"
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "plugins": [
+                            {
+                                "id": "remote.plugin",
+                                "name": "Remote Plugin",
+                                "version": "1.2.0",
+                                "description": "Verified manifest fetch fixture.",
+                                "manifest_url": "https://example.com/remote.plugin/plugin.json",
+                                "manifest_sha256": f"sha256:{digest}",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            class FakeResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return body
+
+            manager = _plugin_manager(data_dir, workspace=root)
+            with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeResponse()):
+                fetched = manager.fetch_marketplace_manifest("remote.plugin", catalog_path=catalog_path, allowlist=("example.com",))
+
+            manifest_path = Path(fetched["manifest_path"])
+            self.assertEqual(fetched["status"], "manifest_downloaded_for_review")
+            self.assertEqual(fetched["manifest_sha256"], digest)
+            self.assertFalse(fetched["auto_install_supported"])
+            self.assertEqual(manifest_path.read_bytes(), body)
+            self.assertEqual(stat.S_IMODE(manifest_path.stat().st_mode), 0o600)
+            self.assertIn("plugins install", fetched["install_command"])
 
     @unittest.skipUnless(os.name == "posix", "POSIX mode assertions only apply on POSIX")
     def test_plugin_store_is_private(self) -> None:

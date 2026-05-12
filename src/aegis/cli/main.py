@@ -348,6 +348,9 @@ def build_parser() -> argparse.ArgumentParser:
         plugin_marketplace.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
         plugin_updates = plugin_sub.add_parser("updates", help="Plan plugin updates from marketplace metadata without downloading code")
         plugin_updates.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
+        plugin_fetch = plugin_sub.add_parser("fetch-manifest", help="Download and verify one marketplace plugin manifest for review")
+        plugin_fetch.add_argument("plugin_id")
+        plugin_fetch.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
 
     connector = subcommands.add_parser("connector", help="List connector status")
     connector_sub = connector.add_subparsers(dest="connector_command", required=True)
@@ -1012,6 +1015,12 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return manager.marketplace(query=args.query, catalog_path=args.catalog_path)
         if args.plugin_command == "updates":
             return manager.update_plan(catalog_path=args.catalog_path)
+        if args.plugin_command == "fetch-manifest":
+            return manager.fetch_marketplace_manifest(
+                args.plugin_id,
+                catalog_path=args.catalog_path,
+                allowlist=config.network_allowlist,
+            )
 
     if args.command == "connector":
         audit = AuditLogger(config.audit_log_path)

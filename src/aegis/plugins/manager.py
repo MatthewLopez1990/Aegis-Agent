@@ -8,17 +8,22 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request
 from uuid import uuid4
+import hashlib
 import json
 import re
 
 from aegis.audit.logger import AuditLogger, redact
+from aegis.connectors.http import _open_without_redirects, _private_network_error, _validate_url
 from aegis.hooks.manager import HookManager
 from aegis.mcp.registry import McpRegistry
 from aegis.security.taint import now_utc
 from aegis.skills.manifest import SkillManifest
 from aegis.skills.registry import SkillRegistry
-from aegis.storage.state import ensure_private_file
+from aegis.storage.state import ensure_private_dir, ensure_private_file
 
 
 _PLUGIN_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,120}$")
@@ -132,6 +137,68 @@ class PluginManager:
                 "unsigned_auto_update",
             ],
         }
+
+    def fetch_marketplace_manifest(
+        self,
+        plugin_id: str,
+        *,
+        catalog_path: str | Path | None = None,
+        allowlist: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        catalog = {str(entry.get("id") or ""): _public_marketplace_entry(entry) for entry in _read_plugin_catalog(catalog_path)}
+        entry = catalog.get(plugin_id)
+        if entry is None:
+            raise KeyError(plugin_id)
+        manifest_url = str(entry.get("manifest_url") or "")
+        expected_sha256 = _normalize_sha256(str(entry.get("manifest_sha256") or ""))
+        if not expected_sha256:
+            raise ValueError("marketplace manifest download requires manifest_sha256")
+        parsed = urlparse(manifest_url)
+        domain = parsed.hostname or ""
+        validation_error = _validate_url(parsed)
+        if validation_error:
+            raise ValueError(validation_error)
+        if parsed.scheme != "https":
+            raise ValueError("marketplace manifest download requires https")
+        if not _allowed_domain(domain, allowlist):
+            raise ValueError(f"domain {domain!r} is not allowlisted")
+        private_error = _private_network_error(domain)
+        if private_error:
+            raise ValueError(private_error)
+        body = _download_manifest_bytes(manifest_url)
+        digest = hashlib.sha256(body).hexdigest()
+        if digest != expected_sha256:
+            raise ValueError("marketplace manifest SHA-256 does not match catalog metadata")
+        decoded = json.loads(body.decode("utf-8"))
+        if not isinstance(decoded, dict):
+            raise ValueError("marketplace manifest must be a JSON object")
+        if str(decoded.get("id") or "") != plugin_id:
+            raise ValueError("marketplace manifest id does not match catalog entry")
+        output_dir = ensure_private_dir(self.path.parent / "plugin-marketplace")
+        output_path = ensure_private_file(output_dir / f"{plugin_id}.plugin.json")
+        with output_path.open("wb") as handle:
+            handle.write(body)
+        ensure_private_file(output_path)
+        result = {
+            "status": "manifest_downloaded_for_review",
+            "mode": "verified_manifest_only_no_dynamic_import",
+            "id": plugin_id,
+            "name": entry["name"],
+            "version": entry["version"],
+            "manifest_url": manifest_url,
+            "manifest_sha256": digest,
+            "manifest_path": str(output_path),
+            "install_command": f"plugins install {output_path}",
+            "auto_install_supported": False,
+            "raw_secret_values_included": False,
+            "blocked_operations": [
+                "dynamic_plugin_import",
+                "marketplace_token_capture",
+                "unsigned_auto_update",
+            ],
+        }
+        self.audit_logger.append("plugin.marketplace_manifest_downloaded", redact(result))
+        return result
 
     def install_plugin(
         self,
@@ -448,6 +515,34 @@ def _read_plugin_catalog(catalog_path: str | Path | None = None) -> list[dict[st
             raise ValueError("marketplace plugin id must be 1-120 characters of letters, digits, dot, underscore, or dash")
         result.append(entry)
     return result
+
+
+def _allowed_domain(domain: str, allowlist: tuple[str, ...]) -> bool:
+    return any(domain == allowed or domain.endswith(f".{allowed}") for allowed in allowlist)
+
+
+def _normalize_sha256(value: str) -> str:
+    text = value.strip().lower()
+    if text.startswith("sha256:"):
+        return text.removeprefix("sha256:")
+    return text
+
+
+def _download_manifest_bytes(url: str) -> bytes:
+    request = Request(url, headers={"User-Agent": "Aegis-Agent/0.1"})
+    try:
+        response_context = _open_without_redirects(request, timeout=10)
+    except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise ValueError("HTTP redirects are not followed for marketplace manifests") from exc
+        raise ValueError(f"marketplace manifest download failed with status {exc.code}") from exc
+    except URLError as exc:
+        raise ValueError(f"marketplace manifest download failed: {exc.reason}") from exc
+    with response_context as response:
+        body = response.read(262_145)
+    if len(body) > 262_144:
+        raise ValueError("marketplace manifest exceeds 262144 byte limit")
+    return body
 
 
 def _public_marketplace_entry(raw: dict[str, Any], *, installed: dict[str, Any] | None = None) -> dict[str, Any]:

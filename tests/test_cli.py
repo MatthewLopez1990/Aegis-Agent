@@ -6,6 +6,7 @@ import stat
 import subprocess
 import unittest
 import tempfile
+from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1990,11 +1991,43 @@ class CliTests(unittest.TestCase):
             parser = build_parser()
             plugin_path = _write_plugin_fixture(root)
             catalog_path = _write_plugin_catalog(root)
+            manifest_body = json.dumps({"id": "remote.plugin", "name": "Remote Plugin", "version": "1.0.0"}).encode("utf-8")
+            manifest_digest = sha256(manifest_body).hexdigest()
+            fetch_catalog = root / "fetch-marketplace.json"
+            fetch_catalog.write_text(
+                json.dumps(
+                    {
+                        "plugins": [
+                            {
+                                "id": "remote.plugin",
+                                "name": "Remote Plugin",
+                                "version": "1.0.0",
+                                "description": "CLI fetch fixture.",
+                                "manifest_url": "https://example.com/plugins/remote.plugin/plugin.json",
+                                "manifest_sha256": manifest_digest,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            class FakeResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return manifest_body
 
             installed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugin", "install", str(plugin_path), "--unsigned-local"]))
             listed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "list"]))
             marketplace = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "marketplace", "--query", "test", "--catalog-path", str(catalog_path)]))
             updates = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "updates", "--catalog-path", str(catalog_path)]))
+            with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeResponse()):
+                fetched = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "fetch-manifest", "remote.plugin", "--catalog-path", str(fetch_catalog)]))
             enabled = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugin", "enable", "test.plugin"]))
             disabled = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugin", "disable", "test.plugin"]))
             removed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugin", "remove", "test.plugin"]))
@@ -2004,6 +2037,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(marketplace["status"], "virtual_marketplace_no_code_download")
             self.assertEqual(marketplace["entries"][0]["id"], "test.plugin")
             self.assertEqual(updates["updates"][0]["status"], "update_available")
+            self.assertEqual(fetched["status"], "manifest_downloaded_for_review")
+            self.assertEqual(Path(fetched["manifest_path"]).read_bytes(), manifest_body)
             self.assertTrue(enabled["plugin"]["enabled"])
             self.assertFalse(disabled["plugin"]["enabled"])
             self.assertTrue(removed["removed"])

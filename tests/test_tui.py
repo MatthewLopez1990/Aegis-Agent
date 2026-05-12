@@ -233,6 +233,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn("create", tui.complete_memory("cr", "memory cr", len("memory "), len("memory cr")))
             self.assertIn("health", tui.complete_memory("he", "memory he", len("memory "), len("memory he")))
             self.assertIn("enable", tui.complete_skills("en", "skills en", len("skills "), len("skills en")))
+            self.assertIn("fetch-manifest", tui.complete_plugins("fetch", "plugins fetch", len("plugins "), len("plugins fetch")))
+            self.assertIn("--catalog-path", tui.completedefault("--", "/plugins fetch-manifest remote.plugin --", len("/plugins fetch-manifest remote.plugin "), len("/plugins fetch-manifest remote.plugin --")))
             self.assertIn("openclaw-memory-preview", tui.complete_migrate("openclaw", "migrate openclaw", len("migrate "), len("migrate openclaw")))
             self.assertIn("candidate", tui.complete_repair("ca", "repair ca", len("repair "), len("repair ca")))
             self.assertIn("readiness", tui.complete_repair("rea", "repair rea", len("repair "), len("repair rea")))
