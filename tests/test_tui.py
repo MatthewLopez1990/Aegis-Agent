@@ -937,6 +937,7 @@ class TuiTests(unittest.TestCase):
                 tui.onecmd("models auth openai")
                 tui.onecmd("models auth methods openai")
                 tui.onecmd("models auth login openai subscription")
+                tui.onecmd("models auth login github-copilot oauth-device")
                 with patch("getpass.getpass", return_value="sk-test-secret"):
                     tui.onecmd("models auth login openai")
                 tui.onecmd("models auth openai")
@@ -957,6 +958,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn('"provider": "openai"', rendered)
             self.assertIn('"auth_methods"', rendered)
             self.assertIn('"external_command": "codex login"', rendered)
+            self.assertIn('"target": "GitHub Copilot"', rendered)
+            self.assertIn('"method": "oauth_device"', rendered)
             self.assertIn('"status": "external_login_required"', rendered)
             self.assertIn('"auth_configured": true', rendered)
             self.assertIn('"auth_configured": false', rendered)

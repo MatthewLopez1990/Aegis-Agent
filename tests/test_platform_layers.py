@@ -950,9 +950,9 @@ class PlatformLayerTests(unittest.TestCase):
             auth_targets = {row["target"]: row for row in auth_parity["targets"]}
             self.assertEqual(auth_targets["OpenAI API"]["status"], "api_key_ready")
             self.assertEqual(auth_targets["Claude Code subscription"]["status"], "official_cli_handoff_only")
-            self.assertEqual(auth_targets["GitHub Copilot"]["status"], "not_started")
+            self.assertEqual(auth_targets["GitHub Copilot"]["status"], "official_cli_handoff_only")
             self.assertEqual(auth_targets["DeepSeek"]["status"], "api_key_ready")
-            self.assertEqual(auth_targets["MiniMax OAuth"]["status"], "provider_native_auth_bridge_required")
+            self.assertEqual(auth_targets["MiniMax OAuth"]["status"], "manual_provider_handoff_only")
             self.assertEqual(auth_targets["Qwen OAuth"]["required_auth"], ["oauth"])
             self.assertFalse(any(row["raw_tokens_captured"] for row in auth_parity["targets"]))
             backlog = {item["area"]: item for item in dashboard["live_gap_backlog"]}
@@ -962,11 +962,11 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("remote_backend_activation", backlog)
             self.assertEqual(backlog["model_provider_auth_login_parity"]["status"], "auth_parity_gap_tracked")
             self.assertIn("Claude Code subscription", backlog["model_provider_auth_login_parity"]["subscription_bridge_targets"])
-            self.assertIn("GitHub Copilot", backlog["model_provider_auth_login_parity"]["not_started_targets"])
+            self.assertIn("GitHub Copilot", backlog["model_provider_auth_login_parity"]["subscription_bridge_targets"])
             auth_checklist = {item["control"]: item for item in backlog["model_provider_auth_login_parity"]["operator_checklist"]}
             self.assertEqual(auth_checklist["api_key_secret_broker"]["state"], "enforced")
             self.assertEqual(auth_checklist["subscription_token_bridge"]["state"], "official_cli_handoff_only")
-            self.assertEqual(auth_checklist["oauth_device_flows"]["state"], "not_started")
+            self.assertEqual(auth_checklist["oauth_device_flows"]["state"], "official_cli_handoff_only")
             self.assertEqual(auth_checklist["raw_browser_token_capture"]["state"], "denied_by_design")
             self.assertIn("model_auth.raw_token_capture_rejected", backlog["model_provider_auth_login_parity"]["evaluation_scenarios"])
             self.assertIn("allowlisted_live_or_local", readiness["ready"]["statuses"])

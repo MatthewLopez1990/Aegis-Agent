@@ -561,8 +561,8 @@ def _model_auth_operator_checklist(model_auth_parity: dict[str, Any]) -> list[di
         },
         {
             "control": "oauth_device_flows",
-            "state": "not_started" if model_auth_parity["not_started_targets"] else "ready_for_review",
-            "detail": "Copilot, Qwen, Nous Portal, and cloud-identity providers need provider-native OAuth/device/cloud identity flows.",
+            "state": "official_cli_handoff_only" if model_auth_parity["subscription_bridge_targets"] else "ready_for_review",
+            "detail": "Copilot, Qwen, Nous Portal, and cloud-identity providers are explicit local handoff targets until governed OAuth/device/cloud identity bridges exist.",
         },
         {
             "control": "raw_browser_token_capture",

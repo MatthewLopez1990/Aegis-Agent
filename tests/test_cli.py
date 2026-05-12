@@ -71,7 +71,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result["model_provider_auth_parity"]["status"], "auth_parity_gap_tracked")
             auth_targets = {row["target"]: row for row in result["model_provider_auth_parity"]["targets"]}
             self.assertEqual(auth_targets["Claude Code subscription"]["status"], "official_cli_handoff_only")
-            self.assertEqual(auth_targets["GitHub Copilot"]["status"], "not_started")
+            self.assertEqual(auth_targets["GitHub Copilot"]["status"], "official_cli_handoff_only")
             self.assertTrue(any(item["area"] == "model_provider_auth_login_parity" for item in result["live_gap_backlog"]))
             self.assertTrue(any(item["area"] == "provider_and_channel_live_connectors" for item in result["live_gap_backlog"]))
             self.assertTrue(all("sample_tools" in item for item in result["live_gap_backlog"]))
@@ -1745,6 +1745,12 @@ class CliTests(unittest.TestCase):
                 patch("aegis.models.registry.subprocess.run", return_value=completed) as run,
             ):
                 external_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "openai", "--subscription", "--run-external"]))
+            github_completed = subprocess.CompletedProcess(("gh", "auth", "login"), 0)
+            with (
+                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/gh"),
+                patch("aegis.models.registry.subprocess.run", return_value=github_completed) as github_run,
+            ):
+                github_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "github-copilot", "--method", "oauth-device", "--run-external"]))
 
             self.assertIn("subscription", methods["auth"]["auth_methods"])
             self.assertEqual(methods["auth"]["subscription_auth"]["external_command"], "codex login")
@@ -1761,10 +1767,15 @@ class CliTests(unittest.TestCase):
             self.assertEqual(external_login["auth"]["status"], "external_login_completed_unverified")
             self.assertTrue(external_login["auth"]["external_login_attempted"])
             self.assertFalse(external_login["auth"]["token_captured"])
+            github_run.assert_called_once_with(("gh", "auth", "login"), timeout=None, check=False)
+            self.assertEqual(github_login["auth"]["target"], "GitHub Copilot")
+            self.assertEqual(github_login["auth"]["method"], "oauth_device")
+            self.assertEqual(github_login["auth"]["status"], "external_login_completed_unverified")
+            self.assertFalse(github_login["auth"]["token_captured"])
             target_rows = {row["target"]: row for row in targets["auth_targets"]["targets"]}
             self.assertEqual(targets["auth_targets"]["status"], "auth_parity_gap_tracked")
             self.assertEqual(target_rows["Claude Code subscription"]["status"], "official_cli_handoff_only")
-            self.assertEqual(target_rows["GitHub Copilot"]["status"], "not_started")
+            self.assertEqual(target_rows["GitHub Copilot"]["status"], "official_cli_handoff_only")
             self.assertEqual(target_rows["DeepSeek"]["status"], "api_key_ready")
             self.assertNotIn("sk-deepseek-test", json.dumps(deepseek_login, sort_keys=True))
 

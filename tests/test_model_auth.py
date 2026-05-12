@@ -200,6 +200,55 @@ class ModelAuthTests(unittest.TestCase):
             self.assertFalse(status["token_captured"])
             self.assertFalse(secret_path.exists())
 
+    def test_provider_native_auth_handoff_runs_official_cli_without_token_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            secret_path = root / ".aegis" / "secrets.json"
+            audit_path = root / ".aegis" / "audit.jsonl"
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(audit_path), SecretsBroker(secret_path))
+
+            completed = subprocess.CompletedProcess(("gh", "auth", "login"), 0)
+            with (
+                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/gh"),
+                patch("aegis.models.registry.subprocess.run", return_value=completed) as run,
+            ):
+                status = registry.login_provider_external("github-copilot", method="oauth-device", run_external=True)
+
+            run.assert_called_once_with(("gh", "auth", "login"), timeout=None, check=False)
+            self.assertEqual(status["provider"], "github-copilot")
+            self.assertEqual(status["target"], "GitHub Copilot")
+            self.assertEqual(status["method"], "oauth_device")
+            self.assertEqual(status["status"], "external_login_completed_unverified")
+            self.assertTrue(status["external_login_attempted"])
+            self.assertEqual(status["external_command_argv"], ["gh", "auth", "login"])
+            self.assertFalse(status["auth_configured"])
+            self.assertFalse(status["token_captured"])
+            self.assertFalse(secret_path.exists())
+
+            audit_text = audit_path.read_text(encoding="utf-8")
+            self.assertIn("model.auth_external_login_requested", audit_text)
+            self.assertNotIn("GH_TOKEN", audit_text)
+
+    def test_manual_provider_native_auth_handoff_never_captures_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            secret_path = root / ".aegis" / "secrets.json"
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"), SecretsBroker(secret_path))
+
+            with (
+                patch("aegis.models.registry.shutil.which", return_value=None),
+                patch("aegis.models.registry.subprocess.run") as run,
+            ):
+                status = registry.login_provider_external("minimax", method="oauth", run_external=True)
+
+            run.assert_not_called()
+            self.assertEqual(status["target"], "MiniMax OAuth")
+            self.assertEqual(status["status"], "external_login_manual_required")
+            self.assertFalse(status["external_command_available"])
+            self.assertFalse(status["external_login_attempted"])
+            self.assertFalse(status["token_captured"])
+            self.assertFalse(secret_path.exists())
+
     def test_provider_auth_targets_track_hermes_and_claude_gaps(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
             root = Path(temp)
@@ -212,6 +261,9 @@ class ModelAuthTests(unittest.TestCase):
             self.assertGreaterEqual(targets["target_provider_count"], 20)
             self.assertIn("api_key", targets["implemented_auth_methods"])
             self.assertIn("subscription", targets["implemented_auth_methods"])
+            self.assertIn("oauth", targets["implemented_auth_methods"])
+            self.assertIn("oauth_device", targets["implemented_auth_methods"])
+            self.assertIn("cloud_identity", targets["implemented_auth_methods"])
             self.assertEqual(by_target["OpenAI API"]["status"], "api_key_ready")
             self.assertEqual(by_target["OpenAI Codex / ChatGPT subscription"]["status"], "official_cli_handoff_only")
             self.assertEqual(by_target["OpenAI Codex / ChatGPT subscription"]["external_command"], "codex login")
@@ -219,11 +271,18 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(by_target["Claude Code subscription"]["external_command"], "claude")
             self.assertEqual(by_target["Claude Code subscription"]["external_login_instruction"], "/login")
             self.assertEqual(by_target["Nous Portal API key"]["status"], "api_key_ready")
-            self.assertEqual(by_target["GitHub Copilot"]["status"], "not_started")
+            self.assertEqual(by_target["Nous Portal OAuth subscription"]["status"], "manual_provider_handoff_only")
+            self.assertEqual(by_target["GitHub Copilot"]["status"], "official_cli_handoff_only")
+            self.assertEqual(by_target["GitHub Copilot"]["external_command"], "gh auth login")
             self.assertEqual(by_target["DeepSeek"]["status"], "api_key_ready")
-            self.assertEqual(by_target["MiniMax OAuth"]["status"], "provider_native_auth_bridge_required")
+            self.assertEqual(by_target["MiniMax"]["status"], "api_key_ready")
+            self.assertEqual(by_target["MiniMax OAuth"]["status"], "manual_provider_handoff_only")
+            self.assertEqual(by_target["AWS Bedrock"]["status"], "official_cli_handoff_only")
+            self.assertEqual(by_target["Azure Foundry"]["status"], "official_cli_handoff_only")
+            self.assertEqual(by_target["Qwen DashScope API"]["status"], "api_key_ready")
             self.assertEqual(by_target["Qwen OAuth"]["required_auth"], ["oauth"])
-            self.assertEqual(by_target["Qwen OAuth"]["status"], "provider_native_auth_bridge_required")
+            self.assertEqual(by_target["Qwen OAuth"]["status"], "official_cli_handoff_only")
+            self.assertEqual(by_target["Qwen OAuth"]["external_command"], "qwen auth")
             self.assertEqual(by_target["Ollama"]["status"], "local_ready")
             self.assertFalse(any(row["raw_tokens_captured"] for row in targets["targets"]))
             self.assertIn("raw_token_capture_rejection", targets["verification_gates"])

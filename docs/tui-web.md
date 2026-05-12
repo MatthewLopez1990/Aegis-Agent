@@ -54,6 +54,10 @@ Commands:
 - `models auth login <provider>`
 - `models auth login <provider> subscription`
 - `models auth login <provider> subscription --run-external`
+- `models auth login github-copilot oauth-device --run-external`
+- `models auth login qwen oauth --run-external`
+- `models auth login aws-bedrock cloud-identity --run-external`
+- `models auth login azure-foundry cloud-identity --run-external`
 - `models auth methods [provider]`
 - `models auth targets`
 - `models auth logout <provider>`
@@ -188,7 +192,7 @@ The API is a local control plane and does not implement user authentication. Bin
 - `POST /models/alias`
 - `POST /models/fallbacks`
 - `GET /model-usage`
-- `POST /models/auth/login` with `method: "api_key"` or guarded `method: "subscription"` metadata; interactive `run_external` subscription login is refused over API and must run in a local CLI/TUI terminal.
+- `POST /models/auth/login` with `method: "api_key"` or guarded `method: "subscription"`, `"oauth"`, `"oauth_device"`, or `"cloud_identity"` metadata; interactive `run_external` provider login is refused over API and must run in a local CLI/TUI terminal.
 - `POST /models/auth/logout`
 - `GET /tools`
 - `POST /tools/run`

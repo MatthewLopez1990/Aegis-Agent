@@ -144,9 +144,17 @@ class ModelRegistry:
             target_row["subscription_auth_supported"] = False
             target_row["subscription_auth_configured"] = False
             target_row["bridge_status"] = "not_started"
+            handoff_profile = _external_auth_handoff_profile(str(target.get("target")))
+            if handoff_profile is not None:
+                target_row.update(_handoff_profile_public_fields(handoff_profile))
+                target_row["bridge_status"] = str(handoff_profile.get("aegis_bridge_status") or "official_cli_handoff_only")
             if provider is None:
-                target_row["status"] = "not_started"
-                not_started.append(str(target["target"]))
+                if handoff_profile is not None:
+                    target_row["status"] = target_row["bridge_status"]
+                    bridge_pending.append(str(target["target"]))
+                else:
+                    target_row["status"] = "not_started"
+                    not_started.append(str(target["target"]))
             else:
                 methods = list(provider.get("auth_methods") or [])
                 target_row["existing_auth_methods"] = methods
@@ -158,6 +166,8 @@ class ModelRegistry:
                     target_row["external_command"] = subscription_profile.get("external_command", target_row.get("external_command"))
                     target_row["bridge_status"] = subscription_profile.get("aegis_bridge_status", "not_implemented")
                     target_row["account_surface"] = subscription_profile.get("account_surface", target_row.get("account_surface"))
+                elif handoff_profile is not None:
+                    target_row["bridge_status"] = str(handoff_profile.get("aegis_bridge_status") or "official_cli_handoff_only")
                 elif provider.get("local"):
                     target_row["bridge_status"] = "not_required_local"
                 elif "api_key" in methods:
@@ -165,6 +175,9 @@ class ModelRegistry:
 
                 if "subscription" in required_auth or "oauth_device" in required_auth or "oauth" in required_auth or "cloud_identity" in required_auth:
                     if "subscription" in required_auth and target_row["subscription_auth_supported"]:
+                        target_row["status"] = target_row["bridge_status"]
+                        bridge_pending.append(str(target["target"]))
+                    elif handoff_profile is not None:
                         target_row["status"] = target_row["bridge_status"]
                         bridge_pending.append(str(target["target"]))
                     else:
@@ -193,8 +206,14 @@ class ModelRegistry:
             "api_key_ready_targets": api_key_ready,
             "local_ready_targets": local_ready,
             "subscription_bridge_targets": bridge_pending,
+            "provider_auth_bridge_targets": bridge_pending,
             "not_started_targets": not_started,
-            "implemented_auth_methods": sorted({method for row in provider_rows.values() for method in row.get("auth_methods", [])}),
+            "implemented_auth_methods": sorted(
+                {
+                    *{method for row in provider_rows.values() for method in row.get("auth_methods", [])},
+                    *{str(profile["method"]) for profile in EXTERNAL_AUTH_HANDOFF_PROFILES.values()},
+                }
+            ),
             "required_controls": [
                 "official_provider_login_flow",
                 "scoped_refresh_token_bridge",
@@ -205,8 +224,9 @@ class ModelRegistry:
             ],
             "verification_gates": [
                 "api_key_secret_redaction",
-                "subscription_login_metadata_only",
-                "oauth_device_flow_denial_until_bridge",
+                "subscription_login_official_cli_handoff",
+                "oauth_device_flow_official_cli_handoff",
+                "cloud_identity_official_cli_handoff",
                 "raw_token_capture_rejection",
                 "provider_allowlist_enforced_before_live_call",
             ],
@@ -263,6 +283,56 @@ class ModelRegistry:
                 "method": "subscription",
                 "status": status["status"],
                 "external_command": status["external_command"],
+                "external_login_attempted": status["external_login_attempted"],
+                "external_login_exit_code": status["external_login_exit_code"],
+                "token_captured": False,
+            },
+        )
+        return status
+
+    def login_provider_external(
+        self,
+        name: str,
+        *,
+        method: str,
+        run_external: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        normalized_method = method.replace("-", "_")
+        if normalized_method == "subscription":
+            return self.login_provider_subscription(name, run_external=run_external, timeout_seconds=timeout_seconds)
+        profile = _external_auth_handoff_profile_for_login(name, normalized_method)
+        if profile is None:
+            raise ValueError(f"{method} login is not supported for {name!r}")
+        command_argv = _external_command_argv(profile)
+        executable_path = shutil.which(command_argv[0]) if command_argv else None
+        status = {
+            "provider": profile.get("provider") or name,
+            "target": profile["target"],
+            "method": profile["method"],
+            "status": "external_login_required",
+            "auth_configured": False,
+            "auth_source": None,
+            "token_captured": False,
+            "token_capture_supported": False,
+            "external_command_argv": list(command_argv),
+            "external_command_available": executable_path is not None,
+            "external_command_path": executable_path,
+            "external_login_attempted": False,
+            "external_login_exit_code": None,
+            "external_login_error": None,
+            **_handoff_profile_public_fields(profile),
+        }
+        if run_external:
+            status.update(_run_external_login_command(command_argv, timeout_seconds=timeout_seconds, manual_profile=profile))
+        self.audit_logger.append(
+            "model.auth_external_login_requested",
+            {
+                "provider": status["provider"],
+                "target": status["target"],
+                "method": status["method"],
+                "status": status["status"],
+                "external_command": status.get("external_command"),
                 "external_login_attempted": status["external_login_attempted"],
                 "external_login_exit_code": status["external_login_exit_code"],
                 "token_captured": False,
@@ -500,6 +570,107 @@ def _metadata_keys(raw: Any) -> list[str]:
     return sorted(str(key) for key in value.keys())
 
 
+EXTERNAL_AUTH_HANDOFF_PROFILES: dict[str, dict[str, Any]] = {
+    "github-copilot": {
+        "target": "GitHub Copilot",
+        "aliases": ("github", "github-copilot", "copilot"),
+        "provider": "github-copilot",
+        "method": "oauth_device",
+        "account_surface": "GitHub Copilot subscription",
+        "external_command": "gh auth login",
+        "external_command_argv": ("gh", "auth", "login"),
+        "external_status_command": "gh auth status",
+        "external_status_command_argv": ("gh", "auth", "status"),
+        "provider_token_source": "official GitHub CLI credential store",
+        "aegis_bridge_status": "official_cli_handoff_only",
+        "interactive": True,
+        "next_steps": [
+            "Run model auth login github-copilot --method oauth-device --run-external or sign in with gh auth login directly.",
+            "Do not paste GitHub OAuth tokens or Copilot session tokens into Aegis.",
+        ],
+    },
+    "aws-bedrock": {
+        "target": "AWS Bedrock",
+        "aliases": ("aws", "aws-bedrock", "bedrock"),
+        "provider": "aws-bedrock",
+        "method": "cloud_identity",
+        "account_surface": "AWS IAM Identity Center / Bedrock",
+        "external_command": "aws sso login",
+        "external_command_argv": ("aws", "sso", "login"),
+        "setup_required": "aws configure sso",
+        "provider_token_source": "official AWS CLI SSO cache",
+        "aegis_bridge_status": "official_cli_handoff_only",
+        "interactive": True,
+        "next_steps": [
+            "Configure an AWS SSO profile with aws configure sso before running the handoff.",
+            "Use model auth login aws-bedrock --method cloud-identity --run-external from a local terminal.",
+        ],
+    },
+    "azure-foundry": {
+        "target": "Azure Foundry",
+        "aliases": ("azure", "azure-foundry", "azure-ai-foundry"),
+        "provider": "azure-foundry",
+        "method": "cloud_identity",
+        "account_surface": "Azure AI Foundry",
+        "external_command": "az login",
+        "external_command_argv": ("az", "login"),
+        "external_status_command": "az account show",
+        "external_status_command_argv": ("az", "account", "show"),
+        "provider_token_source": "official Azure CLI token cache",
+        "aegis_bridge_status": "official_cli_handoff_only",
+        "interactive": True,
+        "next_steps": [
+            "Run model auth login azure-foundry --method cloud-identity --run-external from a local terminal.",
+            "Do not paste Azure access tokens into Aegis.",
+        ],
+    },
+    "qwen-oauth": {
+        "target": "Qwen OAuth",
+        "aliases": ("qwen", "qwen-oauth", "dashscope-oauth"),
+        "provider": "qwen",
+        "method": "oauth",
+        "account_surface": "Qwen Code / Alibaba Cloud Coding Plan",
+        "external_command": "qwen auth",
+        "external_command_argv": ("qwen", "auth"),
+        "provider_token_source": "official Qwen Code auth store",
+        "aegis_bridge_status": "official_cli_handoff_only",
+        "interactive": True,
+        "next_steps": [
+            "Run model auth login qwen --method oauth --run-external or use /auth inside Qwen Code.",
+            "Use DASHSCOPE_API_KEY for Aegis live Qwen calls until a governed OAuth bridge exists.",
+        ],
+    },
+    "nous-oauth": {
+        "target": "Nous Portal OAuth subscription",
+        "aliases": ("nous-oauth", "nous-portal"),
+        "provider": "nous",
+        "method": "oauth",
+        "account_surface": "Nous Portal",
+        "external_command": None,
+        "aegis_bridge_status": "manual_provider_handoff_only",
+        "interactive": True,
+        "next_steps": [
+            "Sign in through the Nous Portal and use NOUS_API_KEY for Aegis live model calls.",
+            "Aegis does not yet import Nous OAuth refresh tokens.",
+        ],
+    },
+    "minimax-oauth": {
+        "target": "MiniMax OAuth",
+        "aliases": ("minimax-oauth",),
+        "provider": "minimax",
+        "method": "oauth",
+        "account_surface": "MiniMax",
+        "external_command": None,
+        "aegis_bridge_status": "manual_provider_handoff_only",
+        "interactive": True,
+        "next_steps": [
+            "Sign in through MiniMax account surfaces and use MINIMAX_API_KEY for Aegis live model calls.",
+            "Aegis does not yet import MiniMax OAuth refresh tokens.",
+        ],
+    },
+}
+
+
 SUBSCRIPTION_AUTH_PROFILES: dict[str, dict[str, Any]] = {
     "openai": {
         "account_surface": "ChatGPT / Codex",
@@ -711,6 +882,10 @@ MODEL_PROVIDER_AUTH_TARGETS: tuple[dict[str, Any], ...] = (
 
 
 def _subscription_command_argv(profile: dict[str, Any]) -> tuple[str, ...]:
+    return _external_command_argv(profile)
+
+
+def _external_command_argv(profile: dict[str, Any]) -> tuple[str, ...]:
     raw_argv = profile.get("external_command_argv")
     if isinstance(raw_argv, (tuple, list)) and raw_argv and all(isinstance(item, str) and item for item in raw_argv):
         return tuple(raw_argv)
@@ -721,14 +896,19 @@ def _subscription_command_argv(profile: dict[str, Any]) -> tuple[str, ...]:
 
 
 def _run_subscription_login_command(command_argv: tuple[str, ...], *, timeout_seconds: float | None) -> dict[str, Any]:
+    return _run_external_login_command(command_argv, timeout_seconds=timeout_seconds)
+
+
+def _run_external_login_command(command_argv: tuple[str, ...], *, timeout_seconds: float | None, manual_profile: dict[str, Any] | None = None) -> dict[str, Any]:
     if not command_argv:
+        manual = manual_profile is not None and manual_profile.get("aegis_bridge_status") == "manual_provider_handoff_only"
         return {
-            "status": "external_command_unavailable",
+            "status": "external_login_manual_required" if manual else "external_command_unavailable",
             "external_command_available": False,
             "external_command_path": None,
             "external_login_attempted": False,
             "external_login_exit_code": None,
-            "external_login_error": "subscription profile has no external command",
+            "external_login_error": "provider requires manual browser/account handoff" if manual else "auth profile has no external command",
         }
     executable_path = shutil.which(command_argv[0])
     if executable_path is None:
@@ -768,6 +948,53 @@ def _run_subscription_login_command(command_argv: tuple[str, ...], *, timeout_se
         "external_login_exit_code": completed.returncode,
         "external_login_error": None if completed.returncode == 0 else f"external login command exited with {completed.returncode}",
     }
+
+
+def _external_auth_handoff_profile(target: str) -> dict[str, Any] | None:
+    normalized_target = _normalize_auth_key(target)
+    for profile in EXTERNAL_AUTH_HANDOFF_PROFILES.values():
+        aliases = {_normalize_auth_key(str(alias)) for alias in profile.get("aliases", ())}
+        aliases.add(_normalize_auth_key(str(profile.get("target") or "")))
+        if normalized_target in aliases:
+            return profile
+    return None
+
+
+def _external_auth_handoff_profile_for_login(name: str, method: str) -> dict[str, Any] | None:
+    normalized_name = _normalize_auth_key(name)
+    normalized_method = method.replace("-", "_")
+    for profile in EXTERNAL_AUTH_HANDOFF_PROFILES.values():
+        if str(profile.get("method")) != normalized_method:
+            continue
+        aliases = {_normalize_auth_key(str(alias)) for alias in profile.get("aliases", ())}
+        aliases.add(_normalize_auth_key(str(profile.get("target") or "")))
+        aliases.add(_normalize_auth_key(str(profile.get("provider") or "")))
+        if normalized_name in aliases:
+            return profile
+    return None
+
+
+def _handoff_profile_public_fields(profile: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "account_surface",
+        "external_command",
+        "external_status_command",
+        "external_login_instruction",
+        "setup_required",
+        "provider_token_source",
+        "aegis_bridge_status",
+        "interactive",
+        "next_steps",
+    }
+    result = {key: value for key, value in profile.items() if key in allowed and value is not None}
+    command_argv = _external_command_argv(profile)
+    result["external_command_argv"] = list(command_argv)
+    result["external_command_available"] = shutil.which(command_argv[0]) is not None if command_argv else False
+    return result
+
+
+def _normalize_auth_key(value: str) -> str:
+    return value.lower().replace("_", "-").replace(" ", "-").strip()
 
 
 def default_providers(*, custom_base_url: str | None = None) -> dict[str, ModelProviderSpec]:

@@ -383,7 +383,7 @@ def build_parser() -> argparse.ArgumentParser:
     model_auth_methods = model_auth_sub.add_parser("methods", help="Show supported auth methods and subscription login status")
     model_auth_methods.add_argument("provider", nargs="?")
     model_auth_sub.add_parser("targets", help="Show Hermes/Claude provider auth parity targets")
-    model_auth_login = model_auth_sub.add_parser("login", help="Store an API key or start a guarded subscription-login flow")
+    model_auth_login = model_auth_sub.add_parser("login", help="Store an API key or start a guarded provider-native login handoff")
     model_auth_login.add_argument(
         "provider",
         choices=(
@@ -398,14 +398,20 @@ def build_parser() -> argparse.ArgumentParser:
             "xai",
             "kimi",
             "minimax",
+            "minimax-oauth",
             "zai",
             "qwen",
+            "qwen-oauth",
+            "github-copilot",
+            "aws-bedrock",
+            "azure-foundry",
+            "nous-oauth",
             "custom",
         ),
     )
-    model_auth_login.add_argument("--method", choices=("api-key", "subscription"), default="api-key")
+    model_auth_login.add_argument("--method", choices=("api-key", "subscription", "oauth", "oauth-device", "cloud-identity"), default="api-key")
     model_auth_login.add_argument("--subscription", action="store_true", help="Alias for --method subscription")
-    model_auth_login.add_argument("--run-external", action="store_true", help="Launch the provider's official interactive subscription login command without capturing tokens")
+    model_auth_login.add_argument("--run-external", action="store_true", help="Launch the provider's official interactive login command without capturing tokens")
     model_auth_login.add_argument("--api-key", help="API key value. Prefer --api-key-stdin or interactive entry.")
     model_auth_login.add_argument("--api-key-stdin", action="store_true", help="Read API key from stdin")
     model_auth_logout = model_auth_sub.add_parser("logout", help="Remove a model provider API key from the local secret store")
@@ -969,13 +975,13 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 return {"auth_targets": registry.auth_targets()}
             if args.auth_command == "login":
                 method = "subscription" if getattr(args, "subscription", False) else str(args.method)
-                if method == "subscription":
+                if method in {"subscription", "oauth", "oauth-device", "cloud-identity"}:
                     if getattr(args, "api_key", None) or getattr(args, "api_key_stdin", False):
-                        raise ValueError("subscription login does not accept API key input")
-                    status = registry.login_provider_subscription(args.provider, run_external=bool(getattr(args, "run_external", False)))
+                        raise ValueError(f"{method} login does not accept API key input")
+                    status = registry.login_provider_external(args.provider, method=method, run_external=bool(getattr(args, "run_external", False)))
                 else:
                     if getattr(args, "run_external", False):
-                        raise ValueError("--run-external is only valid with subscription login")
+                        raise ValueError("--run-external is only valid with subscription, OAuth, or cloud-identity login")
                     status = registry.login_provider(args.provider, _read_api_key(args))
                 return {"ok": True, "auth": status}
             if args.auth_command == "logout":
