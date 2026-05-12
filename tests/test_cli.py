@@ -2099,6 +2099,9 @@ class CliTests(unittest.TestCase):
             bundle_digest = sha256(bundle_body).hexdigest()
             SecretsBroker(data_dir / "secrets.json").store_secret(name=DEFAULT_SKILL_SIGNING_KEY, value="cli-bundle-key")
             bundle_signature = hmac.new(b"cli-bundle-key", bundle_body, digestmod="sha256").hexdigest()
+            bundle_install_body = json.dumps({"plugin": {"id": "bundle.plugin", "name": "Bundle Plugin", "version": "1.0.0"}}).encode("utf-8")
+            bundle_install_digest = sha256(bundle_install_body).hexdigest()
+            bundle_install_signature = hmac.new(b"cli-bundle-key", bundle_install_body, digestmod="sha256").hexdigest()
             fetch_catalog = root / "fetch-marketplace.json"
             fetch_catalog.write_text(
                 json.dumps(
@@ -2118,6 +2121,29 @@ class CliTests(unittest.TestCase):
                                     "key_id": DEFAULT_SKILL_SIGNING_KEY,
                                     "digest": bundle_digest,
                                     "signature": bundle_signature,
+                                },
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            bundle_install_catalog = root / "bundle-install-marketplace.json"
+            bundle_install_catalog.write_text(
+                json.dumps(
+                    {
+                        "plugins": [
+                            {
+                                "id": "bundle.plugin",
+                                "name": "Bundle Plugin",
+                                "version": "1.0.0",
+                                "bundle_url": "https://example.com/plugins/bundle.plugin/plugin.bundle",
+                                "bundle_sha256": f"sha256:{bundle_install_digest}",
+                                "bundle_signature": {
+                                    "algorithm": SIGNATURE_ALGORITHM,
+                                    "key_id": DEFAULT_SKILL_SIGNING_KEY,
+                                    "digest": bundle_install_digest,
+                                    "signature": bundle_install_signature,
                                 },
                             }
                         ]
@@ -2164,6 +2190,16 @@ class CliTests(unittest.TestCase):
                 def read(self, limit: int) -> bytes:
                     return bundle_body
 
+            class FakeBundleInstallResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return bundle_install_body
+
             class FakeUpdateResponse:
                 def __enter__(self):
                     return self
@@ -2187,6 +2223,10 @@ class CliTests(unittest.TestCase):
             with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeResponse()):
                 installed_marketplace = dispatch(
                     parser.parse_args(["--data-dir", str(data_dir), "plugins", "install-marketplace", "remote.plugin", "--catalog-path", str(fetch_catalog)])
+                )
+            with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeBundleInstallResponse()):
+                installed_bundle = dispatch(
+                    parser.parse_args(["--data-dir", str(data_dir), "plugins", "install-bundle", "bundle.plugin", "--catalog-path", str(bundle_install_catalog)])
                 )
             enabled = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugin", "enable", "test.plugin"]))
             disabled = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugin", "disable", "test.plugin"]))
@@ -2214,6 +2254,10 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("cli-bundle-key", json.dumps(fetched_bundle, sort_keys=True))
             self.assertEqual(installed_marketplace["status"], "marketplace_plugin_installed")
             self.assertEqual(installed_marketplace["plugin"]["id"], "remote.plugin")
+            self.assertEqual(installed_bundle["status"], "marketplace_bundle_installed")
+            self.assertEqual(installed_bundle["plugin"]["id"], "bundle.plugin")
+            self.assertEqual(installed_bundle["fetch"]["bundle_sha256"], bundle_install_digest)
+            self.assertTrue(installed_bundle["explicit_install_supported"])
             self.assertTrue(enabled["plugin"]["enabled"])
             self.assertFalse(disabled["plugin"]["enabled"])
             self.assertTrue(removed["removed"])

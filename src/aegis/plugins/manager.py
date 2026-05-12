@@ -268,18 +268,67 @@ class PluginManager:
             "bundle_url": bundle_url,
             "bundle_sha256": digest,
             "bundle_path": str(output_path),
+            "install_command": f"plugins install-bundle {plugin_id}",
             "signature": signature,
             "auto_install_supported": False,
+            "explicit_install_supported": True,
             "dynamic_code_import_supported": False,
             "raw_secret_values_included": False,
             "blocked_operations": [
-                "remote_bundle_auto_install",
+                "unattended_remote_bundle_auto_install",
                 "dynamic_plugin_import",
                 "marketplace_token_capture",
                 "unsigned_auto_update",
             ],
         }
         self.audit_logger.append("plugin.marketplace_bundle_downloaded", redact(result))
+        return result
+
+    def install_marketplace_bundle(
+        self,
+        plugin_id: str,
+        *,
+        catalog_path: str | Path | None = None,
+        allowlist: tuple[str, ...] = (),
+        key_name: str = DEFAULT_SKILL_SIGNING_KEY,
+        enable: bool = False,
+    ) -> dict[str, Any]:
+        fetched = self.fetch_marketplace_bundle(plugin_id, catalog_path=catalog_path, allowlist=allowlist, key_name=key_name)
+        bundle_path = Path(str(fetched["bundle_path"]))
+        bundle_body = bundle_path.read_bytes()
+        manifest_body = _bundle_plugin_manifest_body(bundle_body, plugin_id=plugin_id)
+        output_dir = ensure_private_dir(self.path.parent / "plugin-marketplace")
+        manifest_path = ensure_private_file(output_dir / f"{plugin_id}.bundle.plugin.json")
+        with manifest_path.open("wb") as handle:
+            handle.write(manifest_body)
+        ensure_private_file(manifest_path)
+        plugin = self.install_plugin(manifest_path, enable=enable, unsigned_local=False)
+        result = {
+            "status": "marketplace_bundle_installed",
+            "mode": "sha256_and_signature_verified_bundle_install",
+            "id": plugin_id,
+            "fetch": {
+                "id": fetched["id"],
+                "bundle_url": fetched["bundle_url"],
+                "bundle_sha256": fetched["bundle_sha256"],
+                "bundle_path": fetched["bundle_path"],
+                "signature": fetched["signature"],
+            },
+            "manifest_path": str(manifest_path),
+            "plugin": plugin,
+            "enabled": bool(plugin.get("enabled", False)),
+            "auto_install_supported": False,
+            "explicit_install_supported": True,
+            "dynamic_code_import_supported": False,
+            "raw_secret_values_included": False,
+            "blocked_operations": [
+                "unattended_remote_bundle_auto_install",
+                "dynamic_plugin_import",
+                "marketplace_token_capture",
+                "unsigned_auto_update",
+            ],
+        }
+        self.audit_logger.append("plugin.marketplace_bundle_installed", redact(result))
         return result
 
     def install_marketplace_plugin(
@@ -305,7 +354,7 @@ class PluginManager:
             "enabled": bool(plugin.get("enabled", False)),
             "raw_secret_values_included": False,
             "blocked_operations": [
-                "remote_bundle_auto_install",
+                "unattended_remote_bundle_auto_install",
                 "dynamic_plugin_import",
                 "marketplace_token_capture",
                 "unsigned_auto_update",
@@ -739,6 +788,21 @@ def _download_marketplace_bytes(url: str, *, max_bytes: int, label: str) -> byte
     return body
 
 
+def _bundle_plugin_manifest_body(body: bytes, *, plugin_id: str) -> bytes:
+    try:
+        decoded = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("marketplace bundle must contain a JSON plugin manifest") from exc
+    if not isinstance(decoded, dict):
+        raise ValueError("marketplace bundle must contain a JSON plugin manifest object")
+    manifest = decoded.get("plugin") if isinstance(decoded.get("plugin"), dict) else decoded
+    if not isinstance(manifest, dict):
+        raise ValueError("marketplace bundle plugin entry must be a JSON object")
+    if str(manifest.get("id") or "") != plugin_id:
+        raise ValueError("marketplace bundle plugin id does not match catalog entry")
+    return (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
 def _verify_bundle_signature(
     body: bytes,
     signature: Any,
@@ -806,6 +870,7 @@ def _public_marketplace_entry(raw: dict[str, Any], *, installed: dict[str, Any] 
         "download_supported": False,
         "manifest_fetch_supported": verified_manifest_available,
         "bundle_fetch_supported": verified_bundle_available,
+        "marketplace_bundle_install_supported": verified_bundle_available,
         "marketplace_install_supported": verified_manifest_available,
         "dynamic_code_import_supported": False,
         "token_capture_supported": False,
@@ -816,6 +881,7 @@ def _public_marketplace_entry(raw: dict[str, Any], *, installed: dict[str, Any] 
             "review marketplace metadata",
             "run plugins fetch-manifest <plugin_id> to verify the remote manifest",
             "run plugins install-marketplace <plugin_id> for an explicit governed install",
+            "run plugins install-bundle <plugin_id> for an explicit signed-bundle install",
             "run plugins update-marketplace <plugin_id> for an explicit governed update",
             "install through the existing governed plugin lifecycle",
         ],

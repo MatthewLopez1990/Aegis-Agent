@@ -355,6 +355,11 @@ def build_parser() -> argparse.ArgumentParser:
         plugin_bundle.add_argument("plugin_id")
         plugin_bundle.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
         plugin_bundle.add_argument("--key-name", default=DEFAULT_SKILL_SIGNING_KEY, help="Brokered HMAC signing key name")
+        plugin_bundle_install = plugin_sub.add_parser("install-bundle", help="Fetch, verify, and install one signed marketplace plugin bundle")
+        plugin_bundle_install.add_argument("plugin_id")
+        plugin_bundle_install.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
+        plugin_bundle_install.add_argument("--key-name", default=DEFAULT_SKILL_SIGNING_KEY, help="Brokered HMAC signing key name")
+        plugin_bundle_install.add_argument("--enable", action="store_true", help="Enable default-enabled resources after install")
         plugin_marketplace_install = plugin_sub.add_parser("install-marketplace", help="Fetch, verify, and install one marketplace plugin manifest")
         plugin_marketplace_install.add_argument("plugin_id")
         plugin_marketplace_install.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
@@ -1051,6 +1056,14 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 catalog_path=args.catalog_path,
                 allowlist=config.network_allowlist,
                 key_name=args.key_name,
+            )
+        if args.plugin_command == "install-bundle":
+            return manager.install_marketplace_bundle(
+                args.plugin_id,
+                catalog_path=args.catalog_path,
+                allowlist=config.network_allowlist,
+                key_name=args.key_name,
+                enable=args.enable,
             )
         if args.plugin_command == "install-marketplace":
             return manager.install_marketplace_plugin(

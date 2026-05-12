@@ -220,7 +220,7 @@ class PluginManagerTests(unittest.TestCase):
             self.assertEqual(installed["status"], "marketplace_plugin_installed")
             self.assertEqual(installed["plugin"]["id"], "remote.plugin")
             self.assertEqual(installed["fetch"]["manifest_sha256"], digest)
-            self.assertIn("remote_bundle_auto_install", installed["blocked_operations"])
+            self.assertIn("unattended_remote_bundle_auto_install", installed["blocked_operations"])
             self.assertEqual(manager.list_plugins()[0]["id"], "remote.plugin")
             self.assertNotIn("bundle-signing-key", (data_dir / "audit.jsonl").read_text(encoding="utf-8"))
 
@@ -245,6 +245,77 @@ class PluginManagerTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     manager.fetch_marketplace_manifest("bad.plugin", catalog_path=invalid_catalog_path, allowlist=("example.com",))
             open_without_redirects.assert_not_called()
+
+    def test_plugin_marketplace_installs_verified_signed_bundle_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            bundle_body = json.dumps(
+                {
+                    "plugin": {
+                        "id": "bundle.plugin",
+                        "name": "Bundle Plugin",
+                        "version": "2.0.0",
+                        "description": "Installed from a signed marketplace bundle.",
+                    }
+                }
+            ).encode("utf-8")
+            bundle_digest = sha256(bundle_body).hexdigest()
+            SecretsBroker(data_dir / "secrets.json").store_secret(name=DEFAULT_SKILL_SIGNING_KEY, value="bundle-signing-key")
+            bundle_signature = hmac.new(b"bundle-signing-key", bundle_body, digestmod="sha256").hexdigest()
+            catalog_path = root / "bundle-marketplace.json"
+            catalog_path.write_text(
+                json.dumps(
+                    {
+                        "plugins": [
+                            {
+                                "id": "bundle.plugin",
+                                "name": "Bundle Plugin",
+                                "version": "2.0.0",
+                                "bundle_url": "https://example.com/bundle.plugin/plugin.bundle",
+                                "bundle_sha256": f"sha256:{bundle_digest}",
+                                "bundle_signature": {
+                                    "algorithm": SIGNATURE_ALGORITHM,
+                                    "key_id": DEFAULT_SKILL_SIGNING_KEY,
+                                    "digest": bundle_digest,
+                                    "signature": bundle_signature,
+                                },
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            class FakeBundleResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return bundle_body
+
+            manager = _plugin_manager(data_dir, workspace=root)
+            with patch("aegis.plugins.manager._open_without_redirects", return_value=FakeBundleResponse()):
+                installed = manager.install_marketplace_bundle("bundle.plugin", catalog_path=catalog_path, allowlist=("example.com",))
+
+            self.assertEqual(installed["status"], "marketplace_bundle_installed")
+            self.assertEqual(installed["mode"], "sha256_and_signature_verified_bundle_install")
+            self.assertEqual(installed["fetch"]["bundle_sha256"], bundle_digest)
+            self.assertTrue(installed["fetch"]["signature"]["signature_verified"])
+            self.assertEqual(installed["plugin"]["id"], "bundle.plugin")
+            self.assertEqual(installed["plugin"]["version"], "2.0.0")
+            self.assertEqual(manager.list_plugins()[0]["source_path"], installed["manifest_path"])
+            self.assertEqual(json.loads(Path(installed["manifest_path"]).read_text(encoding="utf-8"))["id"], "bundle.plugin")
+            self.assertEqual(stat.S_IMODE(Path(installed["manifest_path"]).stat().st_mode), 0o600)
+            self.assertFalse(installed["auto_install_supported"])
+            self.assertTrue(installed["explicit_install_supported"])
+            self.assertFalse(installed["dynamic_code_import_supported"])
+            self.assertIn("unattended_remote_bundle_auto_install", installed["blocked_operations"])
+            self.assertNotIn("bundle-signing-key", json.dumps(installed, sort_keys=True))
+            self.assertNotIn("bundle-signing-key", (data_dir / "audit.jsonl").read_text(encoding="utf-8"))
 
     def test_plugin_marketplace_update_replaces_installed_plugin_with_verified_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

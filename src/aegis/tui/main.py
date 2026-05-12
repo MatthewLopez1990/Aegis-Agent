@@ -178,7 +178,7 @@ MODEL_COMMANDS = ("list", "route", "alias", "fallbacks", "usage", "auth", "provi
 MODEL_AUTH_COMMANDS = ("login", "logout", "methods", "targets")
 TOOLS_COMMANDS = ("run",)
 SKILLS_COMMANDS = ("hub", "disable", "enable")
-PLUGIN_COMMANDS = ("list", "install", "enable", "disable", "remove", "reload", "marketplace", "updates", "fetch-manifest", "fetch-bundle", "install-marketplace", "update-marketplace")
+PLUGIN_COMMANDS = ("list", "install", "enable", "disable", "remove", "reload", "marketplace", "updates", "fetch-manifest", "fetch-bundle", "install-bundle", "install-marketplace", "update-marketplace")
 REPAIR_COMMANDS = ("readiness", "review", "approve", "reject", "candidate", "generate-candidate", "synthesis-prompt", "synthesize-candidate", "review-candidate", "apply-candidate", "rollback-candidate", "attempt")
 SCHEDULE_COMMANDS = ("create", "memory-review-digest", "memory-review-escalation", "evaluation-run", "evaluation-suite", "due", "approve", "activate", "pause", "run-due")
 BROWSER_COMMANDS = ("session", "sessions", "close", "navigate", "extract", "inspect", "table", "screenshot", "render", "click", "fill")
@@ -3250,7 +3250,7 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_plugins(self, arg: str) -> None:
-        """plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-marketplace|update-marketplace -- manage governed local plugins."""
+        """plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-bundle|install-marketplace|update-marketplace -- manage governed local plugins."""
         try:
             parts = shlex.split(arg) if arg else []
         except ValueError as exc:
@@ -3314,6 +3314,17 @@ class AegisTui(cmd.Cmd):
                     )
                 )
                 return
+            if parts[0] == "install-bundle" and len(parts) >= 2:
+                _print_json(
+                    manager.install_marketplace_bundle(
+                        parts[1],
+                        catalog_path=_option_value(parts, "--catalog-path"),
+                        allowlist=self.orchestrator.config.network_allowlist,
+                        key_name=_option_value(parts, "--key-name") or DEFAULT_SKILL_SIGNING_KEY,
+                        enable="--enable" in parts[2:],
+                    )
+                )
+                return
             if parts[0] == "install-marketplace" and len(parts) >= 2:
                 _print_json(
                     manager.install_marketplace_plugin(
@@ -3340,7 +3351,7 @@ class AegisTui(cmd.Cmd):
         except (KeyError, PermissionError, ValueError) as exc:
             print(f"plugin error: {exc}")
             return
-        print("usage: plugins list | plugins install <plugin.json> [--enable] [--unsigned-local] | plugins enable|disable|remove <plugin_id> | plugins reload | plugins marketplace [--query q] [--catalog-path file] | plugins updates [--catalog-path file] | plugins fetch-manifest <plugin_id> [--catalog-path file] | plugins fetch-bundle <plugin_id> [--catalog-path file] [--key-name name] | plugins install-marketplace <plugin_id> [--catalog-path file] [--enable] | plugins update-marketplace <plugin_id> [--catalog-path file] [--enable|--disable] [--force]")
+        print("usage: plugins list | plugins install <plugin.json> [--enable] [--unsigned-local] | plugins enable|disable|remove <plugin_id> | plugins reload | plugins marketplace [--query q] [--catalog-path file] | plugins updates [--catalog-path file] | plugins fetch-manifest <plugin_id> [--catalog-path file] | plugins fetch-bundle <plugin_id> [--catalog-path file] [--key-name name] | plugins install-bundle <plugin_id> [--catalog-path file] [--key-name name] [--enable] | plugins install-marketplace <plugin_id> [--catalog-path file] [--enable] | plugins update-marketplace <plugin_id> [--catalog-path file] [--enable|--disable] [--force]")
 
     def do_toolsets(self, arg: str) -> None:
         """toolsets -- summarize governed tools by permission and risk."""
@@ -4304,7 +4315,7 @@ def _command_reference() -> str:
             "allowed-tools|bashes   Policy-visible tools and shell posture",
             "tools run <name> <json> Run a governed tool",
             "skills [hub query]     Governed skills and virtual Skill Hub",
-            "plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-marketplace|update-marketplace",
+            "plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-bundle|install-marketplace|update-marketplace",
             "plugin|reload|reload-plugins|reload-skills  Extension inventory aliases",
             "memory health|search|session-preview|create|update|merge|expire",
             "mcp list|register|call Governed MCP registry",
@@ -4760,6 +4771,8 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("plugin", "fetch-manifest"): ("--catalog-path",),
     ("plugins", "fetch-bundle"): ("--catalog-path", "--key-name"),
     ("plugin", "fetch-bundle"): ("--catalog-path", "--key-name"),
+    ("plugins", "install-bundle"): ("--catalog-path", "--key-name", "--enable"),
+    ("plugin", "install-bundle"): ("--catalog-path", "--key-name", "--enable"),
     ("plugins", "install-marketplace"): ("--catalog-path", "--enable"),
     ("plugin", "install-marketplace"): ("--catalog-path", "--enable"),
     ("plugins", "update-marketplace"): ("--catalog-path", "--enable", "--disable", "--force"),

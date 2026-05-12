@@ -1233,6 +1233,18 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     )
                 )
                 return
+            if path == "/plugins/marketplace/install-bundle":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.plugins.install_marketplace_bundle(
+                        str(_required(payload, "plugin_id")),
+                        catalog_path=_optional_str(payload, "catalog_path"),
+                        allowlist=orchestrator.config.network_allowlist,
+                        key_name=str(payload.get("key_name") or DEFAULT_SKILL_SIGNING_KEY),
+                        enable=bool(payload.get("enable", False)),
+                    )
+                )
+                return
             match_plugin_action = re.fullmatch(r"/plugins/([^/]+)/(enable|disable|remove)", path)
             if match_plugin_action:
                 plugin_id = unquote(match_plugin_action.group(1))
