@@ -1562,6 +1562,8 @@ def _model_registry(config: Any) -> ModelRegistry:
         SecretsBroker(config.secrets_path),
         custom_base_url=config.custom_model_base_url,
         azure_foundry_base_url=config.azure_foundry_base_url,
+        google_vertex_project=config.google_vertex_project,
+        google_vertex_location=config.google_vertex_location,
     )
 
 

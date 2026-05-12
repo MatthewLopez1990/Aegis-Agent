@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from aegis.models.registry import ModelRoute
@@ -496,6 +496,8 @@ class LiveModelClient:
         *,
         temperature: float,
     ) -> ModelInvocationResult:
+        if route.auth_method == "cloud_identity_cli":
+            return self._chat_google_vertex_cli(route, messages, temperature=temperature)
         if route.provider.base_url is None:
             raise ValueError("google provider has no base URL")
         api_key = self._resolve_api_key(route)
@@ -527,6 +529,78 @@ class LiveModelClient:
             input_tokens=int(usage.get("promptTokenCount", 0) or 0),
             output_tokens=int(usage.get("candidatesTokenCount", 0) or 0),
             raw_usage=dict(usage),
+        )
+
+    def _chat_google_vertex_cli(
+        self,
+        route: ModelRoute,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+    ) -> ModelInvocationResult:
+        project = str(route.provider.metadata.get("vertex_project") or "").strip()
+        location = str(route.provider.metadata.get("vertex_location") or "").strip()
+        if not project:
+            raise ValueError("google provider requires models.google_vertex_project for cloud identity")
+        if not location:
+            raise ValueError("google provider requires models.google_vertex_location for cloud identity")
+        bash_path = shutil.which("bash")
+        gcloud_path = shutil.which("gcloud")
+        curl_path = shutil.which("curl")
+        missing = [name for name, path in (("bash", bash_path), ("gcloud", gcloud_path), ("curl", curl_path)) if path is None]
+        if missing:
+            raise RuntimeError(f"google Vertex cloud identity bridge requires installed executables: {', '.join(missing)}")
+        system, contents = _google_messages(messages)
+        payload: dict[str, Any] = {
+            "contents": contents,
+            "generationConfig": {"temperature": temperature},
+        }
+        if system:
+            payload["systemInstruction"] = {"parts": [{"text": system}]}
+        url = _google_vertex_generate_content_url(project=project, location=location, model=route.model)
+        script = (
+            "set -euo pipefail\n"
+            'token="$("$3" auth print-access-token)"\n'
+            "printf 'header = \"Content-Type: application/json\"\\nheader = \"Authorization: Bearer %s\"\\n' \"$token\" "
+            '| "$4" --silent --show-error --fail-with-body --config - --request POST --data-binary @"$1" "$2"\n'
+        )
+        with tempfile.TemporaryDirectory(prefix="aegis-google-vertex-model-") as temp:
+            temp_dir = Path(temp)
+            payload_path = temp_dir / "request.json"
+            payload_path.write_text(json.dumps(payload), encoding="utf-8")
+            try:
+                completed = subprocess.run(
+                    (bash_path, "-lc", script, "aegis-google-vertex", str(payload_path), url, gcloud_path, curl_path),
+                    text=True,
+                    capture_output=True,
+                    timeout=self.timeout_seconds,
+                    check=False,
+                    cwd=temp_dir,
+                )  # noqa: S603 - argv is fixed; token is kept inside the child shell/curl pipeline.
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("official gcloud Vertex invocation timed out") from exc
+            except OSError as exc:
+                raise RuntimeError(f"official gcloud Vertex invocation failed: {exc}") from exc
+        if completed.returncode != 0:
+            raise RuntimeError(f"official gcloud Vertex invocation exited with {completed.returncode}")
+        if not completed.stdout.strip():
+            raise RuntimeError("official gcloud Vertex invocation returned no response")
+        response = json.loads(completed.stdout)
+        if not isinstance(response, dict):
+            raise RuntimeError("official gcloud Vertex invocation returned invalid JSON")
+        candidates = response.get("candidates", [])
+        first = candidates[0] if candidates and isinstance(candidates[0], dict) else {}
+        content = first.get("content", {}) if isinstance(first.get("content", {}), dict) else {}
+        usage = response.get("usageMetadata", {}) if isinstance(response.get("usageMetadata", {}), dict) else {}
+        raw_usage = dict(usage)
+        raw_usage.update({"source": "official_cli", "bridge": "gcloud_vertex_rest"})
+        return ModelInvocationResult(
+            provider=route.provider.provider,
+            model=route.model,
+            content=_google_parts_text(content.get("parts", [])),
+            input_tokens=int(usage.get("promptTokenCount", 0) or 0),
+            output_tokens=int(usage.get("candidatesTokenCount", 0) or 0),
+            raw_usage=raw_usage,
         )
 
     def _chat_ollama(
@@ -687,6 +761,14 @@ def _google_parts_text(parts: Any) -> str:
     if not isinstance(parts, list):
         return ""
     return "\n".join(str(part.get("text", "")).strip() for part in parts if isinstance(part, dict) and str(part.get("text", "")).strip()).strip()
+
+
+def _google_vertex_generate_content_url(*, project: str, location: str, model: str) -> str:
+    host = "aiplatform.googleapis.com" if location == "global" else f"{location}-aiplatform.googleapis.com"
+    project_path = quote(project, safe="")
+    location_path = quote(location, safe="")
+    model_path = quote(model, safe="")
+    return f"https://{host}/v1/projects/{project_path}/locations/{location_path}/publishers/google/models/{model_path}:generateContent"
 
 
 def _bedrock_messages(messages: list[dict[str, str]]) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:

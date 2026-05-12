@@ -53,11 +53,18 @@ class ModelRegistry:
         *,
         custom_base_url: str | None = None,
         azure_foundry_base_url: str | None = None,
+        google_vertex_project: str | None = None,
+        google_vertex_location: str | None = None,
     ) -> None:
         self.store = store
         self.audit_logger = audit_logger
         self.secrets_broker = secrets_broker or SecretsBroker()
-        self.providers = default_providers(custom_base_url=custom_base_url, azure_foundry_base_url=azure_foundry_base_url)
+        self.providers = default_providers(
+            custom_base_url=custom_base_url,
+            azure_foundry_base_url=azure_foundry_base_url,
+            google_vertex_project=google_vertex_project,
+            google_vertex_location=google_vertex_location,
+        )
         self.aliases: dict[str, str] = {
             "smart": "openrouter/anthropic/claude-sonnet-4.6",
             "fast": "openai/gpt-4o-mini",
@@ -535,7 +542,7 @@ class ModelRegistry:
         provider_name, model = identifier.split("/", 1)
         if provider_name not in self.providers:
             raise KeyError(f"unknown model provider {provider_name!r}")
-        if model not in self.providers[provider_name].models and provider_name not in {"custom", "lmstudio", "azure-foundry", "aws-bedrock"}:
+        if model not in self.providers[provider_name].models and provider_name not in {"custom", "lmstudio", "azure-foundry", "aws-bedrock", "google"}:
             raise KeyError(f"unknown model {model!r} for provider {provider_name!r}")
         return provider_name, model
 
@@ -861,11 +868,11 @@ EXTERNAL_AUTH_HANDOFF_PROFILES: dict[str, dict[str, Any]] = {
         "external_status_command": "gcloud auth list --filter=status:ACTIVE --format=value(account)",
         "external_status_command_argv": ("gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"),
         "provider_token_source": "official Google Cloud CLI credential and ADC stores",
-        "aegis_bridge_status": "official_cli_handoff_only",
+        "aegis_bridge_status": "official_cli_bridge_available",
         "interactive": True,
         "next_steps": [
             "Run model auth login google --method cloud-identity --run-external from a local terminal to use the official gcloud account flow and update Application Default Credentials.",
-            "Use GOOGLE_API_KEY for direct Gemini API calls until a governed Vertex AI model bridge is implemented.",
+            "Configure models.google_vertex_project and models.google_vertex_location, then route google/<model-id> after verifying the official gcloud account flow.",
             "Do not paste Google OAuth access tokens, refresh tokens, ADC JSON, or browser session cookies into Aegis.",
         ],
     },
@@ -1323,11 +1330,32 @@ def _external_auth_link_key(provider_name: str, method: str) -> str:
     return f"{_normalize_auth_key(provider_name)}:{method.replace('-', '_')}"
 
 
-def default_providers(*, custom_base_url: str | None = None, azure_foundry_base_url: str | None = None) -> dict[str, ModelProviderSpec]:
+def default_providers(
+    *,
+    custom_base_url: str | None = None,
+    azure_foundry_base_url: str | None = None,
+    google_vertex_project: str | None = None,
+    google_vertex_location: str | None = None,
+) -> dict[str, ModelProviderSpec]:
     providers = (
         ModelProviderSpec("openai", ("gpt-4o", "gpt-4o-mini", "o1", "o3", "o3-mini"), "OPENAI_API_KEY", "https://api.openai.com/v1", False, True, True, True, 2.5, 10.0, 128000, "openai"),
         ModelProviderSpec("anthropic", ("claude-opus", "claude-sonnet-4.6", "claude-haiku"), "ANTHROPIC_API_KEY", "https://api.anthropic.com/v1", False, True, True, False, 3.0, 15.0, 200000, "anthropic"),
-        ModelProviderSpec("google", ("gemini-pro", "gemini-flash"), "GOOGLE_API_KEY", "https://generativelanguage.googleapis.com/v1beta", False, True, True, True, 1.25, 5.0, 1000000, "google"),
+        ModelProviderSpec(
+            "google",
+            ("gemini-pro", "gemini-flash"),
+            "GOOGLE_API_KEY",
+            "https://generativelanguage.googleapis.com/v1beta",
+            False,
+            True,
+            True,
+            True,
+            1.25,
+            5.0,
+            1000000,
+            "google",
+            "cloud_identity",
+            {"vertex_project": google_vertex_project, "vertex_location": google_vertex_location},
+        ),
         ModelProviderSpec("mistral", ("mistral-large", "mistral-medium", "mistral-small", "codestral"), "MISTRAL_API_KEY", "https://api.mistral.ai/v1", False, True, False, False, 2.0, 6.0, 32000, "mistral"),
         ModelProviderSpec("cohere", ("command-r-plus", "command-r"), "COHERE_API_KEY", "https://api.cohere.com/v2", False, True, False, False, 3.0, 15.0, 128000, "cohere"),
         ModelProviderSpec("openrouter", ("anthropic/claude-sonnet-4.6", "openai/gpt-4o", "meta-llama/llama-3.1-70b"), "OPENROUTER_API_KEY", "https://openrouter.ai/api/v1", False, True, True, True, 0.0, 0.0, 128000, "openrouter"),

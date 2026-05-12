@@ -939,6 +939,8 @@ class CliTests(unittest.TestCase):
                         "[models]",
                         'custom_base_url = "https://models.example.com/v1"',
                         'azure_foundry_base_url = "https://aoai.example.openai.azure.com/openai/v1"',
+                        'google_vertex_project = "aegis-test-project"',
+                        'google_vertex_location = "us-central1"',
                         "",
                         "[policy]",
                         f'path = "{policy_path}"',
@@ -957,6 +959,8 @@ class CliTests(unittest.TestCase):
             self.assertTrue(config.live_rest_writes)
             self.assertEqual(config.custom_model_base_url, "https://models.example.com/v1")
             self.assertEqual(config.azure_foundry_base_url, "https://aoai.example.openai.azure.com/openai/v1")
+            self.assertEqual(config.google_vertex_project, "aegis-test-project")
+            self.assertEqual(config.google_vertex_location, "us-central1")
 
     def test_config_loads_execution_backend_activation_policy(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

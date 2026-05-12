@@ -117,6 +117,8 @@ class AgentOrchestrator:
             self.secrets_broker,
             custom_base_url=config.custom_model_base_url,
             azure_foundry_base_url=config.azure_foundry_base_url,
+            google_vertex_project=config.google_vertex_project,
+            google_vertex_location=config.google_vertex_location,
         )
         self.model_client = LiveModelClient(self.models.secrets_broker)
         self.hooks = HookManager(config.data_dir / "hooks.json", audit_logger, allowed_executables=config.allowed_shell_commands, workspace=self.workspace)

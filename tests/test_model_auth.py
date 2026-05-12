@@ -135,6 +135,7 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(anthropic["subscription_auth"]["external_login_instruction"], "/login")
             self.assertFalse(openrouter["subscription_auth_supported"])
             self.assertIsNone(openrouter["subscription_auth"])
+            self.assertIn("cloud_identity", providers["google"]["auth_methods"])
             self.assertTrue(aws_bedrock["auth_required"])
             self.assertEqual(aws_bedrock["auth_methods"], ["cloud_identity"])
             self.assertFalse(aws_bedrock["auth_configured"])
@@ -518,6 +519,105 @@ class ModelAuthTests(unittest.TestCase):
             self.assertTrue(target_rows["Google Vertex AI / Gemini cloud identity"]["external_auth_configured"])
             self.assertNotIn("operator@example.com", audit_path.read_text(encoding="utf-8"))
 
+    def test_verified_google_vertex_cloud_identity_can_invoke_without_token_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            secret_path = root / ".aegis" / "secrets.json"
+            audit_path = root / ".aegis" / "audit.jsonl"
+            broker = SecretsBroker(secret_path)
+            registry = ModelRegistry(
+                LocalStore(root / ".aegis" / "aegis.db"),
+                AuditLogger(audit_path),
+                broker,
+                google_vertex_project="aegis-test-project",
+                google_vertex_location="us-central1",
+            )
+
+            login_completed = subprocess.CompletedProcess(("gcloud", "auth", "login", "--update-adc"), 0)
+            status_completed = subprocess.CompletedProcess(
+                ("gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"),
+                0,
+                stdout="operator@example.com\n",
+                stderr="",
+            )
+            with (
+                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/gcloud"),
+                patch("aegis.models.registry.subprocess.run", side_effect=(login_completed, status_completed)),
+            ):
+                login = registry.login_provider_external("google", method="cloud-identity", run_external=True)
+
+            self.assertEqual(login["status"], "external_login_verified")
+            self.assertFalse(secret_path.exists())
+            self.assertTrue(registry.auth_status("google")["auth_configured"])
+            self.assertEqual(registry.auth_status("google")["auth_source"], "official_cli")
+
+            route = registry.route("google/gemini-2.5-flash")
+            self.assertEqual(route.auth_method, "cloud_identity_cli")
+            self.assertIsNone(route.secret_handle_id)
+            self.assertEqual(route.provider.external_auth_method, "cloud_identity")
+
+            def fake_vertex_request(command, **kwargs):
+                self.assertEqual(command[0], "/usr/bin/bash")
+                self.assertEqual(command[1], "-lc")
+                self.assertNotIn("ya29.", command[2])
+                self.assertEqual(command[3], "aegis-google-vertex")
+                self.assertEqual(command[5], "https://us-central1-aiplatform.googleapis.com/v1/projects/aegis-test-project/locations/us-central1/publishers/google/models/gemini-2.5-flash:generateContent")
+                self.assertEqual(command[6], "/usr/bin/gcloud")
+                self.assertEqual(command[7], "/usr/bin/curl")
+                payload = json.loads(Path(command[4]).read_text(encoding="utf-8"))
+                self.assertEqual(payload["contents"][0]["role"], "user")
+                self.assertEqual(payload["contents"][0]["parts"][0]["text"], "hello from aegis")
+                self.assertEqual(payload["generationConfig"]["temperature"], 0.2)
+                self.assertTrue(kwargs["cwd"].name.startswith("aegis-google-vertex-model-"))
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout='{"candidates":[{"content":{"parts":[{"text":"vertex response"}]}}],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":6}}\n',
+                    stderr="",
+                )
+
+            with (
+                patch("aegis.models.client.shutil.which", side_effect=lambda name: f"/usr/bin/{name}"),
+                patch("aegis.models.client.subprocess.run", side_effect=fake_vertex_request) as run,
+            ):
+                result = LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello from aegis"}])
+
+            self.assertEqual(result.content, "vertex response")
+            self.assertEqual(result.input_tokens, 11)
+            self.assertEqual(result.output_tokens, 6)
+            self.assertEqual(result.raw_usage["source"], "official_cli")
+            self.assertEqual(result.raw_usage["bridge"], "gcloud_vertex_rest")
+            run.assert_called_once()
+
+            audit_text = audit_path.read_text(encoding="utf-8")
+            self.assertIn("model.auth_external_login_requested", audit_text)
+            self.assertNotIn("operator@example.com", audit_text)
+            self.assertNotIn("ya29.", audit_text)
+
+    def test_google_vertex_requires_project_and_location_before_cloud_identity_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            broker = SecretsBroker(root / ".aegis" / "secrets.json")
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"), broker)
+
+            login_completed = subprocess.CompletedProcess(("gcloud", "auth", "login", "--update-adc"), 0)
+            status_completed = subprocess.CompletedProcess(
+                ("gcloud", "auth", "list", "--filter=status:ACTIVE", "--format=value(account)"),
+                0,
+                stdout="operator@example.com\n",
+                stderr="",
+            )
+            with (
+                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/gcloud"),
+                patch("aegis.models.registry.subprocess.run", side_effect=(login_completed, status_completed)),
+            ):
+                registry.login_provider_external("google", method="cloud-identity", run_external=True)
+            route = registry.route("google/gemini-2.5-flash")
+
+            self.assertEqual(route.auth_method, "cloud_identity_cli")
+            with self.assertRaises(ValueError):
+                LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello"}])
+
     def test_manual_provider_native_auth_handoff_never_captures_tokens(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
             root = Path(temp)
@@ -606,7 +706,7 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(by_target["GitHub Copilot"]["status"], "official_cli_handoff_only")
             self.assertEqual(by_target["GitHub Copilot"]["external_command"], "gh auth login")
             self.assertEqual(by_target["Google Gemini"]["status"], "api_key_ready")
-            self.assertEqual(by_target["Google Vertex AI / Gemini cloud identity"]["status"], "official_cli_handoff_only")
+            self.assertEqual(by_target["Google Vertex AI / Gemini cloud identity"]["status"], "official_cli_bridge_available")
             self.assertEqual(by_target["Google Vertex AI / Gemini cloud identity"]["external_command"], "gcloud auth login --update-adc")
             self.assertEqual(by_target["Google Vertex AI / Gemini cloud identity"]["external_status_command"], "gcloud auth list --filter=status:ACTIVE --format=value(account)")
             self.assertEqual(by_target["DeepSeek"]["status"], "api_key_ready")

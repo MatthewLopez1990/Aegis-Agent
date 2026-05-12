@@ -18,6 +18,11 @@ network_allowlist = ["example.com", "localhost", "127.0.0.1"]
 [models]
 # Optional OpenAI-compatible endpoint used by provider id `custom`.
 # custom_base_url = "https://models.example.com/v1"
+# Optional Azure Foundry/OpenAI v1 endpoint used by provider id `azure-foundry`.
+# azure_foundry_base_url = "https://YOUR-RESOURCE-NAME.openai.azure.com/openai/v1"
+# Optional Vertex AI project and location used by verified Google cloud identity.
+# google_vertex_project = "YOUR-GCP-PROJECT-ID"
+# google_vertex_location = "us-central1"
 
 [execution]
 enabled_backends = ["local"]
@@ -88,6 +93,7 @@ Secure defaults:
 - Data, audit logs, and brokered model auth secrets stay local.
 - Model-provider calls are policy-gated by the network allowlist, including local endpoints with a base URL.
 - Custom model URLs must use HTTPS unless they target a loopback host, and URL credentials are rejected before any API key is attached.
+- Google Vertex cloud identity calls require `google_vertex_project` and `google_vertex_location`; Aegis verifies gcloud login status but does not store Google OAuth tokens or ADC JSON.
 - Provider-backed media artifacts are disabled unless `live_rest_writes = true`; approved `image_generate`, `image_edit`, and `tts` provider calls must use HTTPS, a network-allowlisted public host, and `AEGIS_MEDIA_PROVIDER_TOKEN` or a requested `token_secret` from the local secrets broker.
 - Only the local execution backend is enabled by default. Docker must be explicitly added to `[execution].enabled_backends`; approved container runs get CPU, memory, network, activation, execution, and cleanup receipts, and unsafe Docker flags such as host networking, mounts, and privileged mode are rejected. SSH must also be explicitly enabled, must target a configured `ssh_allowed_hosts` entry, uses a brokered private-key secret, rejects shell metacharacters, hashes the remote command instead of logging it raw, and removes temporary key material after execution. Hosted sandbox backends (`modal`, `daytona`, and `vercel_sandbox`) must be explicitly enabled, must target `hosted_sandbox_allowed_hosts`, use an HTTPS API URL, require a brokered token, and return redacted submission receipts.
 - Memory retention is indefinite by default, but `[memory]` can assign default or per-type TTLs. Expired memories are excluded from retrieval and removed by manual or background cleanup. `[memory.escalation_routes.<route>]` can define team-specific review escalation thresholds with `max_age_days`, `limit`, and `scope` for routes such as `memory_ops`.
