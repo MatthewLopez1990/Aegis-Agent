@@ -111,7 +111,13 @@ class AgentOrchestrator:
         self.sessions = SessionManager(store, audit_logger)
         self.channels = ChannelRegistry(store, audit_logger)
         self.browser = BrowserController(connectors, audit_logger, config.data_dir / "browser")
-        self.models = ModelRegistry(store, audit_logger, self.secrets_broker, custom_base_url=config.custom_model_base_url)
+        self.models = ModelRegistry(
+            store,
+            audit_logger,
+            self.secrets_broker,
+            custom_base_url=config.custom_model_base_url,
+            azure_foundry_base_url=config.azure_foundry_base_url,
+        )
         self.model_client = LiveModelClient(self.models.secrets_broker)
         self.hooks = HookManager(config.data_dir / "hooks.json", audit_logger, allowed_executables=config.allowed_shell_commands, workspace=self.workspace)
         self.schedules = ScheduleManager(store, audit_logger)

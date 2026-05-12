@@ -1556,7 +1556,13 @@ def _channel_registry(config: Any) -> ChannelRegistry:
 def _model_registry(config: Any) -> ModelRegistry:
     store = LocalStore(config.database_path)
     audit = AuditLogger(config.audit_log_path)
-    return ModelRegistry(store, audit, SecretsBroker(config.secrets_path), custom_base_url=config.custom_model_base_url)
+    return ModelRegistry(
+        store,
+        audit,
+        SecretsBroker(config.secrets_path),
+        custom_base_url=config.custom_model_base_url,
+        azure_foundry_base_url=config.azure_foundry_base_url,
+    )
 
 
 def _read_api_key(args: argparse.Namespace) -> str:

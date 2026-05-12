@@ -505,7 +505,7 @@ class ModelAuthTests(unittest.TestCase):
             by_target = {row["target"]: row for row in targets["targets"]}
 
             self.assertEqual(targets["status"], "auth_parity_gap_tracked")
-            self.assertGreaterEqual(targets["target_provider_count"], 25)
+            self.assertGreaterEqual(targets["target_provider_count"], 26)
             self.assertIn("api_key", targets["implemented_auth_methods"])
             self.assertIn("subscription", targets["implemented_auth_methods"])
             self.assertIn("oauth", targets["implemented_auth_methods"])
@@ -529,6 +529,7 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(by_target["MiniMax"]["status"], "api_key_ready")
             self.assertEqual(by_target["MiniMax OAuth"]["status"], "manual_provider_handoff_only")
             self.assertEqual(by_target["AWS Bedrock"]["status"], "official_cli_handoff_only")
+            self.assertEqual(by_target["Azure Foundry API key"]["status"], "api_key_ready")
             self.assertEqual(by_target["Azure Foundry"]["status"], "official_cli_handoff_only")
             self.assertEqual(by_target["Qwen DashScope API"]["status"], "api_key_ready")
             self.assertEqual(by_target["Qwen OAuth"]["required_auth"], ["oauth"])
@@ -537,6 +538,80 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(by_target["Ollama"]["status"], "local_ready")
             self.assertFalse(any(row["raw_tokens_captured"] for row in targets["targets"]))
             self.assertIn("raw_token_capture_rejection", targets["verification_gates"])
+
+    def test_azure_foundry_api_key_provider_uses_configured_v1_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            broker = SecretsBroker(root / ".aegis" / "secrets.json")
+            registry = ModelRegistry(
+                LocalStore(root / ".aegis" / "aegis.db"),
+                AuditLogger(root / ".aegis" / "audit.jsonl"),
+                broker,
+                azure_foundry_base_url="https://aoai.example.openai.azure.com/openai/v1",
+            )
+            client = LiveModelClient(broker)
+
+            login = registry.login_provider("azure-foundry", "sk-azure-test")
+            route = registry.route("azure-foundry/prod-gpt-4o")
+
+            self.assertTrue(login["auth_configured"])
+            self.assertEqual(login["auth_secret"], "AZURE_OPENAI_API_KEY")
+            self.assertEqual(route.provider.base_url, "https://aoai.example.openai.azure.com/openai/v1")
+            self.assertEqual(route.provider.models, ("*",))
+            self.assertEqual(route.provider.auth_secret, "AZURE_OPENAI_API_KEY")
+            self.assertTrue(route.secret_handle_id)
+
+            class FakeResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def read(self) -> bytes:
+                    return b'{"choices":[{"message":{"content":"azure response"}}],"usage":{"prompt_tokens":7,"completion_tokens":3}}'
+
+            captured: dict[str, object] = {}
+
+            def fake_urlopen(request, timeout):
+                captured["url"] = request.full_url
+                captured["headers"] = dict(request.header_items())
+                captured["payload"] = json.loads(request.data.decode("utf-8"))
+                self.assertNotIn("sk-azure-test", request.data.decode("utf-8"))
+                return FakeResponse()
+
+            with patch("aegis.models.client._open_model_request", fake_urlopen):
+                result = client.chat(route, [{"role": "user", "content": "hello"}])
+
+            headers = {str(key).lower(): value for key, value in dict(captured["headers"]).items()}
+            self.assertEqual(captured["url"], "https://aoai.example.openai.azure.com/openai/v1/chat/completions")
+            self.assertEqual(headers["api-key"], "sk-azure-test")
+            self.assertEqual(captured["payload"]["model"], "prod-gpt-4o")
+            self.assertEqual(result.content, "azure response")
+            self.assertEqual(result.input_tokens, 7)
+            self.assertEqual(result.output_tokens, 3)
+
+    def test_azure_foundry_rejects_unsafe_base_urls_before_auth_resolution(self) -> None:
+        for base_url in (
+            "http://aoai.example.openai.azure.com/openai/v1",
+            "https://user:pass@aoai.example.openai.azure.com/openai/v1",
+            "https://models.example.com/openai/v1",
+            "https://aoai.example.openai.azure.com",
+        ):
+            with self.subTest(base_url=base_url), tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+                root = Path(temp)
+                broker = SecretsBroker(root / ".aegis" / "secrets.json")
+                registry = ModelRegistry(
+                    LocalStore(root / ".aegis" / "aegis.db"),
+                    AuditLogger(root / ".aegis" / "audit.jsonl"),
+                    broker,
+                    azure_foundry_base_url=base_url,
+                )
+                registry.login_provider("azure-foundry", "sk-azure-test")
+                route = registry.route("azure-foundry/prod-gpt-4o")
+
+                with self.assertRaises(ValueError):
+                    LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello"}])
 
     def test_expanded_openai_compatible_providers_use_shared_guarded_client(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):

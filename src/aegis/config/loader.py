@@ -86,6 +86,7 @@ class AegisConfig:
     live_http_reads: bool = False
     live_rest_writes: bool = False
     custom_model_base_url: str | None = None
+    azure_foundry_base_url: str | None = None
     webhook: WebhookChannelConfig = field(default_factory=WebhookChannelConfig)
     email: EmailChannelConfig = field(default_factory=EmailChannelConfig)
     chat_webhook: ChatWebhookChannelConfig = field(default_factory=ChatWebhookChannelConfig)
@@ -131,6 +132,7 @@ def load_config(data_dir: str | Path | None = None, config_path: str | Path | No
     live_http_reads = bool(security.get("live_http_reads", False))
     live_rest_writes = bool(security.get("live_rest_writes", False))
     custom_model_base_url = str(models["custom_base_url"]) if models.get("custom_base_url") else None
+    azure_foundry_base_url = str(models["azure_foundry_base_url"]) if models.get("azure_foundry_base_url") else None
     memory_retention = MemoryRetentionConfig(
         default_ttl_days=_optional_positive_int(memory.get("default_ttl_days")),
         ttl_days_by_type={str(key): int(value) for key, value in memory_ttl_days.items() if int(value) > 0},
@@ -203,6 +205,7 @@ def load_config(data_dir: str | Path | None = None, config_path: str | Path | No
         live_http_reads=live_http_reads,
         live_rest_writes=live_rest_writes,
         custom_model_base_url=custom_model_base_url,
+        azure_foundry_base_url=azure_foundry_base_url,
         webhook=webhook_config,
         email=email_config,
         chat_webhook=chat_webhook_config,
@@ -236,6 +239,7 @@ def write_default_config(data_dir: str | Path | None = None) -> Path:
                     "",
                     "[models]",
                     "# custom_base_url = \"http://localhost:8000/v1\"",
+                    "# azure_foundry_base_url = \"https://YOUR-RESOURCE-NAME.openai.azure.com/openai/v1\"",
                     "",
                     "[execution]",
                     'enabled_backends = ["local"]',

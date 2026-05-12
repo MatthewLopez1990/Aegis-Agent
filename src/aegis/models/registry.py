@@ -51,11 +51,12 @@ class ModelRegistry:
         secrets_broker: SecretsBroker | None = None,
         *,
         custom_base_url: str | None = None,
+        azure_foundry_base_url: str | None = None,
     ) -> None:
         self.store = store
         self.audit_logger = audit_logger
         self.secrets_broker = secrets_broker or SecretsBroker()
-        self.providers = default_providers(custom_base_url=custom_base_url)
+        self.providers = default_providers(custom_base_url=custom_base_url, azure_foundry_base_url=azure_foundry_base_url)
         self.aliases: dict[str, str] = {
             "smart": "openrouter/anthropic/claude-sonnet-4.6",
             "fast": "openai/gpt-4o-mini",
@@ -531,7 +532,7 @@ class ModelRegistry:
         provider_name, model = identifier.split("/", 1)
         if provider_name not in self.providers:
             raise KeyError(f"unknown model provider {provider_name!r}")
-        if model not in self.providers[provider_name].models and provider_name not in {"custom", "lmstudio"}:
+        if model not in self.providers[provider_name].models and provider_name not in {"custom", "lmstudio", "azure-foundry"}:
             raise KeyError(f"unknown model {model!r} for provider {provider_name!r}")
         return provider_name, model
 
@@ -1076,6 +1077,13 @@ MODEL_PROVIDER_AUTH_TARGETS: tuple[dict[str, Any], ...] = (
         "account_surface": "AWS IAM / Bedrock",
     },
     {
+        "target": "Azure Foundry API key",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "azure-foundry",
+        "required_auth": ("api_key",),
+        "account_surface": "Azure AI Foundry",
+    },
+    {
         "target": "Azure Foundry",
         "platforms": ("Hermes Agent",),
         "aegis_provider": None,
@@ -1301,7 +1309,7 @@ def _external_auth_link_key(provider_name: str, method: str) -> str:
     return f"{_normalize_auth_key(provider_name)}:{method.replace('-', '_')}"
 
 
-def default_providers(*, custom_base_url: str | None = None) -> dict[str, ModelProviderSpec]:
+def default_providers(*, custom_base_url: str | None = None, azure_foundry_base_url: str | None = None) -> dict[str, ModelProviderSpec]:
     providers = (
         ModelProviderSpec("openai", ("gpt-4o", "gpt-4o-mini", "o1", "o3", "o3-mini"), "OPENAI_API_KEY", "https://api.openai.com/v1", False, True, True, True, 2.5, 10.0, 128000, "openai"),
         ModelProviderSpec("anthropic", ("claude-opus", "claude-sonnet-4.6", "claude-haiku"), "ANTHROPIC_API_KEY", "https://api.anthropic.com/v1", False, True, True, False, 3.0, 15.0, 200000, "anthropic"),
@@ -1316,6 +1324,7 @@ def default_providers(*, custom_base_url: str | None = None) -> dict[str, ModelP
         ModelProviderSpec("minimax", ("MiniMax-M2.7", "MiniMax-M2.5", "MiniMax-M2"), "MINIMAX_API_KEY", "https://api.minimax.io/v1", False, True, False, False, 0.0, 0.0, 128000, "openai_compatible"),
         ModelProviderSpec("zai", ("glm-5.1", "glm-5", "glm-4.7", "glm-4.6", "glm-4.5"), "GLM_API_KEY", "https://api.z.ai/api/paas/v4", False, True, True, False, 0.0, 0.0, 128000, "openai_compatible"),
         ModelProviderSpec("qwen", ("qwen-plus", "qwen-max", "qwen-turbo"), "DASHSCOPE_API_KEY", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", False, True, True, False, 0.0, 0.0, 128000, "openai_compatible"),
+        ModelProviderSpec("azure-foundry", ("*",), "AZURE_OPENAI_API_KEY", azure_foundry_base_url, False, True, True, True, 0.0, 0.0, 128000, "openai_compatible"),
         ModelProviderSpec("ollama", ("llama3", "llama3.1", "mistral", "mixtral", "phi3", "gemma2", "codellama", "deepseek-coder"), None, "http://localhost:11434", True, False, context_window_tokens=8192, tokenizer_profile="llama"),
         ModelProviderSpec("lmstudio", ("local",), None, "http://localhost:1234/v1", True, False, context_window_tokens=8192, tokenizer_profile="openai_compatible"),
         ModelProviderSpec("custom", ("*",), "CUSTOM_API_KEY", custom_base_url, False, True, context_window_tokens=8192, tokenizer_profile="openai_compatible"),

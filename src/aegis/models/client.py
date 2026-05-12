@@ -54,6 +54,8 @@ class LiveModelClient:
     def chat(self, route: ModelRoute, messages: list[dict[str, str]], *, temperature: float = 0.2) -> ModelInvocationResult:
         if route.auth_method == "subscription_cli":
             return self._chat_subscription_cli(route, messages, temperature=temperature)
+        if route.provider.provider == "azure-foundry":
+            return self._chat_azure_foundry(route, messages, temperature=temperature)
         if route.provider.provider in OPENAI_COMPATIBLE_PROVIDERS:
             return self._chat_openai_compatible(route, messages, temperature=temperature)
         if route.provider.provider == "anthropic":
@@ -215,6 +217,46 @@ class LiveModelClient:
         choices = response.get("choices", [])
         if not choices:
             raise RuntimeError("model provider returned no choices")
+        message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+        content = str(message.get("content", "")).strip()
+        usage = response.get("usage", {}) if isinstance(response.get("usage", {}), dict) else {}
+        return ModelInvocationResult(
+            provider=route.provider.provider,
+            model=route.model,
+            content=content,
+            input_tokens=int(usage.get("prompt_tokens", 0) or 0),
+            output_tokens=int(usage.get("completion_tokens", 0) or 0),
+            raw_usage=dict(usage),
+        )
+
+    def _chat_azure_foundry(
+        self,
+        route: ModelRoute,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+    ) -> ModelInvocationResult:
+        if route.provider.base_url is None:
+            raise ValueError("azure-foundry provider requires models.azure_foundry_base_url")
+        _validate_azure_foundry_base_url(route.provider.base_url)
+        api_key = self._resolve_api_key(route)
+        if api_key is None:
+            raise ValueError("azure-foundry provider has no API key")
+        response = self._post_json(
+            f"{route.provider.base_url.rstrip('/')}/chat/completions",
+            payload={
+                "model": route.model,
+                "messages": messages,
+                "temperature": temperature,
+            },
+            headers={
+                "Content-Type": "application/json",
+                "api-key": api_key,
+            },
+        )
+        choices = response.get("choices", [])
+        if not choices:
+            raise RuntimeError("azure-foundry provider returned no choices")
         message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
         content = str(message.get("content", "")).strip()
         usage = response.get("usage", {}) if isinstance(response.get("usage", {}), dict) else {}
@@ -530,6 +572,17 @@ def _validate_custom_base_url(base_url: str) -> None:
     if parsed.scheme == "http" and _is_loopback_host(hostname):
         return
     raise ValueError("custom model base URL must use HTTPS unless it targets a local loopback host")
+
+
+def _validate_azure_foundry_base_url(base_url: str) -> None:
+    parsed = urlparse(base_url)
+    if parsed.username or parsed.password:
+        raise ValueError("azure-foundry base URL must not include credentials")
+    hostname = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or not hostname.endswith((".openai.azure.com", ".services.ai.azure.com")):
+        raise ValueError("azure-foundry base URL must be an HTTPS Azure OpenAI or Azure AI Foundry endpoint")
+    if parsed.path.rstrip("/") != "/openai/v1":
+        raise ValueError("azure-foundry base URL must include the /openai/v1 path")
 
 
 def _is_loopback_host(hostname: str) -> bool:

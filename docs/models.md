@@ -29,11 +29,11 @@ Features:
 - Usage and cost tracking with aggregate totals, provider/model breakdowns, and recent sanitized usage receipts.
 - Provider context-window metadata and conservative prompt budget trimming before live calls.
 - Secret handles through the secrets broker.
-- Local auth login for OpenAI, Anthropic, Google, Mistral, Cohere, OpenRouter, Nous, DeepSeek, xAI, Kimi, MiniMax, Z.AI, Qwen, and custom API keys.
+- Local auth login for OpenAI, Anthropic, Google, Mistral, Cohere, OpenRouter, Nous, DeepSeek, xAI, Kimi, MiniMax, Z.AI, Qwen, Azure Foundry/OpenAI, and custom API keys.
 - Guarded provider-native login handoff for OpenAI/ChatGPT Codex, Anthropic/claude.ai, GitHub Copilot, Google Cloud/Vertex AI, Qwen Code, AWS Bedrock, Azure Foundry, MiniMax, and Nous Portal. Aegis can report or launch official local CLI commands such as `codex login`, `claude auth login`, `gh auth login`, `gcloud auth login --update-adc`, `qwen auth`, `aws sso login`, and `az login`; successful non-secret status checks such as `gh auth status`, `gcloud auth list --filter=status:ACTIVE --format=value(account)`, `aws sts get-caller-identity`, and `az account show` are remembered as verified external auth links, but Aegis does not capture browser cookies, subscription session tokens, OAuth tokens, refresh tokens, ADC JSON, or access-token output.
 - Verified OpenAI/ChatGPT and Claude Code subscription login can act as tokenless live model bridges through isolated official CLI invocation: Aegis checks `codex login status` or `claude auth status`, records only non-secret link metadata, and invokes Codex/Claude from an empty read-only temporary workspace when no API key is configured.
 - Hermes/Claude provider-auth target tracking for OpenAI Codex, Claude Code, Copilot, Nous Portal, OpenRouter, Gemini API, Google Cloud/Vertex AI, Qwen OAuth, Bedrock, Azure Foundry, xAI/Grok, Z.AI, Kimi, MiniMax, DeepSeek, Ollama, LM Studio, and custom endpoints. Provider-native login bridges are surfaced as explicit local handoff/manual gaps instead of silent stubs.
-- Live chat completion calls for OpenAI, Anthropic, Google Gemini, Mistral, Cohere, OpenRouter, Ollama, LM Studio, and configured custom OpenAI-compatible routes. LM Studio accepts arbitrary local model IDs after the `lmstudio/` prefix.
+- Live chat completion calls for OpenAI, Anthropic, Google Gemini, Mistral, Cohere, OpenRouter, Ollama, LM Studio, configured Azure Foundry/OpenAI v1 routes, and configured custom OpenAI-compatible routes. LM Studio and Azure Foundry accept arbitrary deployment IDs after their provider prefix.
 - Policy-gated model egress through the configured network allowlist, including local endpoints with a base URL.
 
 Auth commands:
@@ -52,6 +52,7 @@ PYTHONPATH=src python3 -m aegis.cli.main model auth login kimi --api-key-stdin
 PYTHONPATH=src python3 -m aegis.cli.main model auth login minimax --api-key-stdin
 PYTHONPATH=src python3 -m aegis.cli.main model auth login zai --api-key-stdin
 PYTHONPATH=src python3 -m aegis.cli.main model auth login qwen --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login azure-foundry --api-key-stdin
 PYTHONPATH=src python3 -m aegis.cli.main model auth login custom --api-key-stdin
 PYTHONPATH=src python3 -m aegis.cli.main model auth methods openai
 PYTHONPATH=src python3 -m aegis.cli.main model auth login openai --subscription
@@ -86,13 +87,14 @@ Model aliases and fallback routes are persisted in the local SQLite state so CLI
 
 Before a live model call, Aegis estimates prompt size with the routed provider's tokenizer profile, reserves output space, preserves the system instruction and current task request, keeps the newest session and memory context that fits, and records context-budget plus tokenizer metadata in the model response receipt. If `tiktoken` is installed, OpenAI-compatible profiles use exact `cl100k_base` counting. Llama and Mistral-style local profiles can use exact SentencePiece counting when the optional `sentencepiece` package is installed and `AEGIS_SENTENCEPIECE_MODEL_LLAMA`, `AEGIS_SENTENCEPIECE_MODEL_MISTRAL`, or the generic `AEGIS_SENTENCEPIECE_MODEL` points at a local tokenizer model. Otherwise Aegis stays dependency-light and falls back to built-in provider-specific estimators. Long-running sessions therefore retain recent continuity without sending unbounded history to a provider.
 
-OpenAI, Anthropic, Google Gemini, Mistral, Cohere, OpenRouter, Nous, DeepSeek, xAI, Kimi, MiniMax, Z.AI, Qwen, LM Studio, and custom routes invoke live chat completions through the local secrets broker when their provider domains are allowed by policy. Ollama uses its local chat API without auth. For OpenAI and Anthropic, verified Codex/Claude Code subscriptions can be used as fallback live model bridges when no API key is configured; Google Cloud/Vertex AI, AWS Bedrock, Azure Foundry, Copilot, and Qwen OAuth remain handoff/status surfaces until scoped provider bridges exist. MiniMax and Nous OAuth are manual account-surface handoffs in this slice because no local official CLI command is configured.
+OpenAI, Anthropic, Google Gemini, Mistral, Cohere, OpenRouter, Nous, DeepSeek, xAI, Kimi, MiniMax, Z.AI, Qwen, LM Studio, configured Azure Foundry/OpenAI v1 routes, and custom routes invoke live chat completions through the local secrets broker when their provider domains are allowed by policy. Ollama uses its local chat API without auth. For OpenAI and Anthropic, verified Codex/Claude Code subscriptions can be used as fallback live model bridges when no API key is configured; Google Cloud/Vertex AI, AWS Bedrock, Azure Foundry cloud identity, Copilot, and Qwen OAuth remain handoff/status surfaces until scoped provider bridges exist. MiniMax and Nous OAuth are manual account-surface handoffs in this slice because no local official CLI command is configured.
 
 Custom OpenAI-compatible endpoints are configured in `.aegis/config.toml`:
 
 ```toml
 [models]
 custom_base_url = "https://models.example.com/v1"
+azure_foundry_base_url = "https://YOUR-RESOURCE-NAME.openai.azure.com/openai/v1"
 ```
 
-Non-local custom URLs must use HTTPS and cannot include URL credentials. `http://` is accepted only for loopback hosts such as `localhost` or `127.0.0.1`. Model HTTP redirects are blocked instead of followed, so provider credentials are not forwarded to a redirect target.
+Non-local custom URLs must use HTTPS and cannot include URL credentials. `http://` is accepted only for loopback hosts such as `localhost` or `127.0.0.1`. Azure Foundry base URLs must be HTTPS Azure OpenAI or Azure AI Foundry endpoints ending in `.openai.azure.com` or `.services.ai.azure.com`, include the `/openai/v1` path, and use deployment IDs as the model name, for example `azure-foundry/prod-gpt-4o`. Model HTTP redirects are blocked instead of followed, so provider credentials are not forwarded to a redirect target.
