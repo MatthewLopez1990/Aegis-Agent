@@ -408,6 +408,15 @@ class RemoteControlPairingTests(unittest.TestCase):
                 retry_captured["requests"].append(request)
                 return FakeResponse()
 
+            too_early = reloaded.retry_relay_notifications(
+                created["pairing"]["id"],
+                relay_auth_token="relay-raw-secret",
+                allowlist=("example.com",),
+                approved=True,
+                now=now + timedelta(seconds=2),
+            )
+            self.assertEqual(too_early["attempted_count"], 0)
+
             with patch("aegis.remote_control._private_network_error", return_value=None):
                 with patch("aegis.remote_control._open_without_redirects", side_effect=retry_success):
                     retried = reloaded.retry_relay_notifications(
@@ -415,7 +424,7 @@ class RemoteControlPairingTests(unittest.TestCase):
                         relay_auth_token="relay-raw-secret",
                         allowlist=("example.com",),
                         approved=True,
-                        now=now + timedelta(seconds=2),
+                        now=now + timedelta(seconds=32),
                     )
 
             retry_body = json.loads(retry_captured["requests"][0].data.decode("utf-8"))
@@ -429,6 +438,10 @@ class RemoteControlPairingTests(unittest.TestCase):
             self.assertEqual(retried["results"][0]["status"], "acknowledged")
             self.assertEqual(retried["outbox"]["items"][0]["status"], "acknowledged")
             self.assertEqual(retried["outbox"]["items"][0]["attempt_count"], 2)
+            self.assertEqual(retry_body["delivery_id"], retried["results"][0]["outbox_id"])
+            self.assertEqual(retry_body["idempotency_key"], retried["results"][0]["outbox_id"])
+            self.assertEqual(retried["results"][0]["relay_receipt"]["delivery_state"], "ok")
+            self.assertFalse(retried["results"][0]["relay_receipt"]["raw_response_body_included"])
             self.assertFalse(retry_body["relay_auth_token_included"])
             self.assertFalse(retry_body["user_request_included"])
             self.assertNotIn(created["token"], rendered_retry)
@@ -443,6 +456,73 @@ class RemoteControlPairingTests(unittest.TestCase):
             self.assertNotIn("relay-raw-secret", persisted_retry)
             self.assertNotIn("hidden prompt", persisted_retry)
             self.assertNotIn("token=secret", persisted_retry)
+
+    def test_relay_notification_requires_structured_receipt_before_acknowledgement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store_path = Path(temp) / "remote_control_pairings.json"
+            registry = RemoteControlPairingRegistry(store_path)
+            now = datetime(2026, 5, 12, 12, 0, tzinfo=timezone.utc)
+            created = registry.create_pairing(label="phone", task_id="task-1", allowed_actions=("status",), now=now)
+            captured: dict[str, object] = {"requests": []}
+
+            class EmptyReceiptResponse:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback):
+                    return False
+
+                def getcode(self) -> int:
+                    return 202
+
+                def read(self, limit: int) -> bytes:
+                    return b"{}"
+
+            def capture_request(request, timeout: int):
+                captured["requests"].append(request)
+                return EmptyReceiptResponse()
+
+            with patch("aegis.remote_control._private_network_error", return_value=None):
+                with patch("aegis.remote_control._open_without_redirects", side_effect=capture_request):
+                    registry.relay_pairing(
+                        created["pairing"]["id"],
+                        relay_url="https://example.com/aegis-relay",
+                        allowlist=("example.com",),
+                        relay_auth_token="relay-raw-secret",
+                        approved=True,
+                        now=now,
+                    )
+                    published = registry.publish_relay_notification(
+                        created["pairing"]["id"],
+                        notification={
+                            "status": "remote_notification_available",
+                            "mode": "scoped_remote_notification",
+                            "event": "task-updated",
+                            "task_id": "task-1",
+                            "pairing_token_relayed": False,
+                            "raw_secret_values_included": False,
+                            "user_request_included": False,
+                            "plan_receipt_included": False,
+                        },
+                        relay_auth_token="relay-raw-secret",
+                        allowlist=("example.com",),
+                        approved=True,
+                        now=now + timedelta(seconds=1),
+                    )
+
+            body = json.loads(captured["requests"][-1].data.decode("utf-8"))
+            outbox = registry.relay_outbox()
+            rendered = json.dumps(outbox, sort_keys=True)
+            self.assertEqual(published["outbox_status"], "delivered")
+            self.assertFalse(published["relay_acknowledged"])
+            self.assertEqual(body["delivery_id"], published["outbox_id"])
+            self.assertEqual(body["idempotency_key"], published["outbox_id"])
+            self.assertEqual(outbox["items"][0]["status"], "delivered")
+            self.assertEqual(outbox["items"][0]["last_error"], "relay receipt not accepted")
+            self.assertFalse(outbox["items"][0]["relay_receipt"]["receipt_present"])
+            self.assertFalse(outbox["items"][0]["relay_receipt"]["raw_response_body_included"])
+            self.assertNotIn(created["token"], rendered)
+            self.assertNotIn("relay-raw-secret", rendered)
 
     def test_relay_preflight_rejects_non_https_targets(self) -> None:
         registry = RemoteControlPairingRegistry()

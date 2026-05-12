@@ -357,6 +357,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "approved outbound relay registration",
                 "approved relay directory publish",
                 "approved relay notification publish",
+                "structured redacted relay notification receipts",
                 "approved relay action proxy",
                 "background task submission",
                 "governed lifecycle hooks",
