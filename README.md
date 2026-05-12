@@ -77,7 +77,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 - Channel gateway registry with 50+ safe mock adapters plus opt-in signed webhook, chat webhook, and SMTP email delivery slices.
 - Model provider abstraction for cloud, local, and custom providers with aliases, fallbacks, secret handles, and usage tracking.
 - Live OpenAI, Anthropic, Google Gemini, Mistral, Cohere, OpenRouter, Nous, DeepSeek, xAI, Kimi, MiniMax, Z.AI, Qwen, Ollama, LM Studio, and custom OpenAI-compatible model invocation through the local secrets broker, plus model auth login, guarded provider-native handoff targets, and verified Codex/Claude Code subscription CLI bridges that avoid token import.
-- Scheduler with review activation and governed run-due execution, session history, Kanban work boards, governed stdio MCP calls, SOUL/context-file loader, and dry-run migration inspection.
+- Scheduler with review activation and governed run-due execution, session history, Kanban work boards, governed stdio MCP calls, local lifecycle hooks with approval defaults and redacted receipts, SOUL/context-file loader, and dry-run migration inspection.
 - Built-in governed tool catalog with 69 policy-visible tools covering browser, web, files, shell, memory, media, voice, subagent, research, and MCP capabilities.
 - Enterprise readiness snapshots through `aegis enterprise-readiness`, dashboard `enterprise_readiness`, memory health scoring, self-improvement readiness blockers, and a TUI command deck with rotating five-frame shield animation plus active audit/session/approval/model/workspace flags.
 - Memory health reports score provenance, confirmation freshness, duplicates, conflicts, recertification, and scoped recall without sending embeddings or content to external services.

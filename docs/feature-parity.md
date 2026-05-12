@@ -18,10 +18,11 @@ Evidence used for the May 2026 pass:
 | Hermes durable memory and learning loop | `memory health`, `memory review-*`, `improvement readiness` | `governed_local_ready` | `PYTHONPATH=src python3 -m unittest tests.test_memory tests.test_learning_loop -v` |
 | Hermes self-improving repair flow | Failed task proposals, sandbox candidates, candidate review, apply/rollback, verification receipts, learned procedural memory | `enterprise_ready` when readiness blockers are zero | `PYTHONPATH=src python3 -m unittest tests.test_task_state.TaskStateTests.test_failed_task_creates_durable_self_repair_proposal -v` |
 | Hermes/OpenClaw command TUI | Rotating Aegis Shield command deck, active flags, slash aliases, tab completion, session-aware task controls | `enterprise_ready` | `PYTHONPATH=src python3 -m unittest tests.test_tui -v` |
+| Claude/Hermes lifecycle hooks | CLI/TUI/API `hooks` registry with allowlisted argv execution, approval defaults, timeout/output limits, and redacted receipts | `governed_local_ready` | `PYTHONPATH=src python3 -m unittest tests.test_hooks -v` |
 | OpenClaw web/control plane readiness | `aegis dashboard`, `GET /dashboard`, live-gap backlog | `governed_local_ready` with mock/default live integrations | `PYTHONPATH=src python3 -m unittest tests.test_cli.CliTests.test_dashboard_command_reports_product_posture -v` |
 | Remote execution backends | Local, Docker, SSH, hosted sandbox definitions with activation preflights | `backend_gated` | `PYTHONPATH=src python3 -m unittest tests.test_cli.CliTests.test_tool_run_backend_denial_reports_activation_preflight -v` |
 
-Dashboard fields for audit: `enterprise_readiness`, `memory_readiness`, `self_improvement_readiness`, `implementation_readiness`, and `live_gap_backlog`. Remaining residual gaps are live third-party credential flows, provider-specific lifecycle depth, and deeper live browser automation adapters.
+Dashboard fields for audit: `enterprise_readiness`, `memory_readiness`, `self_improvement_readiness`, `implementation_readiness`, and `live_gap_backlog`. Remaining residual gaps are live third-party credential flows, plugin install lifecycle depth, provider-specific lifecycle depth, and deeper live browser automation adapters.
 
 ## Implemented Support
 
@@ -69,6 +70,7 @@ Dashboard fields for audit: `enterprise_readiness`, `memory_readiness`, `self_im
 ### Scheduling and Work Orchestration
 
 - Schedule manager creates paused schedules with cron-like metadata, review activation, due detection, governed run-due execution, next-run advancement, scheduled memory review digests/escalations, scheduled local evaluation reports with operator digests, and audit records.
+- Lifecycle hooks can be registered from CLI, TUI, or local API for manual and task lifecycle events. Hooks use allowlisted argv execution only, default to approval-required, run with timeout and output caps from the configured workspace, avoid inherited secret env, store private hook state, and emit redacted audit receipts without blocking task execution when hook dispatch fails.
 - Kanban manager provides durable boards and cards for multi-agent-style work coordination, and approved `subagent_delegate` tool calls create isolated delegation cards with role, parent task, and tainted-instruction metadata.
 - Sessions and message history are persisted and compactable. The GUI can append non-submitting session context with an explicit trust label so imported chat, web, document, or tool output is retained as context without becoming a task request.
 - Task resume defaults back to the original session when possible, records requested/result/rejected audit receipts, appends resume outcomes to the session transcript with task and approval metadata, and returns interactive TUI/web operators to the originating conversation after cross-session resume actions.

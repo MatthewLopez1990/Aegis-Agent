@@ -19,6 +19,7 @@ from aegis.agent.orchestrator import build_orchestrator
 from aegis.approvals.actions import approval_action_hints
 from aegis.approvals.models import ApprovalRequest
 from aegis.channels.base import ChannelResponse
+from aegis.hooks.manager import HOOK_EVENTS
 from aegis.memory.models import MemoryType
 from aegis.migration.openclaw import inspect_hermes_home, inspect_openclaw_home, preview_hermes_memory_import, preview_openclaw_memory_import
 from aegis.product.capabilities import build_product_dashboard
@@ -140,6 +141,7 @@ REPAIR_COMMANDS = ("readiness", "review", "approve", "reject", "candidate", "gen
 SCHEDULE_COMMANDS = ("create", "memory-review-digest", "memory-review-escalation", "evaluation-run", "evaluation-suite", "due", "approve", "activate", "pause", "run-due")
 BROWSER_COMMANDS = ("session", "sessions", "close", "navigate", "extract", "inspect", "table", "screenshot", "render", "click", "fill")
 MCP_COMMANDS = ("list", "register", "call")
+HOOK_COMMANDS = ("list", "add", "enable", "disable", "remove", "run")
 SESSION_COMMANDS = ("new", "open", "rename", "set-model", "set-personality", "activate", "archive", "pause", "append", "history", "tasks", "compact")
 TASKS_COMMANDS = ("all", "session")
 SECURITY_COMMANDS = (
@@ -372,6 +374,9 @@ class AegisTui(cmd.Cmd):
 
     def complete_mcp(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return _complete_subcommand(MCP_COMMANDS, text, line, begidx)
+
+    def complete_hooks(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return _complete_subcommand(HOOK_COMMANDS, text, line, begidx)
 
     def complete_session(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return _complete_subcommand(SESSION_COMMANDS, text, line, begidx)
@@ -2449,14 +2454,38 @@ class AegisTui(cmd.Cmd):
         _print_json({"ok": True, "mode": "static_plugin_inventory", "plugins": self.orchestrator.skills.list_public(), "mcp_servers": self.orchestrator.mcp.list_servers()})
 
     def do_hooks(self, arg: str) -> None:
-        """hooks -- show guarded hooks readiness."""
-        _print_json(
-            {
-                "status": "not_enabled",
-                "detail": "Lifecycle hooks need signed manifests, scope declarations, approval gates, and audit receipts before execution.",
-                "required_controls": ["signed_hook_manifest", "scope_limited_execution", "approval_for_mutation", "receipt_redaction"],
-            }
-        )
+        """hooks list|add|enable|disable|remove|run -- manage governed local lifecycle hooks."""
+        try:
+            parts = shlex.split(arg) if arg else []
+        except ValueError as exc:
+            print(f"invalid hook command: {exc}")
+            return
+        manager = self.orchestrator.hooks
+        try:
+            if not parts or parts[0] == "list":
+                _print_json(_hook_inventory_payload(self.orchestrator))
+                return
+            if parts[0] == "add":
+                spec = _parse_hook_add_args(parts[1:])
+                _print_json({"hook": manager.register_hook(**spec)})
+                return
+            if parts[0] == "enable" and len(parts) >= 2:
+                _print_json({"hook": manager.set_enabled(parts[1], True)})
+                return
+            if parts[0] == "disable" and len(parts) >= 2:
+                _print_json({"hook": manager.set_enabled(parts[1], False)})
+                return
+            if parts[0] == "remove" and len(parts) >= 2:
+                _print_json({"hook": manager.remove_hook(parts[1]), "removed": True})
+                return
+            if parts[0] == "run" and len(parts) >= 2:
+                event, approved, context = _parse_hook_run_args(parts[1:])
+                _print_json(manager.run_event(event, approved=approved, context=context))
+                return
+        except (KeyError, PermissionError, ValueError) as exc:
+            print(f"hook error: {exc}")
+            return
+        print("usage: hooks list | hooks add <event> [--id id] [--enabled] [--no-approval-required] -- <command...> | hooks enable|disable|remove <id> | hooks run <event> [--approved] [--context-json JSON]")
 
     def do_update(self, arg: str) -> None:
         """update -- show guarded update readiness."""
@@ -3279,6 +3308,98 @@ def _print_json(payload: dict[str, Any] | list[dict[str, Any]]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def _hook_inventory_payload(orchestrator: Any) -> dict[str, Any]:
+    return {
+        "status": "governed_local_ready",
+        "hooks": orchestrator.hooks.list_hooks(),
+        "supported_events": list(HOOK_EVENTS),
+        "allowed_executables": list(orchestrator.config.allowed_shell_commands),
+        "raw_secret_values_included": False,
+    }
+
+
+def _parse_hook_add_args(parts: list[str]) -> dict[str, Any]:
+    if not parts:
+        raise ValueError("hook event required")
+    event = parts[0]
+    if event not in HOOK_EVENTS:
+        raise ValueError(f"unsupported hook event: {event}")
+    hook_id: str | None = None
+    enabled = False
+    approval_required = True
+    timeout_seconds = 10
+    max_output_bytes = 4096
+    command: list[str] = []
+    index = 1
+    while index < len(parts):
+        part = parts[index]
+        if part == "--":
+            command = parts[index + 1 :]
+            break
+        if part == "--id":
+            hook_id = _next_required(parts, index, "--id")
+            index += 2
+            continue
+        if part == "--enabled":
+            enabled = True
+            index += 1
+            continue
+        if part == "--disabled":
+            enabled = False
+            index += 1
+            continue
+        if part == "--approval-required":
+            approval_required = True
+            index += 1
+            continue
+        if part == "--no-approval-required":
+            approval_required = False
+            index += 1
+            continue
+        if part == "--timeout":
+            timeout_seconds = int(_next_required(parts, index, "--timeout"))
+            index += 2
+            continue
+        if part == "--max-output-bytes":
+            max_output_bytes = int(_next_required(parts, index, "--max-output-bytes"))
+            index += 2
+            continue
+        command = parts[index:]
+        break
+    if not command:
+        raise ValueError("hook command required")
+    return {
+        "event": event,
+        "command": command,
+        "hook_id": hook_id,
+        "enabled": enabled,
+        "approval_required": approval_required,
+        "timeout_seconds": timeout_seconds,
+        "max_output_bytes": max_output_bytes,
+    }
+
+
+def _parse_hook_run_args(parts: list[str]) -> tuple[str, bool, dict[str, Any]]:
+    event = parts[0]
+    if event not in HOOK_EVENTS:
+        raise ValueError(f"unsupported hook event: {event}")
+    approved = "--approved" in parts[1:]
+    context: dict[str, Any] = {}
+    if "--context-json" in parts:
+        raw_context = _next_required(parts, parts.index("--context-json"), "--context-json")
+        decoded = json.loads(raw_context)
+        if not isinstance(decoded, dict):
+            raise ValueError("--context-json must decode to a JSON object")
+        context = decoded
+    return event, approved, context
+
+
+def _next_required(parts: list[str], index: int, flag: str) -> str:
+    if index + 1 >= len(parts):
+        raise ValueError(f"{flag} requires a value")
+    return parts[index + 1]
+
+
 def _flag_float(parts: list[str], flag: str, *, default: float | None) -> float | None:
     if flag not in parts:
         return default
@@ -3376,7 +3497,7 @@ def _command_reference() -> str:
             "security-review        Security review posture alias",
             "doctor|config|init     Runtime diagnosis, config paths, and init status",
             "bug <summary>          Capture a local-only bug report",
-            "hooks                  Guarded lifecycle hook readiness",
+            "hooks list|add|run     Governed local lifecycle hooks",
             "dashboard              Runtime command deck",
             "menu                   Grouped command menu",
             "security               Security controls",
@@ -3492,7 +3613,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("permissions|security-review", "Claude-style policy and security review aliases"),
             ("doctor|config|init", "runtime diagnostics, local paths, and initialization status"),
             ("bug <summary>", "local-only bug report capture"),
-            ("hooks", "guarded lifecycle hook readiness"),
+            ("hooks", "governed local lifecycle hooks"),
             ("audit|evidence|timeline|events", "receipts and replay"),
         ),
     ),
@@ -3763,6 +3884,7 @@ def _next_command_hint(command: str) -> str:
         "tools": "/tools run <name> <json>",
         "skills": "/skills hub <query>",
         "plugin": "/plugins",
+        "hooks": "/hooks list",
         "memory": "/memory review-queue",
         "mcp": "/repair readiness",
         "doctor": "/capabilities",
@@ -3790,6 +3912,7 @@ SLASH_SUBCOMMANDS: dict[str, tuple[str, ...]] = {
     "schedule": SCHEDULE_COMMANDS,
     "browser": BROWSER_COMMANDS,
     "mcp": MCP_COMMANDS,
+    "hooks": HOOK_COMMANDS,
     "session": SESSION_COMMANDS,
     "tasks": TASKS_COMMANDS,
     "security": SECURITY_COMMANDS,
@@ -3809,6 +3932,8 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("task", "submit"): ("--path",),
     ("session", "new"): ("--model", "--personality"),
     ("schedule", "run-due"): ("--limit", "--now"),
+    ("hooks", "add"): ("--id", "--enabled", "--approval-required", "--no-approval-required", "--timeout", "--max-output-bytes"),
+    ("hooks", "run"): ("--approved", "--context-json"),
 }
 
 

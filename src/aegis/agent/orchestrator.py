@@ -34,6 +34,7 @@ from aegis.channels.chat_webhook import deliver_chat_webhook
 from aegis.channels.email import deliver_smtp_email
 from aegis.channels.webhook import deliver_signed_webhook, verify_signed_webhook
 from aegis.execution.backends import ExecutionBackendRegistry
+from aegis.hooks.manager import HookManager
 from aegis.kanban.manager import KanbanManager
 from aegis.learning.loop import LearningLoop
 from aegis.memory.manager import MemoryManager, MemorySafetyError
@@ -111,6 +112,7 @@ class AgentOrchestrator:
         self.browser = BrowserController(connectors, audit_logger, config.data_dir / "browser")
         self.models = ModelRegistry(store, audit_logger, self.secrets_broker, custom_base_url=config.custom_model_base_url)
         self.model_client = LiveModelClient(self.models.secrets_broker)
+        self.hooks = HookManager(config.data_dir / "hooks.json", audit_logger, allowed_executables=config.allowed_shell_commands, workspace=self.workspace)
         self.schedules = ScheduleManager(store, audit_logger)
         self.kanban = KanbanManager(store, audit_logger)
         self.mcp = McpRegistry(store, audit_logger)
@@ -215,10 +217,27 @@ class AgentOrchestrator:
             },
             task_id=task_id,
         )
+        self._run_hooks(
+            "task.created",
+            context={"task_id": task_id, "session_id": session_id, "risk_level": plan.risk_level.value, "request": sanitized_user_request},
+            task_id=task_id,
+        )
 
         result = self._run_plan(task_id, approval_context=None, session_id=session_id)
         self._record_session_turn(session_id, sanitized_user_request, result)
+        self._run_hooks(
+            "task.completed" if result.get("status") != "failed" else "task.failed",
+            context={"task_id": task_id, "session_id": session_id, "status": result.get("status"), "risk_level": plan.risk_level.value},
+            task_id=task_id,
+        )
         return result
+
+    def _run_hooks(self, event: str, *, context: dict[str, Any], task_id: str | None = None, approved: bool = False) -> dict[str, Any]:
+        try:
+            return self.hooks.run_event(event, context=context, task_id=task_id, approved=approved)
+        except Exception as exc:  # noqa: BLE001 - hooks must never break task execution.
+            self.audit_logger.append("hook.dispatch_failed", {"event": event, "error": str(exc)}, task_id=task_id)
+            return {"event": event, "status": "dispatch_failed", "error": str(exc), "hook_count": 0, "results": []}
 
     def resume_task(self, task_id: str, *, session_id: str | None = None) -> dict[str, Any]:
         task = self._require_task(task_id)

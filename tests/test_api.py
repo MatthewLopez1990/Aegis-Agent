@@ -120,6 +120,65 @@ class ApiServerSecurityTests(unittest.TestCase):
                     process.kill()
                     process.wait(timeout=5)
 
+    def test_hooks_api_registers_lists_and_runs_governed_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            port = _free_port()
+            workspace = Path(temp) / "workspace"
+            workspace.mkdir()
+            data_dir = Path(temp) / ".aegis"
+            env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "aegis.cli.main",
+                    "--data-dir",
+                    str(data_dir),
+                    "serve",
+                    "--workspace",
+                    str(workspace),
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                _wait_for_server(port)
+                token = _json_get(port, "/auth")["token"]
+
+                added = _json_post(
+                    port,
+                    "/hooks",
+                    {
+                        "id": "api_notify",
+                        "event": "manual",
+                        "command": ["python3", "-c", "import json, sys; data=json.load(sys.stdin); print(data['context']['message'])"],
+                        "enabled": True,
+                        "approval_required": False,
+                    },
+                    token=token,
+                )
+                listed = _json_get(port, "/hooks", token=token)
+                ran = _json_post(port, "/hooks/run", {"event": "manual", "context": {"message": "api hello"}}, token=token)
+
+                self.assertEqual(added["hook"]["id"], "api_notify")
+                self.assertEqual(listed["status"], "governed_local_ready")
+                self.assertEqual(listed["hooks"][0]["id"], "api_notify")
+                self.assertEqual(ran["ran_count"], 1)
+                self.assertIn("api hello", ran["results"][0]["stdout"])
+            finally:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+
     def test_channel_approval_intent_resolve_api_requires_event_and_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             port = _free_port()

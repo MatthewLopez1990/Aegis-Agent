@@ -18,6 +18,7 @@ from aegis.channels.registry import ChannelRegistry
 from aegis.config.loader import load_config, write_default_config
 from aegis.connectors.registry import build_default_registry
 from aegis.execution.backends import ExecutionBackendRegistry
+from aegis.hooks.manager import HOOK_EVENTS, HookManager
 from aegis.kanban.manager import KanbanManager
 from aegis.memory.manager import MemoryManager
 from aegis.memory.models import MemoryType
@@ -553,6 +554,23 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_call.add_argument("--arguments", default="{}")
     mcp_call.add_argument("--approved", action="store_true")
     mcp_sub.add_parser("list", help="List MCP servers")
+
+    hooks = subcommands.add_parser("hooks", help="Manage governed local lifecycle hooks")
+    hooks.add_argument("--workspace", default=".")
+    hooks_sub = hooks.add_subparsers(dest="hooks_command", required=True)
+    hooks_sub.add_parser("list", help="List configured hooks")
+    hooks_add = hooks_sub.add_parser("add", help="Register a disabled hook unless --enabled is set")
+    hooks_add.add_argument("add_args", nargs=argparse.REMAINDER)
+    hooks_enable = hooks_sub.add_parser("enable", help="Enable a hook")
+    hooks_enable.add_argument("hook_id")
+    hooks_disable = hooks_sub.add_parser("disable", help="Disable a hook")
+    hooks_disable.add_argument("hook_id")
+    hooks_remove = hooks_sub.add_parser("remove", help="Remove a hook")
+    hooks_remove.add_argument("hook_id")
+    hooks_run = hooks_sub.add_parser("run", help="Run enabled hooks for one event")
+    hooks_run.add_argument("event", choices=HOOK_EVENTS)
+    hooks_run.add_argument("--approved", action="store_true")
+    hooks_run.add_argument("--context-json", default="{}")
 
     personality = subcommands.add_parser("personality", help="Inspect built-in personalities and context files")
     personality_sub = personality.add_subparsers(dest="personality_command", required=True)
@@ -1141,6 +1159,24 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
         if args.mcp_command == "list":
             return {"servers": registry.list_servers()}
 
+    if args.command == "hooks":
+        manager = _hook_manager(config, workspace=args.workspace)
+        if args.hooks_command == "list":
+            return _hooks_inventory(manager, config)
+        if args.hooks_command == "add":
+            return {"hook": manager.register_hook(**_hook_add_spec(args.add_args))}
+        if args.hooks_command == "enable":
+            return {"hook": manager.set_enabled(args.hook_id, True)}
+        if args.hooks_command == "disable":
+            return {"hook": manager.set_enabled(args.hook_id, False)}
+        if args.hooks_command == "remove":
+            return {"hook": manager.remove_hook(args.hook_id), "removed": True}
+        if args.hooks_command == "run":
+            context = json.loads(args.context_json)
+            if not isinstance(context, dict):
+                raise ValueError("--context-json must decode to a JSON object")
+            return manager.run_event(args.event, context=context, approved=args.approved)
+
     if args.command == "personality":
         if args.personality_command == "list":
             return {"personalities": list(PERSONALITY_NAMES)}
@@ -1463,6 +1499,88 @@ def _mcp_registry(config: Any) -> McpRegistry:
     store = LocalStore(config.database_path)
     audit = AuditLogger(config.audit_log_path)
     return McpRegistry(store, audit)
+
+
+def _hook_manager(config: Any, *, workspace: str | Path) -> HookManager:
+    audit = AuditLogger(config.audit_log_path)
+    return HookManager(config.data_dir / "hooks.json", audit, allowed_executables=config.allowed_shell_commands, workspace=workspace)
+
+
+def _hooks_inventory(manager: HookManager, config: Any) -> dict[str, Any]:
+    return {
+        "status": "governed_local_ready",
+        "hooks": manager.list_hooks(),
+        "supported_events": list(HOOK_EVENTS),
+        "allowed_executables": list(config.allowed_shell_commands),
+        "raw_secret_values_included": False,
+    }
+
+
+def _hook_add_spec(parts: list[str]) -> dict[str, Any]:
+    if not parts:
+        raise ValueError("hook event required")
+    event = parts[0]
+    if event not in HOOK_EVENTS:
+        raise ValueError(f"unsupported hook event: {event}")
+    hook_id: str | None = None
+    enabled = False
+    approval_required = True
+    timeout_seconds = 10
+    max_output_bytes = 4096
+    command: list[str] = []
+    index = 1
+    while index < len(parts):
+        part = parts[index]
+        if part == "--":
+            command = parts[index + 1 :]
+            break
+        if part == "--id":
+            hook_id = _required_next_arg(parts, index, "--id")
+            index += 2
+            continue
+        if part == "--enabled":
+            enabled = True
+            index += 1
+            continue
+        if part == "--disabled":
+            enabled = False
+            index += 1
+            continue
+        if part == "--approval-required":
+            approval_required = True
+            index += 1
+            continue
+        if part == "--no-approval-required":
+            approval_required = False
+            index += 1
+            continue
+        if part == "--timeout":
+            timeout_seconds = int(_required_next_arg(parts, index, "--timeout"))
+            index += 2
+            continue
+        if part == "--max-output-bytes":
+            max_output_bytes = int(_required_next_arg(parts, index, "--max-output-bytes"))
+            index += 2
+            continue
+        command = parts[index:]
+        break
+    if not command:
+        raise ValueError("hook command required; use -- before command arguments when needed")
+    return {
+        "event": event,
+        "command": command,
+        "hook_id": hook_id,
+        "enabled": enabled,
+        "approval_required": approval_required,
+        "timeout_seconds": timeout_seconds,
+        "max_output_bytes": max_output_bytes,
+    }
+
+
+def _required_next_arg(parts: list[str], index: int, flag: str) -> str:
+    if index + 1 >= len(parts):
+        raise ValueError(f"{flag} requires a value")
+    return parts[index + 1]
 
 
 def create_skill_template(skill_id: str, *, name: str, description: str) -> dict[str, Any]:

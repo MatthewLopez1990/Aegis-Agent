@@ -17,6 +17,7 @@ from aegis.agent.orchestrator import build_orchestrator
 from aegis.approvals.actions import approval_action_hints
 from aegis.approvals.models import ApprovalRequest
 from aegis.channels.base import ChannelResponse
+from aegis.hooks.manager import HOOK_EVENTS
 from aegis.memory.models import MemoryType
 from aegis.migration.openclaw import preview_hermes_memory_import, preview_openclaw_memory_import
 from aegis.product.capabilities import build_product_dashboard
@@ -51,6 +52,16 @@ def _browser_artifact_dir(orchestrator: Any) -> Path:
 
 def _safe_artifact_content_type(path: Path) -> str:
     return _SAFE_ARTIFACT_CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
+
+
+def _hooks_payload(orchestrator: Any) -> dict[str, Any]:
+    return {
+        "status": "governed_local_ready",
+        "hooks": orchestrator.hooks.list_hooks(),
+        "supported_events": list(HOOK_EVENTS),
+        "allowed_executables": list(orchestrator.config.allowed_shell_commands),
+        "raw_secret_values_included": False,
+    }
 
 
 def _with_tool_artifact_url(orchestrator: Any, result: dict[str, Any]) -> dict[str, Any]:
@@ -227,6 +238,9 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 return
             if path == "/mcp/servers":
                 self._json({"servers": orchestrator.mcp.list_servers()})
+                return
+            if path == "/hooks":
+                self._json(_hooks_payload(orchestrator))
                 return
             if path == "/schedules/due":
                 self._json({"schedules": orchestrator.schedules.due()})
@@ -1010,6 +1024,43 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
             if match_memory_delete:
                 orchestrator.memory.delete_memory(match_memory_delete.group(1))
                 self._json({"ok": True, "deleted": match_memory_delete.group(1)})
+                return
+            if path == "/hooks":
+                payload = self._read_json()
+                command = payload.get("command")
+                if not isinstance(command, list):
+                    raise ValueError("command must be a JSON array")
+                self._json(
+                    {
+                        "hook": orchestrator.hooks.register_hook(
+                            event=str(_required(payload, "event")),
+                            command=[str(part) for part in command],
+                            hook_id=_optional_str(payload, "id"),
+                            enabled=bool(payload.get("enabled", False)),
+                            approval_required=bool(payload.get("approval_required", True)),
+                            timeout_seconds=int(payload.get("timeout_seconds", 10)),
+                            max_output_bytes=int(payload.get("max_output_bytes", 4096)),
+                        )
+                    }
+                )
+                return
+            if path == "/hooks/run":
+                payload = self._read_json()
+                context = payload.get("context", {})
+                if not isinstance(context, dict):
+                    raise ValueError("context must be a JSON object")
+                self._json(orchestrator.hooks.run_event(str(_required(payload, "event")), context=context, approved=bool(payload.get("approved", False))))
+                return
+            match_hook_action = re.fullmatch(r"/hooks/([^/]+)/(enable|disable|remove)", path)
+            if match_hook_action:
+                hook_id = unquote(match_hook_action.group(1))
+                action = match_hook_action.group(2)
+                if action == "enable":
+                    self._json({"hook": orchestrator.hooks.set_enabled(hook_id, True)})
+                elif action == "disable":
+                    self._json({"hook": orchestrator.hooks.set_enabled(hook_id, False)})
+                else:
+                    self._json({"hook": orchestrator.hooks.remove_hook(hook_id), "removed": True})
                 return
             if path == "/mcp/servers":
                 payload = self._read_json()

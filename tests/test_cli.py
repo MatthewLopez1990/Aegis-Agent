@@ -1787,6 +1787,39 @@ class CliTests(unittest.TestCase):
             self.assertEqual(target_rows["DeepSeek"]["status"], "api_key_ready")
             self.assertNotIn("sk-deepseek-test", json.dumps(deepseek_login, sort_keys=True))
 
+    def test_hooks_cli_registers_lists_and_runs_governed_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            data_dir = Path(temp) / ".aegis"
+            parser = build_parser()
+
+            added = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "hooks",
+                        "add",
+                        "manual",
+                        "--id",
+                        "cli_notify",
+                        "--enabled",
+                        "--no-approval-required",
+                        "--",
+                        "python3",
+                        "-c",
+                        "import json, sys; data=json.load(sys.stdin); print(data['context']['message'])",
+                    ]
+                )
+            )
+            listed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "hooks", "list"]))
+            ran = dispatch(parser.parse_args(["--data-dir", str(data_dir), "hooks", "run", "manual", "--context-json", '{"message":"hello"}']))
+
+            self.assertEqual(added["hook"]["id"], "cli_notify")
+            self.assertEqual(listed["status"], "governed_local_ready")
+            self.assertEqual(listed["hooks"][0]["id"], "cli_notify")
+            self.assertEqual(ran["ran_count"], 1)
+            self.assertIn("hello", ran["results"][0]["stdout"])
+
     @unittest.skipUnless(os.name == "posix", "POSIX mode assertions only apply on POSIX")
     def test_local_state_files_are_private(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
