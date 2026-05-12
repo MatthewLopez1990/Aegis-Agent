@@ -3261,9 +3261,10 @@ class AegisTui(cmd.Cmd):
                 "status": "inline_terminal_ready",
                 "prompt_wrapping": "enabled",
                 "slash_autocomplete": "enabled",
-                "literal_newline_input": "pending_terminal_keybinding",
-                "shift_enter": "terminal_specific_binding_required",
-                "detail": "The live TUI wraps long input lines in-place; literal multiline editing needs terminal-specific keybinding support before it is enabled by default.",
+                "literal_newline_input": "enabled",
+                "newline_keybinding": "Ctrl+V",
+                "alt_enter": "supported_when_terminal_emits_escape_enter",
+                "detail": "The live TUI wraps long input lines in-place and supports literal multiline prompts with Ctrl+V before final Enter submits.",
             }
         )
 
@@ -4221,13 +4222,20 @@ class AegisTui(cmd.Cmd):
                     buffer = ""
                     redraw()
                     continue
+                if char == "\x16":
+                    buffer += "\n"
+                    redraw()
+                    continue
                 if char == "\x1b":
                     sequence = ""
                     while select.select([sys.stdin], [], [], 0.001)[0]:
                         sequence += sys.stdin.read(1)
                         if len(sequence) >= 4:
                             break
-                    if sequence == "[A" and history:
+                    if sequence in {"\r", "\n"}:
+                        buffer += "\n"
+                        redraw()
+                    elif sequence == "[A" and history:
                         history_index = max(0, history_index - 1)
                         buffer = history[history_index]
                         redraw()
@@ -5551,13 +5559,18 @@ def _wrapped_prompt_lines(prompt: str, buffer: str, width: int) -> list[str]:
     if not buffer:
         return [prompt]
     lines: list[str] = []
-    remaining = buffer
-    first = True
-    while remaining:
-        chunk_width = first_width if first else max(8, width - len(continuation))
-        chunk, remaining = remaining[:chunk_width], remaining[chunk_width:]
-        lines.append((prompt if first else continuation) + chunk)
-        first = False
+    prefix = prompt
+    for logical_line in buffer.split("\n"):
+        remaining = logical_line
+        if not remaining:
+            lines.append(prefix)
+            prefix = continuation
+            continue
+        while remaining:
+            chunk_width = first_width if prefix == prompt else max(8, width - len(continuation))
+            chunk, remaining = remaining[:chunk_width], remaining[chunk_width:]
+            lines.append(prefix + chunk)
+            prefix = continuation
     return lines
 
 

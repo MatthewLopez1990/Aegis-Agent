@@ -489,10 +489,16 @@ class TuiTests(unittest.TestCase):
             self.assertGreaterEqual(alias_commands.count("Filesystem checkpoint rollback"), 2)
             self.assertIn("connector_surface_ready", alias_commands)
             self.assertIn("literal_newline_input", alias_commands)
+            self.assertIn('"literal_newline_input": "enabled"', alias_commands)
+            self.assertIn('"newline_keybinding": "Ctrl+V"', alias_commands)
             self.assertIn('"mode": "metadata_only"', alias_commands)
             wrapped, height = _live_input_block("aegis> ", "x" * 80, 24)
             self.assertGreater(height, 3)
             self.assertIn("\n", wrapped)
+            multiline, multiline_height = _live_input_block("aegis> ", "first line\nsecond line", 80)
+            self.assertEqual(multiline_height, 2)
+            self.assertIn("aegis> first line", multiline)
+            self.assertIn("       second line", multiline)
             slash_hint, _ = _live_input_block("aegis> ", "/su", 80)
             self.assertIn("suggest /submit /resume", slash_hint)
 
@@ -739,6 +745,20 @@ class TuiTests(unittest.TestCase):
             history = tui.orchestrator.sessions.history(tui.session["id"])
             self.assertEqual([message["role"] for message in history], ["user", "assistant"])
             self.assertEqual([message["metadata"].get("source") for message in history], ["task_submission", "task_result"])
+
+    def test_plain_multiline_input_submits_single_task(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tui = AegisTui(data_dir=root / ".aegis", workspace=root)
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                tui.onecmd("Summarize this workspace.\nInclude tests.")
+
+            task = tui.orchestrator.store.get_task(tui.last_task_id or "")
+            history = tui.orchestrator.sessions.history(tui.session["id"])
+            self.assertEqual(task["user_request"], "Summarize this workspace.\nInclude tests.")
+            self.assertEqual([message["role"] for message in history], ["user", "assistant"])
 
     def test_retry_undo_and_q_alias_follow_session_history(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
