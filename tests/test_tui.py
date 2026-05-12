@@ -105,7 +105,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("Model Provider Auth Parity", rendered)
             self.assertIn("Claude Code subscription", rendered)
             self.assertIn("GitHub Copilot", rendered)
-            self.assertIn("metadata_only_bridge_pending", rendered)
+            self.assertIn("official_cli_handoff_only", rendered)
             self.assertIn("Model Auth Readiness", rendered)
             self.assertIn("subscription_token_bridge", rendered)
             self.assertIn("raw_browser_token_capture", rendered)

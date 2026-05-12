@@ -457,6 +457,14 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 method = str(payload.get("method") or "api_key").replace("-", "_")
                 if method == "subscription":
                     auth = orchestrator.models.login_provider_subscription(provider)
+                    if payload.get("run_external"):
+                        auth = {
+                            **auth,
+                            "status": "external_login_requires_local_terminal",
+                            "api_run_external_allowed": False,
+                            "external_login_attempted": False,
+                            "external_login_error": "interactive subscription login must be run from the local CLI or TUI",
+                        }
                 else:
                     auth = orchestrator.models.login_provider(provider, str(_required(payload, "api_key")))
                 self._json(

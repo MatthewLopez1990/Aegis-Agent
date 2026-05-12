@@ -949,7 +949,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(auth_parity["status"], "auth_parity_gap_tracked")
             auth_targets = {row["target"]: row for row in auth_parity["targets"]}
             self.assertEqual(auth_targets["OpenAI API"]["status"], "api_key_ready")
-            self.assertEqual(auth_targets["Claude Code subscription"]["status"], "metadata_only_bridge_pending")
+            self.assertEqual(auth_targets["Claude Code subscription"]["status"], "official_cli_handoff_only")
             self.assertEqual(auth_targets["GitHub Copilot"]["status"], "not_started")
             self.assertEqual(auth_targets["DeepSeek"]["status"], "api_key_ready")
             self.assertEqual(auth_targets["MiniMax OAuth"]["status"], "provider_native_auth_bridge_required")
@@ -965,7 +965,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("GitHub Copilot", backlog["model_provider_auth_login_parity"]["not_started_targets"])
             auth_checklist = {item["control"]: item for item in backlog["model_provider_auth_login_parity"]["operator_checklist"]}
             self.assertEqual(auth_checklist["api_key_secret_broker"]["state"], "enforced")
-            self.assertEqual(auth_checklist["subscription_token_bridge"]["state"], "not_implemented")
+            self.assertEqual(auth_checklist["subscription_token_bridge"]["state"], "official_cli_handoff_only")
             self.assertEqual(auth_checklist["oauth_device_flows"]["state"], "not_started")
             self.assertEqual(auth_checklist["raw_browser_token_capture"]["state"], "denied_by_design")
             self.assertIn("model_auth.raw_token_capture_rejected", backlog["model_provider_auth_login_parity"]["evaluation_scenarios"])

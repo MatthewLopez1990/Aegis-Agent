@@ -394,7 +394,7 @@ def _live_gap_backlog(
             "operator_checklist": _model_auth_operator_checklist(model_auth_parity),
             "next_steps": [
                 "Implement provider-native OAuth/device/cloud-identity bridges one provider at a time with token refresh receipts.",
-                "Keep subscription login metadata-only until Aegis can read provider-approved token stores without browser cookie import.",
+                "Use official CLI subscription-login handoff only until Aegis can read provider-approved token stores without browser cookie import.",
                 "Add denied, approved, refresh, logout, and receipt-redaction tests for every bridge before enabling live model calls through it.",
             ],
             "required_controls": model_auth_parity["required_controls"],
@@ -556,8 +556,8 @@ def _model_auth_operator_checklist(model_auth_parity: dict[str, Any]) -> list[di
         },
         {
             "control": "subscription_token_bridge",
-            "state": "not_implemented" if model_auth_parity["subscription_bridge_targets"] else "not_required",
-            "detail": "Codex/ChatGPT and Claude Code subscription login is metadata-only until a governed provider-token bridge exists.",
+            "state": "official_cli_handoff_only" if model_auth_parity["subscription_bridge_targets"] else "not_required",
+            "detail": "Codex/ChatGPT and Claude Code subscription login can launch official CLI auth flows, but Aegis does not import provider tokens until a governed bridge exists.",
         },
         {
             "control": "oauth_device_flows",

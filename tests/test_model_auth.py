@@ -4,6 +4,7 @@ from email.message import Message
 import os
 import json
 import stat
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -127,9 +128,10 @@ class ModelAuthTests(unittest.TestCase):
             self.assertTrue(openai["subscription_auth_supported"])
             self.assertFalse(openai["subscription_auth_configured"])
             self.assertEqual(openai["subscription_auth"]["external_command"], "codex login")
-            self.assertEqual(openai["subscription_auth"]["aegis_bridge_status"], "not_implemented")
+            self.assertEqual(openai["subscription_auth"]["aegis_bridge_status"], "official_cli_handoff_only")
             self.assertEqual(anthropic["auth_methods"], ["api_key", "subscription"])
-            self.assertEqual(anthropic["subscription_auth"]["external_command"], "claude auth login")
+            self.assertEqual(anthropic["subscription_auth"]["external_command"], "claude")
+            self.assertEqual(anthropic["subscription_auth"]["external_login_instruction"], "/login")
             self.assertFalse(openrouter["subscription_auth_supported"])
             self.assertIsNone(openrouter["subscription_auth"])
 
@@ -149,6 +151,55 @@ class ModelAuthTests(unittest.TestCase):
             self.assertNotIn("sk-", audit_text)
             self.assertNotIn("session_cookie", audit_text)
 
+    def test_subscription_auth_can_launch_official_cli_without_token_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            secret_path = root / ".aegis" / "secrets.json"
+            audit_path = root / ".aegis" / "audit.jsonl"
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(audit_path), SecretsBroker(secret_path))
+
+            completed = subprocess.CompletedProcess(("codex", "login"), 0)
+            with (
+                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/codex"),
+                patch("aegis.models.registry.subprocess.run", return_value=completed) as run,
+            ):
+                status = registry.login_provider_subscription("openai", run_external=True)
+
+            run.assert_called_once_with(("codex", "login"), timeout=None, check=False)
+            self.assertEqual(status["status"], "external_login_completed_unverified")
+            self.assertTrue(status["external_login_attempted"])
+            self.assertEqual(status["external_login_exit_code"], 0)
+            self.assertEqual(status["external_command_argv"], ["codex", "login"])
+            self.assertFalse(status["auth_configured"])
+            self.assertFalse(status["token_captured"])
+            self.assertFalse(secret_path.exists())
+
+            audit_text = audit_path.read_text(encoding="utf-8")
+            self.assertIn("model.auth_subscription_login_requested", audit_text)
+            self.assertIn("external_login_completed_unverified", audit_text)
+            self.assertNotIn("CODEX_ACCESS_TOKEN", audit_text)
+            self.assertNotIn("session_cookie", audit_text)
+
+    def test_subscription_auth_reports_missing_official_cli_without_token_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            secret_path = root / ".aegis" / "secrets.json"
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"), SecretsBroker(secret_path))
+
+            with (
+                patch("aegis.models.registry.shutil.which", return_value=None),
+                patch("aegis.models.registry.subprocess.run") as run,
+            ):
+                status = registry.login_provider_subscription("anthropic", run_external=True)
+
+            run.assert_not_called()
+            self.assertEqual(status["status"], "external_command_unavailable")
+            self.assertFalse(status["external_command_available"])
+            self.assertFalse(status["external_login_attempted"])
+            self.assertIn("claude", status["external_login_error"])
+            self.assertFalse(status["token_captured"])
+            self.assertFalse(secret_path.exists())
+
     def test_provider_auth_targets_track_hermes_and_claude_gaps(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
             root = Path(temp)
@@ -162,10 +213,11 @@ class ModelAuthTests(unittest.TestCase):
             self.assertIn("api_key", targets["implemented_auth_methods"])
             self.assertIn("subscription", targets["implemented_auth_methods"])
             self.assertEqual(by_target["OpenAI API"]["status"], "api_key_ready")
-            self.assertEqual(by_target["OpenAI Codex / ChatGPT subscription"]["status"], "metadata_only_bridge_pending")
+            self.assertEqual(by_target["OpenAI Codex / ChatGPT subscription"]["status"], "official_cli_handoff_only")
             self.assertEqual(by_target["OpenAI Codex / ChatGPT subscription"]["external_command"], "codex login")
-            self.assertEqual(by_target["Claude Code subscription"]["status"], "metadata_only_bridge_pending")
-            self.assertEqual(by_target["Claude Code subscription"]["external_command"], "claude auth login")
+            self.assertEqual(by_target["Claude Code subscription"]["status"], "official_cli_handoff_only")
+            self.assertEqual(by_target["Claude Code subscription"]["external_command"], "claude")
+            self.assertEqual(by_target["Claude Code subscription"]["external_login_instruction"], "/login")
             self.assertEqual(by_target["Nous Portal API key"]["status"], "api_key_ready")
             self.assertEqual(by_target["GitHub Copilot"]["status"], "not_started")
             self.assertEqual(by_target["DeepSeek"]["status"], "api_key_ready")

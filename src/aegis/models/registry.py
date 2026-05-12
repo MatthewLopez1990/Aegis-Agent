@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import shlex
+import shutil
+import subprocess
 from typing import Any
 from uuid import uuid4
 
@@ -162,7 +165,7 @@ class ModelRegistry:
 
                 if "subscription" in required_auth or "oauth_device" in required_auth or "oauth" in required_auth or "cloud_identity" in required_auth:
                     if "subscription" in required_auth and target_row["subscription_auth_supported"]:
-                        target_row["status"] = "metadata_only_bridge_pending"
+                        target_row["status"] = target_row["bridge_status"]
                         bridge_pending.append(str(target["target"]))
                     else:
                         target_row["status"] = "provider_native_auth_bridge_required"
@@ -222,11 +225,19 @@ class ModelRegistry:
         )
         return status
 
-    def login_provider_subscription(self, provider_name: str) -> dict[str, Any]:
+    def login_provider_subscription(
+        self,
+        provider_name: str,
+        *,
+        run_external: bool = False,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
         provider = self._provider(provider_name)
         profile = self._subscription_auth_profile(provider)
         if profile is None:
             raise ValueError(f"provider {provider_name!r} does not support subscription login")
+        command_argv = _subscription_command_argv(profile)
+        executable_path = shutil.which(command_argv[0]) if command_argv else None
         status = {
             "provider": provider.provider,
             "method": "subscription",
@@ -235,14 +246,25 @@ class ModelRegistry:
             "auth_source": None,
             "token_captured": False,
             "token_capture_supported": False,
+            "external_command_argv": list(command_argv),
+            "external_command_available": executable_path is not None,
+            "external_command_path": executable_path,
+            "external_login_attempted": False,
+            "external_login_exit_code": None,
+            "external_login_error": None,
             **profile,
         }
+        if run_external:
+            status.update(_run_subscription_login_command(command_argv, timeout_seconds=timeout_seconds))
         self.audit_logger.append(
             "model.auth_subscription_login_requested",
             {
                 "provider": provider.provider,
                 "method": "subscription",
                 "status": status["status"],
+                "external_command": status["external_command"],
+                "external_login_attempted": status["external_login_attempted"],
+                "external_login_exit_code": status["external_login_exit_code"],
                 "token_captured": False,
             },
         )
@@ -423,7 +445,11 @@ class ModelRegistry:
         profile = SUBSCRIPTION_AUTH_PROFILES.get(provider.provider)
         if profile is None:
             return None
-        return {key: value for key, value in profile.items()}
+        result = {key: value for key, value in profile.items()}
+        command_argv = _subscription_command_argv(result)
+        result["external_command_argv"] = list(command_argv)
+        result["external_command_available"] = shutil.which(command_argv[0]) is not None if command_argv else False
+        return result
 
 
 def _accumulate_usage(bucket: dict[str, dict[str, Any]], key: str, row: dict[str, Any]) -> None:
@@ -478,23 +504,30 @@ SUBSCRIPTION_AUTH_PROFILES: dict[str, dict[str, Any]] = {
     "openai": {
         "account_surface": "ChatGPT / Codex",
         "external_command": "codex login",
+        "external_command_argv": ("codex", "login"),
+        "external_status_command": "codex login status",
+        "external_status_command_argv": ("codex", "login", "status"),
         "requires": "ChatGPT account with Codex access",
         "provider_token_source": "official Codex CLI auth store",
-        "aegis_bridge_status": "not_implemented",
+        "aegis_bridge_status": "official_cli_handoff_only",
+        "interactive": True,
         "next_steps": [
-            "Sign in with the official Codex CLI for subscription-backed local Codex access.",
+            "Run model auth login openai --subscription --run-external or sign in with the official Codex CLI directly.",
             "Keep using model auth login openai --api-key-stdin for Aegis live OpenAI API calls until a governed token bridge is implemented.",
             "Do not paste ChatGPT session cookies or browser tokens into Aegis.",
         ],
     },
     "anthropic": {
         "account_surface": "claude.ai / Claude Code",
-        "external_command": "claude auth login",
+        "external_command": "claude",
+        "external_command_argv": ("claude",),
+        "external_login_instruction": "/login",
         "requires": "claude.ai account with Claude Code access; Remote Control requires full-scope claude.ai login, not API key auth",
         "provider_token_source": "official Claude Code auth store",
-        "aegis_bridge_status": "not_implemented",
+        "aegis_bridge_status": "official_cli_handoff_only",
+        "interactive": True,
         "next_steps": [
-            "Sign in with the official Claude Code CLI for subscription-backed Claude Code access.",
+            "Run model auth login anthropic --subscription --run-external, then use /login inside Claude Code if prompted.",
             "Keep using model auth login anthropic --api-key-stdin for Aegis live Anthropic API calls until a governed token bridge is implemented.",
             "Do not paste claude.ai browser session tokens into Aegis.",
         ],
@@ -530,7 +563,8 @@ MODEL_PROVIDER_AUTH_TARGETS: tuple[dict[str, Any], ...] = (
         "platforms": ("Claude Code", "Hermes Agent"),
         "aegis_provider": "anthropic",
         "required_auth": ("subscription",),
-        "external_command": "claude auth login",
+        "external_command": "claude",
+        "external_login_instruction": "/login",
         "account_surface": "claude.ai / Claude Code",
     },
     {
@@ -674,6 +708,66 @@ MODEL_PROVIDER_AUTH_TARGETS: tuple[dict[str, Any], ...] = (
         "account_surface": "operator supplied endpoint",
     },
 )
+
+
+def _subscription_command_argv(profile: dict[str, Any]) -> tuple[str, ...]:
+    raw_argv = profile.get("external_command_argv")
+    if isinstance(raw_argv, (tuple, list)) and raw_argv and all(isinstance(item, str) and item for item in raw_argv):
+        return tuple(raw_argv)
+    command = str(profile.get("external_command") or "").strip()
+    if not command:
+        return ()
+    return tuple(shlex.split(command))
+
+
+def _run_subscription_login_command(command_argv: tuple[str, ...], *, timeout_seconds: float | None) -> dict[str, Any]:
+    if not command_argv:
+        return {
+            "status": "external_command_unavailable",
+            "external_command_available": False,
+            "external_command_path": None,
+            "external_login_attempted": False,
+            "external_login_exit_code": None,
+            "external_login_error": "subscription profile has no external command",
+        }
+    executable_path = shutil.which(command_argv[0])
+    if executable_path is None:
+        return {
+            "status": "external_command_unavailable",
+            "external_command_available": False,
+            "external_command_path": None,
+            "external_login_attempted": False,
+            "external_login_exit_code": None,
+            "external_login_error": f"executable not found: {command_argv[0]}",
+        }
+    try:
+        completed = subprocess.run(command_argv, timeout=timeout_seconds, check=False)  # noqa: S603 - argv is a hardcoded provider login command.
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "external_login_timeout",
+            "external_command_available": True,
+            "external_command_path": executable_path,
+            "external_login_attempted": True,
+            "external_login_exit_code": None,
+            "external_login_error": "external login command timed out",
+        }
+    except OSError as exc:
+        return {
+            "status": "external_login_failed",
+            "external_command_available": True,
+            "external_command_path": executable_path,
+            "external_login_attempted": True,
+            "external_login_exit_code": None,
+            "external_login_error": str(exc),
+        }
+    return {
+        "status": "external_login_completed_unverified" if completed.returncode == 0 else "external_login_failed",
+        "external_command_available": True,
+        "external_command_path": executable_path,
+        "external_login_attempted": True,
+        "external_login_exit_code": completed.returncode,
+        "external_login_error": None if completed.returncode == 0 else f"external login command exited with {completed.returncode}",
+    }
 
 
 def default_providers(*, custom_base_url: str | None = None) -> dict[str, ModelProviderSpec]:
