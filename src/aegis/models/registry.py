@@ -125,8 +125,13 @@ class ModelRegistry:
 
     def auth_status(self, provider_name: str | None = None) -> list[dict[str, Any]] | dict[str, Any]:
         if provider_name is not None:
-            provider = self._provider(provider_name)
-            return self._provider_auth_status(provider)
+            if provider_name in self.providers:
+                provider = self.providers[provider_name]
+                return self._provider_auth_status(provider)
+            profile = _external_auth_handoff_profile(provider_name)
+            if profile is not None:
+                return self._external_auth_status(profile)
+            raise KeyError(f"unknown model provider {provider_name!r}")
         return [self._provider_auth_status(provider) for provider in self.providers.values() if provider.auth_secret]
 
     def auth_targets(self) -> dict[str, Any]:
@@ -136,6 +141,7 @@ class ModelRegistry:
         not_started: list[str] = []
         api_key_ready: list[str] = []
         local_ready: list[str] = []
+        verified_external: list[str] = []
         for target in MODEL_PROVIDER_AUTH_TARGETS:
             target_row = dict(target)
             provider_name = target.get("aegis_provider")
@@ -147,11 +153,30 @@ class ModelRegistry:
             target_row["auth_configured"] = False
             target_row["subscription_auth_supported"] = False
             target_row["subscription_auth_configured"] = False
+            target_row["external_auth_configured"] = False
             target_row["bridge_status"] = "not_started"
             handoff_profile = _external_auth_handoff_profile(str(target.get("target")))
+            external_status = self._external_auth_status(handoff_profile) if handoff_profile is not None else None
+            external_verified = external_status is not None and bool(external_status["external_auth_configured"])
             if handoff_profile is not None:
                 target_row.update(_handoff_profile_public_fields(handoff_profile))
                 target_row["bridge_status"] = str(handoff_profile.get("aegis_bridge_status") or "official_cli_handoff_only")
+            if external_verified and external_status is not None:
+                target_row.update(
+                    {
+                        "status": "external_login_verified",
+                        "bridge_status": "official_cli_link_verified",
+                        "auth_configured": True,
+                        "external_auth_configured": True,
+                        "auth_source": external_status.get("auth_source"),
+                        "last_verified_at": external_status.get("last_verified_at"),
+                        "token_captured": False,
+                        "token_capture_supported": False,
+                    }
+                )
+                verified_external.append(str(target["target"]))
+                targets.append(target_row)
+                continue
             if provider is None:
                 if handoff_profile is not None:
                     target_row["status"] = target_row["bridge_status"]
@@ -210,10 +235,12 @@ class ModelRegistry:
             "aegis_provider_count": len(provider_rows),
             "api_key_ready_count": len(api_key_ready),
             "local_ready_count": len(local_ready),
+            "verified_external_auth_count": len(verified_external),
             "metadata_or_bridge_pending_count": len(bridge_pending),
             "not_started_count": len(not_started),
             "api_key_ready_targets": api_key_ready,
             "local_ready_targets": local_ready,
+            "verified_external_auth_targets": verified_external,
             "subscription_bridge_targets": bridge_pending,
             "provider_auth_bridge_targets": bridge_pending,
             "not_started_targets": not_started,
@@ -384,16 +411,29 @@ class ModelRegistry:
         return status
 
     def logout_provider(self, provider_name: str) -> dict[str, Any]:
-        provider = self._provider(provider_name)
-        if provider.auth_secret is None:
-            raise ValueError(f"provider {provider_name!r} does not require model auth")
-        removed = self.secrets_broker.delete_secret(provider.auth_secret)
-        removed_external_links = self._forget_external_auth_links(provider.provider)
-        status = self._provider_auth_status(provider)
+        if provider_name in self.providers:
+            provider = self.providers[provider_name]
+            if provider.auth_secret is None and not self._external_auth_profiles(provider.provider):
+                raise ValueError(f"provider {provider_name!r} does not require model auth")
+            removed = self.secrets_broker.delete_secret(provider.auth_secret) if provider.auth_secret is not None else False
+            removed_external_links = self._forget_external_auth_links(provider.provider)
+            status = self._provider_auth_status(provider)
+            audit_provider = provider.provider
+            auth_secret = provider.auth_secret
+        else:
+            profile = _external_auth_handoff_profile(provider_name)
+            if profile is None:
+                raise KeyError(f"unknown model provider {provider_name!r}")
+            audit_provider = str(profile.get("provider") or provider_name)
+            auth_secret = None
+            removed = False
+            removed_external_links = self._forget_external_auth_links(audit_provider)
+            status = self._external_auth_status(profile)
         self.audit_logger.append(
             "model.auth_logout",
-            {"provider": provider.provider, "auth_secret": provider.auth_secret, "removed_local_secret": removed, "removed_external_auth_links": removed_external_links},
+            {"provider": audit_provider, "auth_secret": auth_secret, "removed_local_secret": removed, "removed_external_auth_links": removed_external_links},
         )
+        status["removed_local_secret"] = removed
         status["removed_external_auth_links"] = removed_external_links
         return status
 
@@ -546,6 +586,8 @@ class ModelRegistry:
         self.store.set_model_route_setting("external_auth_links", {"links": dict(sorted(self.external_auth_links.items()))})
 
     def _provider_auth_status(self, provider: ModelProviderSpec) -> dict[str, Any]:
+        external_profiles = self._external_auth_profiles(provider.provider)
+        external_statuses = [self._external_auth_status(profile) for profile in external_profiles]
         return {
             "provider": provider.provider,
             "auth_required": provider.auth_secret is not None,
@@ -557,6 +599,9 @@ class ModelRegistry:
             "subscription_auth_supported": self._subscription_auth_supported(provider),
             "subscription_auth_configured": self._subscription_auth_configured(provider),
             "subscription_auth": self._subscription_auth_profile(provider),
+            "provider_native_auth_methods": [status["method"] for status in external_statuses],
+            "provider_native_auth": external_statuses,
+            "external_auth_configured": any(bool(status["external_auth_configured"]) for status in external_statuses),
         }
 
     def _auth_configured(self, provider: ModelProviderSpec) -> bool:
@@ -579,7 +624,48 @@ class ModelRegistry:
         methods = ["none"] if provider.auth_secret is None else ["api_key"]
         if self._subscription_auth_supported(provider):
             methods.append("subscription")
+        for profile in self._external_auth_profiles(provider.provider):
+            method = str(profile.get("method") or "")
+            if method and method not in methods:
+                methods.append(method)
         return methods
+
+    def _external_auth_profiles(self, provider_name: str) -> list[dict[str, Any]]:
+        return [profile for profile in EXTERNAL_AUTH_HANDOFF_PROFILES.values() if str(profile.get("provider") or "") == provider_name]
+
+    def _external_auth_status(self, profile: dict[str, Any]) -> dict[str, Any]:
+        provider_name = str(profile.get("provider") or "")
+        method = str(profile.get("method") or "")
+        link = self._external_auth_link(provider_name, method)
+        status = {
+            "provider": provider_name,
+            "target": profile["target"],
+            "method": method,
+            "status": str(profile.get("aegis_bridge_status") or "official_cli_handoff_only"),
+            "auth_configured": False,
+            "external_auth_configured": False,
+            "auth_source": None,
+            "bridge_status": str(profile.get("aegis_bridge_status") or "official_cli_handoff_only"),
+            "token_captured": False,
+            "token_capture_supported": False,
+            **_handoff_profile_public_fields(profile),
+        }
+        if link is not None:
+            status.update(
+                {
+                    "status": "external_login_verified",
+                    "auth_configured": True,
+                    "external_auth_configured": True,
+                    "auth_source": link.get("auth_source") or "official_cli",
+                    "bridge_status": "official_cli_link_verified",
+                    "external_command": link.get("external_command", status.get("external_command")),
+                    "external_status_command": link.get("external_status_command", status.get("external_status_command")),
+                    "last_verified_at": link.get("verified_at"),
+                    "token_captured": False,
+                    "token_capture_supported": False,
+                }
+            )
+        return status
 
     def _subscription_auth_supported(self, provider: ModelProviderSpec) -> bool:
         return provider.provider in SUBSCRIPTION_AUTH_PROFILES

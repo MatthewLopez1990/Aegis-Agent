@@ -202,8 +202,8 @@ The API is a local control plane and does not implement user authentication. Bin
 - `GET /remote-control/tasks/:id`
 - `GET /remote-control/tasks/:id/events`
 - `POST /remote-control/tasks/:id/resume|pause|cancel`
-- `POST /models/auth/login` with `method: "api_key"` or guarded `method: "subscription"`, `"oauth"`, `"oauth_device"`, or `"cloud_identity"` metadata; `verify_external: true` may run non-secret official status checks, while interactive `run_external` provider login is refused over API and must run in a local CLI/TUI terminal.
-- `POST /models/auth/logout`
+- `POST /models/auth/login` with `method: "api_key"` or guarded `method: "subscription"`, `"oauth"`, `"oauth_device"`, or `"cloud_identity"` metadata; `verify_external: true` may run non-secret official status checks and remember verified external auth links, while interactive `run_external` provider login is refused over API and must run in a local CLI/TUI terminal.
+- `POST /models/auth/logout` removes API-key secrets and verified external auth links without exposing provider tokens.
 - `GET /tools`
 - `POST /tools/run`
 - `GET /backends`

@@ -433,7 +433,7 @@ def build_parser() -> argparse.ArgumentParser:
     model_auth_login.add_argument("--verify-external", action="store_true", help="Run the provider's official non-secret status command and remember a verified external login")
     model_auth_login.add_argument("--api-key", help="API key value. Prefer --api-key-stdin or interactive entry.")
     model_auth_login.add_argument("--api-key-stdin", action="store_true", help="Read API key from stdin")
-    model_auth_logout = model_auth_sub.add_parser("logout", help="Remove a model provider API key from the local secret store")
+    model_auth_logout = model_auth_sub.add_parser("logout", help="Remove a model provider API key or verified external auth link")
     model_auth_logout.add_argument(
         "provider",
         choices=(
@@ -448,8 +448,14 @@ def build_parser() -> argparse.ArgumentParser:
             "xai",
             "kimi",
             "minimax",
+            "minimax-oauth",
             "zai",
             "qwen",
+            "qwen-oauth",
+            "github-copilot",
+            "aws-bedrock",
+            "azure-foundry",
+            "nous-oauth",
             "custom",
         ),
     )

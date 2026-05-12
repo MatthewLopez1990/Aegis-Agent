@@ -378,6 +378,48 @@ class ModelAuthTests(unittest.TestCase):
             self.assertFalse(status["token_captured"])
             self.assertFalse(secret_path.exists())
 
+    def test_verified_provider_native_auth_links_update_targets_and_logout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"))
+            login_completed = subprocess.CompletedProcess(("gh", "auth", "login"), 0)
+            status_completed = subprocess.CompletedProcess(("gh", "auth", "status"), 0, stdout="Logged in to github.com\n", stderr="")
+
+            with (
+                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/gh"),
+                patch("aegis.models.registry.subprocess.run", side_effect=(login_completed, status_completed)) as run,
+            ):
+                login = registry.login_provider_external("github-copilot", method="oauth-device", run_external=True)
+            status = registry.auth_status("github-copilot")
+            qwen_status = registry.auth_status("qwen")
+            targets = registry.auth_targets()
+            by_target = {row["target"]: row for row in targets["targets"]}
+
+            self.assertEqual(run.call_args_list[0].args[0], ("gh", "auth", "login"))
+            self.assertEqual(run.call_args_list[1].args[0], ("gh", "auth", "status"))
+            self.assertEqual(login["status"], "external_login_verified")
+            self.assertFalse(login["token_captured"])
+            self.assertEqual(status["status"], "external_login_verified")
+            self.assertTrue(status["external_auth_configured"])
+            self.assertEqual(status["bridge_status"], "official_cli_link_verified")
+            self.assertIn("oauth", qwen_status["auth_methods"])
+            self.assertEqual(qwen_status["provider_native_auth"][0]["status"], "official_cli_handoff_only")
+            self.assertEqual(by_target["GitHub Copilot"]["status"], "external_login_verified")
+            self.assertEqual(by_target["GitHub Copilot"]["bridge_status"], "official_cli_link_verified")
+            self.assertTrue(by_target["GitHub Copilot"]["external_auth_configured"])
+            self.assertIn("GitHub Copilot", targets["verified_external_auth_targets"])
+            self.assertNotIn("GitHub Copilot", targets["subscription_bridge_targets"])
+            self.assertFalse(any(row["raw_tokens_captured"] for row in targets["targets"]))
+
+            logout = registry.logout_provider("github-copilot")
+            targets_after = registry.auth_targets()
+            by_target_after = {row["target"]: row for row in targets_after["targets"]}
+
+            self.assertEqual(logout["removed_external_auth_links"], 1)
+            self.assertFalse(logout["external_auth_configured"])
+            self.assertEqual(logout["status"], "official_cli_handoff_only")
+            self.assertEqual(by_target_after["GitHub Copilot"]["status"], "official_cli_handoff_only")
+
     def test_provider_auth_targets_track_hermes_and_claude_gaps(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
             root = Path(temp)

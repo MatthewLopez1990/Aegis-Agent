@@ -1755,6 +1755,9 @@ class CliTests(unittest.TestCase):
             ):
                 github_login = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "login", "github-copilot", "--method", "oauth-device", "--run-external"]))
             targets_after = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "targets"]))
+            github_status = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "status", "github-copilot"]))
+            github_logout = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "logout", "github-copilot"]))
+            targets_after_logout = dispatch(parser.parse_args(["--data-dir", str(data_dir), "model", "auth", "targets"]))
 
             self.assertIn("subscription", methods["auth"]["auth_methods"])
             self.assertEqual(methods["auth"]["subscription_auth"]["external_command"], "codex login")
@@ -1779,10 +1782,19 @@ class CliTests(unittest.TestCase):
             self.assertEqual(github_login["auth"]["method"], "oauth_device")
             self.assertEqual(github_login["auth"]["status"], "external_login_verified")
             self.assertFalse(github_login["auth"]["token_captured"])
+            self.assertEqual(github_status["auth"]["status"], "external_login_verified")
+            self.assertTrue(github_status["auth"]["external_auth_configured"])
+            self.assertEqual(github_logout["auth"]["removed_external_auth_links"], 1)
+            self.assertFalse(github_logout["auth"]["external_auth_configured"])
             target_rows = {row["target"]: row for row in targets["auth_targets"]["targets"]}
             target_rows_after = {row["target"]: row for row in targets_after["auth_targets"]["targets"]}
+            target_rows_after_logout = {row["target"]: row for row in targets_after_logout["auth_targets"]["targets"]}
             self.assertEqual(targets["auth_targets"]["status"], "auth_parity_gap_tracked")
             self.assertEqual(target_rows_after["OpenAI Codex / ChatGPT subscription"]["status"], "subscription_cli_ready")
+            self.assertEqual(target_rows_after["GitHub Copilot"]["status"], "external_login_verified")
+            self.assertEqual(target_rows_after["GitHub Copilot"]["bridge_status"], "official_cli_link_verified")
+            self.assertIn("GitHub Copilot", targets_after["auth_targets"]["verified_external_auth_targets"])
+            self.assertEqual(target_rows_after_logout["GitHub Copilot"]["status"], "official_cli_handoff_only")
             self.assertEqual(target_rows["Claude Code subscription"]["status"], "official_cli_handoff_only")
             self.assertEqual(target_rows["GitHub Copilot"]["status"], "official_cli_handoff_only")
             self.assertEqual(target_rows["DeepSeek"]["status"], "api_key_ready")
