@@ -9,6 +9,7 @@ from pathlib import Path
 
 from aegis.agent.orchestrator import build_orchestrator
 from aegis.audit.logger import AuditLogger
+from aegis.mcp.client import McpHttpAuthError
 from aegis.mcp.registry import McpRegistry
 from aegis.memory.store import LocalStore
 
@@ -246,6 +247,54 @@ class McpTests(unittest.TestCase):
             finally:
                 server.close()
 
+    def test_streamable_http_mcp_auth_challenge_is_structured_without_secret_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            server = _HttpMcpFixture(
+                expected_bearer="mcp-token-123",
+                auth_challenge=(
+                    'Bearer realm="mcp", '
+                    'resource_metadata="https://auth.example/.well-known/oauth-protected-resource?access_token=raw-secret", '
+                    'error="invalid_token", '
+                    'error_description="bad token mcp-token-123"'
+                ),
+            )
+            try:
+                orchestrator = build_orchestrator(data_dir=root / ".aegis", workspace=root)
+                orchestrator.mcp.register_server(
+                    name="remote-auth-required",
+                    command=server.url,
+                    allowed_tools=("echo",),
+                    transport="streamable-http",
+                    network_allowlist=("127.0.0.1",),
+                    enabled=True,
+                )
+
+                with self.assertRaises(McpHttpAuthError) as raised:
+                    orchestrator.mcp.call_tool(
+                        server="remote-auth-required",
+                        tool="echo",
+                        arguments={},
+                        approved=True,
+                        network_allowlist=("127.0.0.1",),
+                    )
+
+                challenge = raised.exception.challenge
+                self.assertEqual(challenge["scheme"], "Bearer")
+                self.assertEqual(challenge["parameters"]["realm"], "mcp")
+                self.assertEqual(challenge["parameters"]["resource_metadata"], "https://auth.example/.well-known/oauth-protected-resource")
+                self.assertEqual(challenge["parameters"]["error"], "invalid_token")
+                self.assertEqual(challenge["parameters"]["error_description"], "[REDACTED_AUTH_DESCRIPTION]")
+                self.assertFalse(challenge["raw_header_included"])
+                audit_text = (root / ".aegis" / "audit.jsonl").read_text(encoding="utf-8")
+                self.assertIn("mcp.http_auth_required", audit_text)
+                self.assertIn("resource_metadata", audit_text)
+                self.assertIn("raw_www_authenticate_header_included", audit_text)
+                self.assertNotIn("raw-secret", audit_text)
+                self.assertNotIn("mcp-token-123", audit_text)
+            finally:
+                server.close()
+
     def test_streamable_http_mcp_blocks_unallowlisted_and_insecure_remote_targets(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -308,8 +357,9 @@ class McpTests(unittest.TestCase):
                 registry.call_tool(server="fake", tool="echo", arguments={}, approved=True, allowed_executables=("python3",))
 
 class _HttpMcpFixture:
-    def __init__(self, *, expected_bearer: str | None = None) -> None:
+    def __init__(self, *, expected_bearer: str | None = None, auth_challenge: str | None = None) -> None:
         self.expected_bearer = expected_bearer
+        self.auth_challenge = auth_challenge
         self.accept_headers: list[str] = []
         self.session_headers: list[str] = []
         self.authorization_headers: list[str] = []
@@ -337,6 +387,7 @@ class _HttpMcpFixture:
                     fixture.authorization_headers.append(authorization)
                     if authorization != f"Bearer {fixture.expected_bearer}":
                         self.send_response(401)
+                        self.send_header("WWW-Authenticate", fixture.auth_challenge or 'Bearer realm="mcp"')
                         self.end_headers()
                         return
                 method = payload.get("method")

@@ -5,14 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import os
+import re
 import select
 import subprocess
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse, urlunparse
 from urllib.request import Request
 
 from aegis.connectors.http import _open_without_redirects
+from aegis.security.context_firewall import redact_secret_values
 
 
 MCP_PROTOCOL_VERSION = "2025-06-18"
@@ -38,6 +41,24 @@ class McpToolCallResult:
 
 class McpProtocolError(RuntimeError):
     pass
+
+
+class McpHttpAuthError(McpProtocolError):
+    def __init__(self, status_code: int, challenge: dict[str, Any]) -> None:
+        self.status_code = status_code
+        self.challenge = challenge
+        scheme = challenge.get("scheme") or "unknown"
+        params = challenge.get("parameters", {}) if isinstance(challenge.get("parameters"), dict) else {}
+        details = ", ".join(f"{key}={value}" for key, value in sorted(params.items())[:4])
+        suffix = f": {details}" if details else ""
+        super().__init__(f"MCP HTTP authentication required ({status_code}, {scheme}){suffix}")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status_code": self.status_code,
+            "challenge": self.challenge,
+            "raw_www_authenticate_header_included": False,
+        }
 
 
 class McpStdioClient:
@@ -254,6 +275,8 @@ class McpStreamableHttpClient:
         try:
             response_context = _open_without_redirects(request, timeout=self.timeout_seconds)
         except HTTPError as exc:
+            if exc.code == 401:
+                raise McpHttpAuthError(exc.code, _parse_www_authenticate(exc.headers)) from exc
             raise McpProtocolError(f"MCP HTTP request failed with status {exc.code}") from exc
         except URLError as exc:
             raise McpProtocolError(f"MCP HTTP request failed: {exc.reason}") from exc
@@ -275,6 +298,51 @@ class McpStreamableHttpClient:
                 return {}
             return _decode_sse_response(body_bytes, request_id=request_id)
         raise McpProtocolError(f"MCP HTTP response content type {content_type!r} is unsupported")
+
+
+_AUTH_PARAM_RE = re.compile(r'([A-Za-z][A-Za-z0-9_-]*)\s*=\s*("(?:\\.|[^"])*"|[^,]+)')
+_SENSITIVE_AUTH_PARAM_NAMES = ("token", "secret", "password", "credential", "assertion", "authorization")
+
+
+def _parse_www_authenticate(headers: Any) -> dict[str, Any]:
+    raw_values = headers.get_all("WWW-Authenticate", []) if hasattr(headers, "get_all") else []
+    if not raw_values and hasattr(headers, "get"):
+        value = headers.get("WWW-Authenticate")
+        raw_values = [value] if value else []
+    raw_header = ", ".join(str(value) for value in raw_values if value)
+    redacted_header = redact_secret_values(raw_header)
+    if not redacted_header.strip():
+        return {"present": False, "parameters": {}, "raw_header_included": False}
+    scheme, _, rest = redacted_header.strip().partition(" ")
+    parameters: dict[str, str] = {}
+    for key, value in _AUTH_PARAM_RE.findall(rest):
+        normalized_key = key.strip().lower().replace("-", "_")
+        parameters[normalized_key] = _sanitize_auth_param(normalized_key, _unquote_auth_value(value))
+    return {
+        "present": True,
+        "scheme": re.sub(r"[^A-Za-z0-9_.-]+", "", scheme)[:40] or "unknown",
+        "parameters": parameters,
+        "raw_header_included": False,
+    }
+
+
+def _unquote_auth_value(value: str) -> str:
+    stripped = value.strip()
+    if len(stripped) >= 2 and stripped[0] == '"' and stripped[-1] == '"':
+        return stripped[1:-1].replace(r"\"", '"').replace(r"\\", "\\")
+    return stripped
+
+
+def _sanitize_auth_param(key: str, value: str) -> str:
+    if any(marker in key for marker in _SENSITIVE_AUTH_PARAM_NAMES):
+        return "[REDACTED]"
+    if key == "error_description" and re.search(r"(bearer|token|secret|password|credential|key)", value, re.IGNORECASE):
+        return "[REDACTED_AUTH_DESCRIPTION]"
+    redacted = redact_secret_values(value)
+    parsed = urlparse(redacted)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        redacted = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+    return redacted[:240]
 
 
 class _process:

@@ -13,7 +13,7 @@ from uuid import uuid4
 from aegis.audit.logger import AuditLogger, redact
 from aegis.connectors.http import _private_network_error, _validate_url
 from aegis.memory.store import LocalStore
-from aegis.mcp.client import McpStdioClient, McpStreamableHttpClient, McpToolCallResult
+from aegis.mcp.client import McpHttpAuthError, McpStdioClient, McpStreamableHttpClient, McpToolCallResult
 from aegis.security.context_firewall import ContextFirewall
 from aegis.security.policy_engine import PolicyDecisionType, PolicyEngine, PolicyRequest
 from aegis.security.secrets_broker import SecretsBroker
@@ -365,7 +365,15 @@ class McpRegistry:
             network_allowlist=network_allowlist,
             secrets_broker=self.secrets_broker,
         )
-        result = _call_mcp_utility(client, str(tool_metadata.get("utility")), arguments) if tool_metadata.get("utility") else client.call_tool(tool, arguments)
+        try:
+            result = _call_mcp_utility(client, str(tool_metadata.get("utility")), arguments) if tool_metadata.get("utility") else client.call_tool(tool, arguments)
+        except McpHttpAuthError as exc:
+            self.audit_logger.append(
+                "mcp.http_auth_required",
+                {"server": row["name"], "tool": tool, **audit_target, **exc.to_dict()},
+                task_id=task_id,
+            )
+            raise
         context_item = ContextFirewall().label_content(
             json.dumps(result, sort_keys=True),
             source=f"mcp:{row['name']}:{tool}",
