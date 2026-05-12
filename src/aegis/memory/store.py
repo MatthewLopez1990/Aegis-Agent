@@ -300,6 +300,10 @@ class LocalStore:
         with self.connect() as db:
             db.execute("UPDATE skills SET enabled = ?, updated_at = ? WHERE id = ?", (int(enabled), now_utc(), skill_id))
 
+    def delete_skill(self, skill_id: str) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM skills WHERE id = ?", (skill_id,))
+
     def insert_approval(self, approval: dict[str, Any]) -> None:
         with self.connect() as db:
             db.execute(
@@ -731,3 +735,11 @@ class LocalStore:
         with self.connect() as db:
             rows = db.execute("SELECT * FROM mcp_servers ORDER BY name").fetchall()
         return [dict(row) for row in rows]
+
+    def set_mcp_server_enabled(self, server_id: str, enabled: bool) -> None:
+        with self.connect() as db:
+            db.execute("UPDATE mcp_servers SET enabled = ?, updated_at = ? WHERE id = ?", (int(enabled), now_utc(), server_id))
+
+    def delete_mcp_server(self, server_id: str) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM mcp_servers WHERE id = ?", (server_id,))

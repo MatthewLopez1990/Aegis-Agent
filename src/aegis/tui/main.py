@@ -137,6 +137,7 @@ MODEL_COMMANDS = ("list", "route", "alias", "fallbacks", "usage", "auth", "provi
 MODEL_AUTH_COMMANDS = ("login", "logout", "methods", "targets")
 TOOLS_COMMANDS = ("run",)
 SKILLS_COMMANDS = ("hub", "disable", "enable")
+PLUGIN_COMMANDS = ("list", "install", "enable", "disable", "remove", "reload")
 REPAIR_COMMANDS = ("readiness", "review", "approve", "reject", "candidate", "generate-candidate", "synthesis-prompt", "synthesize-candidate", "review-candidate", "apply-candidate", "rollback-candidate", "attempt")
 SCHEDULE_COMMANDS = ("create", "memory-review-digest", "memory-review-escalation", "evaluation-run", "evaluation-suite", "due", "approve", "activate", "pause", "run-due")
 BROWSER_COMMANDS = ("session", "sessions", "close", "navigate", "extract", "inspect", "table", "screenshot", "render", "click", "fill")
@@ -306,6 +307,16 @@ class AegisTui(cmd.Cmd):
         self._refresh_prompt()
         return stop
 
+    def parseline(self, line: str) -> tuple[str | None, str | None, str]:
+        stripped = line.lstrip()
+        if stripped and not stripped.startswith("/"):
+            name, separator, rest = stripped.partition(" ")
+            canonical = SLASH_COMMAND_ALIASES.get(name)
+            if canonical:
+                prefix = line[: len(line) - len(stripped)]
+                line = f"{prefix}{canonical}{separator}{rest}".strip()
+        return super().parseline(line)
+
     def cmdloop(self, intro: str | None = None) -> None:
         """Run the TUI with a live slash palette when attached to a terminal."""
         if not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -398,6 +409,12 @@ class AegisTui(cmd.Cmd):
 
     def complete_skills(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return _complete_subcommand(SKILLS_COMMANDS, text, line, begidx)
+
+    def complete_plugins(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return _complete_subcommand(PLUGIN_COMMANDS, text, line, begidx)
+
+    def complete_plugin(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return _complete_subcommand(PLUGIN_COMMANDS, text, line, begidx)
 
     def do_dashboard(self, arg: str) -> None:
         """dashboard -- show runtime, security, and capability posture."""
@@ -2450,8 +2467,8 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_reload_plugins(self, arg: str) -> None:
-        """reload_plugins -- show plugin reload readiness."""
-        _print_json({"ok": True, "mode": "static_plugin_inventory", "plugins": self.orchestrator.skills.list_public(), "mcp_servers": self.orchestrator.mcp.list_servers()})
+        """reload_plugins -- reload private local plugin inventory."""
+        self.do_plugins("reload")
 
     def do_hooks(self, arg: str) -> None:
         """hooks list|add|enable|disable|remove|run -- manage governed local lifecycle hooks."""
@@ -2573,8 +2590,44 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_plugins(self, arg: str) -> None:
-        """plugins -- show extension surfaces."""
-        _print_json({"skills": self.orchestrator.skills.list_public(), "mcp_servers": self.orchestrator.mcp.list_servers()})
+        """plugins list|install|enable|disable|remove|reload -- manage governed local plugins."""
+        try:
+            parts = shlex.split(arg) if arg else []
+        except ValueError as exc:
+            print(f"invalid plugin command: {exc}")
+            return
+        manager = self.orchestrator.plugins
+        try:
+            if not parts or parts[0] == "list":
+                _print_json(_plugin_inventory_payload(self.orchestrator))
+                return
+            if parts[0] == "install" and len(parts) >= 2:
+                _print_json(
+                    {
+                        "plugin": manager.install_plugin(
+                            parts[1],
+                            enable="--enable" in parts[2:],
+                            unsigned_local="--unsigned-local" in parts[2:],
+                        )
+                    }
+                )
+                return
+            if parts[0] == "enable" and len(parts) >= 2:
+                _print_json(manager.enable_plugin(parts[1]))
+                return
+            if parts[0] == "disable" and len(parts) >= 2:
+                _print_json(manager.disable_plugin(parts[1]))
+                return
+            if parts[0] == "remove" and len(parts) >= 2:
+                _print_json(manager.remove_plugin(parts[1]))
+                return
+            if parts[0] == "reload":
+                _print_json({"ok": True, "mode": "private_plugin_inventory", **_plugin_inventory_payload(self.orchestrator)})
+                return
+        except (KeyError, PermissionError, ValueError) as exc:
+            print(f"plugin error: {exc}")
+            return
+        print("usage: plugins list | plugins install <plugin.json> [--enable] [--unsigned-local] | plugins enable|disable|remove <plugin_id> | plugins reload")
 
     def do_toolsets(self, arg: str) -> None:
         """toolsets -- summarize governed tools by permission and risk."""
@@ -3318,6 +3371,17 @@ def _hook_inventory_payload(orchestrator: Any) -> dict[str, Any]:
     }
 
 
+def _plugin_inventory_payload(orchestrator: Any) -> dict[str, Any]:
+    return {
+        "status": "governed_local_ready",
+        "plugins": orchestrator.plugins.list_plugins(),
+        "skills": orchestrator.skills.list_public(),
+        "mcp_servers": orchestrator.mcp.list_servers(),
+        "hooks": orchestrator.hooks.list_hooks(),
+        "raw_secret_values_included": False,
+    }
+
+
 def _parse_hook_add_args(parts: list[str]) -> dict[str, Any]:
     if not parts:
         raise ValueError("hook event required")
@@ -3520,7 +3584,7 @@ def _command_reference() -> str:
             "toolsets               Group tools by permission and risk",
             "tools run <name> <json> Run a governed tool",
             "skills [hub query]     Governed skills and virtual Skill Hub",
-            "plugins                Skills and MCP extension surfaces",
+            "plugins list|install|enable|disable|remove|reload",
             "plugin|reload-plugins  Plugin inventory aliases",
             "memory health|search|session-preview|create|update|merge|expire",
             "mcp list|register|call Governed MCP registry",
@@ -3920,6 +3984,8 @@ SLASH_SUBCOMMANDS: dict[str, tuple[str, ...]] = {
     "evaluation": EVALUATION_COMMANDS,
     "tools": TOOLS_COMMANDS,
     "skills": SKILLS_COMMANDS,
+    "plugin": PLUGIN_COMMANDS,
+    "plugins": PLUGIN_COMMANDS,
     "menu": _command_group_names(),
 }
 

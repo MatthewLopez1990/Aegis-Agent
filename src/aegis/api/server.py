@@ -64,6 +64,17 @@ def _hooks_payload(orchestrator: Any) -> dict[str, Any]:
     }
 
 
+def _plugins_payload(orchestrator: Any) -> dict[str, Any]:
+    return {
+        "status": "governed_local_ready",
+        "plugins": orchestrator.plugins.list_plugins(),
+        "skills": orchestrator.skills.list_public(),
+        "mcp_servers": orchestrator.mcp.list_servers(),
+        "hooks": orchestrator.hooks.list_hooks(),
+        "raw_secret_values_included": False,
+    }
+
+
 def _with_tool_artifact_url(orchestrator: Any, result: dict[str, Any]) -> dict[str, Any]:
     artifact_dir = _tool_artifact_dir(orchestrator)
     updated = dict(result)
@@ -235,6 +246,9 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 return
             if path == "/skills":
                 self._json({"skills": orchestrator.skills.list_public()})
+                return
+            if path == "/plugins":
+                self._json(_plugins_payload(orchestrator))
                 return
             if path == "/mcp/servers":
                 self._json({"servers": orchestrator.mcp.list_servers()})
@@ -1061,6 +1075,32 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     self._json({"hook": orchestrator.hooks.set_enabled(hook_id, False)})
                 else:
                     self._json({"hook": orchestrator.hooks.remove_hook(hook_id), "removed": True})
+                return
+            if path == "/plugins":
+                payload = self._read_json()
+                self._json(
+                    {
+                        "plugin": orchestrator.plugins.install_plugin(
+                            str(_required(payload, "manifest_path")),
+                            enable=bool(payload.get("enable", False)),
+                            unsigned_local=bool(payload.get("unsigned_local", False)),
+                        )
+                    }
+                )
+                return
+            if path == "/plugins/reload":
+                self._json({"ok": True, **_plugins_payload(orchestrator)})
+                return
+            match_plugin_action = re.fullmatch(r"/plugins/([^/]+)/(enable|disable|remove)", path)
+            if match_plugin_action:
+                plugin_id = unquote(match_plugin_action.group(1))
+                action = match_plugin_action.group(2)
+                if action == "enable":
+                    self._json(orchestrator.plugins.enable_plugin(plugin_id))
+                elif action == "disable":
+                    self._json(orchestrator.plugins.disable_plugin(plugin_id))
+                else:
+                    self._json(orchestrator.plugins.remove_plugin(plugin_id))
                 return
             if path == "/mcp/servers":
                 payload = self._read_json()

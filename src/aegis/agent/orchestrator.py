@@ -43,6 +43,7 @@ from aegis.memory.store import LocalStore
 from aegis.mcp.registry import McpRegistry
 from aegis.models.client import LiveModelClient
 from aegis.models.registry import ModelRegistry
+from aegis.plugins.manager import PluginManager
 from aegis.research.harness import ResearchHarness
 from aegis.scheduler.manager import ScheduleManager
 from aegis.security.context_firewall import ContextFirewall
@@ -116,6 +117,7 @@ class AgentOrchestrator:
         self.schedules = ScheduleManager(store, audit_logger)
         self.kanban = KanbanManager(store, audit_logger)
         self.mcp = McpRegistry(store, audit_logger)
+        self.plugins = PluginManager(config.data_dir / "plugins.json", audit_logger, skills=self.skills, mcp=self.mcp, hooks=self.hooks)
         self.execution_backends = ExecutionBackendRegistry(
             enabled_backends=config.execution.enabled_backends,
             docker_executable=config.execution.docker_executable,

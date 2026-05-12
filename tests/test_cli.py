@@ -19,6 +19,7 @@ from aegis.config.loader import load_config
 from aegis.memory.store import LocalStore
 from aegis.research.harness import ResearchHarness
 from aegis.security.secrets_broker import SecretsBroker
+from tests.test_plugins import _write_plugin_fixture
 
 
 class CliTests(unittest.TestCase):
@@ -1819,6 +1820,25 @@ class CliTests(unittest.TestCase):
             self.assertEqual(listed["hooks"][0]["id"], "cli_notify")
             self.assertEqual(ran["ran_count"], 1)
             self.assertIn("hello", ran["results"][0]["stdout"])
+
+    def test_plugin_cli_installs_and_removes_local_plugin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            parser = build_parser()
+            plugin_path = _write_plugin_fixture(root)
+
+            installed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugin", "install", str(plugin_path), "--unsigned-local"]))
+            listed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugins", "list"]))
+            enabled = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugin", "enable", "test.plugin"]))
+            disabled = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugin", "disable", "test.plugin"]))
+            removed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "plugin", "remove", "test.plugin"]))
+
+            self.assertEqual(installed["plugin"]["id"], "test.plugin")
+            self.assertEqual(listed["plugins"][0]["id"], "test.plugin")
+            self.assertTrue(enabled["plugin"]["enabled"])
+            self.assertFalse(disabled["plugin"]["enabled"])
+            self.assertTrue(removed["removed"])
 
     @unittest.skipUnless(os.name == "posix", "POSIX mode assertions only apply on POSIX")
     def test_local_state_files_are_private(self) -> None:

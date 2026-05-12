@@ -63,6 +63,19 @@ class McpRegistry:
                 return row
         raise KeyError(server)
 
+    def set_enabled(self, server: str, enabled: bool) -> dict[str, Any]:
+        row = self.get_server(server)
+        self.store.set_mcp_server_enabled(row["id"], enabled)
+        updated = self.get_server(row["id"])
+        self.audit_logger.append("mcp.server_enabled" if enabled else "mcp.server_disabled", {"id": row["id"], "name": row["name"], "enabled": enabled})
+        return updated
+
+    def remove_server(self, server: str) -> dict[str, Any]:
+        row = self.get_server(server)
+        self.store.delete_mcp_server(row["id"])
+        self.audit_logger.append("mcp.server_removed", {"id": row["id"], "name": row["name"]})
+        return row
+
     def call_tool(
         self,
         *,

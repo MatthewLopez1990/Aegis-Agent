@@ -20,6 +20,7 @@ from aegis.security.taint import TrustClass
 from aegis.skills.manifest import SkillManifest
 from aegis.skills.runtime import builtin_workflow_candidate_manifest
 from tests.test_mcp import FAKE_MCP_SERVER
+from tests.test_plugins import _write_plugin_fixture
 
 
 class ApiServerSecurityTests(unittest.TestCase):
@@ -171,6 +172,55 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(listed["hooks"][0]["id"], "api_notify")
                 self.assertEqual(ran["ran_count"], 1)
                 self.assertIn("api hello", ran["results"][0]["stdout"])
+            finally:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+
+    def test_plugins_api_installs_lists_and_removes_local_plugin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            port = _free_port()
+            workspace = Path(temp) / "workspace"
+            workspace.mkdir()
+            data_dir = Path(temp) / ".aegis"
+            plugin_path = _write_plugin_fixture(Path(temp))
+            env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "aegis.cli.main",
+                    "--data-dir",
+                    str(data_dir),
+                    "serve",
+                    "--workspace",
+                    str(workspace),
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                _wait_for_server(port)
+                token = _json_get(port, "/auth")["token"]
+
+                installed = _json_post(port, "/plugins", {"manifest_path": str(plugin_path), "unsigned_local": True}, token=token)
+                listed = _json_get(port, "/plugins", token=token)
+                enabled = _json_post(port, "/plugins/test.plugin/enable", {}, token=token)
+                removed = _json_post(port, "/plugins/test.plugin/remove", {}, token=token)
+
+                self.assertEqual(installed["plugin"]["id"], "test.plugin")
+                self.assertEqual(listed["plugins"][0]["id"], "test.plugin")
+                self.assertTrue(enabled["plugin"]["enabled"])
+                self.assertTrue(removed["removed"])
             finally:
                 process.terminate()
                 try:

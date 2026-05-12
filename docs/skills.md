@@ -10,6 +10,8 @@ The local API exposes the same installed skill inventory at `GET /skills` for th
 
 Installed skills can be disabled without deleting their manifest through the CLI (`skill disable <skill_id>`), TUI (`skills disable <skill_id>`), token-protected local API (`POST /skills/{skill_id}/disable`), or the browser GUI installed-skill list. Low- and medium-risk skills can be re-enabled through the matching `enable` commands or `POST /skills/{skill_id}/enable`. High-risk skills create an approval request bound to the skill id, risk level, and manifest hash; after approval, replay `skill enable <skill_id> --approval-id <approval_id>`, `skills enable <skill_id> --approval-id <approval_id>`, or `POST /skills/{skill_id}/enable` with `{"approval_id":"..."}`. Critical-risk skills additionally require an admin approval decision. Unknown skill IDs fail closed.
 
+Local plugin manifests can group skills with MCP servers and lifecycle hooks without bypassing those controls. Use `plugin install /path/to/plugin.json` or `plugins install /path/to/plugin.json --unsigned-local` for development-only unsigned skill manifests, then `plugin enable|disable|remove <plugin_id>` or the matching token-protected `/plugins` API endpoints. Plugin resource paths must stay relative to the plugin manifest directory, duplicate skills or MCP server names are rejected, owned resources are removed with the plugin, and failed installs roll back any resources registered before the failure. The current plugin lifecycle is local-only; it does not download marketplace bundles or dynamically import plugin code.
+
 Register a manifest:
 
 ```bash

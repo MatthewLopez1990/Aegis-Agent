@@ -27,6 +27,7 @@ from aegis.mcp.registry import McpRegistry
 from aegis.migration.openclaw import inspect_hermes_home, inspect_openclaw_home, preview_hermes_memory_import, preview_openclaw_memory_import
 from aegis.models.registry import ModelRegistry
 from aegis.personality.context import ContextFileLoader, PERSONALITY_NAMES
+from aegis.plugins.manager import PluginManager
 from aegis.product.capabilities import build_product_dashboard
 from aegis.research.harness import ResearchHarness
 from aegis.scheduler.manager import ScheduleManager
@@ -325,6 +326,22 @@ def build_parser() -> argparse.ArgumentParser:
     skill_enable = skill_sub.add_parser("enable", help="Enable a low- or medium-risk skill")
     skill_enable.add_argument("skill_id")
     skill_enable.add_argument("--approval-id", help="Approved high-risk skill enable request")
+
+    for plugin_name in ("plugin", "plugins"):
+        plugin = subcommands.add_parser(plugin_name, help="Manage governed local plugins")
+        plugin_sub = plugin.add_subparsers(dest="plugin_command", required=True)
+        plugin_sub.add_parser("list", help="List installed plugins")
+        plugin_install = plugin_sub.add_parser("install", help="Install a local plugin manifest")
+        plugin_install.add_argument("manifest_path")
+        plugin_install.add_argument("--enable", action="store_true")
+        plugin_install.add_argument("--unsigned-local", action="store_true", help="Allow unsigned local development skill manifests")
+        plugin_enable = plugin_sub.add_parser("enable", help="Enable plugin default-enabled resources")
+        plugin_enable.add_argument("plugin_id")
+        plugin_disable = plugin_sub.add_parser("disable", help="Disable plugin resources")
+        plugin_disable.add_argument("plugin_id")
+        plugin_remove = plugin_sub.add_parser("remove", help="Remove a plugin and its owned resources")
+        plugin_remove.add_argument("plugin_id")
+        plugin_sub.add_parser("reload", help="Reload plugin inventory from private local state")
 
     connector = subcommands.add_parser("connector", help="List connector status")
     connector_sub = connector.add_subparsers(dest="connector_command", required=True)
@@ -923,6 +940,21 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             orchestrator = build_orchestrator(data_dir=config.data_dir)
             return orchestrator.enable_skill(args.skill_id, approval_id=args.approval_id)
 
+    if args.command in {"plugin", "plugins"}:
+        manager = _plugin_manager(config)
+        if args.plugin_command == "list":
+            return {"status": "governed_local_ready", "plugins": manager.list_plugins()}
+        if args.plugin_command == "install":
+            return {"plugin": manager.install_plugin(args.manifest_path, enable=args.enable, unsigned_local=args.unsigned_local)}
+        if args.plugin_command == "enable":
+            return manager.enable_plugin(args.plugin_id)
+        if args.plugin_command == "disable":
+            return manager.disable_plugin(args.plugin_id)
+        if args.plugin_command == "remove":
+            return manager.remove_plugin(args.plugin_id)
+        if args.plugin_command == "reload":
+            return {"ok": True, "mode": "private_plugin_inventory", "plugins": manager.list_plugins()}
+
     if args.command == "connector":
         audit = AuditLogger(config.audit_log_path)
         connectors = build_default_registry(config, audit)
@@ -1499,6 +1531,15 @@ def _mcp_registry(config: Any) -> McpRegistry:
     store = LocalStore(config.database_path)
     audit = AuditLogger(config.audit_log_path)
     return McpRegistry(store, audit)
+
+
+def _plugin_manager(config: Any) -> PluginManager:
+    store = LocalStore(config.database_path)
+    audit = AuditLogger(config.audit_log_path)
+    skills = SkillRegistry(store, audit, SecretsBroker(config.secrets_path))
+    mcp = McpRegistry(store, audit)
+    hooks = HookManager(config.data_dir / "hooks.json", audit, allowed_executables=config.allowed_shell_commands, workspace=Path.cwd())
+    return PluginManager(config.data_dir / "plugins.json", audit, skills=skills, mcp=mcp, hooks=hooks)
 
 
 def _hook_manager(config: Any, *, workspace: str | Path) -> HookManager:
