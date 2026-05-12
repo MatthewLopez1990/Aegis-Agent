@@ -434,7 +434,7 @@ class ConnectorTests(unittest.TestCase):
                 return False
 
             def read(self, limit: int) -> bytes:
-                return b'{"number":1}'
+                return b'{"number":1,"id":99,"url":"https://api.github.com/repos/example/aegis/issues/1","body":"provider response-secret"}'
 
         captured: dict[str, object] = {}
 
@@ -467,11 +467,19 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(live.data["mode"], "live_write")
         self.assertEqual(live.data["status"], 201)
         self.assertTrue(live.data["rate_limit"]["allowed"])
+        self.assertEqual(live.data["rollback_receipt"]["receipt_schema"], "github_rollback_offer_v1")
+        self.assertTrue(live.data["rollback_receipt"]["rollback_available"])
+        self.assertEqual(live.data["rollback_receipt"]["rollback_operation"], "rollback_issue")
+        self.assertEqual(live.data["rollback_receipt"]["resource_number"], 1)
+        self.assertEqual(live.data["rollback_receipt"]["resource_id"], 99)
+        self.assertFalse(live.data["rollback_receipt"]["raw_secret_values_included"])
+        self.assertFalse(live.data["rollback_receipt"]["raw_response_body_included"])
         self.assertEqual(captured["url"], "https://api.github.com/repos/example/aegis/issues")
         self.assertEqual(captured["authorization"], "Bearer ghp_raw_secret")
         self.assertIn('"title": "Live issue"', str(captured["body"]))
         self.assertNotIn("ghp_raw_secret", rendered)
         self.assertNotIn("abc123", rendered)
+        self.assertNotIn("response-secret", rendered)
         self.assertIn("param_sha256", live.data["accepted"])
         self.assertEqual(live.data["accepted"]["receipt_schema"], "redacted_param_summary_v1")
         self.assertFalse(live.data["accepted"]["raw_secret_values_included"])
@@ -507,7 +515,7 @@ class ConnectorTests(unittest.TestCase):
                 return False
 
             def read(self, limit: int) -> bytes:
-                return b'{"iid":1}'
+                return b'{"iid":1,"id":99,"web_url":"https://gitlab.com/example/aegis/-/issues/1","description":"provider response-secret"}'
 
         captured: dict[str, object] = {}
 
@@ -540,11 +548,19 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(live.data["mode"], "live_write")
         self.assertEqual(live.data["status"], 201)
         self.assertTrue(live.data["rate_limit"]["allowed"])
+        self.assertEqual(live.data["rollback_receipt"]["receipt_schema"], "gitlab_rollback_offer_v1")
+        self.assertTrue(live.data["rollback_receipt"]["rollback_available"])
+        self.assertEqual(live.data["rollback_receipt"]["rollback_operation"], "rollback_issue")
+        self.assertEqual(live.data["rollback_receipt"]["resource_iid"], 1)
+        self.assertEqual(live.data["rollback_receipt"]["resource_id"], 99)
+        self.assertFalse(live.data["rollback_receipt"]["raw_secret_values_included"])
+        self.assertFalse(live.data["rollback_receipt"]["raw_response_body_included"])
         self.assertEqual(captured["url"], "https://gitlab.com/api/v4/projects/1/issues")
         self.assertEqual(captured["private_token"], "glpat_raw_secret")
         self.assertIn('"title": "Live issue"', str(captured["body"]))
         self.assertNotIn("glpat_raw_secret", rendered)
         self.assertNotIn("abc123", rendered)
+        self.assertNotIn("response-secret", rendered)
         self.assertIn("param_sha256", live.data["accepted"])
         self.assertEqual(live.data["accepted"]["receipt_schema"], "redacted_param_summary_v1")
         self.assertFalse(live.data["accepted"]["raw_secret_values_included"])

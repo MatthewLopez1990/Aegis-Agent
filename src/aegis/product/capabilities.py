@@ -487,6 +487,7 @@ def _live_gap_backlog(
                 "live_connector_rate_limit.exceeded",
                 "generic_rest.live_write_rate_limit",
                 "github_gitlab.live_write_rate_limit",
+                "github_gitlab.rollback_offer_receipt",
                 "graph.calendar_rollback_receipt",
                 "messaging.live_send_rate_limit",
                 "service_desk.rollback_close_ticket_receipt",
@@ -886,7 +887,7 @@ def _live_connector_operator_checklist(
         {
             "control": "rollback_receipts",
             "state": "partial",
-            "detail": "Service-desk close-ticket and Microsoft Graph calendar/contact create live writes expose approved rollback receipts/actions; remaining live adapters still require provider-specific rollback paths.",
+            "detail": "GitHub and GitLab live writes expose redacted rollback offer metadata; service-desk close-ticket and Microsoft Graph calendar/contact writes expose approved rollback receipts/actions; remaining live adapters still require provider-specific rollback paths.",
         },
         {
             "control": "mock_fallback",

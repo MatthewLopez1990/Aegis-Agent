@@ -44,7 +44,7 @@ class GitLabConnectorStub(MockServiceConnector):
         configured_rate_limits = rate_limits or self.spec.rate_limits
         self.spec = ConnectorSpec(
             name="gitlab",
-            version="0.2.0",
+            version="0.3.0",
             auth_type="brokered_token",
             required_scopes=("read",),
             optional_scopes=("write",),
@@ -134,12 +134,26 @@ class GitLabConnectorStub(MockServiceConnector):
             )
         live_result = _send_gitlab_write(url=url, token=token, payload=payload)
         accepted = _summarize_params({"url": url, "payload": payload, "token_secret": token_secret})
+        rollback_receipt = _rollback_offer_receipt(request.operation, live_result.get("response_json"))
+        rollback = (
+            f"{rollback_receipt['rollback_operation']} available with approval"
+            if rollback_receipt["rollback_available"]
+            else "provider-specific GitLab rollback required"
+        )
         return ConnectorResult(
             self.spec.name,
             request.operation,
             live_result["ok"],
-            {"url": url, "domain": domain, "status": live_result["http_status"], "mode": "live_write", "accepted": accepted, "rate_limit": rate_limit},
-            rollback="provider-specific GitLab rollback required",
+            {
+                "url": url,
+                "domain": domain,
+                "status": live_result["http_status"],
+                "mode": "live_write",
+                "accepted": accepted,
+                "rate_limit": rate_limit,
+                "rollback_receipt": rollback_receipt,
+            },
+            rollback=rollback,
             error=live_result.get("error"),
         )
 
@@ -202,8 +216,13 @@ def _send_gitlab_write(*, url: str, token: str, payload: dict[str, Any]) -> dict
         return {"ok": False, "http_status": 0, "error": f"GitLab write failed: {exc.reason}"}
     with response_context as response:
         status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
-        response.read(4096)
-    return {"ok": 200 <= status < 300, "http_status": status, "error": None if 200 <= status < 300 else f"GitLab write failed with status {status}"}
+        response_body = response.read(4096)
+    return {
+        "ok": 200 <= status < 300,
+        "http_status": status,
+        "response_json": _decoded_json_object(response_body),
+        "error": None if 200 <= status < 300 else f"GitLab write failed with status {status}",
+    }
 
 
 def _positive_int(value: Any) -> int | None:
@@ -225,6 +244,61 @@ def _summarize_params(params: dict[str, Any]) -> dict[str, Any]:
         "raw_response_body_included": False,
         "redacted_preview": _preview(redact(params)),
     }
+
+
+def _rollback_offer_receipt(operation: str, response_json: Any) -> dict[str, Any]:
+    response = response_json if isinstance(response_json, dict) else {}
+    if operation == "create_issue":
+        rollback_operation = "rollback_issue"
+        resource_ref = response.get("web_url") or response.get("url") or response.get("iid") or response.get("id")
+        resource_iid = _optional_int(response.get("iid"))
+        resource_id = _optional_int(response.get("id"))
+    elif operation == "comment_on_merge_request":
+        rollback_operation = "rollback_merge_request_note"
+        resource_ref = response.get("url") or response.get("web_url") or response.get("id")
+        resource_iid = None
+        resource_id = _optional_int(response.get("id"))
+    else:
+        rollback_operation = None
+        resource_ref = None
+        resource_iid = None
+        resource_id = None
+    resource_hash = _resource_ref_hash(resource_ref)
+    return {
+        "receipt_schema": "gitlab_rollback_offer_v1",
+        "rollback_available": bool(rollback_operation and resource_hash),
+        "rollback_operation": rollback_operation if resource_hash else None,
+        "resource_ref_hash": resource_hash or None,
+        "resource_iid": resource_iid,
+        "resource_id": resource_id,
+        "requires_approval": True,
+        "raw_secret_values_included": False,
+        "raw_response_body_included": False,
+    }
+
+
+def _decoded_json_object(response_body: bytes) -> dict[str, Any]:
+    if not response_body:
+        return {}
+    try:
+        decoded = json.loads(response_body.decode("utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _resource_ref_hash(value: Any) -> str:
+    rendered = str(value or "").strip()
+    if not rendered:
+        return ""
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _preview(value: Any) -> Any:

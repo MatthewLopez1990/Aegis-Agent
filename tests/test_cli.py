@@ -108,6 +108,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("live_connector_receipts.redacted_write_summary", provider_gap["evaluation_scenarios"])
             self.assertIn("generic_rest.live_write_rate_limit", provider_gap["evaluation_scenarios"])
             self.assertIn("github_gitlab.live_write_rate_limit", provider_gap["evaluation_scenarios"])
+            self.assertIn("github_gitlab.rollback_offer_receipt", provider_gap["evaluation_scenarios"])
             self.assertIn("graph.calendar_rollback_receipt", provider_gap["evaluation_scenarios"])
             self.assertIn("messaging.live_send_rate_limit", provider_gap["evaluation_scenarios"])
             self.assertIn("calendar_write", provider_gap["sample_tools"])
