@@ -28,7 +28,7 @@ from aegis.remote_control import RemoteControlPairingRegistry, build_remote_cont
 from aegis.research.harness import ResearchHarness
 from aegis.security.policy_engine import PolicyRequest
 from aegis.security.policy_profile import activate_due_policy_rollouts, apply_policy_bundle, diff_policy_bundle, import_policy_bundle, list_policy_bundles, list_policy_promotions, list_policy_rollouts, policy_profile_to_dict, promote_policy_bundle, rollback_policy_bundle, schedule_policy_bundle
-from aegis.security.taint import RiskLevel, Sensitivity, TrustClass
+from aegis.security.taint import RiskLevel, Sensitivity, TrustClass, now_utc
 from aegis.skills.runtime import SkillRuntime
 from aegis.skills.signing import DEFAULT_SKILL_SIGNING_KEY
 
@@ -3232,10 +3232,13 @@ class AegisTui(cmd.Cmd):
                 "message_count": session.get("message_count", 0),
                 "task_count": session.get("task_count", 0),
                 "waiting_task_count": session.get("waiting_task_count", 0),
+                "steering": _session_steering_summary(session),
+                "ui_preferences": session.get("metadata", {}).get("tui_preferences", {}),
                 "workspace": str(self.workspace),
                 "additional_dirs": [str(path) for path in self.additional_dirs],
                 "trust_boundary": "raw transcript content stays behind session history and context firewall processing",
                 "raw_message_content_included": False,
+                "raw_steering_instruction_included": False,
                 "next_actions": ["history", "compact", "memory health", "session tasks"],
             }
         )
@@ -3275,16 +3278,19 @@ class AegisTui(cmd.Cmd):
 
     def do_prompt(self, arg: str) -> None:
         """prompt -- show prompt/personality surfaces without mutating system prompts."""
+        session = self.orchestrator.sessions.get_session(self.session["id"])
         _print_json(
             {
                 "status": "metadata_only",
-                "prompt_mutation": "disabled_by_command",
-                "active_session_id": self.session.get("id"),
-                "model": self.session.get("model") or "alias/smart",
-                "personality": self.session.get("personality") or "default",
+                "prompt_mutation": "session_metadata_only",
+                "active_session_id": session.get("id"),
+                "model": session.get("model") or "alias/smart",
+                "personality": session.get("personality") or "default",
+                "steering": _session_steering_summary(session),
                 "context_firewall": "enabled_for_untrusted_history_and_tool_outputs",
                 "raw_system_prompt_included": False,
                 "raw_message_content_included": False,
+                "raw_steering_instruction_included": False,
                 "next_actions": ["personality", "session set-model <model>", "context", "models auth targets"],
             }
         )
@@ -3357,11 +3363,13 @@ class AegisTui(cmd.Cmd):
     def do_statusbar(self, arg: str) -> None:
         """statusbar -- show status-bar metadata and active flags."""
         dashboard = build_product_dashboard(self.orchestrator)
+        session = self.orchestrator.sessions.get_session(self.session["id"])
         _print_json(
             {
                 "status": "metadata_only",
-                "mode": "metadata_only",
-                "active_flags": _dashboard_status_flags(dashboard["runtime"], self.session, workspace=self.workspace),
+                "mode": "session_ui_metadata",
+                "active_flags": _dashboard_status_flags(dashboard["runtime"], session, workspace=self.workspace),
+                "ui_preferences": session.get("metadata", {}).get("tui_preferences", {}),
                 "visible_in_prompt": True,
                 "raw_secret_values_included": False,
             }
@@ -3441,15 +3449,34 @@ class AegisTui(cmd.Cmd):
         self._print_ui_preference("verbose", arg)
 
     def do_steer(self, arg: str) -> None:
-        """steer [instruction] -- show steering readiness without mutating prompts."""
+        """steer [instruction] -- store a redacted session steering receipt."""
         requested = arg.strip()
+        if requested:
+            steering = {
+                "active": True,
+                "instruction_sha256": hashlib.sha256(requested.encode("utf-8")).hexdigest(),
+                "instruction_character_count": len(requested),
+                "updated_at": now_utc(),
+                "raw_instruction_stored": False,
+            }
+            self.session = self.orchestrator.sessions.update_metadata(
+                self.session["id"],
+                steering,
+                namespace="tui_steering",
+            )
+        else:
+            steering = self.orchestrator.sessions.get_session(self.session["id"]).get("metadata", {}).get("tui_steering", {})
         _print_json(
             {
-                "status": "metadata_only",
-                "steer_mutation": "disabled_by_command",
+                "status": "steering_updated" if requested else "steering_status",
+                "mode": "session_metadata_only",
+                "steer_mutation": "session_metadata_receipt",
                 "requested_instruction_character_count": len(requested),
-                "instruction_captured": False,
+                "instruction_captured": bool(requested),
+                "steering_active": bool(steering.get("active")),
+                "instruction_sha256": steering.get("instruction_sha256"),
                 "raw_instruction_included": False,
+                "raw_instruction_stored": False,
                 "active_session_id": self.session.get("id"),
                 "next_actions": ["prompt", "personality", "session set-personality <name>", "context"],
             }
@@ -3483,17 +3510,29 @@ class AegisTui(cmd.Cmd):
         )
 
     def _print_ui_preference(self, name: str, arg: str) -> None:
-        requested = arg.strip() or None
+        requested = arg.strip() or ("enabled" if name == "verbose" else None)
+        session = self.orchestrator.sessions.get_session(self.session["id"])
+        preferences = dict(session.get("metadata", {}).get("tui_preferences") or {})
+        if requested is not None:
+            preferences[name] = _clean_session_preference_value(requested)
+            self.session = self.orchestrator.sessions.update_metadata(
+                self.session["id"],
+                preferences,
+                namespace="tui_preferences",
+            )
+        current_preferences = self.session.get("metadata", {}).get("tui_preferences", {})
         _print_json(
             {
-                "status": "metadata_only",
-                "mode": "metadata_only",
+                "status": "ui_preference_updated" if requested is not None else "ui_preference_status",
+                "mode": "session_ui_metadata",
                 "preference": name,
-                "requested_value": requested,
+                "requested_value": _safe_display_value(requested),
+                "current_value": current_preferences.get(name),
+                "ui_preferences": current_preferences,
                 "current_theme": "aegis-shield",
-                "persisted": False,
+                "persisted": requested is not None,
                 "raw_secret_values_included": False,
-                "detail": "UI preference persistence is not enabled; this command reports readiness without mutating local config.",
+                "detail": "UI preferences are stored as active-session metadata and do not mutate global config.",
             }
         )
 
@@ -5315,6 +5354,31 @@ def _slash_match_rank(prefix: str, row: tuple[str, str]) -> tuple[int, str]:
     if prefix in detail.lower():
         return (4, command)
     return (5, command)
+
+
+def _session_steering_summary(session: dict[str, Any]) -> dict[str, Any]:
+    steering = session.get("metadata", {}).get("tui_steering", {})
+    if not isinstance(steering, dict):
+        steering = {}
+    return {
+        "active": bool(steering.get("active")),
+        "instruction_sha256": steering.get("instruction_sha256"),
+        "instruction_character_count": int(steering.get("instruction_character_count") or 0),
+        "updated_at": steering.get("updated_at"),
+        "raw_instruction_included": False,
+    }
+
+
+def _clean_session_preference_value(value: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9_.:-]+", "-", value.strip()).strip("-")
+    return (cleaned or "default")[:80]
+
+
+def _safe_display_value(value: str | None) -> str | None:
+    if value is None:
+        return None
+    redacted = redact(value)
+    return "[REDACTED]" if redacted != value else _clean_session_preference_value(value)
 
 
 def _dashboard_status_flags(runtime: dict[str, Any], session: dict[str, Any], *, workspace: Path | None = None) -> list[str]:

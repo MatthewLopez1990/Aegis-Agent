@@ -477,8 +477,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn('"operator_action_required"', alias_commands)
             self.assertIn('"approval_bypass_enabled": false', alias_commands)
             self.assertIn('"dangerous_command_auto_approval": false', alias_commands)
-            self.assertIn('"prompt_mutation": "disabled_by_command"', alias_commands)
-            self.assertIn('"steer_mutation": "disabled_by_command"', alias_commands)
+            self.assertIn('"prompt_mutation": "session_metadata_only"', alias_commands)
+            self.assertIn('"steer_mutation": "session_metadata_receipt"', alias_commands)
             self.assertIn("Filter: /cop", alias_commands)
             self.assertIn('"active_flags"', alias_commands)
             self.assertIn('"surface": "footer"', alias_commands)
@@ -486,6 +486,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn('"surface": "indicator"', alias_commands)
             self.assertIn('"auth_parity_status"', alias_commands)
             self.assertIn('"preference": "theme"', alias_commands)
+            self.assertIn('"status": "ui_preference_updated"', alias_commands)
+            self.assertIn('"persisted": true', alias_commands)
             self.assertIn('"mouse_support": "not_enabled"', alias_commands)
             self.assertIn('"allowed_commands"', alias_commands)
             self.assertIn('"routines"', alias_commands)
@@ -505,6 +507,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn('"literal_newline_input": "enabled"', alias_commands)
             self.assertIn('"newline_keybinding": "Ctrl+V"', alias_commands)
             self.assertIn('"mode": "metadata_only"', alias_commands)
+            self.assertIn('"mode": "session_ui_metadata"', alias_commands)
             wrapped, height = _live_input_block("aegis> ", "x" * 80, 24)
             self.assertGreater(height, 3)
             self.assertIn("\n", wrapped)
@@ -671,8 +674,17 @@ class TuiTests(unittest.TestCase):
 
             rendered = output.getvalue()
             self.assertIn('"raw_message_content_included": false', rendered)
+            self.assertIn('"raw_steering_instruction_included": false', rendered)
+            self.assertIn('"status": "steering_updated"', rendered)
             self.assertNotIn("abc123", rendered)
             self.assertNotIn("should not render", rendered)
+            session = tui.orchestrator.sessions.get_session(tui.session["id"])
+            steering = session["metadata"]["tui_steering"]
+            self.assertTrue(steering["active"])
+            self.assertEqual(steering["instruction_character_count"], len("password=abc123 should not render"))
+            self.assertFalse(steering["raw_instruction_stored"])
+            self.assertNotIn("abc123", json.dumps(session["metadata"], sort_keys=True))
+            self.assertNotIn("should not render", json.dumps(session["metadata"], sort_keys=True))
 
     def test_missing_resources_print_errors_without_raising(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

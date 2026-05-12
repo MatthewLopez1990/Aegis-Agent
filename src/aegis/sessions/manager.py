@@ -103,6 +103,40 @@ class SessionManager:
         self.audit_logger.append("session.updated", {"session_id": session_id, "changes": sorted(changes)})
         return updated
 
+    def update_metadata(
+        self,
+        session_id: str,
+        patch: dict[str, Any],
+        *,
+        namespace: str | None = None,
+    ) -> dict[str, Any]:
+        session = self.get_session(session_id)
+        metadata = dict(session.get("metadata") or {})
+        if namespace:
+            scoped = metadata.get(namespace)
+            if not isinstance(scoped, dict):
+                scoped = {}
+            scoped.update(patch)
+            metadata[namespace] = scoped
+        else:
+            metadata.update(patch)
+        updated = _decode_session(
+            self.store.update_session(
+                session_id,
+                {"metadata_json": json.dumps(metadata, sort_keys=True)},
+            )
+        )
+        self.audit_logger.append(
+            "session.metadata_updated",
+            {
+                "session_id": session_id,
+                "metadata_namespace": namespace,
+                "metadata_keys": sorted(patch),
+                "raw_metadata_values_included": False,
+            },
+        )
+        return updated
+
     def history(self, session_id: str, limit: int = 100) -> list[dict[str, Any]]:
         return [self._decode_message(row) for row in self.store.list_messages(session_id, limit=limit)]
 
