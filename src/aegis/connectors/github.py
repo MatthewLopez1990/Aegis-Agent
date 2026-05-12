@@ -13,6 +13,7 @@ from aegis.audit.logger import redact
 from aegis.connectors.base import ConnectorRequest, ConnectorResult, ConnectorSpec, live_connector_activation, require_scope
 from aegis.connectors.http import _open_without_redirects, _private_network_error, _validate_url
 from aegis.connectors.mock_service import MockServiceConnector
+from aegis.connectors.rate_limit import InMemoryRateLimiter
 from aegis.security.secrets_broker import SecretsBroker
 from aegis.security.taint import RiskLevel, Sensitivity
 
@@ -24,6 +25,8 @@ class GitHubConnectorStub(MockServiceConnector):
         allowlist: tuple[str, ...] = ("api.github.com",),
         live_writes: bool = False,
         secrets_broker: SecretsBroker | None = None,
+        rate_limits: dict[str, Any] | None = None,
+        rate_limiter: InMemoryRateLimiter | None = None,
     ) -> None:
         super().__init__(
             name="github",
@@ -46,9 +49,11 @@ class GitHubConnectorStub(MockServiceConnector):
         self.allowlist = allowlist
         self.live_writes = live_writes
         self.secrets_broker = secrets_broker or SecretsBroker()
+        self._rate_limiter = rate_limiter or InMemoryRateLimiter()
+        configured_rate_limits = rate_limits or self.spec.rate_limits
         self.spec = ConnectorSpec(
             name="github",
-            version="0.2.0",
+            version="0.3.0",
             auth_type="brokered_token",
             required_scopes=("read",),
             optional_scopes=("write",),
@@ -62,7 +67,7 @@ class GitHubConnectorStub(MockServiceConnector):
                 "comment_on_pull_request": RiskLevel.HIGH,
                 "dry_run": RiskLevel.MEDIUM,
             },
-            rate_limits=self.spec.rate_limits,
+            rate_limits=configured_rate_limits,
             data_sensitivity=Sensitivity.INTERNAL,
             default_mode="mock_read_only",
             approval_required=("create_issue", "comment_on_pull_request"),
@@ -127,6 +132,16 @@ class GitHubConnectorStub(MockServiceConnector):
             payload = _github_payload(request.operation, request.params)
         except ValueError as exc:
             return ConnectorResult(self.spec.name, request.operation, False, {}, error=str(exc))
+        rate_limit = self._check_live_rate_limit(domain=domain, operation=request.operation)
+        if not rate_limit["allowed"]:
+            return ConnectorResult(
+                self.spec.name,
+                request.operation,
+                False,
+                {"mode": "live_write", "domain": domain, "rate_limit": rate_limit},
+                rollback="no action performed",
+                error="GitHub live write rate limit exceeded",
+            )
         live_result = _send_github_write(url=url, token=token, payload=payload)
         accepted = _summarize_params({"url": url, "payload": payload, "token_secret": token_secret})
         return ConnectorResult(
@@ -139,6 +154,7 @@ class GitHubConnectorStub(MockServiceConnector):
                 "status": live_result["http_status"],
                 "mode": "live_write",
                 "accepted": accepted,
+                "rate_limit": rate_limit,
             },
             rollback="provider-specific GitHub rollback required",
             error=live_result.get("error"),
@@ -149,6 +165,13 @@ class GitHubConnectorStub(MockServiceConnector):
 
     def _allowed(self, domain: str) -> bool:
         return any(domain == allowed or domain.endswith(f".{allowed}") for allowed in self.allowlist)
+
+    def _check_live_rate_limit(self, *, domain: str, operation: str) -> dict[str, int | bool]:
+        per_minute = _positive_int(self.spec.rate_limits.get("per_minute"))
+        if per_minute is None:
+            return {"allowed": True, "limit": 0, "window_seconds": 60, "remaining": 0, "retry_after_seconds": 0}
+        decision = self._rate_limiter.check(f"{self.spec.name}:{domain}:{operation}", limit=per_minute, window_seconds=60)
+        return decision.to_dict()
 
     @staticmethod
     def _is_live_write_request(request: ConnectorRequest) -> bool:
@@ -200,6 +223,14 @@ def _send_github_write(*, url: str, token: str, payload: dict[str, Any]) -> dict
         status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
         response.read(4096)
     return {"ok": 200 <= status < 300, "http_status": status, "error": None if 200 <= status < 300 else f"GitHub write failed with status {status}"}
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _summarize_params(params: dict[str, Any]) -> dict[str, Any]:

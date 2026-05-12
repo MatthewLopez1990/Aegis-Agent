@@ -466,6 +466,7 @@ class ConnectorTests(unittest.TestCase):
         self.assertTrue(live.ok)
         self.assertEqual(live.data["mode"], "live_write")
         self.assertEqual(live.data["status"], 201)
+        self.assertTrue(live.data["rate_limit"]["allowed"])
         self.assertEqual(captured["url"], "https://api.github.com/repos/example/aegis/issues")
         self.assertEqual(captured["authorization"], "Bearer ghp_raw_secret")
         self.assertIn('"title": "Live issue"', str(captured["body"]))
@@ -538,6 +539,7 @@ class ConnectorTests(unittest.TestCase):
         self.assertTrue(live.ok)
         self.assertEqual(live.data["mode"], "live_write")
         self.assertEqual(live.data["status"], 201)
+        self.assertTrue(live.data["rate_limit"]["allowed"])
         self.assertEqual(captured["url"], "https://gitlab.com/api/v4/projects/1/issues")
         self.assertEqual(captured["private_token"], "glpat_raw_secret")
         self.assertIn('"title": "Live issue"', str(captured["body"]))
@@ -547,6 +549,64 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(live.data["accepted"]["receipt_schema"], "redacted_param_summary_v1")
         self.assertFalse(live.data["accepted"]["raw_secret_values_included"])
         self.assertFalse(live.data["accepted"]["raw_response_body_included"])
+
+    def test_github_and_gitlab_live_write_rate_limits_block_second_write(self) -> None:
+        cases = (
+            (
+                "github",
+                GitHubConnectorStub,
+                "GITHUB_TOKEN",
+                "ghp_raw_secret",
+                "https://api.github.com/repos/example/aegis/issues",
+                "aegis.connectors.github._open_without_redirects",
+            ),
+            (
+                "gitlab",
+                GitLabConnectorStub,
+                "GITLAB_TOKEN",
+                "glpat_raw_secret",
+                "https://gitlab.com/api/v4/projects/1/issues",
+                "aegis.connectors.gitlab._open_without_redirects",
+            ),
+        )
+        for name, connector_type, token_secret, token_value, api_url, patch_target in cases:
+            with self.subTest(connector=name):
+                broker = SecretsBroker()
+                broker.store_secret(name=token_secret, value=token_value)
+                connector = connector_type(live_writes=True, secrets_broker=broker, rate_limits={"per_minute": 1})
+
+                class FakeResponse:
+                    status = 201
+
+                    def __enter__(self):
+                        return self
+
+                    def __exit__(self, exc_type, exc, traceback):
+                        return False
+
+                    def read(self, limit: int) -> bytes:
+                        return b"{}"
+
+                captured: dict[str, int] = {"calls": 0}
+
+                def fake_open(request, timeout):
+                    captured["calls"] += 1
+                    return FakeResponse()
+
+                params = {"api_url": api_url, "title": "Live issue", "body": "token=abc123"}
+                with patch(patch_target, side_effect=fake_open):
+                    live = connector.write(ConnectorRequest(operation="create_issue", params=params, scopes=("write",), approved=True))
+                    limited = connector.write(ConnectorRequest(operation="create_issue", params=params, scopes=("write",), approved=True))
+
+                rendered = json.dumps(limited.data, sort_keys=True)
+                self.assertTrue(live.ok)
+                self.assertEqual(live.data["rate_limit"]["limit"], 1)
+                self.assertFalse(limited.ok)
+                self.assertIn("rate limit", limited.error or "")
+                self.assertFalse(limited.data["rate_limit"]["allowed"])
+                self.assertEqual(captured["calls"], 1)
+                self.assertNotIn(token_value, rendered)
+                self.assertNotIn("abc123", rendered)
 
     def test_service_desk_live_write_requires_approval_secret_and_summarizes_payload(self) -> None:
         broker = SecretsBroker()
