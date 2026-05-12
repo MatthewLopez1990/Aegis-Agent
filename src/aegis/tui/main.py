@@ -32,6 +32,7 @@ from aegis.security.taint import RiskLevel, Sensitivity, TrustClass
 TOP_LEVEL_COMMANDS = (
     "approval",
     "approvals",
+    "app",
     "audit",
     "add-dir",
     "agents",
@@ -40,6 +41,7 @@ TOP_LEVEL_COMMANDS = (
     "background",
     "bg",
     "boards",
+    "branch",
     "browser",
     "bug",
     "cancel",
@@ -54,7 +56,10 @@ TOP_LEVEL_COMMANDS = (
     "connectors",
     "continue",
     "cost",
+    "color",
+    "context",
     "dashboard",
+    "debug",
     "deny",
     "desktop",
     "diff",
@@ -65,6 +70,8 @@ TOP_LEVEL_COMMANDS = (
     "exit",
     "effort",
     "fast",
+    "feedback",
+    "fork",
     "gateway",
     "goal",
     "help",
@@ -92,6 +99,7 @@ TOP_LEVEL_COMMANDS = (
     "plugins",
     "pr_comments",
     "provider",
+    "prompt",
     "rc",
     "reload-plugins",
     "reload-mcp",
@@ -106,28 +114,39 @@ TOP_LEVEL_COMMANDS = (
     "review",
     "rewind",
     "rollback",
+    "save",
     "schedule",
     "schedules",
     "security",
     "security-review",
     "session",
     "sessions",
+    "settings",
+    "sethome",
     "skills",
+    "skin",
+    "snap",
+    "snapshot",
+    "sb",
     "status",
+    "statusbar",
     "stats",
     "stop",
     "submit",
     "tasks",
     "teleport",
     "terminal-setup",
+    "theme",
     "timeline",
     "title",
     "toolsets",
     "tools",
+    "tp",
     "undo",
     "update",
     "usage",
     "vim",
+    "verbose",
     "voice",
     "web-setup",
 )
@@ -163,7 +182,9 @@ CHANNEL_COMMANDS = ("render", "receive", "resolve-approval", "send-webhook", "se
 EVALUATION_COMMANDS = ("queue", "review", "trends", "delta", "readiness")
 SLASH_COMMAND_ALIASES = {
     "add-dir": "add_dir",
+    "app": "desktop",
     "bg": "background",
+    "feedback": "bug",
     "pr-comments": "pr_comments",
     "rc": "remote_control",
     "remote-control": "remote_control",
@@ -172,7 +193,11 @@ SLASH_COMMAND_ALIASES = {
     "reload-mcp": "reload_mcp",
     "reload_mcp": "reload_mcp",
     "reload-plugins": "reload_plugins",
+    "settings": "config",
+    "snap": "rollback",
+    "snapshot": "rollback",
     "terminal-setup": "terminal_setup",
+    "tp": "teleport",
     "web-setup": "web_setup",
     "set-home": "sethome",
 }
@@ -2333,8 +2358,8 @@ class AegisTui(cmd.Cmd):
                 "audit_log": str(config.audit_log_path),
                 "secrets": str(config.secrets_path),
                 "workspace": str(self.workspace),
-                "default_read_only": config.security.default_read_only,
-                "network_allowlist": list(config.security.network_allowlist),
+                "default_read_only": config.default_read_only,
+                "network_allowlist": list(config.network_allowlist),
             }
         )
 
@@ -2402,6 +2427,100 @@ class AegisTui(cmd.Cmd):
             }
         )
 
+    def do_branch(self, arg: str) -> None:
+        """branch -- show guarded conversation branch readiness."""
+        session = self.orchestrator.sessions.get_session(self.session["id"])
+        _print_json(
+            {
+                "status": "metadata_only",
+                "feature": "conversation_branch",
+                "mutation": "disabled_by_command",
+                "active_session_id": session["id"],
+                "title": session.get("title"),
+                "message_count": session.get("message_count", 0),
+                "task_count": session.get("task_count", 0),
+                "raw_message_content_included": False,
+                "next_actions": ["session new <title>", f"session history {session['id']}", "session compact"],
+                "remaining_depth_work": ["branch_lineage_model", "branch_diff_receipts", "merge_or_archive_controls"],
+            }
+        )
+
+    def do_fork(self, arg: str) -> None:
+        """fork -- alias for guarded conversation branch readiness."""
+        self.do_branch(arg)
+
+    def do_context(self, arg: str) -> None:
+        """context -- show active session context metadata without raw transcript content."""
+        session = self.orchestrator.sessions.get_session(self.session["id"])
+        _print_json(
+            {
+                "status": "metadata_only",
+                "active_session_id": session["id"],
+                "title": session.get("title"),
+                "channel": session.get("channel"),
+                "session_status": session.get("status"),
+                "model": session.get("model") or "alias/smart",
+                "personality": session.get("personality") or "default",
+                "message_count": session.get("message_count", 0),
+                "task_count": session.get("task_count", 0),
+                "waiting_task_count": session.get("waiting_task_count", 0),
+                "workspace": str(self.workspace),
+                "additional_dirs": [str(path) for path in self.additional_dirs],
+                "trust_boundary": "raw transcript content stays behind session history and context firewall processing",
+                "raw_message_content_included": False,
+                "next_actions": ["history", "compact", "memory health", "session tasks"],
+            }
+        )
+
+    def do_debug(self, arg: str) -> None:
+        """debug -- show safe runtime diagnostics without dumping logs."""
+        dashboard = build_product_dashboard(self.orchestrator)
+        _print_json(
+            {
+                "status": "metadata_only",
+                "debug_readiness": "local_diagnostics_available",
+                "audit_chain_ok": dashboard["runtime"]["audit_chain_ok"],
+                "pending_approvals": dashboard["runtime"]["pending_approvals"],
+                "recent_task_count": int(dashboard["runtime"].get("recent_tasks", 0)),
+                "session_count": dashboard["runtime"]["sessions"],
+                "model_providers": dashboard["runtime"]["model_providers"],
+                "live_gap_areas": [item["area"] for item in dashboard.get("live_gap_backlog", [])],
+                "raw_audit_log_included": False,
+                "raw_secret_values_included": False,
+                "next_actions": ["doctor", "dashboard", "audit", "capabilities"],
+            }
+        )
+
+    def do_save(self, arg: str) -> None:
+        """save -- show explicit export/save surfaces without writing arbitrary files."""
+        _print_json(
+            {
+                "status": "operator_action_required",
+                "mode": "metadata_only",
+                "active_session_id": self.session.get("id"),
+                "automatic_workspace_write": False,
+                "raw_message_content_included": False,
+                "next_actions": ["session history", "memory export", "audit export-siem", "task evidence <task_id>"],
+                "detail": "Aegis does not silently save transcripts from the TUI; use an explicit export/history command and review redaction boundaries.",
+            }
+        )
+
+    def do_prompt(self, arg: str) -> None:
+        """prompt -- show prompt/personality surfaces without mutating system prompts."""
+        _print_json(
+            {
+                "status": "metadata_only",
+                "prompt_mutation": "disabled_by_command",
+                "active_session_id": self.session.get("id"),
+                "model": self.session.get("model") or "alias/smart",
+                "personality": self.session.get("personality") or "default",
+                "context_firewall": "enabled_for_untrusted_history_and_tool_outputs",
+                "raw_system_prompt_included": False,
+                "raw_message_content_included": False,
+                "next_actions": ["personality", "session set-model <model>", "context", "models auth targets"],
+            }
+        )
+
     def do_plan(self, arg: str) -> None:
         """plan -- show no-mutation planning/readiness context."""
         _print_json(
@@ -2448,6 +2567,69 @@ class AegisTui(cmd.Cmd):
     def do_desktop(self, arg: str) -> None:
         """desktop -- show desktop wrapper readiness."""
         self.do_remote_control(arg)
+
+    def do_statusbar(self, arg: str) -> None:
+        """statusbar -- show status-bar metadata and active flags."""
+        dashboard = build_product_dashboard(self.orchestrator)
+        _print_json(
+            {
+                "status": "metadata_only",
+                "mode": "metadata_only",
+                "active_flags": _dashboard_status_flags(dashboard["runtime"], self.session, workspace=self.workspace),
+                "visible_in_prompt": True,
+                "raw_secret_values_included": False,
+            }
+        )
+
+    def do_sb(self, arg: str) -> None:
+        """sb -- alias for statusbar."""
+        self.do_statusbar(arg)
+
+    def do_theme(self, arg: str) -> None:
+        """theme -- show UI theme metadata."""
+        self._print_ui_preference("theme", arg)
+
+    def do_skin(self, arg: str) -> None:
+        """skin -- show UI skin metadata."""
+        self._print_ui_preference("skin", arg)
+
+    def do_color(self, arg: str) -> None:
+        """color -- show UI color metadata."""
+        self._print_ui_preference("color", arg)
+
+    def do_verbose(self, arg: str) -> None:
+        """verbose -- show verbosity metadata."""
+        self._print_ui_preference("verbose", arg)
+
+    def do_sethome(self, arg: str) -> None:
+        """sethome -- show guarded home-channel readiness."""
+        _print_json(
+            {
+                "status": "not_enabled",
+                "mode": "metadata_only",
+                "home_channel_readiness": "tracked_gap",
+                "active_session_id": self.session.get("id"),
+                "workspace": str(self.workspace),
+                "mutation": "disabled_by_command",
+                "next_actions": ["session rename <title>", "web-setup", "remote-control pair"],
+                "detail": "Home workspace/channel mutation needs explicit profile storage, rollback receipts, and channel identity checks before it can change defaults.",
+            }
+        )
+
+    def _print_ui_preference(self, name: str, arg: str) -> None:
+        requested = arg.strip() or None
+        _print_json(
+            {
+                "status": "metadata_only",
+                "mode": "metadata_only",
+                "preference": name,
+                "requested_value": requested,
+                "current_theme": "aegis-shield",
+                "persisted": False,
+                "raw_secret_values_included": False,
+                "detail": "UI preference persistence is not enabled; this command reports readiness without mutating local config.",
+            }
+        )
 
     def do_plugin(self, arg: str) -> None:
         """plugin -- alias for plugins."""
@@ -3541,6 +3723,8 @@ def _command_reference() -> str:
             "session                Show active session context",
             "session new|open       Create or switch conversation sessions",
             "session history|tasks  Show active session transcript or tasks",
+            "branch|fork|context    Branch readiness and context metadata",
+            "save|prompt            Explicit save and prompt readiness",
             "new|reset|clear        Session reset and screen controls",
             "add-dir <path>         Record extra working directory context",
             "history|title|compress Active session transcript helpers",
@@ -3548,8 +3732,8 @@ def _command_reference() -> str:
             "fast [request]         Inspect fast route or submit a quick governed task",
             "goal|batch|loop        Goal, queue, and self-improvement readiness",
             "remote-control|rc      Local-first remote-control readiness",
-            "remote-env|teleport    Guarded remote environment handoff readiness",
-            "mobile|desktop         Mobile/desktop control-plane readiness",
+            "remote-env|teleport|tp Guarded remote environment handoff readiness",
+            "mobile|desktop|app     Mobile/desktop control-plane readiness",
             "evidence [task_id]     Show receipt and audit evidence",
             "timeline [task_id]     Show plan, receipt, and audit sequence",
             "events [task_id]       Show grouped run-event progress",
@@ -3559,8 +3743,8 @@ def _command_reference() -> str:
             "deny <id> [--admin]    Deny a gated action",
             "permissions            Claude-style policy posture alias",
             "security-review        Security review posture alias",
-            "doctor|config|init     Runtime diagnosis, config paths, and init status",
-            "bug <summary>          Capture a local-only bug report",
+            "doctor|debug|config|settings Runtime diagnosis, safe debug, and config paths",
+            "bug|feedback <summary> Capture a local-only bug report",
             "hooks list|add|run     Governed local lifecycle hooks",
             "dashboard              Runtime command deck",
             "menu                   Grouped command menu",
@@ -3578,6 +3762,7 @@ def _command_reference() -> str:
             "login|logout <provider> Model auth aliases",
             "effort [level]         Guarded reasoning-effort status",
             "cost                   Model usage and estimated cost",
+            "statusbar|theme|color  UI status and preference metadata",
             "provider|usage         Model provider and usage aliases",
             "models auth methods|targets|login|logout <provider>",
             "tools                  Governed tool catalog",
@@ -3612,12 +3797,14 @@ def _command_reference() -> str:
             "boards                 Work boards and cards",
             "backends|sandbox       Execution backend sandbox posture",
             "terminal-setup|vim     Terminal keybinding and vim-mode readiness",
+            "snapshot|snap|rollback Guarded snapshot and rollback status",
+            "sethome|set-home       Home workspace/channel readiness",
             "diff|review            Guarded diff and review workflow surfaces",
             "update|restart         Operator-controlled update/restart readiness",
             "audit                  Audit tail",
             "exit                   Quit",
             "",
-            "Plain text submits a task. Slash aliases such as /tasks, /model, /doctor, /rc, and /bg also work.",
+            "Plain text submits a task. Slash aliases such as /tasks, /model, /settings, /debug, /rc, /tp, and /bg also work.",
         )
     )
 
@@ -3661,6 +3848,8 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("dashboard", "runtime command deck"),
             ("tasks [all|session <id>]", "recent task lanes"),
             ("session|history|title|compress", "active transcript context"),
+            ("branch|fork|context", "conversation branch and context metadata"),
+            ("save|prompt", "explicit save and prompt readiness"),
             ("status|resume|pause|cancel", "task controls"),
             ("fast [request]", "quick route alias or governed task submission"),
             ("goal|batch|loop", "goal state, evaluation queue, and self-improvement readiness"),
@@ -3675,8 +3864,8 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("approve|deny <id>", "decide gated work"),
             ("security", "policy posture"),
             ("permissions|security-review", "Claude-style policy and security review aliases"),
-            ("doctor|config|init", "runtime diagnostics, local paths, and initialization status"),
-            ("bug <summary>", "local-only bug report capture"),
+            ("doctor|debug|config|settings|init", "runtime diagnostics, local paths, and initialization status"),
+            ("bug|feedback <summary>", "local-only bug report capture"),
             ("hooks", "governed local lifecycle hooks"),
             ("audit|evidence|timeline|events", "receipts and replay"),
         ),
@@ -3687,6 +3876,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("model|models|provider|usage", "provider routes, auth, and usage"),
             ("login|logout <provider>", "model auth login/logout aliases"),
             ("effort|cost", "guarded reasoning-effort metadata and usage cost"),
+            ("statusbar|sb|theme|skin|color|verbose", "UI preference and status metadata"),
             ("tools run <name> <json>", "safe tool execution"),
             ("toolsets", "tool catalog grouped by permission and risk"),
             ("skills [hub query]", "governed skill hub"),
@@ -3700,14 +3890,15 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         (
             ("capabilities", "parity and readiness"),
             ("agents", "multi-agent coordination and delegation surfaces"),
-            ("remote-control|rc|remote-env|teleport|mobile|desktop", "local-first remote-control readiness"),
+            ("remote-control|rc|remote-env|teleport|tp|mobile|desktop|app", "local-first remote-control readiness"),
             ("web-setup", "local web control-plane setup"),
             ("connectors|channels|platforms", "integration surfaces"),
             ("pr_comments", "pull request comment integration readiness"),
             ("browser session|render", "sandboxed browser work"),
             ("boards|backends|sandbox", "work and execution planes"),
             ("voice|terminal-setup|vim", "optional interaction and terminal readiness"),
-            ("rollback|diff|review", "guarded rollback, diff, and review status"),
+            ("rollback|snapshot|snap|diff|review", "guarded rollback, snapshot, diff, and review status"),
+            ("sethome|set-home", "home workspace/channel readiness"),
             ("update|restart", "operator-controlled update and restart readiness"),
         ),
     ),
@@ -3931,6 +4122,8 @@ def _next_command_hint(command: str) -> str:
         "dashboard": "/menu",
         "tasks": "/events <id>",
         "session": "/session history",
+        "branch": "/session new <title>",
+        "save": "/session history",
         "add-dir": "/session history",
         "status": "/timeline <id>",
         "approvals": "/approval <id>",
@@ -3952,6 +4145,7 @@ def _next_command_hint(command: str) -> str:
         "memory": "/memory review-queue",
         "mcp": "/repair readiness",
         "doctor": "/capabilities",
+        "statusbar": "/dashboard",
         "permissions": "/security profile",
         "agents": "/boards",
         "remote-control": "/web-setup",
@@ -3963,6 +4157,7 @@ def _next_command_hint(command: str) -> str:
         "boards": "/backends",
         "terminal-setup": "/vim",
         "rollback": "/repair readiness",
+        "sethome": "/web-setup",
     }
     return hints.get(root, "/help")
 
