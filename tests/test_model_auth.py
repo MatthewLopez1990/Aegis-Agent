@@ -123,6 +123,7 @@ class ModelAuthTests(unittest.TestCase):
             openai = providers["openai"]
             anthropic = providers["anthropic"]
             openrouter = providers["openrouter"]
+            aws_bedrock = providers["aws-bedrock"]
 
             self.assertEqual(openai["auth_methods"], ["api_key", "subscription"])
             self.assertTrue(openai["subscription_auth_supported"])
@@ -134,6 +135,11 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(anthropic["subscription_auth"]["external_login_instruction"], "/login")
             self.assertFalse(openrouter["subscription_auth_supported"])
             self.assertIsNone(openrouter["subscription_auth"])
+            self.assertTrue(aws_bedrock["auth_required"])
+            self.assertEqual(aws_bedrock["auth_methods"], ["cloud_identity"])
+            self.assertFalse(aws_bedrock["auth_configured"])
+            all_auth_status = {row["provider"]: row for row in registry.auth_status()}
+            self.assertIn("aws-bedrock", all_auth_status)
 
             status = registry.login_provider_subscription("openai")
             self.assertEqual(status["status"], "external_login_required")
@@ -396,6 +402,84 @@ class ModelAuthTests(unittest.TestCase):
             self.assertTrue(target_rows["AWS Bedrock"]["external_auth_configured"])
             self.assertNotIn("123456789012", audit_path.read_text(encoding="utf-8"))
 
+    def test_verified_aws_bedrock_cloud_identity_can_invoke_without_token_import(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            secret_path = root / ".aegis" / "secrets.json"
+            audit_path = root / ".aegis" / "audit.jsonl"
+            broker = SecretsBroker(secret_path)
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(audit_path), broker)
+
+            login_completed = subprocess.CompletedProcess(("aws", "sso", "login"), 0)
+            status_completed = subprocess.CompletedProcess(
+                ("aws", "sts", "get-caller-identity"),
+                0,
+                stdout='{"Account":"123456789012","Arn":"arn:aws:sts::123456789012:assumed-role/Test/User"}\n',
+                stderr="",
+            )
+            with (
+                patch("aegis.models.registry.shutil.which", return_value="/usr/bin/aws"),
+                patch("aegis.models.registry.subprocess.run", side_effect=(login_completed, status_completed)),
+            ):
+                login = registry.login_provider_external("aws-bedrock", method="cloud-identity", run_external=True)
+
+            self.assertEqual(login["status"], "external_login_verified")
+            self.assertFalse(secret_path.exists())
+            self.assertTrue(registry.auth_status("aws-bedrock")["auth_configured"])
+            self.assertEqual(registry.auth_status("aws-bedrock")["auth_source"], "official_cli")
+
+            route = registry.route("aws-bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0")
+            self.assertEqual(route.auth_method, "cloud_identity_cli")
+            self.assertIsNone(route.secret_handle_id)
+            self.assertEqual(route.provider.external_auth_method, "cloud_identity")
+
+            def fake_bedrock_converse(command, **kwargs):
+                self.assertEqual(command[0], "/usr/bin/aws")
+                self.assertEqual(command[1:3], ("bedrock-runtime", "converse"))
+                self.assertEqual(command[command.index("--model-id") + 1], "anthropic.claude-3-5-sonnet-20240620-v1:0")
+                messages = json.loads(command[command.index("--messages") + 1])
+                self.assertEqual(messages[0]["role"], "user")
+                self.assertEqual(messages[0]["content"][0]["text"], "hello from aegis")
+                inference_config = json.loads(command[command.index("--inference-config") + 1])
+                self.assertEqual(inference_config["temperature"], 0.2)
+                self.assertEqual(kwargs["cwd"].name.startswith("aegis-bedrock-model-"), True)
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout='{"output":{"message":{"role":"assistant","content":[{"text":"bedrock response"}]}},"usage":{"inputTokens":12,"outputTokens":5,"totalTokens":17}}\n',
+                    stderr="",
+                )
+
+            with (
+                patch("aegis.models.client.shutil.which", return_value="/usr/bin/aws"),
+                patch("aegis.models.client.subprocess.run", side_effect=fake_bedrock_converse) as run,
+            ):
+                result = LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello from aegis"}])
+
+            self.assertEqual(result.content, "bedrock response")
+            self.assertEqual(result.input_tokens, 12)
+            self.assertEqual(result.output_tokens, 5)
+            self.assertEqual(result.raw_usage["source"], "official_cli")
+            self.assertEqual(result.raw_usage["bridge"], "aws_bedrock_runtime_converse")
+            run.assert_called_once()
+
+            audit_text = audit_path.read_text(encoding="utf-8")
+            self.assertIn("model.auth_external_login_requested", audit_text)
+            self.assertNotIn("AWS_ACCESS_KEY_ID", audit_text)
+            self.assertNotIn("123456789012", audit_text)
+
+    def test_aws_bedrock_requires_verified_cloud_identity_before_invocation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            broker = SecretsBroker(root / ".aegis" / "secrets.json")
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"), broker)
+
+            route = registry.route("aws-bedrock/amazon.titan-text-express-v1")
+
+            self.assertEqual(route.auth_method, "none")
+            with self.assertRaises(ValueError):
+                LiveModelClient(broker).chat(route, [{"role": "user", "content": "hello"}])
+
     def test_google_cloud_identity_handoff_verifies_official_cli_without_token_capture(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
             root = Path(temp)
@@ -528,7 +612,7 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(by_target["DeepSeek"]["status"], "api_key_ready")
             self.assertEqual(by_target["MiniMax"]["status"], "api_key_ready")
             self.assertEqual(by_target["MiniMax OAuth"]["status"], "manual_provider_handoff_only")
-            self.assertEqual(by_target["AWS Bedrock"]["status"], "official_cli_handoff_only")
+            self.assertEqual(by_target["AWS Bedrock"]["status"], "official_cli_bridge_available")
             self.assertEqual(by_target["Azure Foundry API key"]["status"], "api_key_ready")
             self.assertEqual(by_target["Azure Foundry"]["status"], "official_cli_handoff_only")
             self.assertEqual(by_target["Qwen DashScope API"]["status"], "api_key_ready")

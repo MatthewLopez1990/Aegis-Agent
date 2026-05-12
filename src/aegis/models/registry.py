@@ -30,6 +30,7 @@ class ModelProviderSpec:
     output_cost_per_million: float = 0.0
     context_window_tokens: int = 8192
     tokenizer_profile: str = "generic"
+    external_auth_method: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -83,7 +84,7 @@ class ModelRegistry:
                         "supports_tools": provider.supports_tools,
                         "supports_vision": provider.supports_vision,
                         "supports_audio": provider.supports_audio,
-                        "auth_required": provider.auth_secret is not None,
+                        "auth_required": self._auth_required(provider),
                         "auth_configured": self._auth_configured(provider),
                         "api_key_auth_configured": self._api_key_auth_configured(provider),
                         "auth_source": self._auth_source(provider),
@@ -108,7 +109,7 @@ class ModelRegistry:
                     "supports_tools": provider.supports_tools,
                     "supports_vision": provider.supports_vision,
                     "supports_audio": provider.supports_audio,
-                    "auth_required": provider.auth_secret is not None,
+                    "auth_required": self._auth_required(provider),
                     "auth_secret": provider.auth_secret,
                     "auth_configured": self._auth_configured(provider),
                     "api_key_auth_configured": self._api_key_auth_configured(provider),
@@ -133,7 +134,7 @@ class ModelRegistry:
             if profile is not None:
                 return self._external_auth_status(profile)
             raise KeyError(f"unknown model provider {provider_name!r}")
-        return [self._provider_auth_status(provider) for provider in self.providers.values() if provider.auth_secret]
+        return [self._provider_auth_status(provider) for provider in self.providers.values() if self._auth_required(provider)]
 
     def auth_targets(self) -> dict[str, Any]:
         targets: list[dict[str, Any]] = []
@@ -470,6 +471,8 @@ class ModelRegistry:
                 auth_method = "api_key"
             elif self._subscription_auth_configured(provider):
                 auth_method = "subscription_cli"
+        if auth_method == "none" and provider.external_auth_method and self._external_auth_link(provider.provider, provider.external_auth_method) is not None:
+            auth_method = f"{provider.external_auth_method}_cli"
         route = ModelRoute(resolved, provider, model, self.fallbacks.get(resolved, ()), secret_handle_id, auth_method)
         self.audit_logger.append("model.routed", {"identifier": resolved, "fallbacks": list(route.fallback_identifiers), "auth_method": auth_method})
         return route
@@ -532,7 +535,7 @@ class ModelRegistry:
         provider_name, model = identifier.split("/", 1)
         if provider_name not in self.providers:
             raise KeyError(f"unknown model provider {provider_name!r}")
-        if model not in self.providers[provider_name].models and provider_name not in {"custom", "lmstudio", "azure-foundry"}:
+        if model not in self.providers[provider_name].models and provider_name not in {"custom", "lmstudio", "azure-foundry", "aws-bedrock"}:
             raise KeyError(f"unknown model {model!r} for provider {provider_name!r}")
         return provider_name, model
 
@@ -591,7 +594,7 @@ class ModelRegistry:
         external_statuses = [self._external_auth_status(profile) for profile in external_profiles]
         return {
             "provider": provider.provider,
-            "auth_required": provider.auth_secret is not None,
+            "auth_required": self._auth_required(provider),
             "auth_secret": provider.auth_secret,
             "auth_configured": self._auth_configured(provider),
             "api_key_auth_configured": self._api_key_auth_configured(provider),
@@ -606,23 +609,29 @@ class ModelRegistry:
         }
 
     def _auth_configured(self, provider: ModelProviderSpec) -> bool:
-        return self._api_key_auth_configured(provider) or self._subscription_auth_configured(provider)
+        return self._api_key_auth_configured(provider) or self._subscription_auth_configured(provider) or self._external_auth_configured(provider)
+
+    def _auth_required(self, provider: ModelProviderSpec) -> bool:
+        return provider.auth_secret is not None or provider.external_auth_method is not None
 
     def _api_key_auth_configured(self, provider: ModelProviderSpec) -> bool:
         return provider.auth_secret is not None and self.secrets_broker.has_secret(provider.auth_secret)
 
     def _auth_source(self, provider: ModelProviderSpec) -> str | None:
-        if provider.auth_secret is None:
-            return None
-        source = self.secrets_broker.secret_source(provider.auth_secret)
-        if source is not None:
-            return source
+        if provider.auth_secret is not None:
+            source = self.secrets_broker.secret_source(provider.auth_secret)
+            if source is not None:
+                return source
         if self._subscription_auth_configured(provider):
             return "subscription_cli"
+        if self._external_auth_configured(provider):
+            return "official_cli"
         return None
 
     def _auth_methods(self, provider: ModelProviderSpec) -> list[str]:
-        methods = ["none"] if provider.auth_secret is None else ["api_key"]
+        methods = ["api_key"] if provider.auth_secret is not None else []
+        if provider.auth_secret is None and provider.external_auth_method is None:
+            methods.append("none")
         if self._subscription_auth_supported(provider):
             methods.append("subscription")
         for profile in self._external_auth_profiles(provider.provider):
@@ -633,6 +642,11 @@ class ModelRegistry:
 
     def _external_auth_profiles(self, provider_name: str) -> list[dict[str, Any]]:
         return [profile for profile in EXTERNAL_AUTH_HANDOFF_PROFILES.values() if str(profile.get("provider") or "") == provider_name]
+
+    def _external_auth_configured(self, provider: ModelProviderSpec) -> bool:
+        if provider.external_auth_method is None:
+            return False
+        return self._external_auth_link(provider.provider, provider.external_auth_method) is not None
 
     def _external_auth_status(self, profile: dict[str, Any]) -> dict[str, Any]:
         provider_name = str(profile.get("provider") or "")
@@ -810,7 +824,7 @@ EXTERNAL_AUTH_HANDOFF_PROFILES: dict[str, dict[str, Any]] = {
         "external_status_command_argv": ("aws", "sts", "get-caller-identity"),
         "setup_required": "aws configure sso",
         "provider_token_source": "official AWS CLI SSO cache",
-        "aegis_bridge_status": "official_cli_handoff_only",
+        "aegis_bridge_status": "official_cli_bridge_available",
         "interactive": True,
         "next_steps": [
             "Configure an AWS SSO profile with aws configure sso before running the handoff.",
@@ -1325,6 +1339,7 @@ def default_providers(*, custom_base_url: str | None = None, azure_foundry_base_
         ModelProviderSpec("zai", ("glm-5.1", "glm-5", "glm-4.7", "glm-4.6", "glm-4.5"), "GLM_API_KEY", "https://api.z.ai/api/paas/v4", False, True, True, False, 0.0, 0.0, 128000, "openai_compatible"),
         ModelProviderSpec("qwen", ("qwen-plus", "qwen-max", "qwen-turbo"), "DASHSCOPE_API_KEY", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", False, True, True, False, 0.0, 0.0, 128000, "openai_compatible"),
         ModelProviderSpec("azure-foundry", ("*",), "AZURE_OPENAI_API_KEY", azure_foundry_base_url, False, True, True, True, 0.0, 0.0, 128000, "openai_compatible"),
+        ModelProviderSpec("aws-bedrock", ("*",), None, None, False, True, True, False, 0.0, 0.0, 200000, "bedrock_converse", "cloud_identity"),
         ModelProviderSpec("ollama", ("llama3", "llama3.1", "mistral", "mixtral", "phi3", "gemma2", "codellama", "deepseek-coder"), None, "http://localhost:11434", True, False, context_window_tokens=8192, tokenizer_profile="llama"),
         ModelProviderSpec("lmstudio", ("local",), None, "http://localhost:1234/v1", True, False, context_window_tokens=8192, tokenizer_profile="openai_compatible"),
         ModelProviderSpec("custom", ("*",), "CUSTOM_API_KEY", custom_base_url, False, True, context_window_tokens=8192, tokenizer_profile="openai_compatible"),

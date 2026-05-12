@@ -54,6 +54,8 @@ class LiveModelClient:
     def chat(self, route: ModelRoute, messages: list[dict[str, str]], *, temperature: float = 0.2) -> ModelInvocationResult:
         if route.auth_method == "subscription_cli":
             return self._chat_subscription_cli(route, messages, temperature=temperature)
+        if route.provider.provider == "aws-bedrock":
+            return self._chat_aws_bedrock_cli(route, messages, temperature=temperature)
         if route.provider.provider == "azure-foundry":
             return self._chat_azure_foundry(route, messages, temperature=temperature)
         if route.provider.provider in OPENAI_COMPATIBLE_PROVIDERS:
@@ -190,6 +192,71 @@ class LiveModelClient:
             input_tokens=max(1, len(prompt) // 4),
             output_tokens=max(1, len(content) // 4),
             raw_usage={"source": "subscription_cli", "bridge": "claude_print", "token_counts": "estimated"},
+        )
+
+    def _chat_aws_bedrock_cli(
+        self,
+        route: ModelRoute,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+    ) -> ModelInvocationResult:
+        if route.auth_method != "cloud_identity_cli":
+            raise ValueError("aws-bedrock provider requires verified cloud identity login")
+        executable_path = shutil.which("aws")
+        if executable_path is None:
+            raise RuntimeError("official AWS CLI is not installed")
+        system, bedrock_messages = _bedrock_messages(messages)
+        inference_config = {"maxTokens": 4096, "temperature": temperature}
+        command = [
+            executable_path,
+            "bedrock-runtime",
+            "converse",
+            "--model-id",
+            route.model,
+            "--messages",
+            json.dumps(bedrock_messages, separators=(",", ":")),
+            "--inference-config",
+            json.dumps(inference_config, separators=(",", ":")),
+            "--output",
+            "json",
+            "--no-cli-pager",
+        ]
+        if system:
+            command.extend(["--system", json.dumps(system, separators=(",", ":"))])
+        with tempfile.TemporaryDirectory(prefix="aegis-bedrock-model-") as temp:
+            try:
+                completed = subprocess.run(
+                    tuple(command),
+                    text=True,
+                    capture_output=True,
+                    timeout=self.timeout_seconds,
+                    check=False,
+                    cwd=Path(temp),
+                )  # noqa: S603 - argv is a fixed official provider CLI bridge.
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError("official AWS CLI Bedrock invocation timed out") from exc
+            except OSError as exc:
+                raise RuntimeError(f"official AWS CLI Bedrock invocation failed: {exc}") from exc
+        if completed.returncode != 0:
+            raise RuntimeError(f"official AWS CLI Bedrock invocation exited with {completed.returncode}")
+        if not completed.stdout.strip():
+            raise RuntimeError("official AWS CLI Bedrock invocation returned no response")
+        response = json.loads(completed.stdout)
+        if not isinstance(response, dict):
+            raise RuntimeError("official AWS CLI Bedrock invocation returned invalid JSON")
+        output = response.get("output", {}) if isinstance(response.get("output", {}), dict) else {}
+        message = output.get("message", {}) if isinstance(output.get("message", {}), dict) else {}
+        usage = response.get("usage", {}) if isinstance(response.get("usage", {}), dict) else {}
+        raw_usage = dict(usage)
+        raw_usage.update({"source": "official_cli", "bridge": "aws_bedrock_runtime_converse"})
+        return ModelInvocationResult(
+            provider=route.provider.provider,
+            model=route.model,
+            content=_bedrock_content_text(message.get("content", [])),
+            input_tokens=int(usage.get("inputTokens", 0) or 0),
+            output_tokens=int(usage.get("outputTokens", 0) or 0),
+            raw_usage=raw_usage,
         )
 
     def _chat_openai_compatible(
@@ -548,6 +615,34 @@ def _google_parts_text(parts: Any) -> str:
     if not isinstance(parts, list):
         return ""
     return "\n".join(str(part.get("text", "")).strip() for part in parts if isinstance(part, dict) and str(part.get("text", "")).strip()).strip()
+
+
+def _bedrock_messages(messages: list[dict[str, str]]) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+    system_parts: list[str] = []
+    routed: list[dict[str, Any]] = []
+    for message in messages:
+        role = str(message.get("role", "user"))
+        content = str(message.get("content", ""))
+        if not content:
+            continue
+        if role == "system":
+            system_parts.append(content)
+            continue
+        next_role = "assistant" if role == "assistant" else "user"
+        block = {"text": content}
+        if routed and routed[-1]["role"] == next_role:
+            routed[-1]["content"].append(block)
+        else:
+            routed.append({"role": next_role, "content": [block]})
+    if not routed:
+        routed.append({"role": "user", "content": [{"text": "[no user content]"}]})
+    return [{"text": "\n\n".join(system_parts)}] if system_parts else [], routed
+
+
+def _bedrock_content_text(content: Any) -> str:
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(str(block.get("text", "")).strip() for block in content if isinstance(block, dict) and str(block.get("text", "")).strip()).strip()
 
 
 def _content_blocks_text(content: Any) -> str:
