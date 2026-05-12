@@ -182,6 +182,7 @@ const refresh = async () => {
   try {
     const [
       dashboard,
+      remoteControl,
       connectors,
       policy,
       policyBundles,
@@ -215,6 +216,7 @@ const refresh = async () => {
       evaluationReadiness,
     ] = await Promise.all([
       api("/dashboard"),
+      api("/remote-control/status"),
       api("/connectors"),
       api("/policy"),
       api("/policy/bundles"),
@@ -250,6 +252,15 @@ const refresh = async () => {
 
     syncPendingSkillEnableApprovals([...(approvedApprovals.approvals || []), ...(approvals.approvals || [])]);
     renderMetrics(dashboard);
+    setList("remote-control-pairings", remoteControl.pairings || [], (x) => ({
+      title: x.label || x.id,
+      detail: `Session ${x.session_id || "any"} · task ${x.task_id || "any"} · actions ${(x.allowed_actions || []).join(", ") || "none"}`,
+      meta: `${x.status} · expires ${x.expires_at}`,
+      tone: x.status === "active" ? "ready" : "attention",
+      actions: x.status === "active"
+        ? `<button type="button" class="secondary" data-remote-control-revoke="${escapeHtml(x.id)}">Revoke</button>`
+        : "",
+    }), "No remote-control pairings");
     setFeatureGrid("security-controls", dashboard.security_controls, (x) => ({
       title: x.name,
       detail: x.detail,
@@ -1494,6 +1505,14 @@ const renderPluginOutput = (payload) => {
   `;
 };
 
+const renderRemoteControlOutput = (payload) => {
+  const node = document.getElementById("remote-control-output");
+  node.innerHTML = `
+    <strong>${text(payload.pairing?.label || payload.pairing?.id || payload.status || "Remote control")}</strong>
+    <code>${text(JSON.stringify(payload, null, 2))}</code>
+  `;
+};
+
 const renderChannelOutput = (payload) => {
   const node = document.getElementById("channel-render-output");
   node.innerHTML = `
@@ -2251,6 +2270,38 @@ document.getElementById("policy-promotions").addEventListener("click", async () 
 
 document.getElementById("policy-activate-due").addEventListener("click", async () => {
   renderPolicyOutput(await api("/policy/activate-due", { method: "POST", body: JSON.stringify({}) }));
+  await refresh();
+});
+
+document.getElementById("remote-control-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const allowedActions = document.getElementById("remote-control-actions").value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const ttl = Number.parseInt(document.getElementById("remote-control-ttl").value || "600", 10);
+  const result = await api("/remote-control/pair", {
+    method: "POST",
+    body: JSON.stringify({
+      label: document.getElementById("remote-control-label").value || "web pairing",
+      session_id: document.getElementById("remote-control-session-id").value || undefined,
+      task_id: document.getElementById("remote-control-task-id").value || undefined,
+      allowed_actions: allowedActions,
+      expires_in_seconds: Number.isFinite(ttl) ? ttl : 600,
+    }),
+  });
+  renderRemoteControlOutput(result);
+  await refresh();
+});
+
+document.getElementById("remote-control-pairings").addEventListener("click", async (event) => {
+  const pairingId = event.target.dataset.remoteControlRevoke;
+  if (!pairingId) return;
+  const result = await api("/remote-control/revoke", {
+    method: "POST",
+    body: JSON.stringify({ pairing_id: pairingId }),
+  });
+  renderRemoteControlOutput(result);
   await refresh();
 });
 

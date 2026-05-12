@@ -474,6 +474,25 @@
         <section class="panel span-2" data-section="automation">
           <div class="panel-header">
             <div>
+              <p class="eyebrow">Remote Control</p>
+              <h3>Pairing</h3>
+            </div>
+          </div>
+          <form id="remote-control-form" class="inline-form two-col">
+            <input id="remote-control-label" placeholder="phone or tablet">
+            <input id="remote-control-session-id" placeholder="session id">
+            <input id="remote-control-task-id" placeholder="task id">
+            <input id="remote-control-actions" placeholder="status,events,pause,cancel" value="status,events,pause,cancel">
+            <input id="remote-control-ttl" type="number" min="60" max="3600" value="600" placeholder="ttl seconds">
+            <button type="submit">Create Pairing</button>
+          </form>
+          <div id="remote-control-pairings" class="list compact-list"></div>
+          <div id="remote-control-output" class="evidence-block"></div>
+        </section>
+
+        <section class="panel span-2" data-section="automation">
+          <div class="panel-header">
+            <div>
               <p class="eyebrow">Automation</p>
               <h3>Schedules</h3>
             </div>

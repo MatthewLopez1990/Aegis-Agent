@@ -601,6 +601,31 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertNotIn("x.commands", script)
         self.assertNotIn("x.secrets", script)
 
+    def test_web_remote_control_panel_exposes_scoped_pairing_lifecycle(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "src" / "aegis" / "web" / "static"
+        markup = (root / "index.html").read_text(encoding="utf-8")
+        script = (root / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="remote-control-form"', markup)
+        self.assertIn('id="remote-control-label"', markup)
+        self.assertIn('id="remote-control-session-id"', markup)
+        self.assertIn('id="remote-control-task-id"', markup)
+        self.assertIn('id="remote-control-actions"', markup)
+        self.assertIn('id="remote-control-ttl"', markup)
+        self.assertIn('id="remote-control-pairings"', markup)
+        self.assertIn('id="remote-control-output"', markup)
+        self.assertIn('api("/remote-control/status")', script)
+        self.assertIn('api("/remote-control/pair"', script)
+        self.assertIn('api("/remote-control/revoke"', script)
+        self.assertIn('setList("remote-control-pairings"', script)
+        self.assertIn("allowed_actions", script)
+        self.assertIn("expires_in_seconds", script)
+        self.assertIn("data-remote-control-revoke", script)
+        self.assertIn('document.getElementById("remote-control-form").addEventListener("submit"', script)
+        self.assertIn('document.getElementById("remote-control-pairings").addEventListener("click"', script)
+        self.assertIn("renderRemoteControlOutput", script)
+        self.assertNotIn("token_sha256", script)
+
     def test_web_channel_control_exposes_live_channel_sends(self) -> None:
         root = Path(__file__).resolve().parents[1] / "src" / "aegis" / "web" / "static"
         markup = (root / "index.html").read_text(encoding="utf-8")
