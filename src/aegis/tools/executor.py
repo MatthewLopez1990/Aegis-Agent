@@ -855,12 +855,12 @@ class BuiltinToolExecutor:
         source_file: dict[str, Any] | None = None
         mask_file: dict[str, Any] | None = None
         audio_file: dict[str, Any] | None = None
-        if adapter_name in {"openai_image_edit", "google_imagen_edit", "google_imagen_upscale"}:
+        if adapter_name in {"openai_image_edit", "google_imagen_edit", "google_imagen_upscale", "google_imagen_product"}:
             try:
                 root = _workspace_root(self.connectors)
                 source_file = _live_media_source_file(root=root, source_path=source_path, field="image", provider_adapter=adapter_name)
                 mask_path = str(params.get("mask_path") or params.get("mask") or "").strip()
-                if mask_path and adapter_name in {"openai_image_edit", "google_imagen_edit"}:
+                if mask_path and adapter_name in {"openai_image_edit", "google_imagen_edit", "google_imagen_product"}:
                     mask_file = _live_media_source_file(root=root, source_path=mask_path, field="mask", provider_adapter=adapter_name)
             except ToolExecutionError as exc:
                 return {
@@ -3397,6 +3397,10 @@ def _live_media_provider_adapter(*, name: str, params: dict[str, Any]) -> dict[s
         if name != "image_edit":
             return {"name": raw, "error": "google_imagen_upscale provider adapter currently supports image_edit only"}
         return {"name": "google_imagen_upscale", "error": None}
+    if raw in {"google_imagen_product", "vertex_imagen_product", "vertex_ai_imagen_product", "imagen_product", "imagen_product_edit", "google_vertex_imagen_product", "google_imagen_product_image"}:
+        if name != "image_edit":
+            return {"name": raw, "error": "google_imagen_product provider adapter currently supports image_edit only"}
+        return {"name": "google_imagen_product", "error": None}
     if raw in {"openai_image_edit", "openai_images_edit", "openai_images_edits", "openai_compatible_image_edit"}:
         if name != "image_edit":
             return {"name": raw, "error": "openai_image_edit provider adapter currently supports image_edit only"}
@@ -3731,6 +3735,124 @@ def _live_media_request_payload(
             if edit_mode not in allowed_edit_modes:
                 raise ToolExecutionError("editMode must be a supported Google Imagen edit mode")
             parameters["editMode"] = edit_mode
+        base_steps = params.get("base_steps", params.get("baseSteps"))
+        if base_steps is not None:
+            try:
+                parsed_steps = int(base_steps)
+            except (TypeError, ValueError) as exc:
+                raise ToolExecutionError("baseSteps must be an integer") from exc
+            if parsed_steps < 1 or parsed_steps > 150:
+                raise ToolExecutionError("baseSteps must be between 1 and 150")
+            parameters["editConfig"] = {"baseSteps": parsed_steps}
+        guidance_scale = params.get("guidance_scale", params.get("guidanceScale"))
+        if guidance_scale is not None:
+            try:
+                parsed_guidance = int(guidance_scale)
+            except (TypeError, ValueError) as exc:
+                raise ToolExecutionError("guidanceScale must be an integer") from exc
+            if parsed_guidance < 0 or parsed_guidance > 500:
+                raise ToolExecutionError("guidanceScale must be between 0 and 500")
+            parameters["guidanceScale"] = parsed_guidance
+        for key in ("addWatermark", "includeRaiReason", "includeSafetyAttributes"):
+            value = params.get(key, params.get(_camel_to_snake(key)))
+            if value is not None:
+                parameters[key] = _as_bool(value, label=key)
+        for key in ("language", "negativePrompt", "personGeneration", "safetySetting"):
+            value = str(params.get(key) or params.get(_camel_to_snake(key)) or "").strip()
+            if value:
+                parameters[key] = value[:2000] if key == "negativePrompt" else value[:80]
+        seed = params.get("seed")
+        if seed is not None:
+            try:
+                parsed_seed = int(seed)
+            except (TypeError, ValueError) as exc:
+                raise ToolExecutionError("seed must be an integer") from exc
+            if parsed_seed < 0 or parsed_seed > 4294967295:
+                raise ToolExecutionError("seed must be between 0 and 4294967295")
+            parameters["seed"] = parsed_seed
+        output_mime = str(params.get("output_mime_type") or params.get("mime_type") or params.get("mimeType") or "").strip()
+        compression_quality = params.get("compression_quality", params.get("compressionQuality"))
+        if output_mime or compression_quality is not None:
+            output_options: dict[str, Any] = {}
+            if output_mime:
+                output_options["mimeType"] = output_mime[:80]
+            if compression_quality is not None:
+                try:
+                    parsed_quality = int(compression_quality)
+                except (TypeError, ValueError) as exc:
+                    raise ToolExecutionError("compressionQuality must be an integer") from exc
+                if parsed_quality < 0 or parsed_quality > 100:
+                    raise ToolExecutionError("compressionQuality must be between 0 and 100")
+                output_options["compressionQuality"] = parsed_quality
+            parameters["outputOptions"] = output_options
+        return {"instances": [instance], "parameters": parameters}
+    if provider_adapter == "google_imagen_product":
+        if source_file is None:
+            raise ToolExecutionError("google_imagen_product requires a workspace-scoped source image")
+        mask_mode = str(params.get("mask_mode") or params.get("maskMode") or "MASK_MODE_BACKGROUND")[:80]
+        allowed_mask_modes = {
+            "MASK_MODE_USER_PROVIDED",
+            "MASK_MODE_BACKGROUND",
+            "MASK_MODE_FOREGROUND",
+            "MASK_MODE_SEMANTIC",
+        }
+        if mask_mode not in allowed_mask_modes:
+            raise ToolExecutionError("maskMode must be a supported Google Imagen mask mode")
+        mask_config: dict[str, Any] = {"maskMode": mask_mode}
+        dilation = params.get("mask_dilation", params.get("dilation"))
+        if dilation is not None:
+            mask_config["dilation"] = _bounded_float(dilation, minimum=0.0, maximum=1.0, label="mask_dilation")
+        mask_classes = _google_imagen_mask_classes(params.get("mask_classes", params.get("maskClasses")))
+        if mask_classes:
+            mask_config["maskClasses"] = mask_classes
+        mask_reference: dict[str, Any] = {
+            "referenceType": "REFERENCE_TYPE_MASK",
+            "referenceId": 2,
+            "maskImageConfig": mask_config,
+        }
+        if mask_file:
+            mask_reference["referenceImage"] = {
+                "bytesBase64Encoded": "<redacted>",
+                "sha256": str(mask_file["sha256"]),
+                "mimeType": str(mask_file["mime_type"]),
+                "byteCount": int(mask_file["bytes"]),
+            }
+        reference_images = [
+            {
+                "referenceType": "REFERENCE_TYPE_RAW",
+                "referenceId": 1,
+                "referenceImage": {
+                    "bytesBase64Encoded": "<redacted>",
+                    "sha256": str(source_file["sha256"]),
+                    "mimeType": str(source_file["mime_type"]),
+                    "byteCount": int(source_file["bytes"]),
+                },
+            },
+            mask_reference,
+        ]
+        instance = {"referenceImages": reference_images}
+        if prompt:
+            instance["prompt"] = prompt
+        parameters: dict[str, Any] = {"sampleCount": 1, "editMode": "EDIT_MODE_BGSWAP"}
+        sample_count = params.get("sample_count", params.get("sampleCount"))
+        if sample_count is not None:
+            try:
+                parsed_count = int(sample_count)
+            except (TypeError, ValueError) as exc:
+                raise ToolExecutionError("sampleCount must be an integer") from exc
+            if parsed_count < 1 or parsed_count > 4:
+                raise ToolExecutionError("sampleCount must be between 1 and 4")
+            parameters["sampleCount"] = parsed_count
+        edit_mode = str(params.get("edit_mode") or params.get("editMode") or "EDIT_MODE_BGSWAP").strip()
+        allowed_edit_modes = {
+            "EDIT_MODE_INPAINT_REMOVAL",
+            "EDIT_MODE_INPAINT_INSERTION",
+            "EDIT_MODE_BGSWAP",
+            "EDIT_MODE_OUTPAINT",
+        }
+        if edit_mode not in allowed_edit_modes:
+            raise ToolExecutionError("editMode must be a supported Google Imagen edit mode")
+        parameters["editMode"] = edit_mode
         base_steps = params.get("base_steps", params.get("baseSteps"))
         if base_steps is not None:
             try:
@@ -4119,6 +4241,11 @@ def _send_live_media_provider_request(
             return {"ok": False, "http_status": 0, "error": "google_imagen_upscale requires a workspace-scoped source image"}
         body = _encode_google_imagen_upscale_json(payload=payload, source_file=source_file)
         content_type = "application/json"
+    elif provider_adapter == "google_imagen_product":
+        if source_file is None:
+            return {"ok": False, "http_status": 0, "error": "google_imagen_product requires a workspace-scoped source image"}
+        body = _encode_google_imagen_product_json(payload=payload, source_file=source_file, mask_file=mask_file)
+        content_type = "application/json"
     elif provider_adapter == "elevenlabs_speech_to_speech":
         if audio_file is None:
             return {"ok": False, "http_status": 0, "error": "elevenlabs_speech_to_speech requires a workspace-scoped audio file"}
@@ -4137,7 +4264,7 @@ def _send_live_media_provider_request(
         headers["xi-api-key"] = token
     else:
         headers["Authorization"] = f"Bearer {token}"
-    if provider_adapter in {"stability_v1_text_to_image", "google_imagen", "google_imagen_edit", "google_imagen_upscale"}:
+    if provider_adapter in {"stability_v1_text_to_image", "google_imagen", "google_imagen_edit", "google_imagen_upscale", "google_imagen_product"}:
         headers["Accept"] = "application/json"
     if provider_adapter in {"elevenlabs_speech_to_speech", "elevenlabs_text_to_dialogue"}:
         headers["Accept"] = "audio/mpeg"
@@ -4219,7 +4346,7 @@ def _live_media_source_file(*, root: Path, source_path: str, field: str, provide
 
 
 def _source_image_upload_mime(content: bytes, *, provider_adapter: str = "openai_image_edit") -> tuple[str, str]:
-    google_imagen_source_adapter = provider_adapter in {"google_imagen_edit", "google_imagen_upscale"}
+    google_imagen_source_adapter = provider_adapter in {"google_imagen_edit", "google_imagen_upscale", "google_imagen_product"}
     if content.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png", "png"
     if content.startswith(b"\xff\xd8"):
@@ -4354,6 +4481,58 @@ def _encode_google_imagen_upscale_json(*, payload: dict[str, Any], source_file: 
             "bytesBase64Encoded": base64.b64encode(bytes(source_file["content"])).decode("ascii"),
         },
     }
+    actual_payload: dict[str, Any] = {"instances": [actual_instance]}
+    parameters = payload.get("parameters")
+    if isinstance(parameters, dict):
+        actual_payload["parameters"] = parameters
+    return json.dumps(actual_payload, sort_keys=True, default=str).encode("utf-8")
+
+
+def _encode_google_imagen_product_json(*, payload: dict[str, Any], source_file: dict[str, Any], mask_file: dict[str, Any] | None = None) -> bytes:
+    instances = payload.get("instances")
+    if not isinstance(instances, list) or not instances or not isinstance(instances[0], dict):
+        raise ToolExecutionError("google_imagen_product request payload must include one instance")
+    redacted_instance = instances[0]
+    reference_images = redacted_instance.get("referenceImages")
+    if not isinstance(reference_images, list) or not reference_images:
+        raise ToolExecutionError("google_imagen_product request payload must include referenceImages")
+    actual_references: list[dict[str, Any]] = []
+    for reference in reference_images:
+        if not isinstance(reference, dict):
+            continue
+        reference_type = str(reference.get("referenceType") or "")
+        if reference_type == "REFERENCE_TYPE_RAW":
+            actual_references.append(
+                {
+                    "referenceType": reference_type,
+                    "referenceId": reference.get("referenceId", 1),
+                    "referenceImage": {
+                        "bytesBase64Encoded": base64.b64encode(bytes(source_file["content"])).decode("ascii"),
+                    },
+                }
+            )
+            continue
+        if reference_type == "REFERENCE_TYPE_MASK":
+            actual_reference: dict[str, Any] = {
+                "referenceType": reference_type,
+                "referenceId": reference.get("referenceId", 2),
+            }
+            if mask_file is not None:
+                actual_reference["referenceImage"] = {
+                    "bytesBase64Encoded": base64.b64encode(bytes(mask_file["content"])).decode("ascii"),
+                }
+            mask_config = reference.get("maskImageConfig")
+            if isinstance(mask_config, dict):
+                actual_reference["maskImageConfig"] = mask_config
+            actual_references.append(actual_reference)
+    if not any(reference.get("referenceType") == "REFERENCE_TYPE_RAW" for reference in actual_references):
+        raise ToolExecutionError("google_imagen_product requires a raw source reference image")
+    if not any(reference.get("referenceType") == "REFERENCE_TYPE_MASK" for reference in actual_references):
+        raise ToolExecutionError("google_imagen_product requires a mask reference image config")
+    actual_instance: dict[str, Any] = {"referenceImages": actual_references}
+    prompt = redacted_instance.get("prompt")
+    if prompt:
+        actual_instance["prompt"] = str(prompt)
     actual_payload: dict[str, Any] = {"instances": [actual_instance]}
     parameters = payload.get("parameters")
     if isinstance(parameters, dict):

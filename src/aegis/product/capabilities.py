@@ -347,7 +347,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "session-bound run visibility",
             ],
             "security_delta": "Aegis defaults to mock or dry-run mode for broad-access capabilities until credentials, scopes, rollback, and approvals are explicit.",
-            "live_gap": "Mobile nodes, native desktop wrappers, and live third-party channel implementations remain staged; generic/OpenAI-style media plus Stability AI v1 image generation, Google Vertex Imagen image generation/edit/upscale, ElevenLabs TTS, ElevenLabs speech-to-speech, ElevenLabs text-to-dialogue, ElevenLabs instant voice cloning, and ElevenLabs speech-to-text are implemented, while additional provider-specific image, audio, and video adapters remain staged behind secure adapter work.",
+            "live_gap": "Mobile nodes, native desktop wrappers, and live third-party channel implementations remain staged; generic/OpenAI-style media plus Stability AI v1 image generation, Google Vertex Imagen image generation/edit/upscale/product background-swap, ElevenLabs TTS, ElevenLabs speech-to-speech, ElevenLabs text-to-dialogue, ElevenLabs instant voice cloning, and ElevenLabs speech-to-text are implemented, while additional provider-specific image, audio, and video adapters remain staged behind secure adapter work.",
             "target_requirements": [
                 "native_shell_depth",
                 "live_browser_automation",
@@ -643,6 +643,10 @@ def _live_gap_backlog(
                     "evidence": "approved provider-backed image upscale can send a Google Vertex Imagen upscale predict-style JSON request with a workspace-scoped source image and persist returned predictions[].bytesBase64Encoded artifacts without storing raw prompt, source bytes, response body, or secret values",
                 },
                 {
+                    "control": "google_imagen_product_provider_adapter",
+                    "evidence": "approved provider-backed product image edits can send a Google Vertex Imagen background-swap request with workspace-scoped source images, automatic or user-provided mask references, and returned predictions[].bytesBase64Encoded artifacts without storing raw prompt, source bytes, response body, or secret values",
+                },
+                {
                     "control": "openai_style_tts_provider_adapter",
                     "evidence": "approved provider-backed TTS can send an OpenAI-style speech request and persist the returned audio artifact without storing raw text, response body, or secret values",
                 },
@@ -703,6 +707,7 @@ def _live_gap_backlog(
                     {"adapter": "openai_image_edit", "tool": "image_edit", "response_shape": "data[].b64_json"},
                     {"adapter": "google_imagen_edit", "tool": "image_edit", "response_shape": "predictions[].bytesBase64Encoded"},
                     {"adapter": "google_imagen_upscale", "tool": "image_edit", "response_shape": "predictions[].bytesBase64Encoded"},
+                    {"adapter": "google_imagen_product", "tool": "image_edit", "response_shape": "predictions[].bytesBase64Encoded"},
                     {"adapter": "openai_tts", "tool": "tts", "response_shape": "binary_audio"},
                     {"adapter": "elevenlabs_tts", "tool": "tts", "response_shape": "binary_audio"},
                     {"adapter": "elevenlabs_speech_to_speech", "tool": "tts", "response_shape": "binary_audio"},
@@ -713,7 +718,7 @@ def _live_gap_backlog(
                     {"adapter": "openai_video", "tool": "video_generate", "response_shape": "job_lifecycle_and_bounded_artifacts"},
                 ],
                 "remaining_by_modality": {
-                    "image": ["provider-native product-image adapters"],
+                    "image": ["additional non-Google product-image adapters"],
                     "audio": ["additional non-ElevenLabs voice-cloning adapters"],
                     "video": ["additional provider-native video lifecycle adapters"],
                 },
@@ -759,6 +764,7 @@ def _live_gap_backlog(
                     "openai_style_image_edit_provider_adapter",
                     "google_imagen_edit_provider_adapter",
                     "google_imagen_upscale_provider_adapter",
+                    "google_imagen_product_provider_adapter",
                     "openai_style_tts_provider_adapter",
                     "elevenlabs_tts_provider_adapter",
                     "elevenlabs_speech_to_speech_provider_adapter",
