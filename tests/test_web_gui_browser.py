@@ -312,6 +312,7 @@ if (!release.includes("settings")) {
 api.merge([
   { command: "debug", label: "/debug", detail: "TUI diagnostics", kind: "palette", source: "tui" },
   { command: "submit", label: "/submit duplicate", detail: "duplicate should be ignored", kind: "palette" },
+  { command: "remote-control", label: "/remote-control", detail: "Remote action metadata", kind: "remote-control", section: "automation", source: "tui", surfaces: ["tui", "web_palette"], args: ["status", "directory"], flags: ["--pairing-id", "--limit"], requires_local_token: true, requires_remote_token: false, mutates: false, web_actions: [{ input: "status", method: "GET", path: "/remote-control/status", mutates: false }] },
   { command: "aegis-project-summary", label: "/aegis-project-summary", detail: "Skill command", kind: "palette", source: "skill" },
 ]);
 const debug = api.parse("/debug");
@@ -321,6 +322,10 @@ if (debug.kind !== "palette" || debug.command !== "debug") {
 const skill = api.matches("aegis-project").map((entry) => entry.command);
 if (!skill.includes("aegis-project-summary")) {
   throw new Error(`dynamic skill slash command missing: ${JSON.stringify(skill)}`);
+}
+const remote = api.parse("/remote-control status");
+if (remote.kind !== "remote-control" || remote.request !== "status" || !remote.webActions.length || !remote.args.includes("directory")) {
+  throw new Error(`/remote-control metadata did not merge: ${JSON.stringify(remote)}`);
 }
 const submitCount = api.commands().filter((entry) => entry.command === "submit").length;
 if (submitCount !== 1) {
@@ -354,12 +359,20 @@ const loadTaskEvidence = async (taskId) => calls.push(["evidence", taskId, state
 const renderTaskNotice = (title, detail) => calls.push(["notice", title, detail, state.activeSection]);
 const renderTaskError = (message) => calls.push(["error", message]);
 const resumeTask = async (taskId) => calls.push(["resume", taskId]);
+const renderRemoteControlOutput = (payload) => calls.push(["remote-output", payload.status || payload.pairing?.id || "payload"]);
+const api = async (path) => {
+  calls.push(["api", path]);
+  return { status: path.includes("/directory") ? "scoped_directory" : "remote_control_status" };
+};
 eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = executeLocalSlashCommand;`);
 (async () => {
   await executeLocalSlashCommand({ kind: "task-inspection", command: "status", taskView: "status", request: "task-1" });
   await executeLocalSlashCommand({ kind: "task-inspection", command: "events", taskView: "events", request: "" });
   await executeLocalSlashCommand({ kind: "task-inspection", command: "timeline", taskView: "timeline", request: "task-3 extra" });
   await executeLocalSlashCommand({ kind: "task-inspection", command: "evidence", taskView: "evidence", request: "task-4" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "status" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "directory --pairing-id pair-1 --limit 3" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", detail: "Open remote control", request: "" });
   state.lastTask = null;
   state.lastEvents = null;
   state.lastEvidence = null;
@@ -370,6 +383,16 @@ eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = execute
     ["events", "latest-task", "activity"],
     ["timeline", "task-3", "activity"],
     ["evidence", "task-4", "activity"],
+    ["section", "automation"],
+    ["api", "/remote-control/status"],
+    ["remote-output", "remote_control_status"],
+    ["notice", "/remote-control", "Remote control status loaded.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/directory?pairing_id=pair-1&limit=3"],
+    ["remote-output", "scoped_directory"],
+    ["notice", "/remote-control", "Remote control directory loaded.", "automation"],
+    ["section", "automation"],
+    ["notice", "/remote-control", "Open remote control", "automation"],
     ["section", "activity"],
     ["notice", "/status [task_id]", "Open a task or include a task id, then run this command again.", "activity"],
   ];

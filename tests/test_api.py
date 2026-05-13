@@ -1153,6 +1153,18 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertIn("debug", command_names)
                 self.assertIn("remote-control", command_names)
                 self.assertIn("aegis-project-summary", command_names)
+                command_rows = {row["command"]: row for row in command_catalog["commands"]}
+                self.assertEqual(command_rows["remote-control"]["kind"], "remote-control")
+                self.assertIn("status", command_rows["remote-control"]["args"])
+                self.assertIn("directory", command_rows["remote-control"]["args"])
+                self.assertIn("--pairing-id", command_rows["remote-control"]["flags"])
+                self.assertTrue(command_rows["remote-control"]["requires_local_token"])
+                self.assertFalse(command_rows["remote-control"]["requires_remote_token"])
+                self.assertFalse(command_rows["remote-control"]["mutates"])
+                remote_actions = {action["input"]: action for action in command_rows["remote-control"]["web_actions"]}
+                self.assertEqual(remote_actions["status"]["path"], "/remote-control/status")
+                self.assertEqual(remote_actions["directory"]["path"], "/remote-control/directory")
+                self.assertFalse(remote_actions["status"]["mutates"])
                 self.assertIn("sessions", sessions)
                 self.assertEqual(policy["profile"]["raw_secret_exposure"], "deny")
                 self.assertIn("raw_secret_exposure", policy["immutable_deny"])

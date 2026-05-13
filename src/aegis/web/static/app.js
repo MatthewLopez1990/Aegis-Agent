@@ -79,6 +79,13 @@ const normalizeWebSlashCommand = (entry) => {
     kind: entry.kind || "palette",
     section: entry.section || "settings",
     source: entry.source || "web",
+    surfaces: Array.isArray(entry.surfaces) ? entry.surfaces.map(String) : ["web"],
+    args: Array.isArray(entry.args) ? entry.args.map(String) : [],
+    flags: Array.isArray(entry.flags) ? entry.flags.map(String) : [],
+    requiresLocalToken: Boolean(entry.requires_local_token ?? entry.requiresLocalToken),
+    requiresRemoteToken: Boolean(entry.requires_remote_token ?? entry.requiresRemoteToken),
+    mutates: Boolean(entry.mutates),
+    webActions: Array.isArray(entry.web_actions) ? entry.web_actions : Array.isArray(entry.webActions) ? entry.webActions : [],
     acceptsRequest: Boolean(entry.acceptsRequest),
   };
 };
@@ -91,7 +98,24 @@ const mergeWebSlashCommands = (commands = []) => {
     .filter(Boolean)
     .forEach((entry) => {
       const terms = slashCommandTerms(entry);
-      if (terms.some((term) => knownTerms.has(term))) return;
+      const existing = merged.find((candidate) => terms.some((term) => slashCommandTerms(candidate).includes(term)));
+      if (existing) {
+        if (entry.webActions.length) {
+          existing.aliases = [...new Set([...(existing.aliases || []), ...(entry.aliases || [])])];
+          existing.detail = entry.detail || existing.detail;
+          existing.kind = entry.kind || existing.kind;
+          existing.section = entry.section || existing.section;
+          existing.source = entry.source || existing.source;
+          existing.surfaces = entry.surfaces.length ? entry.surfaces : existing.surfaces;
+          existing.args = entry.args.length ? entry.args : existing.args;
+          existing.flags = entry.flags.length ? entry.flags : existing.flags;
+          existing.requiresLocalToken = entry.requiresLocalToken;
+          existing.requiresRemoteToken = entry.requiresRemoteToken;
+          existing.mutates = entry.mutates;
+          existing.webActions = entry.webActions;
+        }
+        return;
+      }
       terms.forEach((term) => knownTerms.add(term));
       merged.push(entry);
     });
@@ -1789,6 +1813,44 @@ const selectedTaskId = () =>
 
 const slashTaskId = (parsed) => String(parsed.request || "").trim().split(/\s+/, 1)[0] || selectedTaskId();
 
+const remoteControlSlashRequest = (request) => {
+  const parts = String(request || "").trim().split(/\s+/).filter(Boolean);
+  const action = (parts.shift() || "").toLowerCase();
+  const query = new URLSearchParams();
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (part === "--pairing-id" && parts[index + 1]) {
+      query.set("pairing_id", parts[index + 1]);
+      index += 1;
+    } else if (part === "--limit" && parts[index + 1]) {
+      query.set("limit", parts[index + 1]);
+      index += 1;
+    } else if (action === "directory" && !part.startsWith("--") && !query.has("pairing_id")) {
+      query.set("pairing_id", part);
+    }
+  }
+  return { action, query: query.toString() };
+};
+
+const executeRemoteControlSlashCommand = async (parsed) => {
+  const { action, query } = remoteControlSlashRequest(parsed.request);
+  if (!action) return false;
+  let path = "";
+  if (action === "status") {
+    path = "/remote-control/status";
+  } else if (action === "directory") {
+    path = `/remote-control/directory${query ? `?${query}` : ""}`;
+  } else {
+    return false;
+  }
+  state.activeSection = "automation";
+  applySectionVisibility();
+  const payload = await api(path);
+  renderRemoteControlOutput(payload);
+  renderTaskNotice(parsed.label || "/remote-control", `Remote control ${action} loaded.`);
+  return true;
+};
+
 const executeLocalSlashCommand = async (parsed) => {
   if (parsed.kind === "resume") {
     if (!state.lastTask?.id) {
@@ -1821,6 +1883,13 @@ const executeLocalSlashCommand = async (parsed) => {
       return;
     }
     await loadTaskEvidence(taskId);
+    return;
+  }
+  if (parsed.command === "remote-control") {
+    if (String(parsed.request || "").trim() && await executeRemoteControlSlashCommand(parsed)) return;
+    state.activeSection = parsed.section || "automation";
+    applySectionVisibility();
+    renderTaskNotice(parsed.label || "/remote-control", parsed.detail || "Open remote pairing and relay controls.");
     return;
   }
   if (parsed.kind === "section") {

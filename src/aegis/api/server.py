@@ -93,6 +93,13 @@ def _web_command_catalog(orchestrator: Any) -> dict[str, Any]:
                         "section": _command_group_section(group),
                         "group": group.lower(),
                         "source": "tui",
+                        "surfaces": ["tui", "web_palette"],
+                        "args": [],
+                        "flags": [],
+                        "requires_local_token": True,
+                        "requires_remote_token": False,
+                        "mutates": False,
+                        "web_actions": [],
                     },
                 )
     for command in sorted(top_level):
@@ -106,7 +113,31 @@ def _web_command_catalog(orchestrator: Any) -> dict[str, Any]:
                 "section": "settings",
                 "group": "all",
                 "source": "tui",
+                "surfaces": ["tui", "web_palette"],
+                "args": [],
+                "flags": [],
+                "requires_local_token": True,
+                "requires_remote_token": False,
+                "mutates": False,
+                "web_actions": [],
             },
+        )
+    if "remote-control" in command_rows:
+        command_rows["remote-control"].update(
+            {
+                "kind": "remote-control",
+                "detail": "Open remote pairing controls or run read-only remote-control status/directory actions",
+                "section": "automation",
+                "args": ["status", "directory"],
+                "flags": ["--pairing-id", "--limit"],
+                "requires_local_token": True,
+                "requires_remote_token": False,
+                "mutates": False,
+                "web_actions": [
+                    {"input": "status", "method": "GET", "path": "/remote-control/status", "mutates": False},
+                    {"input": "directory", "method": "GET", "path": "/remote-control/directory", "mutates": False},
+                ],
+            }
         )
     skill_rows: list[dict[str, Any]] = []
     for skill in orchestrator.skills.list_public():
@@ -122,6 +153,13 @@ def _web_command_catalog(orchestrator: Any) -> dict[str, Any]:
                     "section": "tools",
                     "group": "skills",
                     "source": "skill",
+                    "surfaces": ["tui", "web_palette"],
+                    "args": [],
+                    "flags": [],
+                    "requires_local_token": True,
+                    "requires_remote_token": False,
+                    "mutates": False,
+                    "web_actions": [],
                 }
             )
     return {
