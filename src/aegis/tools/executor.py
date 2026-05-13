@@ -729,6 +729,7 @@ class BuiltinToolExecutor:
         adapter_name = str(provider_adapter["name"] or "generic")
         source_file: dict[str, Any] | None = None
         mask_file: dict[str, Any] | None = None
+        audio_file: dict[str, Any] | None = None
         if adapter_name in {"openai_image_edit", "google_imagen_edit", "google_imagen_upscale"}:
             try:
                 root = _workspace_root(self.connectors)
@@ -745,13 +746,26 @@ class BuiltinToolExecutor:
                     "reason": str(redact(str(exc))),
                     "required_controls": _live_media_required_controls(),
                 }
+        if adapter_name == "elevenlabs_speech_to_speech":
+            try:
+                root = _workspace_root(self.connectors)
+                audio_file = _live_media_audio_file(root=root, audio_path=str(params.get("audio_path") or params.get("source_audio_path") or params.get("path") or ""), provider_adapter=adapter_name)
+            except ToolExecutionError as exc:
+                return {
+                    "ok": False,
+                    "tool": name,
+                    "mode": "live_media_provider",
+                    "status": "invalid_source",
+                    "reason": str(redact(str(exc))),
+                    "required_controls": _live_media_required_controls(),
+                }
         token_secret = str(params.get("token_secret") or "AEGIS_MEDIA_PROVIDER_TOKEN")
         handle = self.secrets_broker.request_handle(name=token_secret, requester="media_provider", reason=f"{name} provider-backed artifact", scopes=("media:execute",))
         if not handle.present:
             return {"ok": False, "tool": name, "mode": "live_media_provider", "status": "not_configured", "reason": f"secret {token_secret!r} is not configured", "required_controls": _live_media_required_controls()}
         token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="media_provider")
-        request_payload = _live_media_request_payload(name=name, prompt=prompt, text=text, source_path=source_path, params=params, provider_adapter=adapter_name, source_file=source_file, mask_file=mask_file)
-        live_result = _send_live_media_provider_request(url=provider_url, token=token, tool=name, payload=request_payload, provider_adapter=adapter_name, source_file=source_file, mask_file=mask_file)
+        request_payload = _live_media_request_payload(name=name, prompt=prompt, text=text, source_path=source_path, params=params, provider_adapter=adapter_name, source_file=source_file, mask_file=mask_file, audio_file=audio_file)
+        live_result = _send_live_media_provider_request(url=provider_url, token=token, tool=name, payload=request_payload, provider_adapter=adapter_name, source_file=source_file, mask_file=mask_file, audio_file=audio_file)
         if not live_result["ok"]:
             return {
                 "ok": False,
@@ -775,6 +789,8 @@ class BuiltinToolExecutor:
             explicit_reads.append("source_image")
         if mask_file is not None:
             explicit_reads.append("mask_image")
+        if audio_file is not None:
+            explicit_reads.append("source_audio")
         sandbox_receipt = _media_sandbox_receipt(
             tool=name,
             mode=f"live_provider_{extension}",
@@ -785,7 +801,7 @@ class BuiltinToolExecutor:
             "mime_type": mime_type,
             "prompt_length": len(prompt),
             "text_length": len(text),
-            "source_present": bool(source_path),
+            "source_present": bool(source_path or audio_file),
             "provider_adapter": adapter_name,
             "provider_receipt": provider_receipt,
         }
@@ -3268,6 +3284,10 @@ def _live_media_provider_adapter(*, name: str, params: dict[str, Any]) -> dict[s
         if name != "tts":
             return {"name": raw, "error": "elevenlabs_tts provider adapter currently supports tts only"}
         return {"name": "elevenlabs_tts", "error": None}
+    if raw in {"elevenlabs_speech_to_speech", "elevenlabs_sts", "elevenlabs_voice_changer", "eleven_labs_speech_to_speech", "eleven_labs_sts"}:
+        if name != "tts":
+            return {"name": raw, "error": "elevenlabs_speech_to_speech provider adapter currently supports tts only"}
+        return {"name": "elevenlabs_speech_to_speech", "error": None}
     if raw in {"openai_transcription", "openai_transcriptions", "openai_audio_transcription", "openai_compatible_transcription"}:
         if name != "voice_transcribe":
             return {"name": raw, "error": "openai_transcription provider adapter currently supports voice_transcribe only"}
@@ -3370,6 +3390,7 @@ def _live_media_request_payload(
     provider_adapter: str,
     source_file: dict[str, Any] | None = None,
     mask_file: dict[str, Any] | None = None,
+    audio_file: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if provider_adapter == "openai_images":
         payload: dict[str, Any] = {
@@ -3694,6 +3715,20 @@ def _live_media_request_payload(
         if language_code:
             payload["language_code"] = language_code[:40]
         return payload
+    if provider_adapter == "elevenlabs_speech_to_speech":
+        if audio_file is None:
+            raise ToolExecutionError("elevenlabs_speech_to_speech requires a workspace-scoped audio file")
+        payload = {
+            "model_id": str(params.get("model_id") or params.get("model") or "eleven_english_sts_v2")[:200],
+            "audio_present": True,
+            "audio_sha256": str(audio_file["sha256"]),
+            "audio_mime_type": str(audio_file["mime_type"]),
+            "audio_bytes": int(audio_file["bytes"]),
+        }
+        remove_noise = params.get("remove_background_noise", params.get("removeBackgroundNoise"))
+        if remove_noise is not None:
+            payload["remove_background_noise"] = _as_bool(remove_noise, label="remove_background_noise")
+        return payload
     if provider_adapter == "openai_transcription":
         payload = {
             "model": str(params.get("model") or "gpt-4o-mini-transcribe")[:200],
@@ -3758,7 +3793,7 @@ def _google_imagen_mask_classes(value: Any) -> list[int]:
 def _live_media_provider_receipt(*, domain: str, http_status: int, request_payload: dict[str, Any], handle_present: bool, provider_adapter: str = "generic") -> dict[str, Any]:
     encoded = json.dumps(request_payload, sort_keys=True, default=str).encode("utf-8")
     request_format = "application/json"
-    if provider_adapter in {"openai_image_edit", "openai_transcription", "elevenlabs_transcription"}:
+    if provider_adapter in {"openai_image_edit", "openai_transcription", "elevenlabs_transcription", "elevenlabs_speech_to_speech"}:
         request_format = "multipart/form-data"
     elif provider_adapter == "openai_video" and "action" in request_payload:
         request_format = "path_operation"
@@ -3787,6 +3822,7 @@ def _send_live_media_provider_request(
     provider_adapter: str = "generic",
     source_file: dict[str, Any] | None = None,
     mask_file: dict[str, Any] | None = None,
+    audio_file: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if provider_adapter == "openai_image_edit":
         if source_file is None:
@@ -3802,6 +3838,10 @@ def _send_live_media_provider_request(
             return {"ok": False, "http_status": 0, "error": "google_imagen_upscale requires a workspace-scoped source image"}
         body = _encode_google_imagen_upscale_json(payload=payload, source_file=source_file)
         content_type = "application/json"
+    elif provider_adapter == "elevenlabs_speech_to_speech":
+        if audio_file is None:
+            return {"ok": False, "http_status": 0, "error": "elevenlabs_speech_to_speech requires a workspace-scoped audio file"}
+        body, content_type = _encode_elevenlabs_speech_to_speech_multipart(payload=payload, audio_file=audio_file)
     else:
         body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
         content_type = "application/json"
@@ -3809,12 +3849,14 @@ def _send_live_media_provider_request(
         "Content-Type": content_type,
         "User-Agent": "Aegis-Agent/0.1",
     }
-    if provider_adapter == "elevenlabs_tts":
+    if provider_adapter in {"elevenlabs_tts", "elevenlabs_speech_to_speech"}:
         headers["xi-api-key"] = token
     else:
         headers["Authorization"] = f"Bearer {token}"
     if provider_adapter in {"stability_v1_text_to_image", "google_imagen", "google_imagen_edit", "google_imagen_upscale"}:
         headers["Accept"] = "application/json"
+    if provider_adapter == "elevenlabs_speech_to_speech":
+        headers["Accept"] = "audio/mpeg"
     request = Request(
         url,
         data=body,
@@ -3908,18 +3950,19 @@ def _source_image_upload_mime(content: bytes, *, provider_adapter: str = "openai
     raise ToolExecutionError("openai_image_edit source images must be PNG, JPEG, or WEBP")
 
 
-def _live_media_audio_file(*, root: Path, audio_path: str) -> dict[str, Any]:
+def _live_media_audio_file(*, root: Path, audio_path: str, provider_adapter: str = "openai_transcription") -> dict[str, Any]:
+    adapter_label = provider_adapter
     if not str(audio_path or "").strip():
-        raise ToolExecutionError("openai_transcription requires an audio_path inside the workspace")
+        raise ToolExecutionError(f"{adapter_label} requires an audio_path inside the workspace")
     path = _resolve_under_root(root, audio_path)
     if not path.is_file():
-        raise ToolExecutionError("openai_transcription audio_path does not exist or is not a file")
+        raise ToolExecutionError(f"{adapter_label} audio_path does not exist or is not a file")
     content = path.read_bytes()
     if not content:
-        raise ToolExecutionError("openai_transcription audio_path is empty")
+        raise ToolExecutionError(f"{adapter_label} audio_path is empty")
     if len(content) > 10 * 1024 * 1024:
-        raise ToolExecutionError("openai_transcription audio_path exceeds the 10 MiB upload limit")
-    mime_type, extension = _source_audio_upload_mime(path)
+        raise ToolExecutionError(f"{adapter_label} audio_path exceeds the 10 MiB upload limit")
+    mime_type, extension = _source_audio_upload_mime(path, provider_adapter=provider_adapter)
     return {
         "path": path,
         "filename": f"audio.{extension}",
@@ -3930,7 +3973,7 @@ def _live_media_audio_file(*, root: Path, audio_path: str) -> dict[str, Any]:
     }
 
 
-def _source_audio_upload_mime(path: Path) -> tuple[str, str]:
+def _source_audio_upload_mime(path: Path, *, provider_adapter: str = "openai_transcription") -> tuple[str, str]:
     extension = path.suffix.lower().lstrip(".")
     mime_by_extension = {
         "flac": "audio/flac",
@@ -3945,7 +3988,7 @@ def _source_audio_upload_mime(path: Path) -> tuple[str, str]:
     }
     if extension in mime_by_extension:
         return mime_by_extension[extension], extension
-    raise ToolExecutionError("openai_transcription audio files must be FLAC, MP3, MP4, MPEG, MPGA, M4A, OGG, WAV, or WEBM")
+    raise ToolExecutionError(f"{provider_adapter} audio files must be FLAC, MP3, MP4, MPEG, MPGA, M4A, OGG, WAV, or WEBM")
 
 
 def _encode_openai_image_edit_multipart(*, payload: dict[str, Any], source_file: dict[str, Any], mask_file: dict[str, Any] | None = None) -> tuple[bytes, str]:
@@ -4044,6 +4087,27 @@ def _encode_openai_transcription_multipart(*, payload: dict[str, Any], audio_fil
         body.extend(b"\r\n")
     body.extend(f"--{boundary}\r\n".encode("ascii"))
     body.extend(f'Content-Disposition: form-data; name="file"; filename="{audio_file["filename"]}"\r\n'.encode("ascii"))
+    body.extend(f'Content-Type: {audio_file["mime_type"]}\r\n\r\n'.encode("ascii"))
+    body.extend(audio_file["content"])
+    body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode("ascii"))
+    return bytes(body), f"multipart/form-data; boundary={boundary}"
+
+
+def _encode_elevenlabs_speech_to_speech_multipart(*, payload: dict[str, Any], audio_file: dict[str, Any]) -> tuple[bytes, str]:
+    boundary = f"aegis-{uuid4().hex}"
+    body = bytearray()
+    metadata_keys = {"audio_present", "audio_sha256", "audio_mime_type", "audio_bytes"}
+    for key in sorted(payload):
+        if key in metadata_keys:
+            continue
+        value = payload[key]
+        body.extend(f"--{boundary}\r\n".encode("ascii"))
+        body.extend(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("ascii"))
+        body.extend(str(value).lower().encode("utf-8") if isinstance(value, bool) else str(value).encode("utf-8"))
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}\r\n".encode("ascii"))
+    body.extend(f'Content-Disposition: form-data; name="audio"; filename="{audio_file["filename"]}"\r\n'.encode("ascii"))
     body.extend(f'Content-Type: {audio_file["mime_type"]}\r\n\r\n'.encode("ascii"))
     body.extend(audio_file["content"])
     body.extend(b"\r\n")
