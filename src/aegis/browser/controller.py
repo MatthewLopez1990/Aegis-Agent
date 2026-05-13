@@ -241,6 +241,7 @@ class BrowserController:
                 "cookie_persistence": False,
                 "real_selector_events_dispatched": False,
                 "dom_mutation_supported": False,
+                "static_dom_form_fill_supported": True,
             },
             "activation": activation,
             "preflight_status": activation["preflight_status"],
@@ -529,17 +530,34 @@ class BrowserController:
         for selector, value in fields.items():
             form_state[_redacted_string(selector, limit=500)] = _redacted_string(value, limit=500)
         session["form_state"] = form_state
+        fill_result = _apply_static_form_fill(str(session.get("last_content", "")), form_state)
+        static_dom_mutated = bool(fill_result["mutated_selectors"])
+        if static_dom_mutated:
+            mutated_content = _bounded_redacted_content(str(fill_result["content"]))
+            session["last_content"] = mutated_content
+            session["last_content_redacted"] = True
+            session["last_text_length"] = len(mutated_content)
+            session["interactive_elements"] = _normalize_interactive_elements(_extract_interactive_elements(mutated_content))
         session["updated_at"] = now_utc()
         self._persist_sessions()
         evidence = _browser_evidence(session, action="fill", url_before=url_before, content_hash_before=content_hash_before)
+        if static_dom_mutated:
+            evidence["dom_mutated"] = True
+            evidence["mode"] = "static_dom_form_fill_no_js"
+            evidence["real_page_mutated"] = False
+            evidence["static_dom_mutated"] = True
         response = {
             "ok": True,
             "session_id": session_id,
             "fields": sorted(form_state),
             "url": _session_url(session),
-            "effect": "virtual_form_state_updated",
-            "mode": "virtual_state_no_dom",
-            "dom_mutated": False,
+            "effect": "static_dom_form_state_updated" if static_dom_mutated else "virtual_form_state_updated",
+            "mode": "static_dom_form_fill_no_js" if static_dom_mutated else "virtual_state_no_dom",
+            "dom_mutated": static_dom_mutated,
+            "static_dom_mutated": static_dom_mutated,
+            "real_page_mutated": False,
+            "mutated_selectors": fill_result["mutated_selectors"],
+            "unmatched_selectors": fill_result["unmatched_selectors"],
             "form_state": dict(form_state),
             "evidence": evidence,
         }
@@ -701,6 +719,7 @@ def _selector_inventory(elements: list[dict[str, str]]) -> list[dict[str, Any]]:
                 "supported_virtual_actions": supported_actions,
                 "requires_approval": True,
                 "dom_mutation_supported": False,
+                "static_dom_fill_supported": action == "fill",
             }
         )
     return inventory
@@ -746,6 +765,113 @@ def _static_dom_snapshot(content: str, *, selector: str | None = None) -> dict[s
         "selector_status": selector_status,
         "selector_note": selector_note,
     }
+
+
+def _apply_static_form_fill(content: str, form_state: dict[str, str]) -> dict[str, Any]:
+    if "<" not in content or not form_state:
+        return {"content": content, "mutated_selectors": [], "unmatched_selectors": sorted(form_state)}
+    safe_fields = {_redacted_string(selector, limit=500): _redacted_dom_value(value, limit=500) for selector, value in form_state.items()}
+    parser = _StaticFormFillParser(fields=safe_fields)
+    try:
+        parser.feed(content[:_MAX_PERSISTED_CONTENT_CHARS])
+        parser.close()
+    except Exception:
+        return {"content": content, "mutated_selectors": [], "unmatched_selectors": sorted(safe_fields)}
+    mutated_selectors = sorted(parser.mutated_selectors)
+    unmatched_selectors = sorted(selector for selector in safe_fields if selector not in parser.mutated_selectors)
+    return {"content": "".join(parser.output), "mutated_selectors": mutated_selectors, "unmatched_selectors": unmatched_selectors}
+
+
+class _StaticFormFillParser(HTMLParser):
+    def __init__(self, *, fields: dict[str, str]) -> None:
+        super().__init__(convert_charrefs=False)
+        self.fields = fields
+        self.output: list[str] = []
+        self.mutated_selectors: set[str] = set()
+        self._textarea_fill_selector: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        normalized_tag = tag.lower()
+        attrs_dict = {key.lower(): value or "" for key, value in attrs}
+        matched_selector = self._matching_selector(normalized_tag, attrs_dict)
+        if normalized_tag == "input" and matched_selector:
+            attrs = _replace_attr(attrs, "value", self.fields[matched_selector])
+            self.mutated_selectors.add(matched_selector)
+        self.output.append(_format_start_tag(normalized_tag, attrs))
+        if normalized_tag == "textarea" and matched_selector:
+            self.output.append(html.escape(self.fields[matched_selector], quote=False))
+            self._textarea_fill_selector = matched_selector
+            self.mutated_selectors.add(matched_selector)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        normalized_tag = tag.lower()
+        attrs_dict = {key.lower(): value or "" for key, value in attrs}
+        matched_selector = self._matching_selector(normalized_tag, attrs_dict)
+        if normalized_tag == "input" and matched_selector:
+            attrs = _replace_attr(attrs, "value", self.fields[matched_selector])
+            self.mutated_selectors.add(matched_selector)
+        self.output.append(_format_start_tag(normalized_tag, attrs, self_closing=True))
+
+    def handle_endtag(self, tag: str) -> None:
+        normalized_tag = tag.lower()
+        if normalized_tag == "textarea" and self._textarea_fill_selector:
+            self._textarea_fill_selector = None
+        self.output.append(f"</{normalized_tag}>")
+
+    def handle_data(self, data: str) -> None:
+        if self._textarea_fill_selector:
+            return
+        self.output.append(html.escape(_redacted_dom_value(data, limit=len(data)), quote=False))
+
+    def handle_entityref(self, name: str) -> None:
+        if not self._textarea_fill_selector:
+            self.output.append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        if not self._textarea_fill_selector:
+            self.output.append(f"&#{name};")
+
+    def handle_comment(self, data: str) -> None:
+        self.output.append(f"<!--{html.escape(_redacted_dom_value(data, limit=len(data)), quote=False)}-->")
+
+    def _matching_selector(self, tag: str, attrs: dict[str, str]) -> str | None:
+        if tag not in {"input", "textarea"}:
+            return None
+        node = {"type": "element", "tag": tag, "attrs": _redacted_dom_attrs(attrs)}
+        for selector in self.fields:
+            matcher = _dom_selector_matcher(selector)
+            if matcher is not None and matcher(node):
+                return selector
+        return None
+
+
+def _replace_attr(attrs: list[tuple[str, str | None]], name: str, value: str) -> list[tuple[str, str | None]]:
+    replaced = False
+    output: list[tuple[str, str | None]] = []
+    for key, existing_value in attrs:
+        if key.lower() == name:
+            output.append((key, value))
+            replaced = True
+        else:
+            output.append((key, existing_value))
+    if not replaced:
+        output.append((name, value))
+    return output
+
+
+def _format_start_tag(tag: str, attrs: list[tuple[str, str | None]], *, self_closing: bool = False) -> str:
+    attr_text = "".join(_format_html_attr(key, value) for key, value in attrs)
+    suffix = " /" if self_closing else ""
+    return f"<{tag}{attr_text}{suffix}>"
+
+
+def _format_html_attr(key: str, value: str | None) -> str:
+    normalized_key = "".join(char for char in str(key).lower() if char.isalnum() or char in {"-", "_", ":"})
+    if not normalized_key:
+        return ""
+    if value is None:
+        return f" {normalized_key}"
+    return f' {normalized_key}="{html.escape(_redacted_dom_value(value, limit=1000), quote=True)}"'
 
 
 def _count_static_dom_nodes(nodes: list[dict[str, Any]]) -> int:
