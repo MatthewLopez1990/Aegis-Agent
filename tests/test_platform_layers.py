@@ -71,6 +71,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(implementation_statuses["vision_analyze"], "local_metadata")
             self.assertEqual(implementation_statuses["image_generate"], "allowlisted_live_or_local")
             self.assertEqual(implementation_statuses["video_analyze"], "local_metadata")
+            self.assertEqual(implementation_statuses["voice_transcribe"], "allowlisted_live_or_local")
             self.assertEqual(implementation_statuses["browser_screenshot"], "local_png_snapshot")
             self.assertEqual(implementation_statuses["tts"], "allowlisted_live_or_local")
             self.assertEqual(implementation_statuses["voice_record"], "local_wav_silence")
@@ -1238,6 +1239,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("openai_style_image_provider_adapter", browser_hardening_controls)
             self.assertIn("openai_style_image_edit_provider_adapter", browser_hardening_controls)
             self.assertIn("openai_style_tts_provider_adapter", browser_hardening_controls)
+            self.assertIn("openai_style_transcription_provider_adapter", browser_hardening_controls)
             self.assertIn("browser_automation_boundary_receipts", browser_hardening_controls)
             self.assertIn("static_dom_snapshot_no_js", browser_hardening_controls)
             self.assertIn("approved_static_form_fill", browser_hardening_controls)
@@ -1814,6 +1816,116 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertNotIn("read the private roadmap", metadata_text)
             self.assertNotIn("abc123", metadata_text)
             self.assertNotIn("secret-media-token", metadata_text)
+
+    def test_openai_style_transcription_provider_adapter_uploads_audio_with_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            wav_bytes = b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x40\x1f\x00\x00\x80\x3e\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
+            (root / "meeting.wav").write_bytes(wav_bytes)
+            captured: dict[str, Any] = {}
+
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "application/json"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return json.dumps({"text": "Discuss roadmap token=abc123"}).encode("utf-8")
+
+            def fake_open(request, timeout):
+                captured["url"] = request.full_url
+                captured["authorization"] = request.headers.get("Authorization", "")
+                captured["content_type"] = request.get_header("Content-type") or request.get_header("Content-Type") or ""
+                captured["body"] = request.data
+                return FakeResponse()
+
+            gated = orchestrator.tools.execute(
+                "voice_transcribe",
+                {
+                    "audio_path": "meeting.wav",
+                    "provider_url": "https://media.example.com/v1/audio/transcriptions",
+                    "provider_adapter": "openai_transcription",
+                },
+            )
+            self.assertEqual(gated["status"], "approval_required")
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                transcript = orchestrator.tools.execute(
+                    "voice_transcribe",
+                    {
+                        "audio_path": "meeting.wav",
+                        "provider_url": "https://media.example.com/v1/audio/transcriptions",
+                        "provider_adapter": "openai_transcription",
+                        "model": "gpt-4o-mini-transcribe",
+                        "response_format": "json",
+                        "language": "en",
+                        "prompt": "Use private team glossary token=abc123",
+                    },
+                    approved=True,
+                )
+
+            body = captured["body"]
+            self.assertTrue(transcript["ok"])
+            self.assertEqual(transcript["provider_adapter"], "openai_transcription")
+            self.assertEqual(transcript["mode"], "live_provider_transcription")
+            self.assertEqual(transcript["text"], "Discuss roadmap token=abc123")
+            self.assertEqual(captured["authorization"], "Bearer secret-media-token")
+            self.assertIn("multipart/form-data; boundary=", captured["content_type"])
+            self.assertIn(b'name="file"; filename="audio.wav"', body)
+            self.assertIn(b"Content-Type: audio/wav", body)
+            self.assertIn(wav_bytes, body)
+            self.assertIn(b'name="model"', body)
+            self.assertIn(b"gpt-4o-mini-transcribe", body)
+            self.assertIn(b'name="prompt"', body)
+            self.assertIn(b"Use private team glossary token=abc123", body)
+            self.assertEqual(transcript["provider_receipt"]["provider_adapter"], "openai_transcription")
+            self.assertEqual(transcript["provider_receipt"]["request_format"], "multipart/form-data")
+            self.assertEqual(transcript["provider_receipt"]["payload_keys"], ["language", "model", "prompt", "response_format"])
+            self.assertFalse(transcript["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(transcript["provider_receipt"]["raw_secret_values_included"])
+            self.assertFalse(transcript["provider_receipt"]["raw_response_body_included"])
+            self.assertEqual(transcript["audio_receipt"]["source_audio_mime_type"], "audio/wav")
+            self.assertEqual(transcript["audio_receipt"]["source_audio_bytes"], len(wav_bytes))
+            self.assertFalse(transcript["audio_receipt"]["source_audio_path_included"])
+            self.assertFalse(transcript["audio_receipt"]["raw_audio_included"])
+            self.assertFalse(transcript["raw_response_body_included"])
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None):
+                denied = orchestrator.tools.execute(
+                    "voice_transcribe",
+                    {
+                        "audio_path": "../meeting.wav",
+                        "provider_url": "https://media.example.com/v1/audio/transcriptions",
+                        "provider_adapter": "openai_transcription",
+                    },
+                    approved=True,
+                )
+            self.assertFalse(denied["ok"])
+            self.assertEqual(denied["status"], "invalid_source")
 
     def test_product_dashboard_surfaces_configured_live_connector_adapters_without_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -155,7 +155,7 @@ class BuiltinToolExecutor:
         elif name == "web_search":
             result = self._execute_web_search(params=params)
         elif name in {"vision_analyze", "voice_transcribe", "video_analyze"}:
-            result = self._execute_media_read(name=name, params=params)
+            result = self._execute_media_read(name=name, params=params, approved=approved)
         elif name in {"image_generate", "image_edit", "tts", "voice_record"}:
             result = self._execute_media_artifact(name=name, params=params)
         elif name == "http_request":
@@ -344,9 +344,19 @@ class BuiltinToolExecutor:
             "training_use": "human_review_required",
         }
 
-    def _execute_media_read(self, *, name: str, params: dict[str, Any]) -> dict[str, Any]:
+    def _execute_media_read(self, *, name: str, params: dict[str, Any], approved: bool = False) -> dict[str, Any]:
         path_key = {"vision_analyze": "image_path", "voice_transcribe": "audio_path", "video_analyze": "video_path"}[name]
         root = _workspace_root(self.connectors)
+        if name == "voice_transcribe" and params.get("provider_url"):
+            if not approved:
+                return {
+                    "status": "approval_required",
+                    "tool": name,
+                    "mode": "live_media_provider",
+                    "reasons": ["provider-backed audio transcription sends workspace audio to an external allowlisted provider"],
+                    "required_controls": _live_media_required_controls(),
+                }
+            return self._execute_live_transcription_provider(params=params, root=root)
         path = _resolve_under_root(root, params[path_key])
         size = path.stat().st_size if path.exists() else 0
         if name == "voice_transcribe":
@@ -632,6 +642,112 @@ class BuiltinToolExecutor:
         if name == "tts" and live_result.get("duration_seconds") is not None:
             result["duration_seconds"] = live_result["duration_seconds"]
         return result
+
+    def _execute_live_transcription_provider(self, *, params: dict[str, Any], root: Path) -> dict[str, Any]:
+        rest = self.connectors.get("generic_rest")
+        if not bool(getattr(rest, "live_writes", False)):
+            return {
+                "ok": False,
+                "tool": "voice_transcribe",
+                "mode": "live_media_provider",
+                "status": "not_configured",
+                "reason": "live_rest_writes must be enabled before provider-backed audio transcription",
+                "required_controls": _live_media_required_controls(),
+            }
+        provider_url = str(params["provider_url"])
+        parsed = urlparse(provider_url)
+        domain = parsed.hostname or ""
+        validation_error = _validate_url(parsed) or (None if parsed.scheme == "https" else "media provider transcription requires https")
+        if validation_error:
+            return {"ok": False, "tool": "voice_transcribe", "mode": "live_media_provider", "status": "scope_rejected", "reason": validation_error, "required_controls": _live_media_required_controls()}
+        http = self.connectors.get("http")
+        allowlist = tuple(str(item) for item in getattr(http, "allowlist", ()))
+        if not _host_allowed(domain, allowlist):
+            return {"ok": False, "tool": "voice_transcribe", "mode": "live_media_provider", "status": "scope_rejected", "reason": f"media provider host {domain!r} is not allowlisted", "required_controls": _live_media_required_controls()}
+        private_error = _private_network_error(domain)
+        if private_error:
+            return {"ok": False, "tool": "voice_transcribe", "mode": "live_media_provider", "status": "scope_rejected", "reason": private_error, "required_controls": _live_media_required_controls()}
+        provider_adapter = _live_media_provider_adapter(name="voice_transcribe", params=params)
+        if provider_adapter["error"]:
+            return {
+                "ok": False,
+                "tool": "voice_transcribe",
+                "mode": "live_media_provider",
+                "status": "unsupported_provider_adapter",
+                "reason": provider_adapter["error"],
+                "required_controls": _live_media_required_controls(),
+            }
+        adapter_name = str(provider_adapter["name"] or "generic")
+        if adapter_name != "openai_transcription":
+            return {
+                "ok": False,
+                "tool": "voice_transcribe",
+                "mode": "live_media_provider",
+                "status": "unsupported_provider_adapter",
+                "reason": f"{adapter_name} provider adapter does not support provider-backed transcription",
+                "required_controls": _live_media_required_controls(),
+            }
+        try:
+            audio_file = _live_media_audio_file(root=root, audio_path=str(params.get("audio_path") or params.get("path") or ""))
+        except ToolExecutionError as exc:
+            return {
+                "ok": False,
+                "tool": "voice_transcribe",
+                "mode": "live_media_provider",
+                "status": "invalid_source",
+                "reason": str(redact(str(exc))),
+                "required_controls": _live_media_required_controls(),
+            }
+        token_secret = str(params.get("token_secret") or "AEGIS_MEDIA_PROVIDER_TOKEN")
+        handle = self.secrets_broker.request_handle(name=token_secret, requester="media_provider", reason="voice_transcribe provider-backed transcription", scopes=("media:execute",))
+        if not handle.present:
+            return {"ok": False, "tool": "voice_transcribe", "mode": "live_media_provider", "status": "not_configured", "reason": f"secret {token_secret!r} is not configured", "required_controls": _live_media_required_controls()}
+        token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="media_provider")
+        request_payload = _live_media_request_payload(
+            name="voice_transcribe",
+            prompt=str(params.get("prompt", "")),
+            text="",
+            source_path=str(params.get("audio_path") or ""),
+            params=params,
+            provider_adapter=adapter_name,
+        )
+        live_result = _send_live_transcription_provider_request(url=provider_url, token=token, payload=request_payload, provider_adapter=adapter_name, audio_file=audio_file)
+        provider_receipt = _live_media_provider_receipt(domain=domain, http_status=live_result["http_status"], request_payload=request_payload, handle_present=handle.present, provider_adapter=adapter_name)
+        if not live_result["ok"]:
+            return {
+                "ok": False,
+                "tool": "voice_transcribe",
+                "mode": "live_media_provider",
+                "status": "failed",
+                "domain": domain,
+                "http_status": live_result["http_status"],
+                "error": live_result.get("error"),
+                "provider_adapter": adapter_name,
+                "provider_receipt": provider_receipt,
+            }
+        audio_receipt = {
+            "source_audio_sha256": audio_file["sha256"],
+            "source_audio_bytes": audio_file["bytes"],
+            "source_audio_mime_type": audio_file["mime_type"],
+            "source_audio_path_included": False,
+            "raw_audio_included": False,
+        }
+        return {
+            "ok": True,
+            "tool": "voice_transcribe",
+            "text": str(live_result["text"])[:4000],
+            "path": str(audio_file["path"]),
+            "bytes": audio_file["bytes"],
+            "taint": "WEB_CONTENT",
+            "mode": "live_provider_transcription",
+            "domain": domain,
+            "http_status": live_result["http_status"],
+            "provider_adapter": adapter_name,
+            "provider_receipt": provider_receipt,
+            "audio_receipt": audio_receipt,
+            "raw_audio_included": False,
+            "raw_response_body_included": False,
+        }
 
     def _delegate_subagent(self, *, params: dict[str, Any], task_id: str | None) -> dict[str, Any]:
         assert self.kanban is not None
@@ -2821,6 +2937,10 @@ def _live_media_provider_adapter(*, name: str, params: dict[str, Any]) -> dict[s
         if name != "tts":
             return {"name": raw, "error": "openai_tts provider adapter currently supports tts only"}
         return {"name": "openai_tts", "error": None}
+    if raw in {"openai_transcription", "openai_transcriptions", "openai_audio_transcription", "openai_compatible_transcription"}:
+        if name != "voice_transcribe":
+            return {"name": raw, "error": "openai_transcription provider adapter currently supports voice_transcribe only"}
+        return {"name": "openai_transcription", "error": None}
     return {"name": raw[:80], "error": f"unsupported media provider adapter: {raw[:80]}"}
 
 
@@ -2890,6 +3010,23 @@ def _live_media_request_payload(
         if response_format:
             payload["response_format"] = response_format[:40]
         return payload
+    if provider_adapter == "openai_transcription":
+        payload = {
+            "model": str(params.get("model") or "gpt-4o-mini-transcribe")[:200],
+        }
+        prompt_hint = str(params.get("prompt") or "").strip()
+        if prompt_hint:
+            payload["prompt"] = prompt_hint[:2000]
+        response_format = str(params.get("response_format") or params.get("format") or "json").strip()
+        if response_format:
+            payload["response_format"] = response_format[:40]
+        language = str(params.get("language") or "").strip()
+        if language:
+            payload["language"] = language[:40]
+        temperature = params.get("temperature")
+        if temperature is not None:
+            payload["temperature"] = _bounded_float(temperature, minimum=0.0, maximum=1.0, label="temperature")
+        return payload
     payload: dict[str, Any] = {"tool": name}
     if name in {"image_generate", "image_edit"}:
         payload["prompt"] = prompt
@@ -2906,7 +3043,7 @@ def _live_media_provider_receipt(*, domain: str, http_status: int, request_paylo
     return {
         "receipt_schema": "redacted_media_provider_receipt_v1",
         "provider_adapter": provider_adapter,
-        "request_format": "multipart/form-data" if provider_adapter == "openai_image_edit" else "application/json",
+        "request_format": "multipart/form-data" if provider_adapter in {"openai_image_edit", "openai_transcription"} else "application/json",
         "domain": domain,
         "http_status": http_status,
         "payload_sha256": hashlib.sha256(encoded).hexdigest(),
@@ -3025,6 +3162,46 @@ def _source_image_upload_mime(content: bytes) -> tuple[str, str]:
     raise ToolExecutionError("openai_image_edit source images must be PNG, JPEG, or WEBP")
 
 
+def _live_media_audio_file(*, root: Path, audio_path: str) -> dict[str, Any]:
+    if not str(audio_path or "").strip():
+        raise ToolExecutionError("openai_transcription requires an audio_path inside the workspace")
+    path = _resolve_under_root(root, audio_path)
+    if not path.is_file():
+        raise ToolExecutionError("openai_transcription audio_path does not exist or is not a file")
+    content = path.read_bytes()
+    if not content:
+        raise ToolExecutionError("openai_transcription audio_path is empty")
+    if len(content) > 10 * 1024 * 1024:
+        raise ToolExecutionError("openai_transcription audio_path exceeds the 10 MiB upload limit")
+    mime_type, extension = _source_audio_upload_mime(path)
+    return {
+        "path": path,
+        "filename": f"audio.{extension}",
+        "content": content,
+        "mime_type": mime_type,
+        "bytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
+
+
+def _source_audio_upload_mime(path: Path) -> tuple[str, str]:
+    extension = path.suffix.lower().lstrip(".")
+    mime_by_extension = {
+        "flac": "audio/flac",
+        "mp3": "audio/mpeg",
+        "mp4": "audio/mp4",
+        "mpeg": "audio/mpeg",
+        "mpga": "audio/mpeg",
+        "m4a": "audio/mp4",
+        "ogg": "audio/ogg",
+        "wav": "audio/wav",
+        "webm": "audio/webm",
+    }
+    if extension in mime_by_extension:
+        return mime_by_extension[extension], extension
+    raise ToolExecutionError("openai_transcription audio files must be FLAC, MP3, MP4, MPEG, MPGA, M4A, OGG, WAV, or WEBM")
+
+
 def _encode_openai_image_edit_multipart(*, payload: dict[str, Any], source_file: dict[str, Any], mask_file: dict[str, Any] | None = None) -> tuple[bytes, str]:
     boundary = f"aegis-{uuid4().hex}"
     body = bytearray()
@@ -3050,6 +3227,79 @@ def _encode_openai_image_edit_multipart(*, payload: dict[str, Any], source_file:
         body.extend(b"\r\n")
     body.extend(f"--{boundary}--\r\n".encode("ascii"))
     return bytes(body), f"multipart/form-data; boundary={boundary}"
+
+
+def _encode_openai_transcription_multipart(*, payload: dict[str, Any], audio_file: dict[str, Any]) -> tuple[bytes, str]:
+    boundary = f"aegis-{uuid4().hex}"
+    body = bytearray()
+    for key in sorted(payload):
+        value = payload[key]
+        body.extend(f"--{boundary}\r\n".encode("ascii"))
+        body.extend(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("ascii"))
+        body.extend(str(value).encode("utf-8"))
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}\r\n".encode("ascii"))
+    body.extend(f'Content-Disposition: form-data; name="file"; filename="{audio_file["filename"]}"\r\n'.encode("ascii"))
+    body.extend(f'Content-Type: {audio_file["mime_type"]}\r\n\r\n'.encode("ascii"))
+    body.extend(audio_file["content"])
+    body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode("ascii"))
+    return bytes(body), f"multipart/form-data; boundary={boundary}"
+
+
+def _send_live_transcription_provider_request(
+    *,
+    url: str,
+    token: str,
+    payload: dict[str, Any],
+    provider_adapter: str,
+    audio_file: dict[str, Any],
+) -> dict[str, Any]:
+    if provider_adapter != "openai_transcription":
+        return {"ok": False, "http_status": 0, "error": f"unsupported transcription provider adapter: {provider_adapter}"}
+    body, content_type = _encode_openai_transcription_multipart(payload=payload, audio_file=audio_file)
+    request = Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": content_type,
+            "User-Agent": "Aegis-Agent/0.1",
+        },
+    )
+    try:
+        response_context = _open_without_redirects(request, timeout=30)
+    except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            return {"ok": False, "http_status": exc.code, "error": "HTTP redirects are not followed by the governed transcription adapter"}
+        return {"ok": False, "http_status": exc.code, "error": f"transcription provider failed with status {exc.code}"}
+    except URLError as exc:
+        return {"ok": False, "http_status": 0, "error": f"transcription provider request failed: {exc.reason}"}
+    with response_context as response:
+        status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+        raw = response.read(2 * 1024 * 1024)
+        content_type = str(getattr(response, "headers", {}).get("Content-Type", ""))
+    if not 200 <= status < 300:
+        return {"ok": False, "http_status": status, "error": f"transcription provider failed with status {status}"}
+    if "json" in content_type.lower() or raw.strip().startswith(b"{"):
+        try:
+            decoded = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {"ok": False, "http_status": status, "error": "transcription provider JSON response could not be decoded"}
+        if not isinstance(decoded, dict):
+            return {"ok": False, "http_status": status, "error": "transcription provider JSON response must be an object"}
+        text = decoded.get("text") or decoded.get("transcript")
+        if not isinstance(text, str) or not text.strip():
+            return {"ok": False, "http_status": status, "error": "transcription provider response did not include text"}
+        return {"ok": True, "http_status": status, "text": text.strip()}
+    try:
+        text = raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return {"ok": False, "http_status": status, "error": "transcription provider text response could not be decoded"}
+    if not text:
+        return {"ok": False, "http_status": status, "error": "transcription provider returned an empty transcript"}
+    return {"ok": True, "http_status": status, "text": text}
 
 
 def _media_base64_from_provider_json(decoded: dict[str, Any], *, tool: str) -> str:
