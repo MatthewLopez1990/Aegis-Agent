@@ -1165,6 +1165,13 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(remote_actions["status"]["path"], "/remote-control/status")
                 self.assertEqual(remote_actions["directory"]["path"], "/remote-control/directory")
                 self.assertFalse(remote_actions["status"]["mutates"])
+                for task_action in ("resume", "pause", "cancel"):
+                    self.assertEqual(command_rows[task_action]["kind"], "task-control")
+                    self.assertIn("task_id", command_rows[task_action]["args"])
+                    self.assertTrue(command_rows[task_action]["requires_local_token"])
+                    self.assertFalse(command_rows[task_action]["requires_remote_token"])
+                    self.assertTrue(command_rows[task_action]["mutates"])
+                    self.assertEqual(command_rows[task_action]["web_actions"][0]["path_template"], f"/tasks/{{task_id}}/{task_action}")
                 self.assertIn("sessions", sessions)
                 self.assertEqual(policy["profile"]["raw_secret_exposure"], "deny")
                 self.assertIn("raw_secret_exposure", policy["immutable_deny"])

@@ -277,6 +277,14 @@ const status = api.parse("/status task-123");
 if (status.kind !== "task-inspection" || status.taskView !== "status" || status.request !== "task-123") {
   throw new Error(`status task command parsed incorrectly: ${JSON.stringify(status)}`);
 }
+const pause = api.parse("/pause task-456");
+if (pause.kind !== "task-control" || pause.taskAction !== "pause" || pause.request !== "task-456") {
+  throw new Error(`pause task command parsed incorrectly: ${JSON.stringify(pause)}`);
+}
+const stop = api.parse("/stop task-789");
+if (stop.kind !== "task-control" || stop.command !== "cancel" || stop.taskAction !== "cancel") {
+  throw new Error(`stop alias did not resolve to cancel: ${JSON.stringify(stop)}`);
+}
 const events = api.matches("ev").map((entry) => entry.command);
 if (!events.includes("events")) {
   throw new Error(`/events command did not fuzzy match: ${JSON.stringify(events)}`);
@@ -313,6 +321,7 @@ api.merge([
   { command: "debug", label: "/debug", detail: "TUI diagnostics", kind: "palette", source: "tui" },
   { command: "submit", label: "/submit duplicate", detail: "duplicate should be ignored", kind: "palette" },
   { command: "remote-control", label: "/remote-control", detail: "Remote action metadata", kind: "remote-control", section: "automation", source: "tui", surfaces: ["tui", "web_palette"], args: ["status", "directory"], flags: ["--pairing-id", "--limit"], requires_local_token: true, requires_remote_token: false, mutates: false, web_actions: [{ input: "status", method: "GET", path: "/remote-control/status", mutates: false }] },
+  { command: "pause", label: "/pause [task_id]", detail: "Pause task metadata", kind: "task-control", section: "activity", source: "tui", args: ["task_id"], requires_local_token: true, mutates: true, web_actions: [{ input: "pause", method: "POST", path_template: "/tasks/{task_id}/pause", mutates: true }] },
   { command: "aegis-project-summary", label: "/aegis-project-summary", detail: "Skill command", kind: "palette", source: "skill" },
 ]);
 const debug = api.parse("/debug");
@@ -326,6 +335,10 @@ if (!skill.includes("aegis-project-summary")) {
 const remote = api.parse("/remote-control status");
 if (remote.kind !== "remote-control" || remote.request !== "status" || !remote.webActions.length || !remote.args.includes("directory")) {
   throw new Error(`/remote-control metadata did not merge: ${JSON.stringify(remote)}`);
+}
+const mergedPause = api.parse("/pause task-101");
+if (!mergedPause.webActions.length || mergedPause.mutates !== true || !mergedPause.args.includes("task_id")) {
+  throw new Error(`/pause metadata did not merge: ${JSON.stringify(mergedPause)}`);
 }
 const submitCount = api.commands().filter((entry) => entry.command === "submit").length;
 if (submitCount !== 1) {
@@ -359,6 +372,8 @@ const loadTaskEvidence = async (taskId) => calls.push(["evidence", taskId, state
 const renderTaskNotice = (title, detail) => calls.push(["notice", title, detail, state.activeSection]);
 const renderTaskError = (message) => calls.push(["error", message]);
 const resumeTask = async (taskId) => calls.push(["resume", taskId]);
+const pauseTask = async (taskId) => calls.push(["pause", taskId]);
+const cancelTask = async (taskId) => calls.push(["cancel", taskId]);
 const renderRemoteControlOutput = (payload) => calls.push(["remote-output", payload.status || payload.pairing?.id || "payload"]);
 const api = async (path) => {
   calls.push(["api", path]);
@@ -367,6 +382,9 @@ const api = async (path) => {
 eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = executeLocalSlashCommand;`);
 (async () => {
   await executeLocalSlashCommand({ kind: "task-inspection", command: "status", taskView: "status", request: "task-1" });
+  await executeLocalSlashCommand({ kind: "task-control", command: "resume", taskAction: "resume", request: "task-2" });
+  await executeLocalSlashCommand({ kind: "task-control", command: "pause", taskAction: "pause", request: "" });
+  await executeLocalSlashCommand({ kind: "task-control", command: "cancel", taskAction: "cancel", request: "task-5" });
   await executeLocalSlashCommand({ kind: "task-inspection", command: "events", taskView: "events", request: "" });
   await executeLocalSlashCommand({ kind: "task-inspection", command: "timeline", taskView: "timeline", request: "task-3 extra" });
   await executeLocalSlashCommand({ kind: "task-inspection", command: "evidence", taskView: "evidence", request: "task-4" });
@@ -380,6 +398,9 @@ eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = execute
   const expected = [
     ["section", "activity"],
     ["status", "task-1", "activity"],
+    ["resume", "task-2"],
+    ["pause", "latest-task"],
+    ["cancel", "task-5"],
     ["events", "latest-task", "activity"],
     ["timeline", "task-3", "activity"],
     ["evidence", "task-4", "activity"],

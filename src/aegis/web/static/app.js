@@ -49,7 +49,9 @@ const TOOL_RUN_PRESETS = [
 const WEB_SLASH_COMMANDS = [
   { command: "submit", label: "/submit <request>", detail: "Submit a governed task", kind: "submit", acceptsRequest: true },
   { command: "background", aliases: ["bg", "btw", "queue", "q"], label: "/background|/bg|/btw <request>", detail: "Queue governed work from the active session", kind: "submit", acceptsRequest: true },
-  { command: "resume", aliases: ["continue"], label: "/resume", detail: "Resume the last waiting or paused task", kind: "resume" },
+  { command: "resume", aliases: ["continue"], label: "/resume [task_id]", detail: "Resume the selected waiting or paused task", kind: "task-control", taskAction: "resume" },
+  { command: "pause", label: "/pause [task_id]", detail: "Pause the selected non-terminal task", kind: "task-control", taskAction: "pause" },
+  { command: "cancel", aliases: ["stop"], label: "/cancel|/stop [task_id]", detail: "Cancel the selected non-terminal task", kind: "task-control", taskAction: "cancel" },
   { command: "tasks", aliases: ["task", "list"], label: "/tasks", detail: "Open the task feed", kind: "section", section: "activity" },
   { command: "approvals", aliases: ["approve", "permissions", "privacy-settings", "whoami", "yolo"], label: "/approvals", detail: "Open pending approval and privacy gates", kind: "section", section: "security" },
   { command: "models", aliases: ["model", "login", "logout", "setup-bedrock", "setup-vertex", "upgrade"], label: "/models", detail: "Open provider login and model routing controls", kind: "section", section: "models" },
@@ -86,6 +88,7 @@ const normalizeWebSlashCommand = (entry) => {
     requiresRemoteToken: Boolean(entry.requires_remote_token ?? entry.requiresRemoteToken),
     mutates: Boolean(entry.mutates),
     webActions: Array.isArray(entry.web_actions) ? entry.web_actions : Array.isArray(entry.webActions) ? entry.webActions : [],
+    taskAction: entry.taskAction || entry.task_action || "",
     acceptsRequest: Boolean(entry.acceptsRequest),
   };
 };
@@ -113,6 +116,7 @@ const mergeWebSlashCommands = (commands = []) => {
           existing.requiresRemoteToken = entry.requiresRemoteToken;
           existing.mutates = entry.mutates;
           existing.webActions = entry.webActions;
+          existing.taskAction = entry.taskAction || existing.taskAction;
         }
         return;
       }
@@ -1852,12 +1856,22 @@ const executeRemoteControlSlashCommand = async (parsed) => {
 };
 
 const executeLocalSlashCommand = async (parsed) => {
-  if (parsed.kind === "resume") {
-    if (!state.lastTask?.id) {
-      renderTaskNotice("No resumable task is selected", "Open a waiting or paused task, then run /resume again.");
+  if (parsed.kind === "task-control") {
+    const taskId = slashTaskId(parsed);
+    const action = parsed.taskAction || parsed.command;
+    if (!taskId) {
+      renderTaskNotice(`/${parsed.command || action}`, `Open a task or include a task id, then run /${parsed.command || action} again.`);
       return;
     }
-    await resumeTask(state.lastTask.id);
+    if (action === "resume") {
+      await resumeTask(taskId);
+    } else if (action === "pause") {
+      await pauseTask(taskId);
+    } else if (action === "cancel") {
+      await cancelTask(taskId);
+    } else {
+      renderTaskError(`unsupported task action: ${action}`);
+    }
     return;
   }
   if (parsed.kind === "task-inspection") {

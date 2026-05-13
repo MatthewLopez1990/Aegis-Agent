@@ -139,6 +139,42 @@ def _web_command_catalog(orchestrator: Any) -> dict[str, Any]:
                 ],
             }
         )
+    for command, detail in (
+        ("resume", "Resume a waiting or paused task by id, or the selected task from the web console"),
+        ("pause", "Pause a non-terminal task by id, or the selected task from the web console"),
+        ("cancel", "Cancel a non-terminal task by id, or the selected task from the web console"),
+    ):
+        command_rows.setdefault(
+            command,
+            {
+                "command": command,
+                "label": f"/{command} [task_id]",
+                "group": "operate",
+                "source": "web",
+            },
+        )
+        command_rows[command].update(
+            {
+                "label": f"/{command} [task_id]",
+                "detail": detail,
+                "kind": "task-control",
+                "section": "activity",
+                "surfaces": ["tui", "web_palette", "web_action"],
+                "args": ["task_id"],
+                "flags": [],
+                "requires_local_token": True,
+                "requires_remote_token": False,
+                "mutates": command in {"resume", "pause", "cancel"},
+                "web_actions": [
+                    {
+                        "input": command,
+                        "method": "POST",
+                        "path_template": f"/tasks/{{task_id}}/{command}",
+                        "mutates": command in {"resume", "pause", "cancel"},
+                    }
+                ],
+            }
+        )
     skill_rows: list[dict[str, Any]] = []
     for skill in orchestrator.skills.list_public():
         if not skill.get("enabled"):
