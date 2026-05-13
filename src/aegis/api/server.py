@@ -2484,6 +2484,17 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     return
                 self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
                 return
+            if path == "/subagents/delegate-child":
+                payload = self._read_json()
+                result = orchestrator.kanban.delegate_subagent_child(
+                    str(_required(payload, "parent_card_id")),
+                    role=str(_required(payload, "role")),
+                    task=str(_required(payload, "task")),
+                    actor=str(payload.get("actor", "api-operator")),
+                    approved=payload.get("approved") is True,
+                )
+                self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
+                return
             if path == "/subagents/handoff":
                 payload = self._read_json()
                 result = orchestrator.kanban.move_subagent_delegation(

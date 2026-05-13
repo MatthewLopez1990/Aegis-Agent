@@ -836,12 +836,13 @@ class ApiServerSecurityTests(unittest.TestCase):
                 subagent_profile = _json_post(
                     port,
                     "/subagents/profiles",
-                    {"name": "Researcher", "tool_allowlist": ["web_search"], "max_parallel_cards": 2, "max_tool_calls": 4},
+                    {"name": "Researcher", "tool_allowlist": ["web_search"], "max_parallel_cards": 3, "max_tool_calls": 4, "recursive_depth_limit": 1},
                     token=token,
                 )
                 self.assertTrue(subagent_profile["ok"])
                 self.assertEqual(subagent_profile["profile"]["id"], "researcher")
                 self.assertEqual(subagent_profile["profile"]["max_tool_calls"], 4)
+                self.assertEqual(subagent_profile["profile"]["recursive_depth_limit"], 1)
                 listed_profiles = _json_get(port, "/subagents/profiles", token=token)
                 self.assertTrue(any(profile["id"] == "researcher" for profile in listed_profiles["profiles"]))
                 subagent_gated = _json_post(port, "/subagents/delegate", {"role": "Researcher", "task": "Compare provider auth gaps."}, token=token)
@@ -865,6 +866,33 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertTrue(subagent_replayed["subagents"]["cards"][0]["budget_enforced"])
                 self.assertEqual(subagent_replayed["subagents"]["cards"][0]["budget_snapshot"]["max_tool_calls"], 4)
                 self.assertFalse(subagent_replayed["subagents"]["raw_instruction_included"])
+                subagent_child_gated = _json_post(
+                    port,
+                    "/subagents/delegate-child",
+                    {"parent_card_id": subagent_replayed["card_id"], "role": "Researcher", "task": "Review recursive child receipts."},
+                    token=token,
+                )
+                self.assertEqual(subagent_child_gated["status"], "approval_required")
+                self.assertFalse(subagent_child_gated["recursive_model_loop_enabled"])
+                subagent_child = _json_post(
+                    port,
+                    "/subagents/delegate-child",
+                    {"parent_card_id": subagent_replayed["card_id"], "role": "Researcher", "task": "Review recursive child receipts.", "actor": "api-admin", "approved": True},
+                    token=token,
+                )
+                self.assertTrue(subagent_child["ok"])
+                self.assertEqual(subagent_child["receipt"]["receipt_schema"], "aegis.subagent.child_delegation.v1")
+                self.assertEqual(subagent_child["receipt"]["parent_card_id"], subagent_replayed["card_id"])
+                self.assertEqual(subagent_child["receipt"]["child_recursive_depth_remaining"], 0)
+                self.assertEqual(subagent_child["subagents"]["recursive_child_cards"], 1)
+                self.assertIn("review_gated_recursive_child_delegations", subagent_child["subagents"]["implemented_controls"])
+                subagent_child_done = _json_post(
+                    port,
+                    "/subagents/handoff",
+                    {"card_id": subagent_child["card_id"], "lane": "done", "actor": "api-admin", "reason": "child queue check complete"},
+                    token=token,
+                )
+                self.assertTrue(subagent_child_done["ok"])
                 subagent_handoff = _json_post(
                     port,
                     "/subagents/handoff",

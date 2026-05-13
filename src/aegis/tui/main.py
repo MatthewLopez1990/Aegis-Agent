@@ -4088,7 +4088,7 @@ class AegisTui(cmd.Cmd):
         self.do_models("route alias/fast")
 
     def do_agents(self, arg: str) -> None:
-        """agents [status|autonomy-preflight|autonomy-step|autonomy-run|profiles|profile-create|profile-disable|delegate|handoff|review-packet|verify-packet|model-review|run|run-batch] -- manage subagent delegations."""
+        """agents [status|autonomy-preflight|autonomy-step|autonomy-run|profiles|profile-create|profile-disable|delegate|delegate-child|handoff|review-packet|verify-packet|model-review|run|run-batch] -- manage subagent delegations."""
         parts = shlex.split(arg)
         if parts and parts[0] == "autonomy-preflight":
             _print_json(self.orchestrator.kanban.subagent_autonomy_preflight(actor="tui-operator", limit=20))
@@ -4146,6 +4146,21 @@ class AegisTui(cmd.Cmd):
                 {"role": delegate_parts[0], "task": " ".join(delegate_parts[1:])},
                 approved=approved,
                 task_id=self.last_task_id,
+            )
+            _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
+            return
+        if parts and parts[0] == "delegate-child":
+            approved = "--approved" in parts[1:]
+            child_parts = [part for part in parts[1:] if part != "--approved"]
+            if len(child_parts) < 3:
+                print("usage: agents delegate-child <parent-card-id> <role> <task> [--approved]")
+                return
+            result = self.orchestrator.kanban.delegate_subagent_child(
+                child_parts[0],
+                role=child_parts[1],
+                task=" ".join(child_parts[2:]),
+                actor="tui-operator",
+                approved=approved,
             )
             _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
             return

@@ -1652,6 +1652,133 @@ class CliTests(unittest.TestCase):
             audit_text = (data_dir / "audit.jsonl").read_text(encoding="utf-8")
             self.assertIn("subagent.batch_completed", audit_text)
 
+    def test_agents_cli_delegate_child_uses_recursive_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            data_dir = Path(temp) / ".aegis"
+
+            profile = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "profile-create",
+                        "Researcher",
+                        "--max-parallel-cards",
+                        "4",
+                        "--recursive-depth-limit",
+                        "2",
+                    ]
+                )
+            )
+            self.assertTrue(profile["ok"])
+            self.assertEqual(profile["profile"]["recursive_depth_limit"], 2)
+
+            parent = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "delegate",
+                        "Researcher",
+                        "Parent recursive work token=abc123.",
+                        "--approved",
+                    ]
+                )
+            )
+            self.assertTrue(parent["ok"])
+            self.assertEqual(parent["subagents"]["cards"][0]["recursive_depth_remaining"], 2)
+
+            gated_child = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "delegate-child",
+                        parent["card_id"],
+                        "Researcher",
+                        "Child recursive work token=abc123.",
+                    ]
+                )
+            )
+            self.assertEqual(gated_child["status"], "approval_required")
+            self.assertFalse(gated_child["recursive_model_loop_enabled"])
+
+            child = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "delegate-child",
+                        parent["card_id"],
+                        "Researcher",
+                        "Child recursive work token=abc123.",
+                        "--approved",
+                        "--actor",
+                        "cli-reviewer",
+                    ]
+                )
+            )
+            self.assertTrue(child["ok"])
+            self.assertEqual(child["status"], "child_delegated")
+            self.assertEqual(child["receipt"]["receipt_schema"], "aegis.subagent.child_delegation.v1")
+            self.assertEqual(child["receipt"]["actor"], "cli-reviewer")
+            self.assertEqual(child["receipt"]["parent_card_id"], parent["card_id"])
+            self.assertEqual(child["receipt"]["child_depth"], 1)
+            self.assertEqual(child["receipt"]["parent_recursive_depth_remaining"], 2)
+            self.assertEqual(child["receipt"]["child_recursive_depth_remaining"], 1)
+            self.assertFalse(child["receipt"]["autonomous_runtime"])
+            self.assertFalse(child["receipt"]["recursive_model_loop_enabled"])
+            self.assertEqual(child["subagents"]["recursive_child_cards"], 1)
+            self.assertIn("review_gated_recursive_child_delegations", child["subagents"]["implemented_controls"])
+            child_card = next(card for card in child["subagents"]["cards"] if card["id"] == child["card_id"])
+            self.assertEqual(child_card["parent_subagent_card_id"], parent["card_id"])
+            self.assertEqual(child_card["recursive_depth_remaining"], 1)
+            self.assertEqual(child_card["budget_snapshot"]["parent_subagent_card_id"], parent["card_id"])
+
+            grandchild = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "delegate-child",
+                        child["card_id"],
+                        "Researcher",
+                        "Grandchild recursive work token=abc123.",
+                        "--approved",
+                    ]
+                )
+            )
+            self.assertTrue(grandchild["ok"])
+            self.assertEqual(grandchild["receipt"]["child_depth"], 2)
+            self.assertEqual(grandchild["receipt"]["child_recursive_depth_remaining"], 0)
+            with self.assertRaisesRegex(ValueError, "recursive depth budget is exhausted"):
+                dispatch(
+                    parser.parse_args(
+                        [
+                            "--data-dir",
+                            str(data_dir),
+                            "agents",
+                            "delegate-child",
+                            grandchild["card_id"],
+                            "Researcher",
+                            "Blocked recursive work token=abc123.",
+                            "--approved",
+                        ]
+                    )
+                )
+
+            preflight = dispatch(parser.parse_args(["--data-dir", str(data_dir), "agents", "autonomy-preflight"]))
+            self.assertFalse(preflight["ok"])
+            self.assertIn("review_gated_recursive_child_delegations", preflight["receipt"]["implemented_controls"])
+            self.assertIn("recursive_model_loop_executor", preflight["receipt"]["missing_controls"])
+            self.assertNotIn("token=abc123", json.dumps(preflight, sort_keys=True))
+
     def test_enterprise_readiness_reports_memory_improvement_and_tui_flags(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             parser = build_parser()

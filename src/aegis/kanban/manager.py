@@ -1197,6 +1197,180 @@ class KanbanManager:
             },
         )
 
+    def delegate_subagent_child(
+        self,
+        parent_card_id: str,
+        *,
+        role: str,
+        task: str,
+        actor: str = "operator",
+        approved: bool = False,
+    ) -> dict[str, Any]:
+        parent_card, board, parent_metadata = self._require_subagent_card(parent_card_id)
+        if not approved:
+            return {
+                "status": "approval_required",
+                "card_id": parent_card_id,
+                "reason": "recursive child subagent delegations require explicit approval",
+                "approval_required": True,
+                "autonomous_runtime": False,
+                "recursive_model_loop_enabled": False,
+            }
+        if parent_card.get("lane") == "done":
+            raise ValueError("done subagent cards cannot create child delegations")
+        role = role.strip()
+        task = task.strip()
+        if not role or not task:
+            raise ValueError("child subagent delegation requires non-empty role and task")
+        parent_remaining = _card_recursive_depth_remaining(parent_metadata)
+        if parent_remaining <= 0:
+            self.audit_logger.append(
+                "subagent.recursive_budget_denied",
+                {
+                    "parent_card_id": parent_card_id,
+                    "profile_id": parent_metadata.get("profile_id"),
+                    "recursive_depth_remaining": parent_remaining,
+                    "actor": _safe_actor(actor),
+                    "raw_instruction_included": False,
+                    "raw_instruction_forwarded_to_model": False,
+                    "autonomous_runtime": False,
+                    "recursive_model_loop_enabled": False,
+                },
+                task_id=str(parent_card.get("task_id")) if parent_card.get("task_id") else None,
+            )
+            raise ValueError("subagent recursive depth budget is exhausted")
+        profiles = _profiles_from_board(board)
+        profile = _select_profile_for_role(profiles, role)
+        existing_cards = self.list_cards(board["id"])
+        open_profile_cards = _open_profile_card_count(existing_cards, str(profile["id"]))
+        max_parallel_cards = _profile_int(profile, "max_parallel_cards", 1)
+        if open_profile_cards >= max_parallel_cards:
+            self.audit_logger.append(
+                "subagent.budget_denied",
+                {
+                    "profile_id": profile["id"],
+                    "parent_card_id": parent_card_id,
+                    "open_profile_cards": open_profile_cards,
+                    "max_parallel_cards": max_parallel_cards,
+                    "raw_instruction_included": False,
+                    "autonomous_runtime": False,
+                    "recursive_model_loop_enabled": False,
+                },
+                task_id=str(parent_card.get("task_id")) if parent_card.get("task_id") else None,
+            )
+            raise ValueError(f"subagent profile {profile['id']!r} has no available parallel card budget")
+        child_remaining = max(0, min(parent_remaining - 1, _profile_int(profile, "recursive_depth_limit", 0)))
+        child_depth = _card_recursive_child_depth(parent_metadata) + 1
+        budget_snapshot = _profile_budget_snapshot(
+            profile,
+            open_profile_cards=open_profile_cards,
+            recursive_depth_remaining=child_remaining,
+            parent_card_id=parent_card_id,
+        )
+        root_card_id = str(parent_metadata.get("root_subagent_card_id") or parent_card_id)
+        created_at = now_utc()
+        child = self.add_card(
+            board["id"],
+            title=f"{role}: {task[:80]}",
+            description=task,
+            lane="ready",
+            owner=role,
+            risk_level=RiskLevel.HIGH,
+            task_id=str(parent_card.get("task_id")) if parent_card.get("task_id") else None,
+            metadata={
+                "delegation_type": "subagent",
+                "role": role,
+                "profile_id": profile["id"],
+                "profile_status": "matched" if _profile_id(role) == profile["id"] and profile.get("enabled", True) else "default_profile",
+                "profile_snapshot": _profile_summary(profile),
+                "budget_snapshot": budget_snapshot,
+                "budget_enforced": True,
+                "source_tool": "subagent_delegate_child",
+                "isolation": "durable_child_card",
+                "instructions_tainted": True,
+                "parent_task_id": str(parent_card.get("task_id")) if parent_card.get("task_id") else None,
+                "parent_subagent_card_id": parent_card_id,
+                "root_subagent_card_id": root_card_id,
+                "recursive_child_depth": child_depth,
+                "recursive_depth_remaining": child_remaining,
+                "approval_gate": "explicit_child_delegation_approval",
+                "handoff_receipt": "kanban.card_created",
+                "handoff_receipts_recorded": 1,
+                "last_handoff_receipt": {
+                    "receipt_schema": "aegis.subagent.handoff.v1",
+                    "event_type": "kanban.card_created",
+                    "from_lane": None,
+                    "to_lane": "ready",
+                    "raw_reason_included": False,
+                    "raw_instruction_included": False,
+                    "raw_instruction_forwarded_to_model": False,
+                    "autonomous_runtime": False,
+                    "recursive_model_loop_enabled": False,
+                },
+                "raw_instruction_forwarded_to_model": False,
+            },
+        )
+        receipt = {
+            "receipt_schema": "aegis.subagent.child_delegation.v1",
+            "event_type": "subagent.child_delegated",
+            "parent_card_id": parent_card_id,
+            "child_card_id": child["id"],
+            "root_card_id": root_card_id,
+            "board_id": board["id"],
+            "actor": _safe_actor(actor),
+            "parent_profile_id": parent_metadata.get("profile_id"),
+            "child_profile_id": profile["id"],
+            "child_depth": child_depth,
+            "parent_recursive_depth_remaining": parent_remaining,
+            "child_recursive_depth_remaining": child_remaining,
+            "review_gate_required": True,
+            "approved": True,
+            "autonomous_runtime": False,
+            "recursive_model_loop_enabled": False,
+            "model_invocation_performed": False,
+            "tool_execution_performed": False,
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+            "raw_secret_values_included": False,
+            "created_at": created_at,
+        }
+        child_count = _subagent_child_count(parent_metadata) + 1
+        self.store.update_kanban_card_metadata(
+            str(child["id"]),
+            {
+                "recursive_delegation_receipt": receipt,
+                "review_gated_recursive_child_delegation": True,
+                "raw_instruction_forwarded_to_model": False,
+            },
+        )
+        self.store.update_kanban_card_metadata(
+            parent_card_id,
+            {
+                "recursive_child_count": child_count,
+                "last_child_delegation_receipt": receipt,
+                "review_gated_recursive_child_delegations": True,
+                "raw_instruction_forwarded_to_model": False,
+            },
+        )
+        audit_entry = self.audit_logger.append(
+            "subagent.child_delegated",
+            receipt,
+            task_id=str(parent_card.get("task_id")) if parent_card.get("task_id") else None,
+        )
+        updated_child = self._require_card(str(child["id"]))
+        return {
+            "ok": True,
+            "status": "child_delegated",
+            "card_id": str(child["id"]),
+            "parent_card_id": parent_card_id,
+            "root_card_id": root_card_id,
+            "receipt": receipt,
+            "audit_event_hash": audit_entry["event_hash"],
+            "card": _subagent_card_summary(updated_child),
+            "autonomous_runtime": False,
+            "recursive_model_loop_enabled": False,
+        }
+
     def _require_subagent_card(self, card_id: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         card = self._require_card(card_id)
         board = self.subagent_delegation_board(create=False)
@@ -1225,6 +1399,9 @@ class KanbanManager:
         parent_task_review_links = [
             card for card in parent_bound_review_cards if bool(card.get("metadata", {}).get("parent_task_review_linked", False))
         ]
+        recursive_child_cards = [
+            card for card in cards if bool(card.get("metadata", {}).get("parent_subagent_card_id"))
+        ]
         safe_cards = [
             _subagent_card_summary(card, include_preview=include_previews)
             for card in sorted(cards, key=lambda row: str(row.get("updated_at", "")), reverse=True)[: max(0, limit)]
@@ -1245,6 +1422,7 @@ class KanbanManager:
             "done_cards": lanes["done"],
             "parent_bound_review_cards": len(parent_bound_review_cards),
             "parent_task_review_links": len(parent_task_review_links),
+            "recursive_child_cards": len(recursive_child_cards),
             "active_roles": active_roles,
             "profiles": profiles,
             "profile_count": len(profiles),
@@ -1259,6 +1437,8 @@ class KanbanManager:
                 "handoff_receipts",
                 "agent_profile_lifecycle",
                 "recursive_budget_limits",
+                "recursive_budget_remaining",
+                "review_gated_recursive_child_delegations",
                 "isolated_parallel_runtime",
                 "operator_approved_batch_runtime",
                 "parent_bound_review_receipts",
@@ -1285,6 +1465,7 @@ class KanbanManager:
         status = self.subagent_status(limit=limit, include_previews=False)
         required_controls = [
             "autonomous_loop_isolation",
+            "review_gated_recursive_child_delegations",
             "recursive_model_loop_executor",
             "scoped_model_context_builder",
             "recursive_budget_enforcer",
@@ -1453,6 +1634,34 @@ def _subagent_autonomy_loop_count(metadata: dict[str, Any]) -> int:
         return 0
 
 
+def _subagent_child_count(metadata: dict[str, Any]) -> int:
+    try:
+        return int(metadata.get("recursive_child_count", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _card_recursive_depth_remaining(metadata: dict[str, Any]) -> int:
+    direct = metadata.get("recursive_depth_remaining")
+    if direct is not None:
+        try:
+            return max(0, int(direct))
+        except (TypeError, ValueError):
+            return 0
+    budget = metadata.get("budget_snapshot") if isinstance(metadata.get("budget_snapshot"), dict) else {}
+    try:
+        return max(0, int(budget.get("recursive_depth_remaining", budget.get("recursive_depth_limit", 0))))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _card_recursive_child_depth(metadata: dict[str, Any]) -> int:
+    try:
+        return max(0, int(metadata.get("recursive_child_depth", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _parent_task_id(card: dict[str, Any], metadata: dict[str, Any]) -> str | None:
     value = metadata.get("parent_task_id") or card.get("task_id")
     if value is None:
@@ -1587,6 +1796,8 @@ def _model_review_budget_snapshot(budget: dict[str, Any]) -> dict[str, Any]:
         "profile_id": budget.get("profile_id"),
         "max_parallel_cards": budget.get("max_parallel_cards"),
         "recursive_depth_limit": budget.get("recursive_depth_limit"),
+        "recursive_depth_remaining": budget.get("recursive_depth_remaining"),
+        "parent_subagent_card_id": budget.get("parent_subagent_card_id"),
         "max_tool_calls": budget.get("max_tool_calls"),
         "max_runtime_seconds": budget.get("max_runtime_seconds"),
         "network_policy": budget.get("network_policy"),
@@ -1657,6 +1868,7 @@ def _subagent_autonomy_scoped_context(
     budget = metadata.get("budget_snapshot") if isinstance(metadata.get("budget_snapshot"), dict) else {}
     profile = metadata.get("profile_snapshot") if isinstance(metadata.get("profile_snapshot"), dict) else {}
     recursive_depth_limit = _profile_int(budget, "recursive_depth_limit", 0)
+    recursive_depth_remaining = _card_recursive_depth_remaining(metadata)
     tool_budget = _profile_int(budget, "max_tool_calls", 0)
     return {
         "context_schema": "aegis.subagent.scoped_autonomy_context.v1",
@@ -1701,7 +1913,8 @@ def _subagent_autonomy_scoped_context(
             "budget_schema": budget.get("budget_schema"),
             "profile_id": budget.get("profile_id"),
             "recursive_depth_limit": recursive_depth_limit,
-            "recursive_depth_remaining": max(0, recursive_depth_limit),
+            "recursive_depth_remaining": recursive_depth_remaining,
+            "parent_subagent_card_id": budget.get("parent_subagent_card_id") or metadata.get("parent_subagent_card_id"),
             "max_tool_calls": tool_budget,
             "tool_calls_allowed_for_plan": 0,
             "max_runtime_seconds": budget.get("max_runtime_seconds"),
@@ -2128,8 +2341,8 @@ def _build_subagent_profile(
     workspace_scope: str,
 ) -> dict[str, Any]:
     timestamp = now_utc()
-    if recursive_depth_limit != 0:
-        raise ValueError("subagent recursive depth must remain 0 until autonomous isolation is enabled")
+    if recursive_depth_limit < 0 or recursive_depth_limit > 5:
+        raise ValueError("subagent recursive_depth_limit must be between 0 and 5")
     if max_parallel_cards < 1 or max_parallel_cards > 20:
         raise ValueError("subagent max_parallel_cards must be between 1 and 20")
     if max_tool_calls < 0 or max_tool_calls > 1000:
@@ -2199,13 +2412,23 @@ def _open_profile_card_count(cards: list[dict[str, Any]], profile_id: str) -> in
     return count
 
 
-def _profile_budget_snapshot(profile: dict[str, Any], *, open_profile_cards: int) -> dict[str, Any]:
+def _profile_budget_snapshot(
+    profile: dict[str, Any],
+    *,
+    open_profile_cards: int,
+    recursive_depth_remaining: int | None = None,
+    parent_card_id: str | None = None,
+) -> dict[str, Any]:
+    recursive_depth_limit = _profile_int(profile, "recursive_depth_limit", 0)
+    remaining = recursive_depth_limit if recursive_depth_remaining is None else max(0, min(int(recursive_depth_remaining), recursive_depth_limit))
     return {
         "budget_schema": "aegis.subagent.budget.v1",
         "profile_id": profile.get("id"),
         "open_profile_cards_at_create": open_profile_cards,
         "max_parallel_cards": _profile_int(profile, "max_parallel_cards", 1),
-        "recursive_depth_limit": _profile_int(profile, "recursive_depth_limit", 0),
+        "recursive_depth_limit": recursive_depth_limit,
+        "recursive_depth_remaining": remaining,
+        "parent_subagent_card_id": parent_card_id,
         "max_tool_calls": _profile_int(profile, "max_tool_calls", 0),
         "max_runtime_seconds": _profile_int(profile, "max_runtime_seconds", 0),
         "network_policy": profile.get("network_policy", "disabled"),
@@ -2270,6 +2493,15 @@ def _subagent_card_summary(card: dict[str, Any], *, include_preview: bool = True
         "profile_snapshot": metadata.get("profile_snapshot"),
         "budget_snapshot": metadata.get("budget_snapshot"),
         "budget_enforced": bool(metadata.get("budget_enforced", False)),
+        "parent_subagent_card_id": metadata.get("parent_subagent_card_id"),
+        "root_subagent_card_id": metadata.get("root_subagent_card_id"),
+        "recursive_child_depth": _card_recursive_child_depth(metadata),
+        "recursive_depth_remaining": _card_recursive_depth_remaining(metadata),
+        "recursive_child_count": _subagent_child_count(metadata),
+        "recursive_delegation_receipt": metadata.get("recursive_delegation_receipt"),
+        "last_child_delegation_receipt": metadata.get("last_child_delegation_receipt"),
+        "review_gated_recursive_child_delegation": bool(metadata.get("review_gated_recursive_child_delegation", False)),
+        "review_gated_recursive_child_delegations": bool(metadata.get("review_gated_recursive_child_delegations", False)),
         "created_at": card.get("created_at"),
         "updated_at": card.get("updated_at"),
         "description_preview": _preview(description) if include_preview else None,

@@ -795,6 +795,13 @@ def build_parser() -> argparse.ArgumentParser:
     agents_delegate.add_argument("--approved", action="store_true")
     agents_delegate.add_argument("--task-id")
     agents_delegate.add_argument("--limit", type=int, default=20)
+    agents_delegate_child = agents_sub.add_parser("delegate-child", help="Queue an approved child subagent card from a parent subagent budget")
+    agents_delegate_child.add_argument("parent_card_id")
+    agents_delegate_child.add_argument("role")
+    agents_delegate_child.add_argument("task")
+    agents_delegate_child.add_argument("--approved", action="store_true")
+    agents_delegate_child.add_argument("--actor", default="operator")
+    agents_delegate_child.add_argument("--limit", type=int, default=20)
     agents_handoff = agents_sub.add_parser("handoff", help="Record an operator handoff by moving a subagent delegation card")
     agents_handoff.add_argument("card_id")
     agents_handoff.add_argument("lane", choices=("backlog", "ready", "in_progress", "review", "blocked", "done"))
@@ -2457,6 +2464,15 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 {"role": args.role, "task": args.task},
                 approved=args.approved,
                 task_id=args.task_id,
+            )
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
+        if args.agents_command == "delegate-child":
+            result = orchestrator.kanban.delegate_subagent_child(
+                args.parent_card_id,
+                role=args.role,
+                task=args.task,
+                actor=args.actor,
+                approved=args.approved,
             )
             return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
         if args.agents_command == "handoff":
