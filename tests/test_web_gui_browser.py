@@ -161,6 +161,13 @@ if (frames.length !== 2 || frames[1].event !== "task" || frames[1].data.status !
         self.assertIn("ultrareview", script)
         self.assertIn("release-notes", script)
         self.assertIn("chrome", script)
+        self.assertIn('taskView: "status"', script)
+        self.assertIn('taskView: "events"', script)
+        self.assertIn('taskView: "timeline"', script)
+        self.assertIn('taskView: "evidence"', script)
+        self.assertIn("const selectedTaskId = () =>", script)
+        self.assertIn("const slashTaskId = (parsed)", script)
+        self.assertIn('parsed.kind === "task-inspection"', script)
         self.assertIn("slashCommandMatches(prefix).slice(0, 8)", script)
         self.assertIn('document.getElementById("slash-palette").addEventListener("click"', script)
         self.assertIn('document.getElementById("task-form").requestSubmit()', script)
@@ -193,6 +200,22 @@ if (parsed.kind !== "submit" || parsed.command !== "background" || parsed.reques
 const nav = api.parse("/models");
 if (nav.kind !== "section" || nav.section !== "models") {
   throw new Error(`models navigation parsed incorrectly: ${JSON.stringify(nav)}`);
+}
+const status = api.parse("/status task-123");
+if (status.kind !== "task-inspection" || status.taskView !== "status" || status.request !== "task-123") {
+  throw new Error(`status task command parsed incorrectly: ${JSON.stringify(status)}`);
+}
+const events = api.matches("ev").map((entry) => entry.command);
+if (!events.includes("events")) {
+  throw new Error(`/events command did not fuzzy match: ${JSON.stringify(events)}`);
+}
+const timeline = api.matches("timeline").map((entry) => entry.command);
+if (!timeline.includes("timeline")) {
+  throw new Error(`/timeline command did not resolve: ${JSON.stringify(timeline)}`);
+}
+const audit = api.parse("/audit task-456");
+if (audit.kind !== "task-inspection" || audit.taskView !== "evidence" || audit.command !== "evidence") {
+  throw new Error(`/audit alias did not resolve to task evidence: ${JSON.stringify(audit)}`);
 }
 const privacy = api.matches("privacy").map((entry) => entry.command);
 if (!privacy.includes("approvals")) {
@@ -231,6 +254,60 @@ const submitCount = api.commands().filter((entry) => entry.command === "submit")
 if (submitCount !== 1) {
   throw new Error(`core submit command duplicated: ${submitCount}`);
 }
+"""
+        result = subprocess.run((node, "-e", node_script, str(app_js)), capture_output=True, text=True, timeout=5, check=False)
+        if result.returncode != 0:
+            raise AssertionError(result.stderr.strip() or result.stdout.strip())
+
+    def test_web_task_inspection_slash_commands_call_task_loaders(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        app_js = Path(__file__).resolve().parents[1] / "src" / "aegis" / "web" / "static" / "app.js"
+        node_script = r"""
+const fs = require("fs");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const start = source.indexOf("const selectedTaskId =");
+const end = source.indexOf("\n\nconst renderBrowserOutput =", start);
+if (start < 0 || end < 0) {
+  throw new Error("task inspection slash dispatcher not found");
+}
+const calls = [];
+const state = { lastTask: { id: "latest-task" }, activeSection: "security" };
+const applySectionVisibility = () => calls.push(["section", state.activeSection]);
+const loadTaskStatus = async (taskId) => calls.push(["status", taskId, state.activeSection]);
+const loadTaskEvents = async (taskId) => calls.push(["events", taskId, state.activeSection]);
+const loadTaskTimeline = async (taskId) => calls.push(["timeline", taskId, state.activeSection]);
+const loadTaskEvidence = async (taskId) => calls.push(["evidence", taskId, state.activeSection]);
+const renderTaskNotice = (title, detail) => calls.push(["notice", title, detail, state.activeSection]);
+const renderTaskError = (message) => calls.push(["error", message]);
+const resumeTask = async (taskId) => calls.push(["resume", taskId]);
+eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = executeLocalSlashCommand;`);
+(async () => {
+  await executeLocalSlashCommand({ kind: "task-inspection", command: "status", taskView: "status", request: "task-1" });
+  await executeLocalSlashCommand({ kind: "task-inspection", command: "events", taskView: "events", request: "" });
+  await executeLocalSlashCommand({ kind: "task-inspection", command: "timeline", taskView: "timeline", request: "task-3 extra" });
+  await executeLocalSlashCommand({ kind: "task-inspection", command: "evidence", taskView: "evidence", request: "task-4" });
+  state.lastTask = null;
+  state.lastEvents = null;
+  state.lastEvidence = null;
+  await executeLocalSlashCommand({ kind: "task-inspection", command: "status", label: "/status [task_id]", taskView: "status", request: "" });
+  const expected = [
+    ["section", "activity"],
+    ["status", "task-1", "activity"],
+    ["events", "latest-task", "activity"],
+    ["timeline", "task-3", "activity"],
+    ["evidence", "task-4", "activity"],
+    ["section", "activity"],
+    ["notice", "/status [task_id]", "Open a task or include a task id, then run this command again.", "activity"],
+  ];
+  if (JSON.stringify(calls) !== JSON.stringify(expected)) {
+    throw new Error(`unexpected task inspection dispatch: ${JSON.stringify(calls)}`);
+  }
+})().catch((error) => {
+  console.error(error.stack || error.message);
+  process.exit(1);
+});
 """
         result = subprocess.run((node, "-e", node_script, str(app_js)), capture_output=True, text=True, timeout=5, check=False)
         if result.returncode != 0:

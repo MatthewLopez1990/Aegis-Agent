@@ -56,8 +56,11 @@ const WEB_SLASH_COMMANDS = [
   { command: "memory", aliases: ["mem"], label: "/memory", detail: "Open governed memory controls", kind: "section", section: "memory" },
   { command: "remote-control", aliases: ["rc", "remote"], label: "/remote-control", detail: "Open remote pairing and relay controls", kind: "section", section: "automation" },
   { command: "schedules", aliases: ["schedule", "hooks"], label: "/schedules", detail: "Open automation, hooks, and scheduled runs", kind: "section", section: "automation" },
-  { command: "evidence", aliases: ["events", "timeline", "audit"], label: "/evidence", detail: "Open evidence, timelines, and audit output", kind: "section", section: "evidence" },
-  { command: "settings", aliases: ["status", "dashboard", "controls", "recap", "release-notes", "tui", "scroll-speed", "radio", "stickers"], label: "/settings", detail: "Open runtime posture and UI controls", kind: "section", section: "security" },
+  { command: "status", label: "/status [task_id]", detail: "Show task status for an id or the selected task", kind: "task-inspection", taskView: "status" },
+  { command: "events", label: "/events [task_id]", detail: "Stream grouped run events for an id or the selected task", kind: "task-inspection", taskView: "events" },
+  { command: "timeline", label: "/timeline [task_id]", detail: "Open ordered plan, receipt, and audit events", kind: "task-inspection", taskView: "timeline" },
+  { command: "evidence", aliases: ["audit"], label: "/evidence [task_id]", detail: "Open receipts and audit evidence for an id or the selected task", kind: "task-inspection", taskView: "evidence" },
+  { command: "settings", aliases: ["dashboard", "controls", "recap", "release-notes", "tui", "scroll-speed", "radio", "stickers"], label: "/settings", detail: "Open runtime posture and UI controls", kind: "section", section: "security" },
   { command: "commands", aliases: ["help", "keybindings", "autofix-pr", "simplify", "ultraplan", "ultrareview"], label: "/commands", detail: "Show slash command suggestions", kind: "palette" },
 ];
 
@@ -1710,6 +1713,11 @@ const renderTaskNotice = (title, detail = "") => {
   node.replaceChildren(card);
 };
 
+const selectedTaskId = () =>
+  state.lastTask?.id || state.lastEvents?.task_id || state.lastEvidence?.task?.id || state.lastEvidence?.task_id || "";
+
+const slashTaskId = (parsed) => String(parsed.request || "").trim().split(/\s+/, 1)[0] || selectedTaskId();
+
 const executeLocalSlashCommand = async (parsed) => {
   if (parsed.kind === "resume") {
     if (!state.lastTask?.id) {
@@ -1717,6 +1725,31 @@ const executeLocalSlashCommand = async (parsed) => {
       return;
     }
     await resumeTask(state.lastTask.id);
+    return;
+  }
+  if (parsed.kind === "task-inspection") {
+    const taskId = slashTaskId(parsed);
+    if (!taskId) {
+      state.activeSection = parsed.taskView === "status" ? "activity" : "evidence";
+      applySectionVisibility();
+      renderTaskNotice(parsed.label || `/${parsed.command}`, "Open a task or include a task id, then run this command again.");
+      return;
+    }
+    if (parsed.taskView === "status") {
+      state.activeSection = "activity";
+      applySectionVisibility();
+      await loadTaskStatus(taskId);
+      return;
+    }
+    if (parsed.taskView === "events") {
+      await loadTaskEvents(taskId);
+      return;
+    }
+    if (parsed.taskView === "timeline") {
+      await loadTaskTimeline(taskId);
+      return;
+    }
+    await loadTaskEvidence(taskId);
     return;
   }
   if (parsed.kind === "section") {
