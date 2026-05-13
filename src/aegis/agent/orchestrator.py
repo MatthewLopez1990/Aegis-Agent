@@ -1318,6 +1318,55 @@ class AgentOrchestrator:
             "audit_event_hash": audit_entry["event_hash"],
         }
 
+    def approve_channel_live_activation_packet(self, packet: str, *, actor: str = "operator", approved: bool = False) -> dict[str, Any]:
+        if not approved:
+            return {
+                "ok": False,
+                "status": "approval_required",
+                "reason": "live channel activation requires explicit approval",
+                "approval_required": True,
+                "send_probe_performed": False,
+                "raw_secret_values_included": False,
+                "raw_channel_content_included": False,
+            }
+        verified = self.verify_channel_live_activation_packet(packet, actor=actor)
+        packet_summary = verified.get("packet", {}) if isinstance(verified.get("packet", {}), dict) else {}
+        ready = bool(verified.get("ok")) and packet_summary.get("preflight_status") == "ready_for_approved_send"
+        status = "activation_approved" if ready else "activation_blocked"
+        reason = "ready_for_approved_send" if ready else "packet_verification_failed" if not verified.get("ok") else "preflight_not_ready"
+        receipt = {
+            "receipt_schema": "aegis.channel.live_activation_approval.v1",
+            "event_type": "channel.live_activation_approved" if ready else "channel.live_activation_blocked",
+            "packet_id": str(packet_summary.get("packet_id") or ""),
+            "actor": _safe_actor(actor),
+            "status": status,
+            "reason": reason,
+            "approved": True,
+            "packet_integrity_ok": bool(verified.get("ok")),
+            "preflight_status": packet_summary.get("preflight_status"),
+            "configured_channel_count": int(packet_summary.get("configured_channel_count") or 0),
+            "live_channel_count": int(packet_summary.get("live_channel_count") or 0),
+            "blocker_count": int(packet_summary.get("blocker_count") or 0),
+            "channel_names": list(packet_summary.get("channel_names", [])) if isinstance(packet_summary.get("channel_names", []), list) else [],
+            "required_next_gate": "approved_send" if ready else "clear_activation_blockers",
+            "activation_config_written": False,
+            "send_probe_performed": False,
+            "model_invocation_performed": False,
+            "raw_packet_payload_included": False,
+            "raw_secret_values_included": False,
+            "raw_channel_content_included": False,
+            "approved_at": now_utc(),
+        }
+        audit_entry = self.audit_logger.append(str(receipt["event_type"]), receipt)
+        return {
+            "ok": ready,
+            "status": status,
+            "packet": packet_summary,
+            "verification_receipt": verified.get("receipt", {}),
+            "receipt": receipt,
+            "audit_event_hash": audit_entry["event_hash"],
+        }
+
     def _run_plan(self, task_id: str, *, approval_context: dict[str, str | None] | None, session_id: str | None = None) -> dict[str, Any]:
         task = self._require_task(task_id)
         plan_rows = json.loads(task["plan_json"])
@@ -3779,6 +3828,7 @@ _CHANNEL_ACTIVATION_VERIFICATION_GATES = (
     "brokered_secret_resolution",
     "inbound_tainting",
     "activation_packet_integrity",
+    "activation_approval_receipt",
 )
 
 
@@ -3823,11 +3873,19 @@ def _channel_live_activation_preflight(config: AegisConfig) -> dict[str, Any]:
         _email_channel_activation(config),
         _chat_webhook_channel_activation(config),
     ]
-    blockers = [blocker for channel in channels for blocker in channel["blockers"]]
-    configured_controls = sorted({control for channel in channels for control in channel["configured_controls"]})
-    missing_controls = sorted(set(_CHANNEL_ACTIVATION_REQUIRED_CONTROLS).difference(configured_controls))
     live_channels = [channel for channel in channels if channel["live_outbound_enabled"]]
     configured_channels = [channel for channel in channels if channel["preflight_status"] == "ready_for_approved_send"]
+    if configured_channels:
+        blockers = [
+            blocker
+            for channel in channels
+            if _channel_activation_enabled_for_review(channel) and channel["preflight_status"] != "ready_for_approved_send"
+            for blocker in channel["blockers"]
+        ]
+    else:
+        blockers = [blocker for channel in channels for blocker in channel["blockers"]]
+    configured_controls = sorted({control for channel in channels for control in channel["configured_controls"]})
+    missing_controls = sorted(set(_CHANNEL_ACTIVATION_REQUIRED_CONTROLS).difference(configured_controls))
     preflight_status = "ready_for_approved_send" if configured_channels and not blockers else "blocked"
     return {
         "status": "channel_live_activation_preflight",
@@ -3848,6 +3906,10 @@ def _channel_live_activation_preflight(config: AegisConfig) -> dict[str, Any]:
         "raw_secret_values_included": False,
         "raw_channel_content_included": False,
     }
+
+
+def _channel_activation_enabled_for_review(channel: dict[str, Any]) -> bool:
+    return bool(channel.get("live_outbound_enabled"))
 
 
 def _webhook_channel_activation(config: AegisConfig) -> dict[str, Any]:

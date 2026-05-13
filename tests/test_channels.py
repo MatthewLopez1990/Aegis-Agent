@@ -168,6 +168,59 @@ class ChannelWebhookTests(unittest.TestCase):
             self.assertFalse(verified["receipt"]["raw_packet_payload_included"])
             self.assertNotIn("AEGIS_WEBHOOK_SHARED_SECRET", json.dumps(packet, sort_keys=True))
 
+            approval_required = orchestrator.approve_channel_live_activation_packet(packet["receipt"]["packet_id"], actor="channel-approver")
+            blocked = orchestrator.approve_channel_live_activation_packet(packet["receipt"]["packet_id"], actor="channel-approver", approved=True)
+
+            self.assertEqual(approval_required["status"], "approval_required")
+            self.assertTrue(approval_required["approval_required"])
+            self.assertFalse(approval_required["send_probe_performed"])
+            self.assertFalse(blocked["ok"])
+            self.assertEqual(blocked["status"], "activation_blocked")
+            self.assertEqual(blocked["receipt"]["receipt_schema"], "aegis.channel.live_activation_approval.v1")
+            self.assertEqual(blocked["receipt"]["reason"], "preflight_not_ready")
+            self.assertFalse(blocked["receipt"]["send_probe_performed"])
+            self.assertFalse(blocked["receipt"]["raw_secret_values_included"])
+
+    def test_ready_channel_live_activation_packet_can_be_approved_without_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[security]",
+                        'network_allowlist = ["example.com"]',
+                        "[channels.chat_webhook]",
+                        "outbound_enabled = true",
+                        'url_secret = "AEGIS_CHAT_WEBHOOK_URL"',
+                        'payload_format = "slack"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+
+            packet = orchestrator.create_channel_live_activation_packet(actor="channel-reviewer")
+            verified = orchestrator.verify_channel_live_activation_packet(packet["receipt"]["packet_id"], actor="channel-verifier")
+            approved = orchestrator.approve_channel_live_activation_packet(packet["receipt"]["packet_id"], actor="channel-approver", approved=True)
+
+            self.assertEqual(packet["receipt"]["preflight_status"], "ready_for_approved_send")
+            self.assertEqual(packet["receipt"]["configured_channel_count"], 1)
+            self.assertTrue(verified["ok"])
+            self.assertTrue(approved["ok"])
+            self.assertEqual(approved["status"], "activation_approved")
+            self.assertEqual(approved["receipt"]["receipt_schema"], "aegis.channel.live_activation_approval.v1")
+            self.assertEqual(approved["receipt"]["required_next_gate"], "approved_send")
+            self.assertEqual(approved["receipt"]["reason"], "ready_for_approved_send")
+            self.assertFalse(approved["receipt"]["activation_config_written"])
+            self.assertFalse(approved["receipt"]["send_probe_performed"])
+            self.assertFalse(approved["receipt"]["model_invocation_performed"])
+            self.assertFalse(approved["receipt"]["raw_packet_payload_included"])
+            self.assertFalse(approved["receipt"]["raw_secret_values_included"])
+            self.assertFalse(approved["receipt"]["raw_channel_content_included"])
+            self.assertIn("chat_webhook", approved["receipt"]["channel_names"])
+
     def test_direct_inbound_receive_redacts_stored_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

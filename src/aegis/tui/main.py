@@ -299,7 +299,7 @@ SECURITY_COMMANDS = (
     "rollback-bundle",
     "evaluate",
 )
-CHANNEL_COMMANDS = ("render", "receive", "resolve-approval", "send-webhook", "send-email", "send-chat-webhook", "activation-packet", "verify-activation-packet", "events")
+CHANNEL_COMMANDS = ("render", "receive", "resolve-approval", "send-webhook", "send-email", "send-chat-webhook", "activation-packet", "verify-activation-packet", "activate-packet", "events")
 EVALUATION_COMMANDS = ("queue", "review", "trends", "delta", "readiness")
 SLASH_COMMAND_ALIASES = {
     "add-dir": "add_dir",
@@ -987,7 +987,7 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_channel(self, arg: str) -> None:
-        """channel render|receive|resolve-approval|send-webhook|send-email|send-chat-webhook|activation-packet|verify-activation-packet|events -- inspect and exercise channel adapters."""
+        """channel render|receive|resolve-approval|send-webhook|send-email|send-chat-webhook|activation-packet|verify-activation-packet|activate-packet|events -- inspect and exercise channel adapters."""
         parts = shlex.split(arg)
         if parts and parts[0] == "events":
             limit = int(parts[1]) if len(parts) > 1 else 20
@@ -1001,6 +1001,18 @@ class AegisTui(cmd.Cmd):
                 print("usage: channel verify-activation-packet <packet-id-or-path>")
                 return
             _print_json(self.orchestrator.verify_channel_live_activation_packet(parts[1], actor="tui-operator"))
+            return
+        if parts and parts[0] == "activate-packet":
+            if len(parts) < 2:
+                print("usage: channel activate-packet <packet-id-or-path> --approved [--actor name]")
+                return
+            _print_json(
+                self.orchestrator.approve_channel_live_activation_packet(
+                    parts[1],
+                    actor=_option_value(parts, "--actor") or "tui-operator",
+                    approved="--approved" in parts,
+                )
+            )
             return
         if parts and parts[0] == "resolve-approval":
             if len(parts) < 3:
@@ -1049,7 +1061,7 @@ class AegisTui(cmd.Cmd):
             _print_json({"message": self.orchestrator.channels.events(limit=1)[0]})
             return
         if len(parts) < 3 or parts[0] != "render":
-            print("usage: channel render <channel> <text> | channel receive <channel> <text> | channel resolve-approval <event_id> <approval_id> | channel send-webhook <text> --approved | channel send-email <subject> <text> --approved | channel send-chat-webhook <text> --approved | channel activation-packet | channel verify-activation-packet <packet> | channel events [limit]")
+            print("usage: channel render <channel> <text> | channel receive <channel> <text> | channel resolve-approval <event_id> <approval_id> | channel send-webhook <text> --approved | channel send-email <subject> <text> --approved | channel send-chat-webhook <text> --approved | channel activation-packet | channel verify-activation-packet <packet> | channel activate-packet <packet> --approved | channel events [limit]")
             return
         channel = parts[1]
         text = " ".join(parts[2:])
@@ -6697,6 +6709,7 @@ def _command_reference() -> str:
             "channel receive <c> <t> Normalize inbound channel payload",
             "channel resolve-approval <event> <approval>",
             "channel send-chat-webhook <text> --approved",
+            "channel activate-packet <packet> --approved",
             "channel events [limit]  Recent channel activity",
             "models|model           Model providers",
             "login|logout <provider> Model auth aliases",

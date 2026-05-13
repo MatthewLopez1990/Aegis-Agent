@@ -591,7 +591,10 @@ class CliTests(unittest.TestCase):
             self.assertIn("subscription_token_bridge", {item["control"] for item in auth_gap["operator_checklist"]})
             provider_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "provider_and_channel_live_connectors")
             self.assertIn("human_approval", provider_gap["required_controls"])
+            self.assertIn("channel_activation_approval_receipt", provider_gap["required_controls"])
+            self.assertIn("channel_activation_approval_receipt", provider_gap["verification_gates"])
             self.assertIn("live_connector_receipts.redacted_write_summary", provider_gap["evaluation_scenarios"])
+            self.assertIn("channel.live_activation_approval", provider_gap["evaluation_scenarios"])
             self.assertIn("generic_rest.live_write_rate_limit", provider_gap["evaluation_scenarios"])
             self.assertIn("github_gitlab.live_write_rate_limit", provider_gap["evaluation_scenarios"])
             self.assertIn("github_gitlab.rollback_offer_receipt", provider_gap["evaluation_scenarios"])
@@ -616,6 +619,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(checklist["runtime_rate_limits"]["state"], "partial")
             self.assertEqual(checklist["rollback_receipts"]["state"], "partial")
             self.assertEqual(checklist["promotion_scope"]["state"], "not_started")
+            self.assertEqual(checklist["channel_activation_approval_receipt"]["state"], "available")
             browser_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "browser_and_media_depth")
             self.assertIn("activation_packet_verification", browser_gap["required_controls"])
             self.assertIn("live_browser_activation_packet_schema", browser_gap["verification_gates"])
@@ -2045,6 +2049,20 @@ class CliTests(unittest.TestCase):
                     ]
                 )
             )
+            activation_approval = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "channel",
+                        "activate-packet",
+                        activation_packet["receipt"]["packet_id"],
+                        "--actor",
+                        "cli-approver",
+                        "--approved",
+                    ]
+                )
+            )
             events = build_orchestrator(data_dir=data_dir, workspace=root).channels.events(limit=1)
             self.assertEqual(result["status"], "rendered_pending_approval")
             self.assertEqual(inbound["message"]["direction"], "inbound")
@@ -2062,6 +2080,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(activation_packet["receipt"]["preflight_status"], "blocked")
             self.assertEqual(verified_packet["receipt"]["receipt_schema"], "aegis.channel.live_activation_packet_verification.v1")
             self.assertTrue(verified_packet["receipt"]["packet_integrity_ok"])
+            self.assertEqual(activation_approval["receipt"]["receipt_schema"], "aegis.channel.live_activation_approval.v1")
+            self.assertEqual(activation_approval["status"], "activation_blocked")
+            self.assertEqual(activation_approval["receipt"]["reason"], "preflight_not_ready")
+            self.assertFalse(activation_approval["receipt"]["send_probe_performed"])
             self.assertNotIn("abc123", json.dumps(events, sort_keys=True))
             self.assertNotIn("abc123", json.dumps(listed, sort_keys=True))
 

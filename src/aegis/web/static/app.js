@@ -3202,6 +3202,15 @@ document.getElementById("channel-verify-activation-packet").addEventListener("cl
   renderChannelOutput(result);
 });
 
+document.getElementById("channel-activate-packet").addEventListener("click", async () => {
+  const activationPacket = state.channelActivationPacketId;
+  const result = await api("/channels/activate-packet", {
+    method: "POST",
+    body: JSON.stringify({ packet: activationPacket, actor: "web-operator", approved: true }),
+  });
+  renderChannelOutput(result);
+});
+
 document.getElementById("policy-evaluate-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const scopes = document.getElementById("policy-scopes").value

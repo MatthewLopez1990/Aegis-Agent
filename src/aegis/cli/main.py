@@ -424,6 +424,10 @@ def build_parser() -> argparse.ArgumentParser:
     channel_verify_activation_packet = channel_sub.add_parser("verify-activation-packet", help="Verify a private live channel activation packet")
     channel_verify_activation_packet.add_argument("packet")
     channel_verify_activation_packet.add_argument("--actor", default="operator")
+    channel_activate_packet = channel_sub.add_parser("activate-packet", help="Approve a verified live channel activation packet without sending a probe")
+    channel_activate_packet.add_argument("packet")
+    channel_activate_packet.add_argument("--actor", default="operator")
+    channel_activate_packet.add_argument("--approved", action="store_true", help="Approve recording the live channel activation receipt")
     channel_receive = channel_sub.add_parser("receive", help="Normalize an inbound channel message")
     channel_receive.add_argument("channel")
     channel_receive.add_argument("text")
@@ -1648,6 +1652,8 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return build_orchestrator(data_dir=config.data_dir).create_channel_live_activation_packet(actor=args.actor)
         if args.channel_command == "verify-activation-packet":
             return build_orchestrator(data_dir=config.data_dir).verify_channel_live_activation_packet(args.packet, actor=args.actor)
+        if args.channel_command == "activate-packet":
+            return build_orchestrator(data_dir=config.data_dir).approve_channel_live_activation_packet(args.packet, actor=args.actor, approved=args.approved)
         if args.channel_command == "receive":
             registry.receive(args.channel, {"sender": args.sender, "text": args.text})
             return {"message": registry.events(limit=1)[0]}

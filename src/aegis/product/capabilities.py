@@ -493,15 +493,16 @@ def _live_gap_backlog(
             "next_steps": [
                 "Add per-provider credential handles and domain allowlists.",
                 "Keep live writes approval-gated with runtime rate limits and redacted receipts.",
-                "Create and verify channel activation packets before promoting signed webhook, email, or chat-webhook delivery.",
+                "Create, verify, and explicitly approve channel activation packets before promoting signed webhook, email, or chat-webhook delivery.",
                 "Promote each adapter only after mock, denied, approved, and audit-path tests pass.",
             ],
-            "required_controls": ["human_approval", "secret_broker", "network_allowlist", "rate_limits", "rollback_receipts", "audit_receipts", "channel_activation_packet_verification"],
-            "verification_gates": ["mock_fallback", "denied_write", "approved_write", "rate_limit_denial", "rollback_receipt", "receipt_redaction", "channel_activation_packet_integrity"],
+            "required_controls": ["human_approval", "secret_broker", "network_allowlist", "rate_limits", "rollback_receipts", "audit_receipts", "channel_activation_packet_verification", "channel_activation_approval_receipt"],
+            "verification_gates": ["mock_fallback", "denied_write", "approved_write", "rate_limit_denial", "rollback_receipt", "receipt_redaction", "channel_activation_packet_integrity", "channel_activation_approval_receipt"],
             "evaluation_scenarios": [
                 "connector_abuse.write_without_scope",
                 "live_connector_receipts.redacted_write_summary",
                 "live_connector_rate_limit.exceeded",
+                "channel.live_activation_approval",
                 "generic_rest.live_write_rate_limit",
                 "github_gitlab.live_write_rate_limit",
                 "github_gitlab.rollback_offer_receipt",
@@ -986,11 +987,12 @@ def _configured_live_channel_activation(name: str) -> dict[str, Any]:
     return {
         "status": "live_outbound_enabled",
         "preflight_status": "ready_for_approved_send",
-        "required_controls": ["explicit_channel_config", "human_approval", "secret_broker_or_allowlist", "redacted_receipts"],
-        "configured_controls": ["explicit_channel_config", "redacted_receipts"],
+        "required_controls": ["explicit_channel_config", "human_approval", "secret_broker_or_allowlist", "redacted_receipts", "activation_approval_receipt"],
+        "configured_controls": ["explicit_channel_config", "redacted_receipts", "activation_approval_receipt"],
         "blockers": [],
-        "verification_gates": ["approved_send", "receipt_redaction"],
+        "verification_gates": ["activation_packet_integrity", "activation_approval_receipt", "approved_send", "receipt_redaction"],
         "next_steps": [
+            f"Approve a verified {name} activation packet to record the promotion receipt.",
             f"Send one approved {name} delivery in the target environment.",
             "Confirm delivery receipts stay redacted before using the channel broadly.",
         ],
@@ -1121,7 +1123,7 @@ def _available_live_connector_adapters(connectors: list[dict[str, Any]], config:
                     "name": name,
                     "status": "available_opt_in",
                     "capabilities": list(_LIVE_CHANNEL_CAPABILITIES[name]),
-                    "required_controls": ["explicit_channel_config", "human_approval", "secret_broker_or_allowlist", "redacted_receipts"],
+                    "required_controls": ["explicit_channel_config", "human_approval", "secret_broker_or_allowlist", "redacted_receipts", "activation_approval_receipt"],
                     "activation": _live_channel_activation(name),
                     "raw_secret_values_included": False,
                 }
@@ -1133,16 +1135,18 @@ def _live_channel_activation(name: str) -> dict[str, Any]:
     return {
         "status": "live_channel_required",
         "preflight_status": "blocked",
-        "required_controls": ["explicit_channel_config", "human_approval", "secret_broker_or_allowlist", "redacted_receipts"],
+        "required_controls": ["explicit_channel_config", "human_approval", "secret_broker_or_allowlist", "redacted_receipts", "activation_approval_receipt"],
         "configured_controls": ["redacted_receipts"],
         "blockers": [
             {"control": "explicit_channel_config", "detail": f"{name} outbound channel is not fully enabled"},
             {"control": "human_approval", "detail": f"{name} outbound sends require approval before delivery"},
             {"control": "secret_broker_or_allowlist", "detail": f"{name} credentials or provider target must be brokered and allowlisted"},
+            {"control": "activation_approval_receipt", "detail": f"{name} activation requires a verified packet approval receipt before promotion"},
         ],
-        "verification_gates": ["disabled_channel_denial", "approved_send", "receipt_redaction"],
+        "verification_gates": ["disabled_channel_denial", "activation_packet_integrity", "activation_approval_receipt", "approved_send", "receipt_redaction"],
         "next_steps": [
             f"Configure only the scoped outbound {name} channel needed for the deployment.",
+            "Create, verify, and approve a private activation packet without sending a probe payload.",
             "Keep sends approval-gated and store only redacted delivery receipts.",
         ],
     }
@@ -1203,6 +1207,11 @@ def _live_connector_operator_checklist(
             "control": "promotion_scope",
             "state": "partial" if live_connector_adapters else "not_started" if available_live_connector_adapters else "needs_adapter",
             "detail": f"{len(live_connector_adapters)} live adapters enabled; {len(available_live_connector_adapters)} opt-in adapters still available.",
+        },
+        {
+            "control": "channel_activation_approval_receipt",
+            "state": "available",
+            "detail": "Verified channel activation packets can be explicitly approved with a no-send receipt before any live delivery probe or broader promotion.",
         },
     ]
 

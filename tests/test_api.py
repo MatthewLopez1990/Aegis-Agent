@@ -340,6 +340,12 @@ class ApiServerSecurityTests(unittest.TestCase):
                     {"packet": activation_packet["receipt"]["packet_id"], "actor": "api-channel-verifier"},
                     token=token,
                 )
+                activation_approval = _json_post(
+                    port,
+                    "/channels/activate-packet",
+                    {"packet": activation_packet["receipt"]["packet_id"], "actor": "api-channel-approver", "approved": True},
+                    token=token,
+                )
 
                 resolved = _json_post(
                     port,
@@ -359,6 +365,10 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(verified_packet["receipt"]["receipt_schema"], "aegis.channel.live_activation_packet_verification.v1")
                 self.assertTrue(verified_packet["receipt"]["packet_integrity_ok"])
                 self.assertFalse(verified_packet["receipt"]["raw_packet_payload_included"])
+                self.assertEqual(activation_approval["receipt"]["receipt_schema"], "aegis.channel.live_activation_approval.v1")
+                self.assertEqual(activation_approval["status"], "activation_blocked")
+                self.assertEqual(activation_approval["receipt"]["reason"], "preflight_not_ready")
+                self.assertFalse(activation_approval["receipt"]["send_probe_performed"])
             finally:
                 process.terminate()
                 try:
