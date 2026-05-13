@@ -1405,6 +1405,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("stability_v1_image_provider_adapter", browser_hardening_controls)
             self.assertIn("google_imagen_provider_adapter", browser_hardening_controls)
             self.assertIn("openai_style_image_edit_provider_adapter", browser_hardening_controls)
+            self.assertIn("google_imagen_edit_provider_adapter", browser_hardening_controls)
             self.assertIn("openai_style_tts_provider_adapter", browser_hardening_controls)
             self.assertIn("elevenlabs_tts_provider_adapter", browser_hardening_controls)
             self.assertIn("openai_style_transcription_provider_adapter", browser_hardening_controls)
@@ -2662,6 +2663,160 @@ class PlatformLayerTests(unittest.TestCase):
                 )
             self.assertFalse(denied["ok"])
             self.assertEqual(denied["status"], "invalid_source")
+
+    def test_google_imagen_edit_provider_adapter_uploads_references_with_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            png_bytes = (
+                b"\x89PNG\r\n\x1a\n"
+                b"\x00\x00\x00\rIHDR"
+                b"\x00\x00\x00\x02\x00\x00\x00\x03"
+                b"\x08\x02\x00\x00\x00"
+                b"\x00\x00\x00\x00"
+                b"\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+            mask_bytes = (
+                b"\x89PNG\r\n\x1a\n"
+                b"\x00\x00\x00\rIHDR"
+                b"\x00\x00\x00\x02\x00\x00\x00\x03"
+                b"\x08\x00\x00\x00\x00"
+                b"\x00\x00\x00\x00"
+                b"\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+            (root / "source.png").write_bytes(png_bytes)
+            (root / "mask.png").write_bytes(mask_bytes)
+            captured: dict[str, str] = {}
+
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "application/json"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return json.dumps(
+                        {
+                            "predictions": [
+                                {
+                                    "bytesBase64Encoded": base64.b64encode(png_bytes).decode("ascii"),
+                                    "mimeType": "image/png",
+                                }
+                            ]
+                        }
+                    ).encode("utf-8")
+
+            def fake_open(request, timeout):
+                captured["url"] = request.full_url
+                captured["authorization"] = request.headers.get("Authorization", "")
+                captured["accept"] = request.headers.get("Accept", "")
+                captured["content_type"] = request.get_header("Content-type") or request.get_header("Content-Type") or ""
+                captured["body"] = request.data.decode("utf-8")
+                return FakeResponse()
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                edited = orchestrator.tools.execute(
+                    "image_edit",
+                    {
+                        "prompt": "edit the private roadmap token=abc123",
+                        "source_path": "source.png",
+                        "mask_path": "mask.png",
+                        "provider_url": "https://media.example.com/v1/projects/demo/locations/us-central1/publishers/google/models/imagen-3.0-capability-001:predict",
+                        "provider_adapter": "google_imagen_edit",
+                        "editMode": "EDIT_MODE_INPAINT_INSERTION",
+                        "baseSteps": 35,
+                        "sampleCount": 1,
+                        "mask_dilation": 0.01,
+                        "output_mime_type": "image/png",
+                        "addWatermark": False,
+                    },
+                    approved=True,
+                )
+
+            body = json.loads(captured["body"])
+            references = body["instances"][0]["referenceImages"]
+            metadata_text = Path(edited["metadata_path"]).read_text(encoding="utf-8")
+            source_b64 = base64.b64encode(png_bytes).decode("ascii")
+            mask_b64 = base64.b64encode(mask_bytes).decode("ascii")
+            self.assertTrue(edited["ok"])
+            self.assertEqual(edited["provider_adapter"], "google_imagen_edit")
+            self.assertEqual(edited["mode"], "live_provider_png")
+            self.assertEqual(Path(edited["asset_path"]).read_bytes(), png_bytes)
+            self.assertEqual(captured["authorization"], "Bearer secret-media-token")
+            self.assertEqual(captured["accept"], "application/json")
+            self.assertEqual(captured["content_type"], "application/json")
+            self.assertEqual(body["instances"][0]["prompt"], "edit the private roadmap token=abc123")
+            self.assertEqual(references[0]["referenceType"], "REFERENCE_TYPE_RAW")
+            self.assertEqual(references[0]["referenceImage"]["bytesBase64Encoded"], source_b64)
+            self.assertEqual(references[1]["referenceType"], "REFERENCE_TYPE_MASK")
+            self.assertEqual(references[1]["referenceImage"]["bytesBase64Encoded"], mask_b64)
+            self.assertEqual(references[1]["maskImageConfig"], {"dilation": 0.01, "maskMode": "MASK_MODE_USER_PROVIDED"})
+            self.assertEqual(body["parameters"]["sampleCount"], 1)
+            self.assertEqual(body["parameters"]["editMode"], "EDIT_MODE_INPAINT_INSERTION")
+            self.assertEqual(body["parameters"]["editConfig"], {"baseSteps": 35})
+            self.assertEqual(body["parameters"]["outputOptions"], {"mimeType": "image/png"})
+            self.assertFalse(body["parameters"]["addWatermark"])
+            self.assertEqual(edited["provider_receipt"]["provider_adapter"], "google_imagen_edit")
+            self.assertEqual(edited["provider_receipt"]["request_format"], "application/json")
+            self.assertEqual(edited["provider_receipt"]["payload_keys"], ["instances", "parameters"])
+            self.assertFalse(edited["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(edited["provider_receipt"]["raw_secret_values_included"])
+            self.assertFalse(edited["provider_receipt"]["raw_response_body_included"])
+            self.assertEqual(edited["sandbox_receipt"]["provider_adapter"], "google_imagen_edit")
+            self.assertEqual(edited["sandbox_receipt"]["explicit_workspace_reads"], ["source_image", "mask_image"])
+            self.assertNotIn("edit the private roadmap", metadata_text)
+            self.assertNotIn("abc123", metadata_text)
+            self.assertNotIn("source.png", metadata_text)
+            self.assertNotIn(source_b64, metadata_text)
+            self.assertNotIn(mask_b64, metadata_text)
+            self.assertNotIn("secret-media-token", metadata_text)
+
+            wrong_tool_adapter = executor_module._live_media_provider_adapter(
+                name="image_generate",
+                params={"provider_adapter": "google_imagen_edit"},
+            )
+            self.assertEqual(wrong_tool_adapter["name"], "google_imagen_edit")
+            self.assertIn("supports image_edit only", str(wrong_tool_adapter["error"]))
+
+            with self.assertRaises(executor_module.ToolExecutionError):
+                executor_module._live_media_request_payload(
+                    name="image_edit",
+                    prompt="edit the private roadmap",
+                    text="",
+                    source_path="source.png",
+                    params={"sampleCount": 5},
+                    provider_adapter="google_imagen_edit",
+                    source_file={
+                        "field": "image",
+                        "filename": "image.png",
+                        "content": png_bytes,
+                        "mime_type": "image/png",
+                        "bytes": len(png_bytes),
+                        "sha256": hashlib.sha256(png_bytes).hexdigest(),
+                    },
+                )
 
     def test_openai_style_tts_provider_adapter_uses_redacted_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
