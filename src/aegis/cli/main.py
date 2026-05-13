@@ -6,6 +6,7 @@ import argparse
 import getpass
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -84,6 +85,9 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands.add_parser("init", help="Create default local configuration")
     setup = subcommands.add_parser("setup", help="Show guided local setup readiness")
     setup.add_argument("--init", action="store_true", help="Create default local configuration before reporting setup readiness")
+    completion = subcommands.add_parser("completion", help="Emit shell completion script")
+    completion.add_argument("shell", choices=("bash", "zsh", "fish"), help="Shell completion format to emit")
+    completion.add_argument("--program", default="aegis", help="Installed command name")
     subcommands.add_parser("health", help="Show local runtime health")
     subcommands.add_parser("dashboard", help="Show product capability and security posture")
     subcommands.add_parser("capabilities", help="Show capability groups, readiness buckets, and live gaps")
@@ -1038,8 +1042,161 @@ def _live_connector_flag_status(config: Any) -> list[dict[str, Any]]:
     ]
 
 
+def build_completion_script(shell: str, *, program: str = "aegis") -> str:
+    """Build a dependency-free shell completion script from the argparse tree."""
+    catalog = _completion_catalog(build_parser())
+    if shell == "bash":
+        return _bash_completion_script(catalog, program=program)
+    if shell == "zsh":
+        return _zsh_completion_script(catalog, program=program)
+    if shell == "fish":
+        return _fish_completion_script(catalog, program=program)
+    raise ValueError(f"unsupported shell: {shell}")
+
+
+def _completion_catalog(parser: argparse.ArgumentParser) -> dict[str, dict[str, Any]]:
+    root_choices = _subparser_choices(parser)
+    catalog: dict[str, dict[str, Any]] = {}
+    catalog["__root__"] = {
+        "commands": tuple(sorted(root_choices)),
+        "options": tuple(sorted(_parser_options(parser))),
+        "help": "Aegis Agent local-first runtime",
+    }
+    for command, subparser in sorted(root_choices.items()):
+        subcommands = tuple(sorted({*_subparser_choices(subparser), *_parser_positional_choices(subparser)}))
+        catalog[command] = {
+            "commands": subcommands,
+            "options": tuple(sorted(_parser_options(subparser))),
+            "help": subparser.description or subparser.get_default("help") or "",
+        }
+    return catalog
+
+
+def _subparser_choices(parser: argparse.ArgumentParser) -> dict[str, argparse.ArgumentParser]:
+    for action in parser._actions:  # noqa: SLF001 - argparse exposes no public subparser catalog.
+        if isinstance(action, argparse._SubParsersAction):  # type: ignore[attr-defined]
+            return {name: choice for name, choice in action.choices.items() if isinstance(choice, argparse.ArgumentParser)}
+    return {}
+
+
+def _parser_options(parser: argparse.ArgumentParser) -> tuple[str, ...]:
+    options: list[str] = []
+    for action in parser._actions:  # noqa: SLF001 - argparse exposes option strings on actions.
+        for option in action.option_strings:
+            if option in {"-h", "--help"}:
+                continue
+            options.append(option)
+    return tuple(options)
+
+
+def _parser_positional_choices(parser: argparse.ArgumentParser) -> tuple[str, ...]:
+    choices: list[str] = []
+    for action in parser._actions:  # noqa: SLF001 - argparse exposes choices on actions.
+        if action.option_strings or isinstance(action, argparse._SubParsersAction):  # type: ignore[attr-defined]
+            continue
+        if action.choices:
+            choices.extend(str(choice) for choice in action.choices)
+    return tuple(choices)
+
+
+def _bash_completion_script(catalog: dict[str, dict[str, Any]], *, program: str) -> str:
+    top_level = _completion_words((*catalog["__root__"]["options"], *catalog["__root__"]["commands"]))
+    cases = []
+    for command, info in sorted(catalog.items()):
+        if command == "__root__":
+            continue
+        candidates = _completion_words((*info["options"], *info["commands"]))
+        if candidates:
+            cases.append(f'    {command}) COMPREPLY=( $(compgen -W "{candidates}" -- "$cur") ) ;;')
+    case_block = "\n".join(cases)
+    function_name = _completion_function_name(program)
+    return "\n".join(
+        [
+            f"# bash completion for {program}",
+            f"_{function_name}() {{",
+            "  local cur command",
+            '  cur="${COMP_WORDS[COMP_CWORD]}"',
+            '  command="${COMP_WORDS[1]}"',
+            "  COMPREPLY=()",
+            "  if [[ ${COMP_CWORD} -eq 1 ]]; then",
+            f'    COMPREPLY=( $(compgen -W "{top_level}" -- "$cur") )',
+            "    return 0",
+            "  fi",
+            '  case "$command" in',
+            case_block,
+            "    *) COMPREPLY=() ;;",
+            "  esac",
+            "}",
+            f"complete -F _{function_name} {program}",
+            "",
+        ]
+    )
+
+
+def _zsh_completion_script(catalog: dict[str, dict[str, Any]], *, program: str) -> str:
+    top_level = _completion_words(catalog["__root__"]["commands"])
+    cases = []
+    for command, info in sorted(catalog.items()):
+        if command == "__root__":
+            continue
+        candidates = _completion_words((*info["options"], *info["commands"]))
+        if candidates:
+            cases.append(f"    {command}) _values '{command}' {candidates} ;;")
+    case_block = "\n".join(cases)
+    function_name = _completion_function_name(program)
+    return "\n".join(
+        [
+            f"#compdef {program}",
+            f"# zsh completion for {program}",
+            f"_{function_name}() {{",
+            "  local context state line",
+            "  _arguments '1:command:->command' '*::arg:->arg'",
+            "  case $state in",
+            f"    command) _values 'command' {top_level} ;;",
+            "    arg)",
+            "      case $words[2] in",
+            case_block,
+            "      esac",
+            "      ;;",
+            "  esac",
+            "}",
+            f"_{function_name} \"$@\"",
+            "",
+        ]
+    )
+
+
+def _fish_completion_script(catalog: dict[str, dict[str, Any]], *, program: str) -> str:
+    lines = [f"# fish completion for {program}"]
+    for option in catalog["__root__"]["options"]:
+        lines.append(f"complete -c {program} -l {option.lstrip('-')} -d 'Aegis global option'")
+    for command in catalog["__root__"]["commands"]:
+        help_text = str(catalog.get(command, {}).get("help") or "Aegis command").replace("'", "\\'")
+        lines.append(f"complete -c {program} -f -n '__fish_use_subcommand' -a {command} -d '{help_text}'")
+    for command, info in sorted(catalog.items()):
+        if command == "__root__":
+            continue
+        candidates = _completion_words((*info["options"], *info["commands"]))
+        if candidates:
+            lines.append(f"complete -c {program} -f -n '__fish_seen_subcommand_from {command}' -a '{candidates}'")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _completion_words(items: tuple[str, ...]) -> str:
+    return " ".join(item for item in items if item)
+
+
+def _completion_function_name(program: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_]", "_", program)
+
+
 def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
     config = load_config(args.data_dir)
+    if args.command == "completion":
+        print(build_completion_script(args.shell, program=args.program))
+        return None
+
     if args.command == "init":
         path = write_default_config(args.data_dir)
         store = LocalStore(config.database_path)

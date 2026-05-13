@@ -8,6 +8,8 @@ Run:
 PYTHONPATH=src python3 -m aegis.cli.main tui
 ```
 
+Shell completion scripts can be generated with `aegis completion bash`, `aegis completion zsh`, or `aegis completion fish`; the scripts are built from the current CLI parser and include top-level commands plus first-level subcommands/options.
+
 Commands:
 
 - `dashboard`

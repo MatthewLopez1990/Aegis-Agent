@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import stat
@@ -7,6 +8,7 @@ import subprocess
 import unittest
 import tempfile
 import hmac
+from contextlib import redirect_stdout
 from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
@@ -14,7 +16,7 @@ from unittest.mock import patch
 import aegis.channels.chat_webhook as chat_webhook_module
 import aegis.channels.email as email_module
 import aegis.channels.webhook as webhook_module
-from aegis.cli.main import _model_auth_provider_choices, create_skill_template, dispatch, build_parser
+from aegis.cli.main import _model_auth_provider_choices, build_completion_script, create_skill_template, dispatch, build_parser
 from aegis.agent.orchestrator import build_orchestrator
 from aegis.models.registry import default_providers
 from aegis.skills.runtime import builtin_project_summary_manifest
@@ -27,6 +29,33 @@ from tests.test_plugins import _write_plugin_catalog, _write_plugin_fixture
 
 
 class CliTests(unittest.TestCase):
+    def test_completion_command_emits_shell_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            for shell, marker in (
+                ("bash", "complete -F _aegis aegis"),
+                ("zsh", "#compdef aegis"),
+                ("fish", "complete -c aegis"),
+            ):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    result = dispatch(parser.parse_args(["--data-dir", str(Path(temp) / ".aegis"), "completion", shell]))
+                script = output.getvalue()
+
+                self.assertIsNone(result)
+                self.assertIn(marker, script)
+                self.assertIn("task", script)
+                self.assertIn("submit", script)
+                self.assertIn("models", script)
+                self.assertIn("auth", script)
+                self.assertIn("bash", script)
+                self.assertIn("zsh", script)
+                self.assertIn("fish", script)
+                self.assertNotIn("secret", script.lower())
+
+            bash_script = build_completion_script("bash", program="aegis-dev")
+            self.assertIn("complete -F _aegis_dev aegis-dev", bash_script)
+
     def test_skill_create_template_is_disabled_and_approval_required(self) -> None:
         manifest = create_skill_template("example.skill", name="Example", description="Example skill")
 
