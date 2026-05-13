@@ -344,6 +344,7 @@ class ModelRegistry:
         checks: list[dict[str, Any]] = []
         missing_commands: list[str] = []
         verified_targets = set(targets.get("verified_external_auth_targets") or [])
+        activation_state_counts: dict[str, int] = {}
         for row in targets["targets"]:
             required = list(row.get("required_auth") or [])
             method = next(
@@ -369,12 +370,17 @@ class ModelRegistry:
                 command_available = shutil.which(str(executable)) is not None
             login_flag = "--subscription" if method == "subscription" else f"--method {method.replace('_', '-')}"
             verified = target in verified_targets or bool(row.get("auth_configured") and row.get("external_auth_configured"))
+            activation = self._auth_activation_preflight(row, method=method, verified=verified, command_available=command_available)
+            activation_state = str(activation["activation_state"])
+            activation_state_counts[activation_state] = activation_state_counts.get(activation_state, 0) + 1
             check = {
                 "target": target,
                 "provider": login_name,
                 "method": method,
                 "status": row.get("status"),
                 "verified": verified,
+                "activation_state": activation_state,
+                "activation": activation,
                 "external_command": row.get("external_command"),
                 "external_command_argv": command_argv,
                 "external_command_available": command_available,
@@ -396,6 +402,7 @@ class ModelRegistry:
             "operator_login_required_count": len(pending),
             "operator_login_required_targets": pending,
             "missing_external_commands": sorted(set(missing_commands)),
+            "activation_state_counts": activation_state_counts,
             "implementation_gap_count": targets["implementation_gap_count"],
             "raw_secret_values_included": False,
             "checks": checks,
@@ -404,6 +411,61 @@ class ModelRegistry:
                 "Use verify_command after signing in directly with an official provider CLI.",
                 "Do not paste browser cookies, OAuth tokens, refresh tokens, CLI credential files, or subscription session values into Aegis.",
             ],
+        }
+
+    def _auth_activation_preflight(self, row: dict[str, Any], *, method: str, verified: bool, command_available: bool) -> dict[str, Any]:
+        target = str(row.get("target") or "")
+        provider_name = str(row.get("provider") or row.get("aegis_provider") or "")
+        provider = self.providers.get(provider_name)
+        configured_controls = ["raw_token_capture_denied", "secret_redaction"]
+        blockers: list[dict[str, str]] = []
+        required_config: list[str] = []
+        missing_config: list[str] = []
+        configured_config: list[str] = []
+        if command_available or row.get("oauth_device_flow"):
+            configured_controls.append("official_login_handoff")
+        else:
+            blockers.append({"control": "official_login_handoff", "detail": "official provider login command is not available on this machine"})
+        if verified:
+            configured_controls.append("external_login_verified")
+        else:
+            blockers.append({"control": "local_operator_login", "detail": "run the listed login and verification commands from a local terminal"})
+        if method == "cloud_identity" and target == "Google Vertex AI / Gemini cloud identity":
+            required_config.extend(["models.google_vertex_project", "models.google_vertex_location"])
+            metadata = provider.metadata if provider is not None else {}
+            if str(metadata.get("vertex_project") or "").strip():
+                configured_config.append("models.google_vertex_project")
+            else:
+                missing_config.append("models.google_vertex_project")
+            if str(metadata.get("vertex_location") or "").strip():
+                configured_config.append("models.google_vertex_location")
+            else:
+                missing_config.append("models.google_vertex_location")
+        if method == "cloud_identity" and target == "Azure Foundry":
+            required_config.append("models.azure_foundry_base_url")
+            if provider is not None and provider.base_url:
+                configured_config.append("models.azure_foundry_base_url")
+            else:
+                missing_config.append("models.azure_foundry_base_url")
+        for config_key in missing_config:
+            blockers.append({"control": "config_required", "detail": f"{config_key} must be configured before invocation"})
+        if missing_config:
+            activation_state = "verified_but_invocation_blocked" if verified else "config_required"
+        elif verified:
+            activation_state = "verified_ready"
+        else:
+            activation_state = "login_required"
+        return {
+            "activation_state": activation_state,
+            "final_ready": activation_state == "verified_ready",
+            "required_controls": ["official_provider_login_flow", "local_operator_verification", "no_raw_token_import"],
+            "configured_controls": configured_controls,
+            "required_config": required_config,
+            "configured_config": configured_config,
+            "missing_config": missing_config,
+            "blockers": blockers,
+            "invocation_bridge": row.get("invocation_bridge"),
+            "raw_secret_values_included": False,
         }
 
     def login_provider(self, provider_name: str, api_key: str) -> dict[str, Any]:

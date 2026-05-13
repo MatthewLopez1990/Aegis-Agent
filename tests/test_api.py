@@ -1263,7 +1263,11 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(model_auth_doctor["checked_login_target_count"], 11)
                 self.assertEqual(model_auth_doctor["implementation_gap_count"], 0)
                 self.assertFalse(model_auth_doctor["raw_secret_values_included"])
-                self.assertTrue(any(row["target"] == "GitHub Copilot" and "github-copilot" in row["login_command"] for row in model_auth_doctor["checks"]))
+                model_auth_doctor_checks = {row["target"]: row for row in model_auth_doctor["checks"]}
+                self.assertIn("config_required", model_auth_doctor["activation_state_counts"])
+                self.assertTrue("github-copilot" in model_auth_doctor_checks["GitHub Copilot"]["login_command"])
+                self.assertEqual(model_auth_doctor_checks["Google Vertex AI / Gemini cloud identity"]["activation_state"], "config_required")
+                self.assertIn("models.google_vertex_project", model_auth_doctor_checks["Google Vertex AI / Gemini cloud identity"]["activation"]["missing_config"])
                 self.assertNotIn("sk-api-secret", json.dumps(model_auth_login, sort_keys=True))
                 self.assertNotIn("sk-api-secret", json.dumps(model_auth_logout, sort_keys=True))
                 self.assertNotIn("sk-api-secret", json.dumps(model_auth_doctor, sort_keys=True))

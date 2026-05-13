@@ -501,9 +501,9 @@ const refresh = async () => {
     }), "No provider auth targets");
     setList("model-auth-doctor", modelAuthDoctor.checks || [], (x) => ({
       title: x.target,
-      detail: `${x.login_command}${x.setup_required ? ` · setup ${x.setup_required}` : ""}`,
-      meta: `${x.verified ? "verified" : "login required"} · ${x.method} · command ${x.external_command_available ? "available" : "missing"} · provider ${x.provider}`,
-      tone: x.verified ? "ready" : "attention",
+      detail: `${x.login_command}${x.activation?.missing_config?.length ? ` · config ${x.activation.missing_config.join(", ")}` : ""}${x.setup_required ? ` · setup ${x.setup_required}` : ""}`,
+      meta: `${x.activation_state || (x.verified ? "verified" : "login_required")} · ${x.method} · command ${x.external_command_available ? "available" : "missing"} · provider ${x.provider}`,
+      tone: x.activation_state === "verified_ready" ? "ready" : "attention",
     }), "No provider login checks");
     setList("models", models.models.slice(0, 24), (x) => ({
       title: x.identifier,

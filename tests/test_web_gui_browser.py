@@ -56,6 +56,8 @@ class WebGuiBrowserSmokeTests(unittest.TestCase):
         self.assertIn("subscription_auth_supported", app_js)
         self.assertIn('api("/models/auth/targets")', app_js)
         self.assertIn('api("/models/auth/doctor")', app_js)
+        self.assertIn("activation_state", app_js)
+        self.assertIn("missing_config", app_js)
         self.assertIn('if (method === "api_key")', app_js)
         self.assertIn("payload.verify_external", app_js)
         self.assertIn("payload.run_external", app_js)
