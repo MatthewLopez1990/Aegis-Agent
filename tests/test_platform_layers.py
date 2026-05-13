@@ -77,6 +77,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(implementation_statuses["browser_screenshot"], "local_or_opt_in_live_png_snapshot")
             self.assertEqual(implementation_statuses["tts"], "allowlisted_live_or_local")
             self.assertEqual(implementation_statuses["voice_record"], "local_wav_silence")
+            self.assertEqual(implementation_statuses["voice_clone"], "allowlisted_live_provider")
             self.assertEqual(implementation_statuses["package_install"], "backend_gate")
             self.assertEqual(implementation_statuses["code_execute"], "local")
             self.assertEqual(implementation_statuses["github_pr"], "allowlisted_live_read_write_or_mock_connector")
@@ -111,6 +112,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertTrue(implemented["tts"])
             self.assertFalse(implemented["package_install"])
             self.assertTrue(implemented["voice_record"])
+            self.assertTrue(implemented["voice_clone"])
             self.assertTrue(implemented["code_execute"])
             calc = orchestrator.tools.execute("calculator", {"expression": "2 + 3 * 4"})
             self.assertEqual(calc["result"], 14.0)
@@ -1411,6 +1413,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("elevenlabs_tts_provider_adapter", browser_hardening_controls)
             self.assertIn("elevenlabs_speech_to_speech_provider_adapter", browser_hardening_controls)
             self.assertIn("elevenlabs_text_to_dialogue_provider_adapter", browser_hardening_controls)
+            self.assertIn("elevenlabs_voice_clone_provider_adapter", browser_hardening_controls)
             self.assertIn("openai_style_transcription_provider_adapter", browser_hardening_controls)
             self.assertIn("elevenlabs_transcription_provider_adapter", browser_hardening_controls)
             self.assertIn("openai_style_video_provider_adapter", browser_hardening_controls)
@@ -3349,6 +3352,133 @@ class PlatformLayerTests(unittest.TestCase):
                     params={"inputs": [{"text": "bad", "voice_id": "bad/voice"}]},
                     provider_adapter="elevenlabs_text_to_dialogue",
                 )
+
+    def test_elevenlabs_voice_clone_provider_adapter_uploads_audio_with_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            wav_bytes = b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x40\x1f\x00\x00\x80\x3e\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
+            mp3_bytes = b"ID3\x04\x00\x00\x00\x00\x00\x21Aegis clone sample"
+            (root / "clone-a.wav").write_bytes(wav_bytes)
+            (root / "clone-b.mp3").write_bytes(mp3_bytes)
+            captured: dict[str, Any] = {}
+
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "application/json"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return json.dumps({"voice_id": "voice_public_01", "requires_verification": False}).encode("utf-8")
+
+            def fake_open(request, timeout):
+                captured["url"] = request.full_url
+                captured["authorization"] = request.headers.get("Authorization", "")
+                captured["xi_api_key"] = request.headers.get("Xi-api-key", "") or request.headers.get("xi-api-key", "")
+                captured["content_type"] = request.get_header("Content-type") or request.get_header("Content-Type") or ""
+                captured["body"] = request.data
+                return FakeResponse()
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                cloned = orchestrator.tools.execute(
+                    "voice_clone",
+                    {
+                        "name": "Private review voice token=abc123",
+                        "description": "Use only for approved local tests",
+                        "labels": {"language": "en", "accent": "neutral"},
+                        "audio_paths": ["clone-a.wav", "clone-b.mp3"],
+                        "provider_url": "https://media.example.com/v1/voices/add",
+                        "provider_adapter": "elevenlabs_voice_clone",
+                        "remove_background_noise": True,
+                    },
+                    approved=True,
+                )
+
+            body = captured["body"]
+            result_text = json.dumps(cloned, sort_keys=True)
+            self.assertTrue(cloned["ok"])
+            self.assertEqual(cloned["provider_adapter"], "elevenlabs_voice_clone")
+            self.assertEqual(cloned["status"], "created")
+            self.assertEqual(cloned["mode"], "live_provider_voice_clone")
+            self.assertEqual(cloned["voice_id"], "voice_public_01")
+            self.assertEqual(cloned["sample_count"], 2)
+            self.assertEqual(captured["authorization"], "")
+            self.assertEqual(captured["xi_api_key"], "secret-media-token")
+            self.assertIn("multipart/form-data; boundary=", captured["content_type"])
+            self.assertIn(b'name="name"', body)
+            self.assertIn(b"Private review voice token=abc123", body)
+            self.assertIn(b'name="remove_background_noise"', body)
+            self.assertIn(b"true", body)
+            self.assertIn(b'name="labels"', body)
+            self.assertIn(b'"language": "en"', body)
+            self.assertIn(b'name="files[]"; filename="audio.wav"', body)
+            self.assertIn(b'name="files[]"; filename="audio.mp3"', body)
+            self.assertIn(b"Content-Type: audio/wav", body)
+            self.assertIn(b"Content-Type: audio/mpeg", body)
+            self.assertIn(wav_bytes, body)
+            self.assertIn(mp3_bytes, body)
+            self.assertEqual(cloned["provider_receipt"]["provider_adapter"], "elevenlabs_voice_clone")
+            self.assertEqual(cloned["provider_receipt"]["request_format"], "multipart/form-data")
+            self.assertEqual(
+                cloned["provider_receipt"]["payload_keys"],
+                ["description", "labels", "name", "remove_background_noise", "sample_bytes", "sample_count", "sample_mime_types", "sample_sha256"],
+            )
+            self.assertFalse(cloned["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(cloned["provider_receipt"]["raw_secret_values_included"])
+            self.assertFalse(cloned["provider_receipt"]["raw_response_body_included"])
+            self.assertEqual(cloned["sandbox_receipt"]["provider_adapter"], "elevenlabs_voice_clone")
+            self.assertEqual(cloned["sandbox_receipt"]["explicit_workspace_reads"], ["source_audio"])
+            self.assertFalse(cloned["sandbox_receipt"]["artifact_write"])
+            self.assertFalse(cloned["audio_receipts"][0]["source_audio_path_included"])
+            self.assertFalse(cloned["audio_receipts"][1]["raw_audio_included"])
+            self.assertNotIn("Private review voice", result_text)
+            self.assertNotIn("abc123", result_text)
+            self.assertNotIn("secret-media-token", result_text)
+            self.assertNotIn(wav_bytes.decode("latin1"), result_text)
+
+            wrong_tool_adapter = executor_module._live_media_provider_adapter(
+                name="tts",
+                params={"provider_adapter": "elevenlabs_voice_clone"},
+            )
+            self.assertEqual(wrong_tool_adapter["name"], "elevenlabs_voice_clone")
+            self.assertIn("supports voice_clone only", str(wrong_tool_adapter["error"]))
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None):
+                denied = orchestrator.tools.execute(
+                    "voice_clone",
+                    {
+                        "name": "Bad",
+                        "audio_paths": ["../clone-a.wav"],
+                        "provider_url": "https://media.example.com/v1/voices/add",
+                        "provider_adapter": "elevenlabs_voice_clone",
+                    },
+                    approved=True,
+                )
+            self.assertFalse(denied["ok"])
+            self.assertEqual(denied["status"], "invalid_source")
 
     def test_openai_style_transcription_provider_adapter_uploads_audio_with_redacted_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

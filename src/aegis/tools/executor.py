@@ -156,7 +156,7 @@ class BuiltinToolExecutor:
             result = self._execute_web_search(params=params)
         elif name in {"vision_analyze", "voice_transcribe", "video_analyze"}:
             result = self._execute_media_read(name=name, params=params, approved=approved)
-        elif name in {"image_generate", "image_edit", "tts", "voice_record", "video_generate"}:
+        elif name in {"image_generate", "image_edit", "tts", "voice_record", "voice_clone", "video_generate"}:
             result = self._execute_media_artifact(name=name, params=params)
         elif name == "http_request":
             result = self._execute_http_request(params=params, approved=approved)
@@ -390,6 +390,8 @@ class BuiltinToolExecutor:
         artifact_dir = root / ".aegis" / "tool-artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         artifact_dir.chmod(0o700)
+        if name == "voice_clone":
+            return self._execute_live_voice_clone_provider(params=params, root=root)
         if name == "video_generate":
             return self._execute_live_video_provider(params=params, artifact_dir=artifact_dir)
         if params.get("provider_url"):
@@ -513,6 +515,129 @@ class BuiltinToolExecutor:
             details={"text_artifact": True},
         )
         return {"ok": True, key: str(path), "artifact_path": str(path), "metadata_path": str(metadata_path), **artifact_receipt, "sandbox_receipt": sandbox_receipt, "mode": "local_placeholder_artifact"}
+
+    def _execute_live_voice_clone_provider(self, *, params: dict[str, Any], root: Path) -> dict[str, Any]:
+        rest = self.connectors.get("generic_rest")
+        if not bool(getattr(rest, "live_writes", False)):
+            return {
+                "ok": False,
+                "tool": "voice_clone",
+                "mode": "live_voice_clone_provider",
+                "status": "not_configured",
+                "reason": "live_rest_writes must be enabled before provider-backed voice cloning",
+                "required_controls": _live_media_required_controls(),
+            }
+        if not params.get("provider_url"):
+            return {
+                "ok": False,
+                "tool": "voice_clone",
+                "mode": "live_voice_clone_provider",
+                "status": "not_configured",
+                "reason": "provider_url is required for provider-backed voice cloning",
+                "required_controls": _live_media_required_controls(),
+            }
+        provider_url = str(params["provider_url"])
+        parsed = urlparse(provider_url)
+        domain = parsed.hostname or ""
+        validation_error = _validate_url(parsed) or (None if parsed.scheme == "https" else "voice clone provider execution requires https")
+        if validation_error:
+            return {"ok": False, "tool": "voice_clone", "mode": "live_voice_clone_provider", "status": "scope_rejected", "reason": validation_error, "required_controls": _live_media_required_controls()}
+        http = self.connectors.get("http")
+        allowlist = tuple(str(item) for item in getattr(http, "allowlist", ()))
+        if not _host_allowed(domain, allowlist):
+            return {"ok": False, "tool": "voice_clone", "mode": "live_voice_clone_provider", "status": "scope_rejected", "reason": f"voice clone provider host {domain!r} is not allowlisted", "required_controls": _live_media_required_controls()}
+        private_error = _private_network_error(domain)
+        if private_error:
+            return {"ok": False, "tool": "voice_clone", "mode": "live_voice_clone_provider", "status": "scope_rejected", "reason": private_error, "required_controls": _live_media_required_controls()}
+        provider_adapter = _live_media_provider_adapter(name="voice_clone", params=params)
+        if provider_adapter["error"]:
+            return {
+                "ok": False,
+                "tool": "voice_clone",
+                "mode": "live_voice_clone_provider",
+                "status": "unsupported_provider_adapter",
+                "reason": provider_adapter["error"],
+                "required_controls": _live_media_required_controls(),
+            }
+        adapter_name = str(provider_adapter["name"] or "generic")
+        if adapter_name != "elevenlabs_voice_clone":
+            return {
+                "ok": False,
+                "tool": "voice_clone",
+                "mode": "live_voice_clone_provider",
+                "status": "unsupported_provider_adapter",
+                "reason": f"{adapter_name} provider adapter does not support provider-backed voice cloning",
+                "required_controls": _live_media_required_controls(),
+            }
+        try:
+            audio_files = [
+                _live_media_audio_file(root=root, audio_path=audio_path, provider_adapter=adapter_name)
+                for audio_path in _voice_clone_audio_paths(params)
+            ]
+        except ToolExecutionError as exc:
+            return {
+                "ok": False,
+                "tool": "voice_clone",
+                "mode": "live_voice_clone_provider",
+                "status": "invalid_source",
+                "reason": str(redact(str(exc))),
+                "required_controls": _live_media_required_controls(),
+            }
+        token_secret = str(params.get("token_secret") or "AEGIS_MEDIA_PROVIDER_TOKEN")
+        handle = self.secrets_broker.request_handle(name=token_secret, requester="media_provider", reason="voice_clone provider-backed voice creation", scopes=("media:execute",))
+        if not handle.present:
+            return {"ok": False, "tool": "voice_clone", "mode": "live_voice_clone_provider", "status": "not_configured", "reason": f"secret {token_secret!r} is not configured", "required_controls": _live_media_required_controls()}
+        token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="media_provider")
+        request_payload = _live_voice_clone_request_payload(params=params, audio_files=audio_files)
+        live_result = _send_live_voice_clone_provider_request(url=provider_url, token=token, payload=request_payload, audio_files=audio_files)
+        provider_receipt = _live_media_provider_receipt(domain=domain, http_status=live_result["http_status"], request_payload=request_payload, handle_present=handle.present, provider_adapter=adapter_name)
+        if not live_result["ok"]:
+            return {
+                "ok": False,
+                "tool": "voice_clone",
+                "mode": "live_voice_clone_provider",
+                "status": "failed",
+                "domain": domain,
+                "http_status": live_result["http_status"],
+                "error": live_result.get("error"),
+                "provider_adapter": adapter_name,
+                "provider_receipt": provider_receipt,
+            }
+        voice_id = str(live_result["voice_id"])
+        audio_receipts = [
+            {
+                "source_audio_sha256": str(audio_file["sha256"]),
+                "source_audio_bytes": int(audio_file["bytes"]),
+                "source_audio_mime_type": str(audio_file["mime_type"]),
+                "source_audio_path_included": False,
+                "raw_audio_included": False,
+            }
+            for audio_file in audio_files
+        ]
+        sandbox_receipt = _media_sandbox_receipt(
+            tool="voice_clone",
+            mode="live_provider_voice_clone",
+            worker_result={"provider_domain": domain, "provider_adapter": adapter_name, "artifact_write": False, "explicit_workspace_reads": ["source_audio"]},
+        )
+        return {
+            "ok": True,
+            "tool": "voice_clone",
+            "status": "created",
+            "mode": "live_provider_voice_clone",
+            "domain": domain,
+            "http_status": live_result["http_status"],
+            "provider_adapter": adapter_name,
+            "provider_receipt": provider_receipt,
+            "sandbox_receipt": sandbox_receipt,
+            "voice_id": voice_id,
+            "voice_id_sha256": hashlib.sha256(voice_id.encode("utf-8")).hexdigest(),
+            "requires_verification": bool(live_result.get("requires_verification")),
+            "sample_count": len(audio_files),
+            "audio_receipts": audio_receipts,
+            "raw_audio_included": False,
+            "raw_response_body_included": False,
+            "raw_secret_values_included": False,
+        }
 
     def _execute_live_video_provider(self, *, params: dict[str, Any], artifact_dir: Path) -> dict[str, Any]:
         rest = self.connectors.get("generic_rest")
@@ -3292,6 +3417,10 @@ def _live_media_provider_adapter(*, name: str, params: dict[str, Any]) -> dict[s
         if name != "tts":
             return {"name": raw, "error": "elevenlabs_text_to_dialogue provider adapter currently supports tts only"}
         return {"name": "elevenlabs_text_to_dialogue", "error": None}
+    if raw in {"elevenlabs_voice_clone", "elevenlabs_ivc", "elevenlabs_instant_voice_clone", "eleven_labs_voice_clone", "eleven_labs_ivc"}:
+        if name != "voice_clone":
+            return {"name": raw, "error": "elevenlabs_voice_clone provider adapter currently supports voice_clone only"}
+        return {"name": "elevenlabs_voice_clone", "error": None}
     if raw in {"openai_transcription", "openai_transcriptions", "openai_audio_transcription", "openai_compatible_transcription"}:
         if name != "voice_transcribe":
             return {"name": raw, "error": "openai_transcription provider adapter currently supports voice_transcribe only"}
@@ -3866,10 +3995,86 @@ def _elevenlabs_dialogue_request_url(*, url: str, payload: dict[str, Any]) -> st
     return f"{url}{separator}output_format={quote(output_format, safe='')}"
 
 
+def _voice_clone_audio_paths(params: dict[str, Any]) -> list[str]:
+    raw_paths = params.get("audio_paths", params.get("files", params.get("audio_path")))
+    if raw_paths in (None, ""):
+        raise ToolExecutionError("voice_clone requires at least one audio_path")
+    if isinstance(raw_paths, str):
+        text = raw_paths.strip()
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ToolExecutionError("voice_clone audio_paths must be a JSON list or comma-separated string") from exc
+            raw_paths = parsed
+        else:
+            raw_paths = [item.strip() for item in text.split(",") if item.strip()]
+    elif isinstance(raw_paths, tuple):
+        raw_paths = list(raw_paths)
+    if not isinstance(raw_paths, list) or not raw_paths:
+        raise ToolExecutionError("voice_clone requires at least one audio_path")
+    paths = [str(item).strip() for item in raw_paths if str(item).strip()]
+    if not paths:
+        raise ToolExecutionError("voice_clone requires at least one audio_path")
+    if len(paths) > 10:
+        raise ToolExecutionError("voice_clone supports at most 10 audio files per request")
+    return paths
+
+
+def _live_voice_clone_request_payload(*, params: dict[str, Any], audio_files: list[dict[str, Any]]) -> dict[str, Any]:
+    if not audio_files:
+        raise ToolExecutionError("voice_clone requires at least one audio file")
+    name = str(params.get("name") or params.get("voice_name") or "").strip()
+    if not name:
+        raise ToolExecutionError("voice_clone requires a name")
+    if len(name) > 120:
+        raise ToolExecutionError("voice_clone name must be 120 characters or less")
+    total_bytes = sum(int(audio_file["bytes"]) for audio_file in audio_files)
+    if total_bytes > 25 * 1024 * 1024:
+        raise ToolExecutionError("voice_clone audio samples exceed the 25 MiB request limit")
+    payload: dict[str, Any] = {
+        "name": name,
+        "sample_count": len(audio_files),
+        "sample_sha256": [str(audio_file["sha256"]) for audio_file in audio_files],
+        "sample_bytes": [int(audio_file["bytes"]) for audio_file in audio_files],
+        "sample_mime_types": sorted({str(audio_file["mime_type"]) for audio_file in audio_files}),
+    }
+    remove_noise = params.get("remove_background_noise", params.get("removeBackgroundNoise"))
+    if remove_noise is not None:
+        payload["remove_background_noise"] = _as_bool(remove_noise, label="remove_background_noise")
+    description = str(params.get("description") or "").strip()
+    if description:
+        payload["description"] = description[:500]
+    labels = _voice_clone_labels(params.get("labels"))
+    if labels:
+        payload["labels"] = labels
+    return payload
+
+
+def _voice_clone_labels(value: Any) -> dict[str, str]:
+    if value in (None, ""):
+        return {}
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ToolExecutionError("voice_clone labels must be a JSON object") from exc
+        value = parsed
+    if not isinstance(value, dict):
+        raise ToolExecutionError("voice_clone labels must be an object")
+    labels: dict[str, str] = {}
+    for key, item in value.items():
+        label_key = str(key).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", label_key):
+            raise ToolExecutionError("voice_clone label keys must be simple identifiers")
+        labels[label_key] = str(item).strip()[:120]
+    return labels
+
+
 def _live_media_provider_receipt(*, domain: str, http_status: int, request_payload: dict[str, Any], handle_present: bool, provider_adapter: str = "generic") -> dict[str, Any]:
     encoded = json.dumps(request_payload, sort_keys=True, default=str).encode("utf-8")
     request_format = "application/json"
-    if provider_adapter in {"openai_image_edit", "openai_transcription", "elevenlabs_transcription", "elevenlabs_speech_to_speech"}:
+    if provider_adapter in {"openai_image_edit", "openai_transcription", "elevenlabs_transcription", "elevenlabs_speech_to_speech", "elevenlabs_voice_clone"}:
         request_format = "multipart/form-data"
     elif provider_adapter == "openai_video" and "action" in request_payload:
         request_format = "path_operation"
@@ -4193,6 +4398,63 @@ def _encode_elevenlabs_speech_to_speech_multipart(*, payload: dict[str, Any], au
     body.extend(b"\r\n")
     body.extend(f"--{boundary}--\r\n".encode("ascii"))
     return bytes(body), f"multipart/form-data; boundary={boundary}"
+
+
+def _encode_elevenlabs_voice_clone_multipart(*, payload: dict[str, Any], audio_files: list[dict[str, Any]]) -> tuple[bytes, str]:
+    boundary = f"aegis-{uuid4().hex}"
+    body = bytearray()
+    metadata_keys = {"sample_count", "sample_sha256", "sample_bytes", "sample_mime_types"}
+    for key in sorted(payload):
+        if key in metadata_keys:
+            continue
+        value = payload[key]
+        if key == "labels":
+            value = json.dumps(value, sort_keys=True)
+        body.extend(f"--{boundary}\r\n".encode("ascii"))
+        body.extend(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("ascii"))
+        body.extend(str(value).lower().encode("utf-8") if isinstance(value, bool) else str(value).encode("utf-8"))
+        body.extend(b"\r\n")
+    for audio_file in audio_files:
+        body.extend(f"--{boundary}\r\n".encode("ascii"))
+        body.extend(f'Content-Disposition: form-data; name="files[]"; filename="{audio_file["filename"]}"\r\n'.encode("ascii"))
+        body.extend(f'Content-Type: {audio_file["mime_type"]}\r\n\r\n'.encode("ascii"))
+        body.extend(audio_file["content"])
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode("ascii"))
+    return bytes(body), f"multipart/form-data; boundary={boundary}"
+
+
+def _send_live_voice_clone_provider_request(*, url: str, token: str, payload: dict[str, Any], audio_files: list[dict[str, Any]]) -> dict[str, Any]:
+    body, content_type = _encode_elevenlabs_voice_clone_multipart(payload=payload, audio_files=audio_files)
+    headers = {
+        "Content-Type": content_type,
+        "User-Agent": "Aegis-Agent/0.1",
+        "xi-api-key": token,
+    }
+    request = Request(url, data=body, method="POST", headers=headers)
+    try:
+        response_context = _open_without_redirects(request, timeout=30)
+    except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            return {"ok": False, "http_status": exc.code, "error": "HTTP redirects are not followed by the governed voice clone adapter"}
+        return {"ok": False, "http_status": exc.code, "error": f"voice clone provider failed with status {exc.code}"}
+    except URLError as exc:
+        return {"ok": False, "http_status": 0, "error": f"voice clone provider request failed: {exc.reason}"}
+    with response_context as response:
+        status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+        raw = response.read(2 * 1024 * 1024)
+    if not 200 <= status < 300:
+        return {"ok": False, "http_status": status, "error": f"voice clone provider failed with status {status}"}
+    try:
+        decoded = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {"ok": False, "http_status": status, "error": "voice clone provider JSON response could not be decoded"}
+    if not isinstance(decoded, dict):
+        return {"ok": False, "http_status": status, "error": "voice clone provider JSON response must be an object"}
+    voice_id = decoded.get("voice_id") or decoded.get("voiceId") or decoded.get("id")
+    if not isinstance(voice_id, str) or not voice_id.strip():
+        return {"ok": False, "http_status": status, "error": "voice clone provider response did not include voice_id"}
+    return {"ok": True, "http_status": status, "voice_id": voice_id.strip(), "requires_verification": bool(decoded.get("requires_verification"))}
 
 
 def _send_live_transcription_provider_request(

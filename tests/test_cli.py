@@ -741,6 +741,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("elevenlabs_tts_provider_adapter", browser_controls)
             self.assertIn("elevenlabs_speech_to_speech_provider_adapter", browser_controls)
             self.assertIn("elevenlabs_text_to_dialogue_provider_adapter", browser_controls)
+            self.assertIn("elevenlabs_voice_clone_provider_adapter", browser_controls)
             self.assertIn("elevenlabs_transcription_provider_adapter", browser_controls)
             provider_media_adapters = browser_gap["provider_media_adapters"]
             implemented_media_adapters = {adapter["adapter"]: adapter for adapter in provider_media_adapters["implemented"]}
@@ -759,6 +760,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(implemented_media_adapters["elevenlabs_speech_to_speech"]["response_shape"], "binary_audio")
             self.assertIn("elevenlabs_text_to_dialogue", implemented_media_adapters)
             self.assertEqual(implemented_media_adapters["elevenlabs_text_to_dialogue"]["response_shape"], "binary_audio")
+            self.assertIn("elevenlabs_voice_clone", implemented_media_adapters)
+            self.assertEqual(implemented_media_adapters["elevenlabs_voice_clone"]["response_shape"], "voice_id")
             self.assertIn("elevenlabs_transcription", implemented_media_adapters)
             self.assertEqual(implemented_media_adapters["elevenlabs_transcription"]["response_shape"], "transcript_text")
             self.assertIn("video", provider_media_adapters["remaining_by_modality"])
