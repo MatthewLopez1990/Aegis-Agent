@@ -942,7 +942,8 @@ const renderSubagents = (payload) => {
   const summary = document.getElementById("subagent-summary");
   const batchControl = (payload.implemented_controls || []).includes("operator_approved_batch_runtime") ? " · batch run ready" : "";
   const reviewPacketControl = (payload.implemented_controls || []).includes("model_ready_review_packets") ? " · review packets ready" : "";
-  summary.textContent = `${payload.open_cards || 0} open · ${payload.ready_cards || 0} ready · ${payload.in_progress_cards || 0} active · ${payload.review_cards || 0} review · ${payload.done_cards || 0} done · profiles ${payload.enabled_profile_count || 0}/${payload.profile_count || 0} · autonomous runtime ${payload.autonomous_runtime ? "enabled" : "blocked"}${batchControl}${reviewPacketControl}`;
+  const autonomyStepControl = (payload.implemented_controls || []).includes("scoped_autonomy_step_plans") ? " · step plans ready" : "";
+  summary.textContent = `${payload.open_cards || 0} open · ${payload.ready_cards || 0} ready · ${payload.in_progress_cards || 0} active · ${payload.review_cards || 0} review · ${payload.done_cards || 0} done · profiles ${payload.enabled_profile_count || 0}/${payload.profile_count || 0} · autonomous runtime ${payload.autonomous_runtime ? "enabled" : "blocked"}${batchControl}${reviewPacketControl}${autonomyStepControl}`;
   setList("subagent-cards", payload.cards || [], (x) => ({
     title: x.title,
     detail: x.description_preview || "No preview",
@@ -971,6 +972,12 @@ const subagentCardMeta = (card) => {
   if (card.model_reviews_recorded) {
     parts.push(`model reviews ${card.model_reviews_recorded}`);
   }
+  if (card.autonomy_step_plans_recorded) {
+    parts.push(`step plans ${card.autonomy_step_plans_recorded}`);
+  }
+  if (card.autonomy_status) {
+    parts.push(`autonomy ${card.autonomy_status}`);
+  }
   if (hasReviewPacket) {
     parts.push("model-ready");
   }
@@ -995,6 +1002,7 @@ const subagentLaneActions = (card) => {
   if (card.lane !== "done") {
     const label = subagentHasReviewPacket(card) ? "Refresh Review Packet" : "Create Review Packet";
     actions.push(`<button type="button" class="secondary" data-subagent-review-packet="${escapeHtml(card.id)}">${text(label)}</button>`);
+    actions.push(`<button type="button" class="secondary" data-subagent-autonomy-step="${escapeHtml(card.id)}">Plan Step</button>`);
   }
   const reviewPacket = card.review_packet || card.model_review_packet || {};
   if (reviewPacket.packet_id) {
@@ -4821,6 +4829,17 @@ document.getElementById("subagent-cards").addEventListener("click", async (event
     const result = await api("/subagents/model-review", {
       method: "POST",
       body: JSON.stringify({ card_id: modelReviewCard, actor: "web-operator", approved: true, limit: 12 }),
+    });
+    renderSubagentOutput(result);
+    renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
+    await refresh();
+    return;
+  }
+  const autonomyStepCard = event.target.dataset.subagentAutonomyStep;
+  if (autonomyStepCard) {
+    const result = await api("/subagents/autonomy-step", {
+      method: "POST",
+      body: JSON.stringify({ card_id: autonomyStepCard, actor: "web-operator", approved: true, max_steps: 1, limit: 12 }),
     });
     renderSubagentOutput(result);
     renderSubagents(result.subagents || await api("/subagents/status?limit=12"));

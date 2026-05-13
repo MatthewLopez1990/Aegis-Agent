@@ -276,7 +276,7 @@ BROWSER_COMMANDS = (
 )
 MCP_COMMANDS = ("list", "register", "auth", "call")
 HOOK_COMMANDS = ("list", "add", "enable", "disable", "remove", "run")
-AGENTS_COMMANDS = ("status", "autonomy-preflight", "profiles", "profile-create", "profile-disable", "delegate", "handoff", "review-packet", "verify-packet", "model-review", "run", "run-batch")
+AGENTS_COMMANDS = ("status", "autonomy-preflight", "autonomy-step", "profiles", "profile-create", "profile-disable", "delegate", "handoff", "review-packet", "verify-packet", "model-review", "run", "run-batch")
 PROCESS_COMMANDS = ("list", "start", "input", "resize", "stop", "logs")
 REMOTE_CONTROL_COMMANDS = ("pair", "directory", "revoke", "relay", "relay-directory", "relay-notify", "push-targets", "push-register", "push-disable", "push-rotate", "push", "relay-outbox", "relay-retry", "relay-confirm", "relay-pull", "relay-action")
 SESSION_COMMANDS = ("new", "open", "rename", "set-model", "set-personality", "activate", "archive", "pause", "append", "history", "tasks", "compact")
@@ -4058,10 +4058,22 @@ class AegisTui(cmd.Cmd):
         self.do_models("route alias/fast")
 
     def do_agents(self, arg: str) -> None:
-        """agents [status|autonomy-preflight|profiles|profile-create|profile-disable|delegate|handoff|review-packet|verify-packet|model-review|run|run-batch] -- manage subagent delegations."""
+        """agents [status|autonomy-preflight|autonomy-step|profiles|profile-create|profile-disable|delegate|handoff|review-packet|verify-packet|model-review|run|run-batch] -- manage subagent delegations."""
         parts = shlex.split(arg)
         if parts and parts[0] == "autonomy-preflight":
             _print_json(self.orchestrator.kanban.subagent_autonomy_preflight(actor="tui-operator", limit=20))
+            return
+        if parts and parts[0] == "autonomy-step":
+            if len(parts) < 2:
+                print("usage: agents autonomy-step <card-id> --approved [--max-steps n]")
+                return
+            result = self.orchestrator.kanban.plan_subagent_autonomy_step(
+                parts[1],
+                actor="tui-operator",
+                approved="--approved" in parts[2:],
+                max_steps=_flag_int(parts[2:], "--max-steps", default=1) or 1,
+            )
+            _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20, include_previews=False)})
             return
         if parts and parts[0] == "profiles":
             _print_json({"profiles": self.orchestrator.kanban.list_subagent_profiles(), "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
@@ -6680,7 +6692,7 @@ def _command_reference() -> str:
             "toolsets               Group tools by permission and risk",
             "allowed-tools|bashes|processes Policy-visible tools and governed process controls",
             "tools list|run|enable|disable  Governed tool catalog and policy-owned preferences",
-            "agents status|autonomy-preflight|profiles|delegate|handoff|review-packet|verify-packet|model-review|run|run-batch  Subagent coordination and runtime preflight",
+            "agents status|autonomy-preflight|autonomy-step|profiles|delegate|handoff|review-packet|verify-packet|model-review|run|run-batch  Subagent coordination and runtime preflight",
             "skills hub|search|browse|inspect|install  Governed skills and virtual Skill Hub",
             "curator status|run|pin|archive  Local authored skill maintenance",
             "plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-bundle|install-marketplace|update-marketplace|prepare-update|apply-prepared-update",
@@ -6827,7 +6839,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         "Explore",
         (
             ("capabilities", "parity and readiness"),
-            ("agents status|autonomy-preflight|delegate|review-packet|verify-packet|model-review|run", "multi-agent coordination and runtime preflight"),
+            ("agents status|autonomy-preflight|autonomy-step|delegate|review-packet|verify-packet|model-review|run", "multi-agent coordination and runtime preflight"),
             ("remote-control|rc|handoff|remote-env|teleport|tp|mobile|ios|android|desktop|app", "local-first remote-control readiness"),
             ("web-setup", "local web control-plane setup"),
             ("connectors|channels|platforms", "integration surfaces"),
@@ -7265,6 +7277,7 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("hooks", "add"): ("--id", "--enabled", "--approval-required", "--no-approval-required", "--timeout", "--max-output-bytes"),
     ("hooks", "run"): ("--approved", "--context-json"),
     ("agents", "delegate"): ("--approved",),
+    ("agents", "autonomy-step"): ("--approved", "--max-steps"),
     ("agents", "model-review"): ("--approved",),
     ("agents", "run"): ("--approved",),
     ("agents", "run-batch"): ("--approved", "--limit", "--card-id"),

@@ -770,6 +770,12 @@ def build_parser() -> argparse.ArgumentParser:
     agents_autonomy_preflight = agents_sub.add_parser("autonomy-preflight", help="Show blockers before autonomous recursive subagent runtime can run")
     agents_autonomy_preflight.add_argument("--actor", default="operator")
     agents_autonomy_preflight.add_argument("--limit", type=int, default=20)
+    agents_autonomy_step = agents_sub.add_parser("autonomy-step", help="Create an approved sanitized per-step autonomy plan without executing recursion")
+    agents_autonomy_step.add_argument("card_id")
+    agents_autonomy_step.add_argument("--approved", action="store_true")
+    agents_autonomy_step.add_argument("--actor", default="operator")
+    agents_autonomy_step.add_argument("--max-steps", type=int, default=1)
+    agents_autonomy_step.add_argument("--limit", type=int, default=20)
     agents_delegate = agents_sub.add_parser("delegate", help="Queue a subagent delegation card through the governed tool path")
     agents_delegate.add_argument("role")
     agents_delegate.add_argument("task")
@@ -2408,6 +2414,14 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return orchestrator.kanban.subagent_status(limit=args.limit)
         if args.agents_command == "autonomy-preflight":
             return orchestrator.kanban.subagent_autonomy_preflight(actor=args.actor, limit=args.limit)
+        if args.agents_command == "autonomy-step":
+            result = orchestrator.kanban.plan_subagent_autonomy_step(
+                args.card_id,
+                actor=args.actor,
+                approved=args.approved,
+                max_steps=args.max_steps,
+            )
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit, include_previews=False)}
         if args.agents_command == "delegate":
             result = orchestrator.tools.execute(
                 "subagent_delegate",

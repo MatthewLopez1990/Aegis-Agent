@@ -935,6 +935,33 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertFalse(subagent_model_review_gated["raw_instruction_forwarded_to_model"])
                 self.assertIn("sanitized_model_review_invocations", subagent_model_review_gated["subagents"]["implemented_controls"])
                 self.assertNotIn("Compare provider auth gaps", json.dumps(subagent_model_review_gated, sort_keys=True))
+                subagent_autonomy_step_gated = _json_post(port, "/subagents/autonomy-step", {"card_id": subagent_replayed["card_id"]}, token=token)
+                self.assertEqual(subagent_autonomy_step_gated["status"], "approval_required")
+                self.assertFalse(subagent_autonomy_step_gated["autonomous_runtime"])
+                subagent_autonomy_step_string_approval = _json_post(
+                    port,
+                    "/subagents/autonomy-step",
+                    {"card_id": subagent_replayed["card_id"], "approved": "true"},
+                    token=token,
+                )
+                self.assertEqual(subagent_autonomy_step_string_approval["status"], "approval_required")
+                subagent_autonomy_step = _json_post(
+                    port,
+                    "/subagents/autonomy-step",
+                    {"card_id": subagent_replayed["card_id"], "actor": "api-planner", "approved": True, "max_steps": 2},
+                    token=token,
+                )
+                self.assertTrue(subagent_autonomy_step["ok"])
+                self.assertEqual(subagent_autonomy_step["receipt"]["receipt_schema"], "aegis.subagent.autonomy_step_plan.v1")
+                self.assertEqual(subagent_autonomy_step["receipt"]["actor"], "api-planner")
+                self.assertEqual(subagent_autonomy_step["receipt"]["max_steps"], 2)
+                self.assertEqual(subagent_autonomy_step["receipt"]["tool_call_sandbox"], "deny_all_until_operator_approved")
+                self.assertTrue(subagent_autonomy_step["receipt"]["packet_integrity_ok"])
+                self.assertFalse(subagent_autonomy_step["receipt"]["model_invocation_performed"])
+                self.assertFalse(subagent_autonomy_step["receipt"]["tool_execution_performed"])
+                self.assertIn("scoped_autonomy_step_plans", subagent_autonomy_step["subagents"]["implemented_controls"])
+                self.assertEqual(subagent_autonomy_step["subagents"]["cards"][0]["autonomy_status"], "step_plan_review_required")
+                self.assertNotIn("Compare provider auth gaps", json.dumps(subagent_autonomy_step, sort_keys=True))
                 subagent_parent_task = _json_get(port, f"/tasks/{task['id']}", token=token)
                 self.assertTrue(subagent_parent_task["checkpoint"]["subagent_review_required"])
                 self.assertIn("subagent_review_complete", {hint["action"] for hint in subagent_parent_task["action_hints"]})

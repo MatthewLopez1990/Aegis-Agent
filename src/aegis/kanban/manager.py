@@ -428,6 +428,171 @@ class KanbanManager:
             "raw_instruction_forwarded_to_model": False,
         }
 
+    def plan_subagent_autonomy_step(
+        self,
+        card_id: str,
+        *,
+        actor: str = "operator",
+        approved: bool = False,
+        max_steps: int = 1,
+    ) -> dict[str, Any]:
+        card, board, metadata = self._require_subagent_card(card_id)
+        if not approved:
+            return {
+                "status": "approval_required",
+                "card_id": card_id,
+                "reason": "autonomous subagent step planning requires explicit approval",
+                "approval_required": True,
+                "autonomous_runtime": False,
+                "model_invocation_performed": False,
+                "tool_execution_performed": False,
+            }
+        if card.get("lane") == "done":
+            raise ValueError("done subagent cards cannot be planned")
+        try:
+            step_limit = max(1, min(int(max_steps), 20))
+        except (TypeError, ValueError):
+            step_limit = 1
+        packet_result = self.create_subagent_review_packet(card_id, actor=actor)
+        packet_receipt = packet_result["receipt"]
+        verification = self.verify_subagent_review_packet(str(packet_receipt["packet_id"]), actor=actor)
+        if not verification.get("ok"):
+            raise ValueError("subagent review packet verification failed")
+        refreshed_card, refreshed_board, refreshed_metadata = self._require_subagent_card(card_id)
+        plan_id = str(uuid4())
+        created_at = now_utc()
+        data_dir = Path(self.store.database_path).parent
+        plan_dir = ensure_private_dir(data_dir / "subagent-autonomy-steps")
+        plan_path = ensure_private_file(plan_dir / f"{plan_id}.json")
+        checksum_path = ensure_private_file(plan_dir / f"{plan_id}.sha256")
+        plan_count = _subagent_autonomy_step_plan_count(refreshed_metadata) + 1
+        scoped_context = _subagent_autonomy_scoped_context(
+            card=refreshed_card,
+            board=refreshed_board,
+            metadata=refreshed_metadata,
+            packet_summary=verification["packet"],
+            packet_receipt=packet_receipt,
+            verification_receipt=verification["receipt"],
+            step_index=plan_count,
+            max_steps=step_limit,
+        )
+        scoped_context_sha256 = _stable_json_sha256(scoped_context)
+        plan = {
+            "plan_schema": "aegis.subagent.autonomy_step_plan.v1",
+            "plan_id": plan_id,
+            "created_at": created_at,
+            "actor": _safe_actor(actor),
+            "taint": "TOOL_OUTPUT_METADATA",
+            "scoped_model_context": scoped_context,
+            "step_plan": {
+                "status": "operator_review_required",
+                "step_index": plan_count,
+                "max_steps": step_limit,
+                "planned_step_count": 1,
+                "required_next_gate": "operator_review",
+                "recursive_model_loop_enabled": False,
+                "autonomous_runtime": False,
+                "model_invocation_performed": False,
+                "tool_execution_performed": False,
+                "tool_call_sandbox": "deny_all_until_operator_approved",
+                "operator_interrupt_supported": True,
+                "review_gate_after_each_step": True,
+            },
+            "controls": {
+                "operator_review_required": True,
+                "scoped_model_context_builder": True,
+                "recursive_budget_enforced": True,
+                "tool_call_sandbox": "deny_all_until_operator_approved",
+                "tool_calls_allowed": 0,
+                "per_step_operator_interrupt": True,
+                "review_gate_after_each_step": True,
+                "autonomous_runtime": False,
+                "recursive_model_loop_enabled": False,
+                "model_invocation_performed": False,
+                "tool_execution_performed": False,
+                "raw_instruction_included": False,
+                "raw_instruction_forwarded_to_model": False,
+                "raw_worker_output_included": False,
+                "raw_worker_result_included": False,
+                "raw_prompt_for_model_included": False,
+                "raw_secret_values_included": False,
+            },
+        }
+        plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        plan_path.chmod(0o600)
+        artifact_sha256 = hashlib.sha256(plan_path.read_bytes()).hexdigest()
+        checksum_path.write_text(f"{artifact_sha256}\n", encoding="utf-8")
+        checksum_path.chmod(0o600)
+        receipt = {
+            "receipt_schema": "aegis.subagent.autonomy_step_plan.v1",
+            "event_type": "subagent.autonomy_step_plan_created",
+            "plan_id": plan_id,
+            "card_id": card_id,
+            "board_id": board["id"],
+            "actor": _safe_actor(actor),
+            "artifact": str(plan_path),
+            "artifact_sha256": artifact_sha256,
+            "checksum": str(checksum_path),
+            "checksum_sha256": hashlib.sha256(checksum_path.read_bytes()).hexdigest(),
+            "packet_id": packet_receipt["packet_id"],
+            "packet_integrity_ok": bool(verification["receipt"].get("packet_integrity_ok")),
+            "scoped_model_context_sha256": scoped_context_sha256,
+            "step_index": plan_count,
+            "max_steps": step_limit,
+            "planned_step_count": 1,
+            "operator_review_required": True,
+            "required_next_gate": "operator_review",
+            "scoped_model_context_builder": True,
+            "recursive_budget_enforced": True,
+            "tool_call_sandbox": "deny_all_until_operator_approved",
+            "tool_calls_allowed": 0,
+            "per_step_operator_interrupt": True,
+            "review_gate_after_each_step": True,
+            "autonomous_runtime": False,
+            "recursive_model_loop_enabled": False,
+            "model_invocation_performed": False,
+            "tool_execution_performed": False,
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+            "raw_worker_output_included": False,
+            "raw_worker_result_included": False,
+            "raw_prompt_for_model_included": False,
+            "raw_secret_values_included": False,
+            "created_at": created_at,
+        }
+        self.store.update_kanban_card_metadata(
+            card_id,
+            {
+                "autonomy_step_plan": receipt,
+                "last_autonomy_step_plan": receipt,
+                "autonomy_step_plans_recorded": plan_count,
+                "autonomy_status": "step_plan_review_required",
+                "scoped_model_context_available": True,
+                "tool_call_sandbox": "deny_all_until_operator_approved",
+                "per_step_operator_interrupt": True,
+                "review_gate_after_each_step": True,
+                "raw_instruction_forwarded_to_model": False,
+                "raw_worker_output_included": False,
+            },
+        )
+        audit_entry = self.audit_logger.append("subagent.autonomy_step_plan_created", receipt, task_id=str(card.get("task_id")) if card.get("task_id") else None)
+        updated_card = self._require_card(card_id)
+        return {
+            "ok": True,
+            "status": "step_plan_created",
+            "card_id": card_id,
+            "plan": _subagent_autonomy_step_plan_summary(plan),
+            "receipt": receipt,
+            "packet": verification["packet"],
+            "packet_receipt": packet_receipt,
+            "verification_receipt": verification["receipt"],
+            "audit_event_hash": audit_entry["event_hash"],
+            "card": _subagent_card_summary(updated_card, include_preview=False),
+            "autonomous_runtime": False,
+            "model_invocation_performed": False,
+            "tool_execution_performed": False,
+        }
+
     def create_subagent_review_packet(self, card_id: str, *, actor: str = "operator") -> dict[str, Any]:
         card, board, metadata = self._require_subagent_card(card_id)
         packet_id = str(uuid4())
@@ -847,6 +1012,14 @@ class KanbanManager:
                 "model_ready_review_packets",
                 "sanitized_model_review_invocations",
                 "autonomy_preflight_receipts",
+                "scoped_autonomy_step_plans",
+                "scoped_model_context_builder",
+                "recursive_budget_enforcer",
+                "tool_call_sandbox",
+                "per_step_operator_interrupt",
+                "review_gate_after_each_step",
+                "raw_instruction_redaction",
+                "worker_output_redaction",
             ],
             "remaining_depth_work": [],
             "raw_instruction_included": False,
@@ -867,7 +1040,7 @@ class KanbanManager:
         ]
         implemented_controls = list(status.get("implemented_controls") or [])
         missing_controls = [control for control in required_controls if control not in implemented_controls]
-        blockers = [
+        candidate_blockers = [
             {
                 "control": "autonomous_loop_isolation",
                 "state": "missing",
@@ -876,19 +1049,20 @@ class KanbanManager:
             {
                 "control": "scoped_model_context_builder",
                 "state": "missing",
-                "detail": "Autonomous subagent model prompts still need scoped per-step context builders; approved review prompts use sanitized review packets only.",
+                "detail": "Scoped per-step context builders are available for approved step plans, but recursive autonomous model-loop workers are still disabled.",
             },
             {
                 "control": "tool_call_sandbox",
                 "state": "missing",
-                "detail": "Autonomous subagent tool calls need per-step approval, allowlists, and receipts before execution.",
+                "detail": "Autonomous step plans deny tool execution until a future isolated loop can enforce per-step allowlists and receipts.",
             },
             {
                 "control": "review_gate_after_each_step",
                 "state": "missing",
-                "detail": "Every autonomous step must return to operator review before deeper recursion is allowed.",
+                "detail": "Approved step plans require operator review after each planned step; recursive execution remains disabled.",
             },
         ]
+        blockers = [blocker for blocker in candidate_blockers if blocker["control"] in missing_controls]
         if int(status.get("enabled_profile_count") or 0) <= 0:
             blockers.insert(
                 0,
@@ -928,8 +1102,8 @@ class KanbanManager:
             ],
             "next_steps": [
                 "Use agents delegate/run/review-packet for operator-approved isolated subagent work today.",
-                "Implement sanitized model-context construction from verified review packets before enabling autonomous model loops.",
-                "Add per-step review, budget, tool-call, and interrupt receipts before recursive subagents can execute.",
+                "Use agents autonomy-step <card-id> --approved to create a sanitized per-step plan from verified review metadata.",
+                "Add isolated autonomous model-loop workers before recursive subagents can execute.",
             ],
             "checked_at": now_utc(),
         }
@@ -1004,6 +1178,13 @@ def _subagent_review_packet_count(metadata: dict[str, Any]) -> int:
 def _subagent_model_review_count(metadata: dict[str, Any]) -> int:
     try:
         return int(metadata.get("model_reviews_recorded", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _subagent_autonomy_step_plan_count(metadata: dict[str, Any]) -> int:
+    try:
+        return int(metadata.get("autonomy_step_plans_recorded", 0))
     except (TypeError, ValueError):
         return 0
 
@@ -1192,6 +1373,132 @@ def _subagent_review_packet_summary(packet: dict[str, Any]) -> dict[str, Any]:
         "last_worker_result_sha256": review.get("last_worker_result_sha256"),
         "result_summary_sha256": review.get("result_summary_sha256"),
         "model_ready": controls.get("model_ready") is True,
+        "raw_instruction_included": False,
+        "raw_worker_output_included": False,
+        "raw_worker_result_included": False,
+    }
+
+
+def _subagent_autonomy_scoped_context(
+    *,
+    card: dict[str, Any],
+    board: dict[str, Any],
+    metadata: dict[str, Any],
+    packet_summary: dict[str, Any],
+    packet_receipt: dict[str, Any],
+    verification_receipt: dict[str, Any],
+    step_index: int,
+    max_steps: int,
+) -> dict[str, Any]:
+    budget = metadata.get("budget_snapshot") if isinstance(metadata.get("budget_snapshot"), dict) else {}
+    profile = metadata.get("profile_snapshot") if isinstance(metadata.get("profile_snapshot"), dict) else {}
+    recursive_depth_limit = _profile_int(budget, "recursive_depth_limit", 0)
+    tool_budget = _profile_int(budget, "max_tool_calls", 0)
+    return {
+        "context_schema": "aegis.subagent.scoped_autonomy_context.v1",
+        "taint": "TOOL_OUTPUT_METADATA",
+        "card": {
+            "card_id": str(card["id"]),
+            "board_id": str(board["id"]),
+            "lane": str(card.get("lane", "")),
+            "owner": str(card.get("owner") or ""),
+            "risk_level": str(card.get("risk_level") or ""),
+            "parent_task_id": _parent_task_id(card, metadata),
+            "profile_id": metadata.get("profile_id"),
+            "instruction_sha256": packet_summary.get("instruction_sha256"),
+            "instruction_character_count": packet_summary.get("instruction_character_count"),
+            "instruction_word_count": packet_summary.get("instruction_word_count"),
+            "instructions_tainted": bool(metadata.get("instructions_tainted", True)),
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+        },
+        "profile": {
+            "profile_id": profile.get("id") or metadata.get("profile_id"),
+            "enabled": bool(profile.get("enabled", True)),
+            "workspace_scope": profile.get("workspace_scope") or budget.get("workspace_scope"),
+            "network_policy": profile.get("network_policy") or budget.get("network_policy", "disabled"),
+            "tool_allowlist_count": len(profile.get("tool_allowlist") or []),
+            "tool_allowlist_sha256": _stable_json_sha256(sorted(profile.get("tool_allowlist") or [])),
+            "raw_tool_arguments_included": False,
+        },
+        "review": {
+            "review_status": packet_summary.get("review_status"),
+            "packet_id": packet_receipt.get("packet_id"),
+            "packet_sha256": packet_receipt.get("artifact_sha256"),
+            "packet_integrity_ok": bool(verification_receipt.get("packet_integrity_ok")),
+            "review_artifact_sha256": packet_summary.get("review_artifact_sha256"),
+            "last_run_receipt_sha256": packet_summary.get("last_run_receipt_sha256"),
+            "last_worker_result_sha256": packet_summary.get("last_worker_result_sha256"),
+            "result_summary_sha256": packet_summary.get("result_summary_sha256"),
+            "raw_worker_output_included": False,
+            "raw_worker_result_included": False,
+        },
+        "budget": {
+            "budget_schema": budget.get("budget_schema"),
+            "profile_id": budget.get("profile_id"),
+            "recursive_depth_limit": recursive_depth_limit,
+            "recursive_depth_remaining": max(0, recursive_depth_limit),
+            "max_tool_calls": tool_budget,
+            "tool_calls_allowed_for_plan": 0,
+            "max_runtime_seconds": budget.get("max_runtime_seconds"),
+            "network_policy": budget.get("network_policy", "disabled"),
+            "workspace_scope": budget.get("workspace_scope", "current_workspace"),
+            "enforcement": "approved_autonomy_step_plan",
+            "recursive_budget_enforced": True,
+        },
+        "step": {
+            "step_index": step_index,
+            "max_steps": max_steps,
+            "planned_step_count": 1,
+            "required_next_gate": "operator_review",
+            "operator_interrupt_supported": True,
+            "review_gate_after_each_step": True,
+        },
+        "controls": {
+            "scoped_model_context_builder": True,
+            "operator_review_required": True,
+            "tool_call_sandbox": "deny_all_until_operator_approved",
+            "tool_execution_performed": False,
+            "model_invocation_performed": False,
+            "autonomous_runtime": False,
+            "recursive_model_loop_enabled": False,
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+            "raw_worker_output_included": False,
+            "raw_worker_result_included": False,
+            "raw_prompt_for_model_included": False,
+            "raw_secret_values_included": False,
+        },
+    }
+
+
+def _subagent_autonomy_step_plan_summary(plan: dict[str, Any]) -> dict[str, Any]:
+    context = plan.get("scoped_model_context") if isinstance(plan.get("scoped_model_context"), dict) else {}
+    controls = plan.get("controls") if isinstance(plan.get("controls"), dict) else {}
+    step_plan = plan.get("step_plan") if isinstance(plan.get("step_plan"), dict) else {}
+    review = context.get("review") if isinstance(context.get("review"), dict) else {}
+    card = context.get("card") if isinstance(context.get("card"), dict) else {}
+    return {
+        "plan_schema": plan.get("plan_schema"),
+        "plan_id": plan.get("plan_id"),
+        "created_at": plan.get("created_at"),
+        "card_id": card.get("card_id"),
+        "packet_id": review.get("packet_id"),
+        "packet_integrity_ok": bool(review.get("packet_integrity_ok", False)),
+        "review_status": review.get("review_status"),
+        "status": step_plan.get("status"),
+        "step_index": step_plan.get("step_index"),
+        "max_steps": step_plan.get("max_steps"),
+        "required_next_gate": step_plan.get("required_next_gate"),
+        "tool_call_sandbox": controls.get("tool_call_sandbox"),
+        "operator_review_required": controls.get("operator_review_required") is True,
+        "scoped_model_context_builder": controls.get("scoped_model_context_builder") is True,
+        "recursive_budget_enforced": controls.get("recursive_budget_enforced") is True,
+        "per_step_operator_interrupt": controls.get("per_step_operator_interrupt") is True,
+        "review_gate_after_each_step": controls.get("review_gate_after_each_step") is True,
+        "autonomous_runtime": False,
+        "model_invocation_performed": False,
+        "tool_execution_performed": False,
         "raw_instruction_included": False,
         "raw_worker_output_included": False,
         "raw_worker_result_included": False,
@@ -1673,6 +1980,13 @@ def _subagent_card_summary(card: dict[str, Any], *, include_preview: bool = True
         "model_reviews_recorded": _subagent_model_review_count(metadata),
         "model_review_status": metadata.get("model_review_status"),
         "model_review_performed": bool(metadata.get("model_review_performed", False)),
+        "autonomy_step_plan": metadata.get("autonomy_step_plan") or metadata.get("last_autonomy_step_plan"),
+        "autonomy_step_plans_recorded": _subagent_autonomy_step_plan_count(metadata),
+        "autonomy_status": metadata.get("autonomy_status"),
+        "scoped_model_context_available": bool(metadata.get("scoped_model_context_available", False)),
+        "tool_call_sandbox": metadata.get("tool_call_sandbox"),
+        "per_step_operator_interrupt": bool(metadata.get("per_step_operator_interrupt", False)),
+        "review_gate_after_each_step": bool(metadata.get("review_gate_after_each_step", False)),
         "review_completion_receipt": metadata.get("review_completion_receipt"),
         "parent_task_review_linked": bool(metadata.get("parent_task_review_linked", False)),
         "raw_worker_output_included": bool(metadata.get("raw_worker_output_included", False)),
