@@ -1045,6 +1045,8 @@ class TuiTests(unittest.TestCase):
                 tui.onecmd("""tools run calculator '{"expression":"2+2"}'""")
                 tui.onecmd("""tools run service_ticket_write '{"operation":"close","ticket":{"id":"INC000001"}}'""")
                 tui.onecmd("""tools run service_ticket_write '{"operation":"close","ticket":{"id":"INC000001"}}' --approved""")
+                tui.onecmd("""tools run message_send '{"message":{"text":"hello","channel":"general"}}'""")
+                tui.onecmd("""tools run message_send '{"message":{"text":"hello","channel":"general"}}' --approved""")
                 tui.onecmd("""tools run contacts_write '{"operation":"create","contact":{"displayName":"Local User"}}'""")
                 tui.onecmd("""tools run contacts_write '{"operation":"create","contact":{"displayName":"Local User"}}' --approved""")
                 tui.onecmd("agents")

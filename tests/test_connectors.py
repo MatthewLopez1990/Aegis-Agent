@@ -362,6 +362,101 @@ class ConnectorTests(unittest.TestCase):
         self.assertNotIn("msg_raw_secret", rendered)
         self.assertNotIn("abc123", rendered)
 
+    def test_mock_messaging_live_write_returns_redacted_rollback_offer(self) -> None:
+        broker = SecretsBroker()
+        broker.store_secret(name="MESSAGING_TOKEN", value="msg_raw_secret")
+        connector = MockMessagingConnector(allowlist=("example.com",), live_writes=True, secrets_broker=broker)
+        live_params = {
+            "provider_url": "https://example.com/hooks/messages",
+            "channel": "general",
+            "text": "please post token=abc123",
+        }
+
+        class FakeResponse:
+            status = 202
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self, limit: int) -> bytes:
+                return b'{"ok":true,"ts":"1700000000.000100","channel":"general","message":{"text":"provider response-secret"}}'
+
+        with patch("aegis.connectors.mock_messaging._open_without_redirects", return_value=FakeResponse()):
+            live = connector.write(ConnectorRequest(operation="send_message", params=live_params, scopes=("write",), approved=True))
+
+        rendered = json.dumps(live.data, sort_keys=True)
+        self.assertTrue(live.ok)
+        self.assertEqual(live.data["rollback_receipt"]["receipt_schema"], "messaging_rollback_offer_v1")
+        self.assertTrue(live.data["rollback_receipt"]["rollback_available"])
+        self.assertEqual(live.data["rollback_receipt"]["rollback_operation"], "rollback_message")
+        self.assertIn("message_ref_hash", live.data["rollback_receipt"])
+        self.assertIn("channel_ref_hash", live.data["rollback_receipt"])
+        self.assertFalse(live.data["rollback_receipt"]["raw_secret_values_included"])
+        self.assertFalse(live.data["rollback_receipt"]["raw_response_body_included"])
+        self.assertEqual(live.rollback, "rollback_message available with approval")
+        self.assertNotIn("msg_raw_secret", rendered)
+        self.assertNotIn("abc123", rendered)
+        self.assertNotIn("response-secret", rendered)
+        self.assertNotIn("1700000000.000100", rendered)
+
+    def test_mock_messaging_live_rollback_requires_approval_and_redacts_receipt(self) -> None:
+        broker = SecretsBroker()
+        broker.store_secret(name="MESSAGING_TOKEN", value="msg_raw_secret")
+        connector = MockMessagingConnector(allowlist=("example.com",), live_writes=True, secrets_broker=broker, rate_limits={"per_minute": 2})
+        rollback_params = {
+            "provider_url": "https://example.com/hooks/messages/1700000000.000100",
+            "channel": "general",
+            "message_ts": "1700000000.000100",
+            "reason": "operator rollback token=abc123",
+        }
+
+        class FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self, limit: int) -> bytes:
+                return b'{"ok":true,"deleted":"1700000000.000100","secret":"response-secret"}'
+
+        captured: dict[str, object] = {}
+
+        def fake_open(request, timeout):
+            captured["url"] = request.full_url
+            captured["method"] = request.get_method()
+            captured["authorization"] = request.headers.get("Authorization")
+            captured["body"] = request.data.decode("utf-8") if request.data else ""
+            return FakeResponse()
+
+        with patch("aegis.connectors.mock_messaging._open_without_redirects", side_effect=fake_open):
+            unapproved = connector.rollback(ConnectorRequest(operation="rollback_message", params=rollback_params, scopes=("write",)))
+            rollback = connector.rollback(ConnectorRequest(operation="rollback_message", params=rollback_params, scopes=("write",), approved=True))
+
+        rendered = json.dumps(rollback.data, sort_keys=True)
+        self.assertFalse(unapproved.ok)
+        self.assertIn("approval", unapproved.error or "")
+        self.assertTrue(rollback.ok)
+        self.assertEqual(rollback.operation, "rollback_message")
+        self.assertEqual(rollback.data["mode"], "live_rollback")
+        self.assertEqual(rollback.data["rollback_receipt"]["receipt_schema"], "messaging_rollback_receipt_v1")
+        self.assertEqual(rollback.data["rollback_receipt"]["rollback_operation"], "rollback_message")
+        self.assertFalse(rollback.data["rollback_receipt"]["raw_secret_values_included"])
+        self.assertFalse(rollback.data["rollback_receipt"]["raw_response_body_included"])
+        self.assertTrue(rollback.data["rate_limit"]["allowed"])
+        self.assertEqual(captured["url"], "https://example.com/hooks/messages/1700000000.000100")
+        self.assertEqual(captured["method"], "DELETE")
+        self.assertEqual(captured["authorization"], "Bearer msg_raw_secret")
+        self.assertIn('"message_id": "1700000000.000100"', str(captured["body"]))
+        self.assertNotIn("msg_raw_secret", rendered)
+        self.assertNotIn("abc123", rendered)
+        self.assertNotIn("response-secret", rendered)
+
     def test_mock_connector_results_summarize_and_redact_params(self) -> None:
         connector = MockMessagingConnector()
         params = {

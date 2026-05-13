@@ -496,6 +496,7 @@ def _live_gap_backlog(
                 "github_gitlab.approved_rollback_receipt",
                 "graph.calendar_rollback_receipt",
                 "messaging.live_send_rate_limit",
+                "messaging.rollback_message_receipt",
                 "service_desk.rollback_close_ticket_receipt",
             ],
             "configured_provider_count": len(configured_providers),
@@ -933,7 +934,7 @@ def _live_connector_operator_checklist(
         {
             "control": "rollback_receipts",
             "state": "partial",
-            "detail": "GitHub/GitLab issue and comment rollbacks, service-desk close-ticket rollbacks, and Microsoft Graph calendar/contact rollbacks expose approved redacted rollback receipts/actions; remaining live adapters still require provider-specific rollback paths.",
+            "detail": "GitHub/GitLab issue and comment rollbacks, service-desk close-ticket rollbacks, Microsoft Graph calendar/contact rollbacks, and messaging rollback_message actions expose approved redacted rollback receipts; remaining live adapters still require provider-specific rollback paths.",
         },
         {
             "control": "mock_fallback",
@@ -959,7 +960,7 @@ _LIVE_CONNECTOR_CAPABILITIES = {
     "generic_rest": ("https_rest_write",),
     "mock_graph": ("calendar_write", "email_write", "contact_write"),
     "mock_servicenow": ("ticket_write",),
-    "mock_messaging": ("message_send",),
+    "mock_messaging": ("message_send", "message_rollback"),
 }
 
 

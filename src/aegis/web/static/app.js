@@ -41,6 +41,7 @@ const TOOL_RUN_PRESETS = [
   { label: "Subagent", name: "subagent_delegate", params: { role: "Researcher", task: "Compare provider auth gaps." } },
   { label: "Service Ticket", name: "service_ticket_read", params: { operation: "search", query: "incident" } },
   { label: "Close Ticket", name: "service_ticket_write", params: { operation: "close", ticket: { id: "INC000001" } } },
+  { label: "Message", name: "message_send", params: { message: { text: "Hello from Aegis", channel: "general" } } },
 ];
 
 const WEB_SLASH_COMMANDS = [

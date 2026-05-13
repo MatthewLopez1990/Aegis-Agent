@@ -218,6 +218,8 @@ class BuiltinToolExecutor:
             result = self._execute_service_ticket_read(params=params)
         elif name == "service_ticket_write":
             result = self._execute_service_ticket_write(params=params, approved=approved)
+        elif name == "message_send":
+            result = self._execute_message_send(params=params, approved=approved)
         elif name in {"browser", "browser_click", "browser_fill", "browser_submit", "browser_screenshot", "browser_render_screenshot", "browser_extract_table", "browser_dom_snapshot", "browser_close"}:
             if self.browser is None:
                 raise ToolExecutionError("browser controller is not configured")
@@ -2018,6 +2020,39 @@ class BuiltinToolExecutor:
             "connector": result.connector,
             "status": "accepted" if result.ok else "failed",
             "ticket_id": str(payload.get("id") or payload.get("number") or f"mock-{operation}"),
+            "mode": result.data.get("mode", "mock"),
+            "accepted": result.data.get("accepted", {}),
+            "rate_limit": result.data.get("rate_limit"),
+            "rollback_receipt": result.data.get("rollback_receipt"),
+            **_connector_activation_fields(result),
+            "rollback": result.rollback,
+            "error": result.error,
+        }
+
+    def _execute_message_send(self, *, params: dict[str, Any], approved: bool) -> dict[str, Any]:
+        requested = str(params.get("operation", "send")).lower()
+        operation = "rollback_message" if requested in {"rollback", "rollback_message", "delete", "delete_message", "retract"} else "send_message"
+        message = dict(params.get("message", {})) if isinstance(params.get("message"), dict) else {}
+        request_params = {key: value for key, value in params.items() if key != "operation"}
+        if message:
+            request_params["message"] = message
+        connector = self.connectors.get("mock_messaging")
+        request = ConnectorRequest(operation=operation, params=request_params, scopes=("write",), approved=approved)
+        result = connector.rollback(request) if operation == "rollback_message" else connector.write(request)
+        return {
+            "ok": result.ok,
+            "operation": operation,
+            "connector": result.connector,
+            "status": "rolled_back" if operation == "rollback_message" and result.ok else "sent" if result.ok else "failed",
+            "message_id": str(
+                params.get("message_id")
+                or params.get("message_ts")
+                or params.get("ts")
+                or message.get("message_id")
+                or message.get("message_ts")
+                or message.get("ts")
+                or f"mock-{operation}"
+            ),
             "mode": result.data.get("mode", "mock"),
             "accepted": result.data.get("accepted", {}),
             "rate_limit": result.data.get("rate_limit"),
@@ -4048,6 +4083,8 @@ def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def _operation_for_tool(name: str, permission: str) -> str:
+    if name == "message_send":
+        return "send_message"
     if name in {"file_write", "memory_store", "image_generate", "tts", "subagent_delegate", "mcp_call"}:
         return "write"
     if name == "shell":

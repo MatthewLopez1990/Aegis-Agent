@@ -55,6 +55,7 @@ class EvaluationScenarioTests(unittest.TestCase):
         self.assertIn("artifact_integrity.browser_media_receipts", scenario_ids)
         self.assertIn("backend_activation.remote_execution_disabled", scenario_ids)
         self.assertIn("live_connector_receipts.redacted_write_summary", scenario_ids)
+        self.assertIn("messaging.rollback_message_receipt", scenario_ids)
         self.assertIn("policy_regression_gates", manifest)
         self.assertIn("policy_regression_variants", manifest)
         self.assertEqual(
@@ -209,7 +210,20 @@ class EvaluationScenarioTests(unittest.TestCase):
                         approved=True,
                     )
                 )
+                rollback = live_connector.rollback(
+                    ConnectorRequest(
+                        operation="rollback_message",
+                        params={
+                            "provider_url": "https://example.com/hooks/messages/1700000000.000100",
+                            "channel": "security",
+                            "message_ts": "1700000000.000100",
+                        },
+                        scopes=("write",),
+                        approved=True,
+                    )
+                )
             rendered_live_write = json.dumps(live_write.data, sort_keys=True)
+            rendered_rollback = json.dumps(rollback.data, sort_keys=True)
             self.assertTrue(live_write.ok)
             self.assertEqual(live_write.data["accepted"]["receipt_schema"], "redacted_param_summary_v1")
             self.assertFalse(live_write.data["accepted"]["raw_secret_values_included"])
@@ -217,6 +231,12 @@ class EvaluationScenarioTests(unittest.TestCase):
             self.assertNotIn("msg_eval_secret", rendered_live_write)
             self.assertNotIn("response-secret", rendered_live_write)
             self.assertNotIn("token-shaped content", rendered_live_write)
+            self.assertTrue(rollback.ok)
+            self.assertEqual(rollback.data["rollback_receipt"]["receipt_schema"], "messaging_rollback_receipt_v1")
+            self.assertFalse(rollback.data["rollback_receipt"]["raw_secret_values_included"])
+            self.assertFalse(rollback.data["rollback_receipt"]["raw_response_body_included"])
+            self.assertNotIn("msg_eval_secret", rendered_rollback)
+            self.assertNotIn("response-secret", rendered_rollback)
 
     def test_evaluation_run_reports_are_persisted_locally_with_trends(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

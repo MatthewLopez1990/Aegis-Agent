@@ -157,6 +157,7 @@ Tool commands use JSON parameters and the same approval semantics as the governe
 tool run calculator '{"expression":"2+2"}'
 tools run service_ticket_read '{"query":"incident"}'
 tools run service_ticket_write '{"operation":"close","ticket":{"id":"INC000001"}}' --approved
+tools run message_send '{"message":{"text":"Hello from Aegis","channel":"general"}}' --approved
 ```
 
 ## Web GUI

@@ -90,6 +90,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(implementation_statuses["contacts_write"], "allowlisted_live_write_or_mock_connector")
             self.assertEqual(implementation_statuses["service_ticket_read"], "allowlisted_live_read_or_mock_connector")
             self.assertEqual(implementation_statuses["service_ticket_write"], "allowlisted_live_write_or_mock_connector")
+            self.assertEqual(implementation_statuses["message_send"], "allowlisted_live_write_or_mock_connector")
             self.assertEqual(implementation_statuses["weather"], "allowlisted_live_or_local")
             self.assertEqual(implementation_statuses["maps_geocode"], "allowlisted_live_or_local")
             self.assertEqual(implementation_statuses["image_edit"], "allowlisted_live_or_local")
@@ -533,6 +534,20 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(approved_email_draft["draft_id"], "mock-draft_email")
             email_send = orchestrator.tools.execute("email_send", {"message": {"subject": "Hello"}}, approved=True)
             self.assertEqual(email_send["status"], "sent")
+            message_send = orchestrator.tools.execute("message_send", {"message": {"text": "Hello", "channel": "general"}})
+            self.assertEqual(message_send["status"], "approval_required")
+            approved_message_send = orchestrator.tools.execute("message_send", {"message": {"text": "Hello", "channel": "general"}}, approved=True)
+            self.assertTrue(approved_message_send["ok"])
+            self.assertEqual(approved_message_send["status"], "sent")
+            self.assertEqual(approved_message_send["message_id"], "mock-send_message")
+            approved_message_rollback = orchestrator.tools.execute(
+                "message_send",
+                {"operation": "rollback", "message": {"message_id": "msg-1", "channel": "general"}},
+                approved=True,
+            )
+            self.assertTrue(approved_message_rollback["ok"])
+            self.assertEqual(approved_message_rollback["operation"], "rollback_message")
+            self.assertEqual(approved_message_rollback["status"], "rolled_back")
             calendar = orchestrator.tools.execute("calendar_read", {"range": "today"})
             calendar_write = orchestrator.tools.execute("calendar_write", {"event": {"subject": "Planning"}})
             self.assertEqual(calendar_write["status"], "approval_required")
@@ -1227,6 +1242,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("rollback_receipt", backlog["provider_and_channel_live_connectors"]["verification_gates"])
             self.assertIn("receipt_redaction", backlog["provider_and_channel_live_connectors"]["verification_gates"])
             self.assertIn("service_desk.rollback_close_ticket_receipt", backlog["provider_and_channel_live_connectors"]["evaluation_scenarios"])
+            self.assertIn("messaging.rollback_message_receipt", backlog["provider_and_channel_live_connectors"]["evaluation_scenarios"])
             self.assertIn("live_connector_receipts.redacted_write_summary", backlog["provider_and_channel_live_connectors"]["evaluation_scenarios"])
             self.assertIn("approval_required_mutation", backlog["browser_and_media_depth"]["verification_gates"])
             self.assertIn("disabled_live_browser_denial", backlog["browser_and_media_depth"]["verification_gates"])

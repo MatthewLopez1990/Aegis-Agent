@@ -19,6 +19,6 @@ Implemented reference connectors:
 - `generic_rest`: brokered mock REST connector with optional approved HTTPS writes.
 - `mock_graph`: Microsoft Graph-style mock with optional approved brokered-token live calendar, contact, and email writes.
 - `mock_servicenow`: ServiceNow-style mock with optional approved brokered-token live ticket writes.
-- `mock_messaging`: Slack/Teams-style mock with optional approved, brokered-token, allowlisted HTTPS live sends.
+- `mock_messaging`: Slack/Teams-style mock with optional approved, brokered-token, allowlisted HTTPS live sends and approved redacted rollback_message receipts.
 
 Connector output is treated as untrusted tool output and passed through the context firewall.

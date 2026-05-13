@@ -112,6 +112,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("github_gitlab.approved_rollback_receipt", provider_gap["evaluation_scenarios"])
             self.assertIn("graph.calendar_rollback_receipt", provider_gap["evaluation_scenarios"])
             self.assertIn("messaging.live_send_rate_limit", provider_gap["evaluation_scenarios"])
+            self.assertIn("messaging.rollback_message_receipt", provider_gap["evaluation_scenarios"])
             self.assertIn("calendar_write", provider_gap["sample_tools"])
             self.assertIn("calendar_read", provider_gap["live_read_surfaces"])
             self.assertEqual(provider_gap["status"], "live_connectors_available_unconfigured")
