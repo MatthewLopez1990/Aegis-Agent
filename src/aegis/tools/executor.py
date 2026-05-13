@@ -533,11 +533,6 @@ class BuiltinToolExecutor:
         private_error = _private_network_error(domain)
         if private_error:
             return {"ok": False, "tool": name, "mode": "live_media_provider", "status": "scope_rejected", "reason": private_error, "required_controls": _live_media_required_controls()}
-        token_secret = str(params.get("token_secret") or "AEGIS_MEDIA_PROVIDER_TOKEN")
-        handle = self.secrets_broker.request_handle(name=token_secret, requester="media_provider", reason=f"{name} provider-backed artifact", scopes=("media:execute",))
-        if not handle.present:
-            return {"ok": False, "tool": name, "mode": "live_media_provider", "status": "not_configured", "reason": f"secret {token_secret!r} is not configured", "required_controls": _live_media_required_controls()}
-        token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="media_provider")
         prompt = str(params.get("prompt", ""))
         text = str(params.get("text", ""))
         source_path = str(params.get("source_path") or params.get("image_path") or "")
@@ -552,8 +547,31 @@ class BuiltinToolExecutor:
                 "required_controls": _live_media_required_controls(),
             }
         adapter_name = str(provider_adapter["name"] or "generic")
-        request_payload = _live_media_request_payload(name=name, prompt=prompt, text=text, source_path=source_path, params=params, provider_adapter=adapter_name)
-        live_result = _send_live_media_provider_request(url=provider_url, token=token, tool=name, payload=request_payload)
+        source_file: dict[str, Any] | None = None
+        mask_file: dict[str, Any] | None = None
+        if adapter_name == "openai_image_edit":
+            try:
+                root = _workspace_root(self.connectors)
+                source_file = _live_media_source_file(root=root, source_path=source_path, field="image")
+                mask_path = str(params.get("mask_path") or params.get("mask") or "").strip()
+                if mask_path:
+                    mask_file = _live_media_source_file(root=root, source_path=mask_path, field="mask")
+            except ToolExecutionError as exc:
+                return {
+                    "ok": False,
+                    "tool": name,
+                    "mode": "live_media_provider",
+                    "status": "invalid_source",
+                    "reason": str(redact(str(exc))),
+                    "required_controls": _live_media_required_controls(),
+                }
+        token_secret = str(params.get("token_secret") or "AEGIS_MEDIA_PROVIDER_TOKEN")
+        handle = self.secrets_broker.request_handle(name=token_secret, requester="media_provider", reason=f"{name} provider-backed artifact", scopes=("media:execute",))
+        if not handle.present:
+            return {"ok": False, "tool": name, "mode": "live_media_provider", "status": "not_configured", "reason": f"secret {token_secret!r} is not configured", "required_controls": _live_media_required_controls()}
+        token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="media_provider")
+        request_payload = _live_media_request_payload(name=name, prompt=prompt, text=text, source_path=source_path, params=params, provider_adapter=adapter_name, source_file=source_file, mask_file=mask_file)
+        live_result = _send_live_media_provider_request(url=provider_url, token=token, tool=name, payload=request_payload, provider_adapter=adapter_name, source_file=source_file, mask_file=mask_file)
         if not live_result["ok"]:
             return {
                 "ok": False,
@@ -2740,6 +2758,10 @@ def _live_media_provider_adapter(*, name: str, params: dict[str, Any]) -> dict[s
         if name != "image_generate":
             return {"name": raw, "error": "openai_images provider adapter currently supports image_generate only"}
         return {"name": "openai_images", "error": None}
+    if raw in {"openai_image_edit", "openai_images_edit", "openai_images_edits", "openai_compatible_image_edit"}:
+        if name != "image_edit":
+            return {"name": raw, "error": "openai_image_edit provider adapter currently supports image_edit only"}
+        return {"name": "openai_image_edit", "error": None}
     if raw in {"openai_tts", "openai_speech", "openai_audio_speech", "openai_compatible_tts"}:
         if name != "tts":
             return {"name": raw, "error": "openai_tts provider adapter currently supports tts only"}
@@ -2747,7 +2769,17 @@ def _live_media_provider_adapter(*, name: str, params: dict[str, Any]) -> dict[s
     return {"name": raw[:80], "error": f"unsupported media provider adapter: {raw[:80]}"}
 
 
-def _live_media_request_payload(*, name: str, prompt: str, text: str, source_path: str, params: dict[str, Any], provider_adapter: str) -> dict[str, Any]:
+def _live_media_request_payload(
+    *,
+    name: str,
+    prompt: str,
+    text: str,
+    source_path: str,
+    params: dict[str, Any],
+    provider_adapter: str,
+    source_file: dict[str, Any] | None = None,
+    mask_file: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if provider_adapter == "openai_images":
         payload: dict[str, Any] = {
             "model": str(params.get("model") or "gpt-image-1")[:200],
@@ -2763,6 +2795,35 @@ def _live_media_request_payload(*, name: str, prompt: str, text: str, source_pat
         background = str(params.get("background") or "").strip()
         if background:
             payload["background"] = background[:80]
+        return payload
+    if provider_adapter == "openai_image_edit":
+        payload = {
+            "model": str(params.get("model") or "gpt-image-1.5")[:200],
+            "prompt": prompt,
+            "n": 1,
+            "image_present": bool(source_file),
+        }
+        if source_file:
+            payload.update(
+                {
+                    "image_sha256": str(source_file["sha256"]),
+                    "image_mime_type": str(source_file["mime_type"]),
+                    "image_bytes": int(source_file["bytes"]),
+                }
+            )
+        if mask_file:
+            payload.update(
+                {
+                    "mask_present": True,
+                    "mask_sha256": str(mask_file["sha256"]),
+                    "mask_mime_type": str(mask_file["mime_type"]),
+                    "mask_bytes": int(mask_file["bytes"]),
+                }
+            )
+        for key in ("size", "quality", "background", "input_fidelity", "output_format", "output_compression", "moderation", "response_format"):
+            value = str(params.get(key) or "").strip()
+            if value:
+                payload[key] = value[:80]
         return payload
     if provider_adapter == "openai_tts":
         payload = {
@@ -2790,6 +2851,7 @@ def _live_media_provider_receipt(*, domain: str, http_status: int, request_paylo
     return {
         "receipt_schema": "redacted_media_provider_receipt_v1",
         "provider_adapter": provider_adapter,
+        "request_format": "multipart/form-data" if provider_adapter == "openai_image_edit" else "application/json",
         "domain": domain,
         "http_status": http_status,
         "payload_sha256": hashlib.sha256(encoded).hexdigest(),
@@ -2802,15 +2864,30 @@ def _live_media_provider_receipt(*, domain: str, http_status: int, request_paylo
     }
 
 
-def _send_live_media_provider_request(*, url: str, token: str, tool: str, payload: dict[str, Any]) -> dict[str, Any]:
-    body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+def _send_live_media_provider_request(
+    *,
+    url: str,
+    token: str,
+    tool: str,
+    payload: dict[str, Any],
+    provider_adapter: str = "generic",
+    source_file: dict[str, Any] | None = None,
+    mask_file: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if provider_adapter == "openai_image_edit":
+        if source_file is None:
+            return {"ok": False, "http_status": 0, "error": "openai_image_edit requires a workspace-scoped source image"}
+        body, content_type = _encode_openai_image_edit_multipart(payload=payload, source_file=source_file, mask_file=mask_file)
+    else:
+        body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        content_type = "application/json"
     request = Request(
         url,
         data=body,
         method="POST",
         headers={
             "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
+            "Content-Type": content_type,
             "User-Agent": "Aegis-Agent/0.1",
         },
     )
@@ -2859,6 +2936,65 @@ def _send_live_media_provider_request(*, url: str, token: str, tool: str, payloa
         except (TypeError, ValueError):
             pass
     return result
+
+
+def _live_media_source_file(*, root: Path, source_path: str, field: str) -> dict[str, Any]:
+    if not str(source_path or "").strip():
+        raise ToolExecutionError(f"openai_image_edit requires a {field}_path inside the workspace")
+    path = _resolve_under_root(root, source_path)
+    if not path.is_file():
+        raise ToolExecutionError(f"openai_image_edit {field}_path does not exist or is not a file")
+    content = path.read_bytes()
+    if not content:
+        raise ToolExecutionError(f"openai_image_edit {field}_path is empty")
+    if len(content) > 10 * 1024 * 1024:
+        raise ToolExecutionError(f"openai_image_edit {field}_path exceeds the 10 MiB upload limit")
+    mime_type, extension = _source_image_upload_mime(content)
+    return {
+        "field": field,
+        "filename": f"{field}.{extension}",
+        "content": content,
+        "mime_type": mime_type,
+        "bytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
+
+
+def _source_image_upload_mime(content: bytes) -> tuple[str, str]:
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", "png"
+    if content.startswith(b"\xff\xd8"):
+        return "image/jpeg", "jpg"
+    if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+        return "image/webp", "webp"
+    raise ToolExecutionError("openai_image_edit source images must be PNG, JPEG, or WEBP")
+
+
+def _encode_openai_image_edit_multipart(*, payload: dict[str, Any], source_file: dict[str, Any], mask_file: dict[str, Any] | None = None) -> tuple[bytes, str]:
+    boundary = f"aegis-{uuid4().hex}"
+    body = bytearray()
+    metadata_keys = {"image_present", "image_sha256", "image_mime_type", "image_bytes", "mask_present", "mask_sha256", "mask_mime_type", "mask_bytes"}
+    for key in sorted(payload):
+        if key in metadata_keys:
+            continue
+        value = payload[key]
+        body.extend(f"--{boundary}\r\n".encode("ascii"))
+        body.extend(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("ascii"))
+        body.extend(str(value).encode("utf-8"))
+        body.extend(b"\r\n")
+    for upload in (source_file, mask_file):
+        if not upload:
+            continue
+        field = str(upload["field"])
+        filename = str(upload["filename"])
+        mime_type = str(upload["mime_type"])
+        body.extend(f"--{boundary}\r\n".encode("ascii"))
+        body.extend(f'Content-Disposition: form-data; name="{field}"; filename="{filename}"\r\n'.encode("ascii"))
+        body.extend(f"Content-Type: {mime_type}\r\n\r\n".encode("ascii"))
+        body.extend(upload["content"])
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode("ascii"))
+    return bytes(body), f"multipart/form-data; boundary={boundary}"
 
 
 def _media_base64_from_provider_json(decoded: dict[str, Any], *, tool: str) -> str:

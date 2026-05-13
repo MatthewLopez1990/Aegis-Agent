@@ -504,7 +504,7 @@ def _live_gap_backlog(
             "area": "browser_and_media_depth",
             "platforms": ["OpenClaw"],
             "status": "facade_hardening_required",
-            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, and approved static-anchor navigation are available for stored HTTP-content sessions; provider-backed media artifacts can run through allowlisted HTTPS adapters, including OpenAI-style image JSON and TTS adapters, while real page automation and broader provider-specific media depth still require stronger sandboxing.",
+            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, and approved static-anchor navigation are available for stored HTTP-content sessions; provider-backed media artifacts can run through allowlisted HTTPS adapters, including OpenAI-style image JSON, multipart image edit, and TTS adapters, while real page automation and broader provider-specific media depth still require stronger sandboxing.",
             "sample_tools": facade_tools[:8],
             "next_steps": [
                 "Extend rendering toward real browser automation only after network, cookie, and JavaScript boundaries are enforceable.",
@@ -557,6 +557,10 @@ def _live_gap_backlog(
                     "evidence": "approved provider-backed image generation can send an OpenAI-style image JSON request and persist returned data[].b64_json artifacts without storing raw prompt, response body, or secret values",
                 },
                 {
+                    "control": "openai_style_image_edit_provider_adapter",
+                    "evidence": "approved provider-backed image edits can upload one workspace-scoped source image through an OpenAI-style multipart request and persist returned data[].b64_json artifacts without storing raw prompt, source bytes, response body, or secret values",
+                },
+                {
                     "control": "openai_style_tts_provider_adapter",
                     "evidence": "approved provider-backed TTS can send an OpenAI-style speech request and persist the returned audio artifact without storing raw text, response body, or secret values",
                 },
@@ -598,6 +602,7 @@ def _live_gap_backlog(
                     "provider_backed_media_artifacts",
                     "browser_automation_boundary_receipts",
                     "openai_style_image_provider_adapter",
+                    "openai_style_image_edit_provider_adapter",
                     "openai_style_tts_provider_adapter",
                     "static_dom_snapshot_no_js",
                     "approved_static_form_fill",
@@ -811,7 +816,7 @@ def _browser_media_operator_checklist(implemented_controls: list[str], remaining
         {
             "control": "provider_media_depth",
             "state": "partial" if "provider_backed_media_artifacts" in implemented else "not_started",
-            "detail": "Provider-backed image and TTS artifacts exist, including OpenAI-style image JSON and TTS adapters; provider-specific video, edit-upload, and additional image/audio adapters still need expansion.",
+            "detail": "Provider-backed image and TTS artifacts exist, including OpenAI-style image JSON, multipart image edit, and TTS adapters; provider-specific video and additional image/audio adapters still need expansion.",
         },
         {
             "control": "platform_media_sandbox_profiles",
