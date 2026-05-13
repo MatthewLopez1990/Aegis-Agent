@@ -521,6 +521,9 @@ class CliTests(unittest.TestCase):
             self.assertIn("approved PR local patch application", claude_target["covered"])
             self.assertIn("verified plugin marketplace update application", claude_target["covered"])
             self.assertNotIn("PR local patch application", claude_target["live_gap"])
+            openclaw_target = next(target for target in result["competitive_targets"] if target["platform"] == "OpenClaw")
+            self.assertIn("Stability AI v1 image generation", openclaw_target["live_gap"])
+            self.assertIn("provider-specific image", openclaw_target["live_gap"])
             self.assertIn("memory_readiness", result)
             self.assertIn("self_improvement_readiness", result)
             self.assertIn("enterprise_readiness", result)
@@ -611,6 +614,15 @@ class CliTests(unittest.TestCase):
             self.assertIn("approved_live_browser_download_adapter", browser_controls)
             self.assertIn("approved_live_browser_upload_adapter", browser_controls)
             self.assertIn("approved_live_browser_javascript_adapter", browser_controls)
+            self.assertIn("stability_v1_image_provider_adapter", browser_controls)
+            provider_media_adapters = browser_gap["provider_media_adapters"]
+            implemented_media_adapters = {adapter["adapter"]: adapter for adapter in provider_media_adapters["implemented"]}
+            self.assertIn("openai_images", implemented_media_adapters)
+            self.assertIn("stability_v1_text_to_image", implemented_media_adapters)
+            self.assertEqual(implemented_media_adapters["stability_v1_text_to_image"]["response_shape"], "artifacts[].base64")
+            self.assertIn("video", provider_media_adapters["remaining_by_modality"])
+            self.assertFalse(provider_media_adapters["raw_prompt_or_secret_storage"])
+            self.assertFalse(provider_media_adapters["raw_response_body_storage"])
             self.assertNotIn("live_browser_arbitrary_js_adapter", browser_gap["remaining_depth_work"])
             browser_checklist = {item["control"]: item for item in browser_gap["operator_checklist"]}
             self.assertEqual(browser_checklist["live_browser_activation_packets"]["state"], "available_adapter_blocked")

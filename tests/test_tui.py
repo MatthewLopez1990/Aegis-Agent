@@ -110,6 +110,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("unsupported_selector_truthfulness", rendered)
             self.assertIn("sandboxed_media_worker_process", rendered)
             self.assertIn("provider_backed_media_artifacts", rendered)
+            self.assertIn("Stability AI v1", rendered)
             self.assertIn("browser_automation_boundary_receipts", rendered)
             self.assertIn("live_browser_readonly_adapter", rendered)
             self.assertIn("live_browser_selector_mutatio", rendered)

@@ -3223,6 +3223,10 @@ def _live_media_provider_adapter(*, name: str, params: dict[str, Any]) -> dict[s
         if name != "image_generate":
             return {"name": raw, "error": "openai_images provider adapter currently supports image_generate only"}
         return {"name": "openai_images", "error": None}
+    if raw in {"stability_ai", "stability", "stability_v1", "stability_text_to_image", "stability_v1_text_to_image"}:
+        if name != "image_generate":
+            return {"name": raw, "error": "stability_v1_text_to_image provider adapter currently supports image_generate only"}
+        return {"name": "stability_v1_text_to_image", "error": None}
     if raw in {"openai_image_edit", "openai_images_edit", "openai_images_edits", "openai_compatible_image_edit"}:
         if name != "image_edit":
             return {"name": raw, "error": "openai_image_edit provider adapter currently supports image_edit only"}
@@ -3346,6 +3350,43 @@ def _live_media_request_payload(
         if background:
             payload["background"] = background[:80]
         return payload
+    if provider_adapter == "stability_v1_text_to_image":
+        payload = {
+            "text_prompts": [
+                {
+                    "text": prompt,
+                    "weight": 1,
+                }
+            ],
+            "samples": 1,
+        }
+        if params.get("cfg_scale") is not None:
+            payload["cfg_scale"] = _bounded_float(params.get("cfg_scale"), minimum=0.0, maximum=35.0, label="cfg_scale")
+        for key in ("height", "width"):
+            value = params.get(key)
+            if value is not None:
+                try:
+                    parsed = int(value)
+                except (TypeError, ValueError) as exc:
+                    raise ToolExecutionError(f"{key} must be an integer") from exc
+                if parsed < 128 or parsed > 2048:
+                    raise ToolExecutionError(f"{key} must be between 128 and 2048")
+                payload[key] = parsed
+        for key, maximum in (("steps", 150), ("seed", 4294967295)):
+            value = params.get(key)
+            if value is not None:
+                try:
+                    parsed = int(value)
+                except (TypeError, ValueError) as exc:
+                    raise ToolExecutionError(f"{key} must be an integer") from exc
+                if parsed < 0 or parsed > maximum:
+                    raise ToolExecutionError(f"{key} must be between 0 and {maximum}")
+                payload[key] = parsed
+        for key in ("clip_guidance_preset", "sampler", "style_preset"):
+            value = str(params.get(key) or "").strip()
+            if value:
+                payload[key] = value[:80]
+        return payload
     if provider_adapter == "openai_image_edit":
         payload = {
             "model": str(params.get("model") or "gpt-image-1.5")[:200],
@@ -3453,15 +3494,18 @@ def _send_live_media_provider_request(
     else:
         body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
         content_type = "application/json"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": content_type,
+        "User-Agent": "Aegis-Agent/0.1",
+    }
+    if provider_adapter == "stability_v1_text_to_image":
+        headers["Accept"] = "application/json"
     request = Request(
         url,
         data=body,
         method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": content_type,
-            "User-Agent": "Aegis-Agent/0.1",
-        },
+        headers=headers,
     )
     try:
         response_context = _open_without_redirects(request, timeout=30)
@@ -3782,6 +3826,15 @@ def _media_base64_from_provider_json(decoded: dict[str, Any], *, tool: str) -> s
                 value = first.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
+    artifacts = decoded.get("artifacts")
+    if isinstance(artifacts, list):
+        for artifact in artifacts:
+            candidates = artifact if isinstance(artifact, list) else [artifact]
+            for candidate in candidates:
+                if isinstance(candidate, dict):
+                    value = candidate.get("base64")
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
     data_items = decoded.get("data")
     if isinstance(data_items, list) and data_items:
         first = data_items[0]
