@@ -139,19 +139,31 @@ def _web_command_catalog(orchestrator: Any) -> dict[str, Any]:
         row["args"] = args
         row["flags"] = flags
     if "remote-control" in command_rows:
+        remote_args = list(command_rows["remote-control"].get("args") or [])
+        remote_flags = list(command_rows["remote-control"].get("flags") or [])
+        for arg in ("status",):
+            if arg not in remote_args:
+                remote_args.append(arg)
+        for flag in ("--relay-url", "--status"):
+            if flag not in remote_flags:
+                remote_flags.append(flag)
         command_rows["remote-control"].update(
             {
                 "kind": "remote-control",
-                "detail": "Open remote pairing controls or run read-only remote-control status/directory actions",
+                "detail": "Open remote pairing controls or run governed remote-control status, directory, pairing, relay, and outbox actions",
                 "section": "automation",
-                "args": ["status", "directory"],
-                "flags": ["--pairing-id", "--limit"],
+                "args": remote_args,
+                "flags": remote_flags,
                 "requires_local_token": True,
                 "requires_remote_token": False,
-                "mutates": False,
+                "mutates": True,
                 "web_actions": [
                     {"input": "status", "method": "GET", "path": "/remote-control/status", "mutates": False},
                     {"input": "directory", "method": "GET", "path": "/remote-control/directory", "mutates": False},
+                    {"input": "relay", "method": "GET", "path": "/remote-control/relay", "mutates": False},
+                    {"input": "relay-outbox", "method": "GET", "path": "/remote-control/relay/outbox", "mutates": False},
+                    {"input": "pair", "method": "POST", "path": "/remote-control/pair", "mutates": True},
+                    {"input": "revoke", "method": "POST", "path": "/remote-control/revoke", "mutates": True},
                 ],
             }
         )

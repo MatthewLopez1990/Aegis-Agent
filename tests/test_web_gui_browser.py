@@ -332,7 +332,7 @@ if (!release.includes("settings")) {
 api.merge([
   { command: "debug", label: "/debug", detail: "TUI diagnostics", kind: "palette", source: "tui" },
   { command: "submit", label: "/submit duplicate", detail: "duplicate should be ignored", kind: "palette" },
-  { command: "remote-control", label: "/remote-control", detail: "Remote action metadata", kind: "remote-control", section: "automation", source: "tui", surfaces: ["tui", "web_palette"], args: ["status", "directory"], flags: ["--pairing-id", "--limit"], requires_local_token: true, requires_remote_token: false, mutates: false, web_actions: [{ input: "status", method: "GET", path: "/remote-control/status", mutates: false }] },
+  { command: "remote-control", label: "/remote-control", detail: "Remote action metadata", kind: "remote-control", section: "automation", source: "tui", surfaces: ["tui", "web_palette"], args: ["status", "directory", "pair", "revoke", "relay-outbox"], flags: ["--pairing-id", "--limit", "--label"], requires_local_token: true, requires_remote_token: false, mutates: true, web_actions: [{ input: "status", method: "GET", path: "/remote-control/status", mutates: false }, { input: "pair", method: "POST", path: "/remote-control/pair", mutates: true }] },
   { command: "q", label: "/queue|/q [status|all|session|submit]", detail: "Queue control metadata", kind: "queue-control", section: "activity", source: "tui", surfaces: ["tui", "web_palette", "web_action"], args: ["status", "all", "session", "submit", "request"], flags: ["--limit", "--status"], requires_local_token: true, mutates: true, web_actions: [{ input: "status", method: "GET", path: "/tasks", mutates: false }, { input: "submit", method: "POST", path: "/tasks", mutates: true }] },
   { command: "pause", label: "/pause [task_id]", detail: "Pause task metadata", kind: "task-control", section: "activity", source: "tui", args: ["task_id"], requires_local_token: true, mutates: true, web_actions: [{ input: "pause", method: "POST", path_template: "/tasks/{task_id}/pause", mutates: true }] },
   { command: "approve", label: "/approve <approval_id>", detail: "Approve metadata", kind: "approval-control", section: "security", source: "tui", args: ["approval_id"], flags: ["--actor", "--reason", "--admin"], requires_local_token: true, mutates: true, web_actions: [{ input: "approve", method: "POST", path_template: "/approvals/{approval_id}/approve", mutates: true }] },
@@ -347,7 +347,7 @@ if (!skill.includes("aegis-project-summary")) {
   throw new Error(`dynamic skill slash command missing: ${JSON.stringify(skill)}`);
 }
 const remote = api.parse("/remote-control status");
-if (remote.kind !== "remote-control" || remote.request !== "status" || !remote.webActions.length || !remote.args.includes("directory")) {
+if (remote.kind !== "remote-control" || remote.request !== "status" || !remote.webActions.length || !remote.args.includes("directory") || !remote.args.includes("pair")) {
   throw new Error(`/remote-control metadata did not merge: ${JSON.stringify(remote)}`);
 }
 const queue = api.parse("/q submit review the next slice");
@@ -417,16 +417,32 @@ const approvalDecisionPayload = () => ({ actor: "web-test", reason: "reviewed", 
 const refresh = async () => calls.push(["refresh"]);
 const renderTaskResult = (task) => calls.push(["task-result", task.id]);
 const shortId = (value) => String(value || "").slice(0, 8);
+const elements = {
+  "task-path": { value: "/workspace" },
+  "remote-control-actions": { value: "status,events,resume" },
+  "remote-control-ttl": { value: "600" },
+  "remote-control-label": { value: "web pairing" },
+  "remote-control-session-id": { value: "" },
+  "remote-control-task-id": { value: "" },
+  "remote-control-relay-outbox-id": { value: "" },
+  "remote-control-relay-pairing-id": { value: "pair-form" },
+};
 const document = {
   getElementById(id) {
-    if (id === "task-path") return { value: "/workspace" };
+    if (elements[id]) return elements[id];
     return { replaceChildren() { calls.push(["replace-children", id]); } };
   },
 };
 const renderRemoteControlOutput = (payload) => calls.push(["remote-output", payload.status || payload.pairing?.id || "payload"]);
+const renderRemoteControlRelay = (payload) => calls.push(["remote-relay", payload.status || "payload"]);
+const renderRemoteControlOutbox = (payload) => calls.push(["remote-outbox", payload.status || "payload"]);
 const api = async (path, options = {}) => {
   calls.push(["api", path, options.method || "GET", options.body || ""]);
   if (path === "/tasks" && options.method === "POST") return { id: "task-new-123", status: "planned" };
+  if (path === "/remote-control/pair" && options.method === "POST") return { pairing: { id: "pair-new" }, outbox_id: "outbox-new" };
+  if (path === "/remote-control/revoke" && options.method === "POST") return { status: "remote_pairing_revoked" };
+  if (path.startsWith("/remote-control/relay/outbox")) return { status: "relay_outbox" };
+  if (path.startsWith("/remote-control/relay?")) return { status: "relay_preflight" };
   return { status: path.includes("/directory") ? "scoped_directory" : "remote_control_status" };
 };
 eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = executeLocalSlashCommand;`);
@@ -443,6 +459,10 @@ eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = execute
   await executeLocalSlashCommand({ kind: "task-inspection", command: "evidence", taskView: "evidence", request: "task-4" });
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "status" });
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "directory --pairing-id pair-1 --limit 3" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay --relay-url https://relay.example/aegis" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay-outbox --status pending --limit 2" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "pair --label phone --session-id session-2 --task-id task-9 --allowed-actions status,events --expires-in-seconds 120" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "revoke pair-1" });
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", detail: "Open remote control", request: "" });
   await executeLocalSlashCommand({ kind: "queue-control", command: "queue", label: "/queue", section: "activity", request: "all" });
   await executeLocalSlashCommand({ kind: "queue-control", command: "queue", label: "/queue", section: "activity", request: "submit inspect queue" });
@@ -480,6 +500,26 @@ eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = execute
     ["api", "/remote-control/directory?pairing_id=pair-1&limit=3", "GET", ""],
     ["remote-output", "scoped_directory"],
     ["notice", "/remote-control", "Remote control directory loaded.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/relay?relay_url=https%3A%2F%2Frelay.example%2Faegis", "GET", ""],
+    ["remote-relay", "relay_preflight"],
+    ["remote-output", "relay_preflight"],
+    ["notice", "/remote-control", "Remote control relay loaded.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/relay/outbox?status=pending&limit=2", "GET", ""],
+    ["remote-outbox", "relay_outbox"],
+    ["remote-output", "relay_outbox"],
+    ["notice", "/remote-control", "Remote control relay-outbox loaded.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/pair", "POST", JSON.stringify({ label: "phone", session_id: "session-2", task_id: "task-9", allowed_actions: ["status", "events"], expires_in_seconds: 120 })],
+    ["remote-output", "pair-new"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control pair created.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/revoke", "POST", JSON.stringify({ pairing_id: "pair-1" })],
+    ["remote-output", "remote_pairing_revoked"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control pairing pair-1 revoked.", "automation"],
     ["section", "automation"],
     ["notice", "/remote-control", "Open remote control", "automation"],
     ["section", "activity"],

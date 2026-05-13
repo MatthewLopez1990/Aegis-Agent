@@ -1923,36 +1923,82 @@ const executeQueueSlashCommand = async (parsed) => {
 const remoteControlSlashRequest = (request) => {
   const parts = String(request || "").trim().split(/\s+/).filter(Boolean);
   const action = (parts.shift() || "").toLowerCase();
+  const options = {};
+  const positionals = [];
   const query = new URLSearchParams();
   for (let index = 0; index < parts.length; index += 1) {
     const part = parts[index];
-    if (part === "--pairing-id" && parts[index + 1]) {
-      query.set("pairing_id", parts[index + 1]);
+    if (part.startsWith("--") && parts[index + 1] && !parts[index + 1].startsWith("--")) {
+      options[part] = parts[index + 1];
+      const queryKey = part.slice(2).replaceAll("-", "_");
+      if (["pairing_id", "limit", "relay_url", "status"].includes(queryKey)) {
+        query.set(queryKey, parts[index + 1]);
+      }
       index += 1;
-    } else if (part === "--limit" && parts[index + 1]) {
-      query.set("limit", parts[index + 1]);
-      index += 1;
-    } else if (action === "directory" && !part.startsWith("--") && !query.has("pairing_id")) {
-      query.set("pairing_id", part);
+    } else if (!part.startsWith("--")) {
+      positionals.push(part);
+      if (action === "directory" && !query.has("pairing_id")) {
+        query.set("pairing_id", part);
+      }
     }
   }
-  return { action, query: query.toString() };
+  return { action, options, positionals, query: query.toString() };
 };
 
 const executeRemoteControlSlashCommand = async (parsed) => {
-  const { action, query } = remoteControlSlashRequest(parsed.request);
+  const { action, options, positionals, query } = remoteControlSlashRequest(parsed.request);
   if (!action) return false;
   let path = "";
   if (action === "status") {
     path = "/remote-control/status";
   } else if (action === "directory") {
     path = `/remote-control/directory${query ? `?${query}` : ""}`;
+  } else if (action === "relay") {
+    path = `/remote-control/relay${query ? `?${query}` : ""}`;
+  } else if (action === "relay-outbox") {
+    path = `/remote-control/relay/outbox${query ? `?${query}` : ""}`;
+  } else if (action === "pair") {
+    const allowedActions = (options["--allowed-actions"] || document.getElementById("remote-control-actions").value)
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const ttl = Number.parseInt(options["--expires-in-seconds"] || document.getElementById("remote-control-ttl").value || "600", 10);
+    const payload = {
+      label: options["--label"] || document.getElementById("remote-control-label").value || "web pairing",
+      session_id: options["--session-id"] || document.getElementById("remote-control-session-id").value || undefined,
+      task_id: options["--task-id"] || document.getElementById("remote-control-task-id").value || undefined,
+      allowed_actions: allowedActions,
+      expires_in_seconds: Number.isFinite(ttl) ? ttl : 600,
+    };
+    state.activeSection = "automation";
+    applySectionVisibility();
+    const payloadResult = await api("/remote-control/pair", { method: "POST", body: JSON.stringify(payload) });
+    document.getElementById("remote-control-relay-outbox-id").value = payloadResult.outbox_id || "";
+    renderRemoteControlOutput(payloadResult);
+    await refresh();
+    renderTaskNotice(parsed.label || "/remote-control", "Remote control pair created.");
+    return true;
+  } else if (action === "revoke") {
+    const pairingId = options["--pairing-id"] || positionals[0] || document.getElementById("remote-control-relay-pairing-id").value.trim();
+    if (!pairingId) {
+      renderTaskNotice(parsed.label || "/remote-control", "Include a pairing id before revoking remote control.");
+      return true;
+    }
+    state.activeSection = "automation";
+    applySectionVisibility();
+    const payloadResult = await api("/remote-control/revoke", { method: "POST", body: JSON.stringify({ pairing_id: pairingId }) });
+    renderRemoteControlOutput(payloadResult);
+    await refresh();
+    renderTaskNotice(parsed.label || "/remote-control", `Remote control pairing ${pairingId} revoked.`);
+    return true;
   } else {
     return false;
   }
   state.activeSection = "automation";
   applySectionVisibility();
   const payload = await api(path);
+  if (action === "relay") renderRemoteControlRelay(payload);
+  if (action === "relay-outbox") renderRemoteControlOutbox(payload);
   renderRemoteControlOutput(payload);
   renderTaskNotice(parsed.label || "/remote-control", `Remote control ${action} loaded.`);
   return true;
