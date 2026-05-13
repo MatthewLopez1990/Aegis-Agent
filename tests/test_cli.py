@@ -178,6 +178,42 @@ class CliTests(unittest.TestCase):
             self.assertIn("execution.enabled_backends", backend["config_keys"])
             self.assertIn("docker", {adapter["name"] for adapter in backend["available_backend_adapters"]})
 
+    def test_backend_list_and_select_use_configured_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[execution]",
+                        'enabled_backends = ["local", "docker"]',
+                        'container_network = "none"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            parser = build_parser()
+
+            listed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "backend", "list"]))["backends"]
+            backends = {backend["name"]: backend for backend in listed}
+            self.assertTrue(backends["local"]["enabled"])
+            self.assertTrue(backends["docker"]["enabled"])
+            self.assertEqual(backends["docker"]["activation"]["preflight_status"], "ready")
+
+            approval_required = dispatch(parser.parse_args(["--data-dir", str(data_dir), "backend", "select", "docker"]))
+            self.assertEqual(approval_required["status"], "approval_required")
+            selected = dispatch(parser.parse_args(["--data-dir", str(data_dir), "backend", "select", "docker", "--approved"]))
+            self.assertTrue(selected["ok"])
+            self.assertEqual(selected["backend"], "docker")
+            disabled = dispatch(parser.parse_args(["--data-dir", str(data_dir), "backend", "select", "ssh", "--approved"]))
+            self.assertFalse(disabled["ok"])
+            self.assertEqual(disabled["status"], "disabled")
+            self.assertEqual(disabled["activation"]["preflight_status"], "blocked")
+
     def test_mcp_cli_registers_streamable_http_with_brokered_token_secret(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             parser = build_parser()

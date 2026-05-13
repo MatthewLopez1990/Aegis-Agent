@@ -208,6 +208,7 @@ MIGRATE_COMMANDS = ("openclaw", "hermes", "openclaw-memory-preview", "hermes-mem
 MODEL_COMMANDS = ("list", "route", "alias", "fallbacks", "usage", "auth", "providers")
 MODEL_AUTH_COMMANDS = ("login", "logout", "methods", "targets", "doctor")
 TOOLS_COMMANDS = ("list", "run", "disable", "enable")
+BACKEND_COMMANDS = ("list", "doctor", "select")
 SKILLS_COMMANDS = ("hub", "search", "browse", "inspect", "install", "disable", "enable")
 PLUGIN_COMMANDS = ("list", "install", "enable", "disable", "remove", "reload", "marketplace", "updates", "fetch-manifest", "fetch-bundle", "install-bundle", "install-marketplace", "update-marketplace", "prepare-update", "apply-prepared-update")
 CURATOR_COMMANDS = ("status", "run", "pin", "unpin", "archive", "restore", "pause", "resume")
@@ -516,6 +517,9 @@ class AegisTui(cmd.Cmd):
 
     def complete_tools(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return _complete_subcommand(TOOLS_COMMANDS, text, line, begidx)
+
+    def complete_backends(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return _complete_subcommand(BACKEND_COMMANDS, text, line, begidx)
 
     def complete_skills(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return _complete_subcommand(SKILLS_COMMANDS, text, line, begidx)
@@ -2138,8 +2142,14 @@ class AegisTui(cmd.Cmd):
                 print(_table(cards, (("lane", "lane", 14), ("risk", "risk_level", 10), ("title", "title", 52))))
 
     def do_backends(self, arg: str) -> None:
-        """backends [doctor] -- list execution backends or activation preflight."""
+        """backends [list|doctor|select] -- inspect or select execution backends."""
         parts = shlex.split(arg)
+        if parts and parts[0] == "select":
+            if len(parts) < 2:
+                print("usage: backends select <name> [--approved]")
+                return
+            _print_json(self.orchestrator.tools.execute("terminal_backend", {"backend": parts[1]}, approved="--approved" in parts[2:]))
+            return
         if parts and parts[0] == "doctor":
             dashboard = build_product_dashboard(self.orchestrator)
             gap = next((item for item in dashboard.get("live_gap_backlog", []) if item.get("area") == "remote_backend_activation"), None)
@@ -6714,6 +6724,8 @@ SLASH_SUBCOMMANDS: dict[str, tuple[str, ...]] = {
     "channel": CHANNEL_COMMANDS,
     "evaluation": EVALUATION_COMMANDS,
     "tools": TOOLS_COMMANDS,
+    "backends": BACKEND_COMMANDS,
+    "sandbox": BACKEND_COMMANDS,
     "skills": SKILLS_COMMANDS,
     "curator": CURATOR_COMMANDS,
     "plugin": PLUGIN_COMMANDS,

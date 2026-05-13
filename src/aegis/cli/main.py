@@ -17,7 +17,6 @@ from aegis.channels.base import ChannelResponse
 from aegis.channels.registry import ChannelRegistry
 from aegis.config.loader import load_config, write_default_config
 from aegis.connectors.registry import build_default_registry
-from aegis.execution.backends import ExecutionBackendRegistry
 from aegis.hooks.manager import HOOK_EVENTS, HookManager
 from aegis.kanban.manager import KanbanManager, subagent_review_action_hints
 from aegis.memory.manager import MemoryManager
@@ -593,6 +592,10 @@ def build_parser() -> argparse.ArgumentParser:
     backend_sub = backend.add_subparsers(dest="backend_command", required=True)
     backend_sub.add_parser("list", help="List execution backends")
     backend_sub.add_parser("doctor", help="Show remote backend activation preflight")
+    backend_select = backend_sub.add_parser("select", help="Select an enabled execution backend")
+    backend_select.add_argument("name")
+    backend_select.add_argument("--approved", action="store_true", help="Approve the high-risk backend selection")
+    backend_select.add_argument("--workspace", default=".")
 
     evaluation = subcommands.add_parser("evaluation", help="Review local evaluation reports")
     evaluation_sub = evaluation.add_subparsers(dest="evaluation_command", required=True)
@@ -1917,11 +1920,13 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return orchestrator.tools.execute(args.name, params, approved=args.approved)
 
     if args.command == "backend":
+        orchestrator = build_orchestrator(data_dir=args.data_dir, workspace=getattr(args, "workspace", "."))
         if args.backend_command == "list":
-            return {"backends": ExecutionBackendRegistry().list()}
+            return {"backends": orchestrator.execution_backends.list()}
         if args.backend_command == "doctor":
-            orchestrator = build_orchestrator(data_dir=args.data_dir)
             return {"backend_doctor": _live_gap_doctor(orchestrator, "remote_backend_activation")}
+        if args.backend_command == "select":
+            return orchestrator.tools.execute("terminal_backend", {"backend": args.name}, approved=args.approved)
 
     if args.command == "evaluation":
         harness = ResearchHarness(data_dir=config.data_dir)

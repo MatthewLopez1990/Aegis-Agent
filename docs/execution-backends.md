@@ -15,9 +15,10 @@ Inspect backend activation preflight from the CLI:
 ```bash
 PYTHONPATH=src python3 -m aegis.cli.main backend list
 PYTHONPATH=src python3 -m aegis.cli.main backend doctor
+PYTHONPATH=src python3 -m aegis.cli.main backend select docker --approved
 ```
 
-Only `local` is marked enabled by default, and even local execution still flows through shell allowlists, policy gates, and approvals. Approved `terminal_backend` tool calls can select an enabled backend and expose the active backend in runtime listings.
+Only `local` is marked enabled by default, and even local execution still flows through shell allowlists, policy gates, and approvals. `backend list` reads the configured orchestrator registry, and `backend select <name> --approved` is a first-class wrapper around the same high-risk `terminal_backend` tool path. The TUI mirrors this with `backends select <name> --approved`.
 
 Docker can be activated explicitly with `[execution].enabled_backends = ["local", "docker"]`. The Docker adapter resolves the configured executable, injects container resource limits for `container_run`, blocks privileged mode, host networking, mounts, and volume flags, and returns activation, execution, and cleanup receipts. Execution receipts hash the command vector instead of logging raw command text.
 

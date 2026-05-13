@@ -120,7 +120,7 @@ Commands:
 - `browser status|connect|disconnect|session|sessions|close [session_id]|navigate <url>`, `chrome`
 - `browser extract|inspect|dom [selector]|table [selector]|screenshot|render|click <selector> [--approval-id id]|fill <json> [--approval-id id]|submit [selector] [--approval-id id]`
 - `boards`
-- `backends`, `sandbox`
+- `backends`, `backends select <name> --approved`, `sandbox`
 - `voice`, `radio`, `stickers`
 - `terminal-setup`, `vim`, `tui [default|fullscreen]`, `scroll-speed [value]`
 - `rollback`
