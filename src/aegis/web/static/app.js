@@ -4019,6 +4019,13 @@ document.getElementById("subagent-run-batch").addEventListener("click", async ()
   await refresh();
 });
 
+document.getElementById("subagent-autonomy-preflight").addEventListener("click", async () => {
+  const result = await api("/subagents/autonomy-preflight?limit=12&actor=web-operator");
+  renderSubagentOutput(result);
+  renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
+  await refresh();
+});
+
 document.getElementById("card-board").addEventListener("change", async (event) => {
   state.selectedBoardId = event.target.value;
   await renderCards();

@@ -252,14 +252,18 @@ class CliTests(unittest.TestCase):
             self.assertIn("operator_batch_receipts", subagent_gap["required_controls"])
             self.assertIn("parent_bound_review_receipts", subagent_gap["required_controls"])
             self.assertIn("model_ready_review_packets", subagent_gap["required_controls"])
+            self.assertIn("autonomy_preflight_receipts", subagent_gap["required_controls"])
             self.assertIn("subagent.parent_bound_review_receipt", subagent_gap["evaluation_scenarios"])
             self.assertIn("subagent.model_ready_review_packet", subagent_gap["evaluation_scenarios"])
+            self.assertIn("subagent.autonomy_preflight", subagent_gap["evaluation_scenarios"])
             self.assertIn("model_ready_review_packet_sanitization", subagent_gap["verification_gates"])
+            self.assertIn("autonomy_preflight_receipt", subagent_gap["verification_gates"])
             self.assertIn("subagent.operator_batch_receipts", subagent_gap["evaluation_scenarios"])
             subagent_checklist = {item["control"]: item for item in subagent_gap["operator_checklist"]}
             self.assertEqual(subagent_checklist["operator_approved_batch_runtime"]["state"], "enforced")
             self.assertEqual(subagent_checklist["parent_bound_review_receipts"]["state"], "enforced")
             self.assertEqual(subagent_checklist["model_ready_review_packets"]["state"], "enforced")
+            self.assertEqual(subagent_checklist["autonomy_preflight_receipts"]["state"], "enforced")
             backend_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "remote_backend_activation")
             self.assertEqual(backend_gap["status"], "backend_adapters_available_unconfigured")
             self.assertIn("available_backend_adapters", backend_gap)
@@ -795,6 +799,27 @@ class CliTests(unittest.TestCase):
             self.assertIn("recursive_budget_limits", profile["subagents"]["implemented_controls"])
             self.assertNotIn("agent_profile_lifecycle", profile["subagents"]["remaining_depth_work"])
             self.assertNotIn("recursive_budget_limits", profile["subagents"]["remaining_depth_work"])
+
+            autonomy = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "autonomy-preflight",
+                        "--actor",
+                        "cli-reviewer",
+                    ]
+                )
+            )
+            self.assertFalse(autonomy["ok"])
+            self.assertEqual(autonomy["receipt"]["receipt_schema"], "aegis.subagent.autonomy_preflight.v1")
+            self.assertEqual(autonomy["receipt"]["actor"], "cli-reviewer")
+            self.assertFalse(autonomy["receipt"]["autonomous_runtime"])
+            self.assertFalse(autonomy["receipt"]["model_invocation_performed"])
+            self.assertIn("autonomous_loop_isolation", autonomy["receipt"]["missing_controls"])
+            self.assertIn("blocked_autonomous_runtime", autonomy["receipt"]["verification_gates"])
+            self.assertNotIn("Compare provider auth gaps", json.dumps(autonomy, sort_keys=True))
 
             gated = dispatch(
                 parser.parse_args(

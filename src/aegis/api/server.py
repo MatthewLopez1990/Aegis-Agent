@@ -568,6 +568,14 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
             if path == "/subagents/status":
                 self._json(orchestrator.kanban.subagent_status(limit=_limit(query, default=20)))
                 return
+            if path == "/subagents/autonomy-preflight":
+                self._json(
+                    orchestrator.kanban.subagent_autonomy_preflight(
+                        actor=str(query.get("actor", ["api-operator"])[0]),
+                        limit=_limit(query, default=20),
+                    )
+                )
+                return
             if path == "/subagents/profiles":
                 self._json({"profiles": orchestrator.kanban.list_subagent_profiles(), "subagents": orchestrator.kanban.subagent_status(limit=_limit(query, default=20))})
                 return

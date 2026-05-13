@@ -735,6 +735,12 @@ class ApiServerSecurityTests(unittest.TestCase):
                 subagent_initial = _json_get(port, "/subagents/status", token=token)
                 self.assertEqual(subagent_initial["status"], "no_delegations")
                 self.assertFalse(subagent_initial["autonomous_runtime"])
+                subagent_autonomy_preflight = _json_get(port, "/subagents/autonomy-preflight?actor=api-reviewer", token=token)
+                self.assertFalse(subagent_autonomy_preflight["ok"])
+                self.assertEqual(subagent_autonomy_preflight["receipt"]["receipt_schema"], "aegis.subagent.autonomy_preflight.v1")
+                self.assertEqual(subagent_autonomy_preflight["receipt"]["actor"], "api-reviewer")
+                self.assertFalse(subagent_autonomy_preflight["receipt"]["autonomous_runtime"])
+                self.assertIn("autonomous_loop_isolation", subagent_autonomy_preflight["receipt"]["missing_controls"])
                 subagent_profile = _json_post(
                     port,
                     "/subagents/profiles",

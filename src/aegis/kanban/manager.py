@@ -829,10 +829,101 @@ class KanbanManager:
                 "operator_approved_batch_runtime",
                 "parent_bound_review_receipts",
                 "model_ready_review_packets",
+                "autonomy_preflight_receipts",
             ],
             "remaining_depth_work": [],
             "raw_instruction_included": False,
             "raw_worker_output_included": False,
+        }
+
+    def subagent_autonomy_preflight(self, *, actor: str = "operator", limit: int = 20) -> dict[str, Any]:
+        status = self.subagent_status(limit=limit, include_previews=False)
+        required_controls = [
+            "autonomous_loop_isolation",
+            "scoped_model_context_builder",
+            "recursive_budget_enforcer",
+            "tool_call_sandbox",
+            "per_step_operator_interrupt",
+            "review_gate_after_each_step",
+            "raw_instruction_redaction",
+            "worker_output_redaction",
+        ]
+        implemented_controls = list(status.get("implemented_controls") or [])
+        missing_controls = [control for control in required_controls if control not in implemented_controls]
+        blockers = [
+            {
+                "control": "autonomous_loop_isolation",
+                "state": "missing",
+                "detail": "Recursive autonomous model-loop workers are not implemented or enabled.",
+            },
+            {
+                "control": "scoped_model_context_builder",
+                "state": "missing",
+                "detail": "Subagent model prompts must be built from sanitized review packets instead of raw delegation instructions.",
+            },
+            {
+                "control": "tool_call_sandbox",
+                "state": "missing",
+                "detail": "Autonomous subagent tool calls need per-step approval, allowlists, and receipts before execution.",
+            },
+            {
+                "control": "review_gate_after_each_step",
+                "state": "missing",
+                "detail": "Every autonomous step must return to operator review before deeper recursion is allowed.",
+            },
+        ]
+        if int(status.get("enabled_profile_count") or 0) <= 0:
+            blockers.insert(
+                0,
+                {
+                    "control": "enabled_profile_required",
+                    "state": "missing",
+                    "detail": "Create and enable at least one subagent profile before any autonomous runtime can be considered.",
+                },
+            )
+        receipt = {
+            "receipt_schema": "aegis.subagent.autonomy_preflight.v1",
+            "event_type": "subagent.autonomy_preflight_checked",
+            "actor": _safe_actor(actor),
+            "status": "blocked",
+            "autonomous_runtime": False,
+            "recursive_model_loop_enabled": False,
+            "model_invocation_performed": False,
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+            "raw_worker_output_included": False,
+            "profile_count": int(status.get("profile_count") or 0),
+            "enabled_profile_count": int(status.get("enabled_profile_count") or 0),
+            "open_card_count": int(status.get("open_cards") or 0),
+            "review_card_count": int(status.get("review_cards") or 0),
+            "required_controls": required_controls,
+            "implemented_controls": implemented_controls,
+            "missing_controls": missing_controls,
+            "blockers": blockers,
+            "blocker_count": len(blockers),
+            "verification_gates": [
+                "blocked_autonomous_runtime",
+                "raw_instruction_redaction",
+                "sanitized_model_context_only",
+                "recursive_budget_limits",
+                "per_step_review_receipts",
+                "tool_call_sandbox_denial",
+            ],
+            "next_steps": [
+                "Use agents delegate/run/review-packet for operator-approved isolated subagent work today.",
+                "Implement sanitized model-context construction from verified review packets before enabling autonomous model loops.",
+                "Add per-step review, budget, tool-call, and interrupt receipts before recursive subagents can execute.",
+            ],
+            "checked_at": now_utc(),
+        }
+        audit_entry = self.audit_logger.append("subagent.autonomy_preflight_checked", receipt)
+        return {
+            "ok": False,
+            "status": "blocked",
+            "preflight": receipt,
+            "receipt": receipt,
+            "audit_event_hash": audit_entry["event_hash"],
+            "subagents": status,
         }
 
     def _require_board(self, board_id: str) -> dict[str, Any]:
