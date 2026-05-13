@@ -3256,6 +3256,10 @@ def _live_media_provider_adapter(*, name: str, params: dict[str, Any]) -> dict[s
         if name != "tts":
             return {"name": raw, "error": "openai_tts provider adapter currently supports tts only"}
         return {"name": "openai_tts", "error": None}
+    if raw in {"elevenlabs", "elevenlabs_tts", "eleven_labs", "eleven_labs_tts"}:
+        if name != "tts":
+            return {"name": raw, "error": "elevenlabs_tts provider adapter currently supports tts only"}
+        return {"name": "elevenlabs_tts", "error": None}
     if raw in {"openai_transcription", "openai_transcriptions", "openai_audio_transcription", "openai_compatible_transcription"}:
         if name != "voice_transcribe":
             return {"name": raw, "error": "openai_transcription provider adapter currently supports voice_transcribe only"}
@@ -3498,6 +3502,25 @@ def _live_media_request_payload(
         if response_format:
             payload["response_format"] = response_format[:40]
         return payload
+    if provider_adapter == "elevenlabs_tts":
+        payload = {
+            "text": text,
+            "model_id": str(params.get("model_id") or params.get("model") or "eleven_multilingual_v2")[:200],
+        }
+        voice_settings: dict[str, Any] = {}
+        for key in ("stability", "similarity_boost", "style"):
+            value = params.get(key)
+            if value is not None:
+                voice_settings[key] = _bounded_float(value, minimum=0.0, maximum=1.0, label=key)
+        speaker_boost = params.get("use_speaker_boost")
+        if speaker_boost is not None:
+            voice_settings["use_speaker_boost"] = _as_bool(speaker_boost, label="use_speaker_boost")
+        if voice_settings:
+            payload["voice_settings"] = voice_settings
+        language_code = str(params.get("language_code") or params.get("languageCode") or "").strip()
+        if language_code:
+            payload["language_code"] = language_code[:40]
+        return payload
     if provider_adapter == "openai_transcription":
         payload = {
             "model": str(params.get("model") or "gpt-4o-mini-transcribe")[:200],
@@ -3567,10 +3590,13 @@ def _send_live_media_provider_request(
         body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
         content_type = "application/json"
     headers = {
-        "Authorization": f"Bearer {token}",
         "Content-Type": content_type,
         "User-Agent": "Aegis-Agent/0.1",
     }
+    if provider_adapter == "elevenlabs_tts":
+        headers["xi-api-key"] = token
+    else:
+        headers["Authorization"] = f"Bearer {token}"
     if provider_adapter in {"stability_v1_text_to_image", "google_imagen"}:
         headers["Accept"] = "application/json"
     request = Request(
