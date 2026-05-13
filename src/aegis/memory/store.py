@@ -300,6 +300,10 @@ class LocalStore:
         with self.connect() as db:
             db.execute("UPDATE skills SET enabled = ?, updated_at = ? WHERE id = ?", (int(enabled), now_utc(), skill_id))
 
+    def delete_skill(self, skill_id: str) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM skills WHERE id = ?", (skill_id,))
+
     def insert_approval(self, approval: dict[str, Any]) -> None:
         with self.connect() as db:
             db.execute(
@@ -436,6 +440,24 @@ class LocalStore:
                 (session_id, limit),
             ).fetchall()
         return [dict(row) for row in reversed(rows)]
+
+    def delete_messages(self, session_id: str, message_ids: list[str]) -> list[dict[str, Any]]:
+        if not message_ids:
+            return []
+        placeholders = ", ".join("?" for _ in message_ids)
+        with self.connect() as db:
+            rows = db.execute(
+                f"SELECT * FROM messages WHERE session_id = ? AND id IN ({placeholders})",
+                (session_id, *message_ids),
+            ).fetchall()
+            if rows:
+                db.execute(
+                    f"DELETE FROM messages WHERE session_id = ? AND id IN ({placeholders})",
+                    (session_id, *message_ids),
+                )
+                db.execute("UPDATE sessions SET updated_at = ? WHERE id = ?", (now_utc(), session_id))
+        by_id = {str(row["id"]): dict(row) for row in rows}
+        return [by_id[message_id] for message_id in message_ids if message_id in by_id]
 
     def insert_schedule(self, row: dict[str, Any]) -> None:
         timestamp = now_utc()
@@ -652,6 +674,24 @@ class LocalStore:
                 (row["id"], row["name"], row.get("created_at", timestamp), row.get("updated_at", timestamp), json.dumps(row.get("metadata", {}))),
             )
 
+    def update_kanban_board_metadata(self, board_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
+        existing = self.get_kanban_board(board_id)
+        if not existing:
+            raise KeyError(board_id)
+        merged = json.loads(existing.get("metadata_json") or "{}")
+        merged.update(metadata)
+        with self.connect() as db:
+            cursor = db.execute(
+                "UPDATE kanban_boards SET metadata_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(merged), now_utc(), board_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(board_id)
+        updated = self.get_kanban_board(board_id)
+        if not updated:
+            raise KeyError(board_id)
+        return updated
+
     def insert_kanban_card(self, row: dict[str, Any]) -> None:
         timestamp = now_utc()
         with self.connect() as db:
@@ -682,6 +722,24 @@ class LocalStore:
             cursor = db.execute("UPDATE kanban_cards SET lane = ?, updated_at = ? WHERE id = ?", (lane, now_utc(), card_id))
             if cursor.rowcount == 0:
                 raise KeyError(card_id)
+
+    def update_kanban_card_metadata(self, card_id: str, metadata: dict[str, Any]) -> dict[str, Any]:
+        existing = self.get_kanban_card(card_id)
+        if not existing:
+            raise KeyError(card_id)
+        merged = json.loads(existing.get("metadata_json") or "{}")
+        merged.update(metadata)
+        with self.connect() as db:
+            cursor = db.execute(
+                "UPDATE kanban_cards SET metadata_json = ?, updated_at = ? WHERE id = ?",
+                (json.dumps(merged), now_utc(), card_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(card_id)
+        updated = self.get_kanban_card(card_id)
+        if not updated:
+            raise KeyError(card_id)
+        return updated
 
     def get_kanban_board(self, board_id: str) -> dict[str, Any] | None:
         with self.connect() as db:
@@ -731,3 +789,11 @@ class LocalStore:
         with self.connect() as db:
             rows = db.execute("SELECT * FROM mcp_servers ORDER BY name").fetchall()
         return [dict(row) for row in rows]
+
+    def set_mcp_server_enabled(self, server_id: str, enabled: bool) -> None:
+        with self.connect() as db:
+            db.execute("UPDATE mcp_servers SET enabled = ?, updated_at = ? WHERE id = ?", (int(enabled), now_utc(), server_id))
+
+    def delete_mcp_server(self, server_id: str) -> None:
+        with self.connect() as db:
+            db.execute("DELETE FROM mcp_servers WHERE id = ?", (server_id,))

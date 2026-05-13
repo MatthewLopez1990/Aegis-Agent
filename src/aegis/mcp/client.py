@@ -1,14 +1,24 @@
-"""Minimal stdio MCP JSON-RPC client."""
+"""Minimal MCP JSON-RPC clients for stdio and Streamable HTTP."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import json
 import os
+import re
 import select
 import subprocess
 import time
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse, urlunparse
+from urllib.request import Request
+
+from aegis.connectors.http import _open_without_redirects
+from aegis.security.context_firewall import redact_secret_values
+
+
+MCP_PROTOCOL_VERSION = "2025-06-18"
 
 
 @dataclass(frozen=True)
@@ -33,6 +43,24 @@ class McpProtocolError(RuntimeError):
     pass
 
 
+class McpHttpAuthError(McpProtocolError):
+    def __init__(self, status_code: int, challenge: dict[str, Any]) -> None:
+        self.status_code = status_code
+        self.challenge = challenge
+        scheme = challenge.get("scheme") or "unknown"
+        params = challenge.get("parameters", {}) if isinstance(challenge.get("parameters"), dict) else {}
+        details = ", ".join(f"{key}={value}" for key, value in sorted(params.items())[:4])
+        suffix = f": {details}" if details else ""
+        super().__init__(f"MCP HTTP authentication required ({status_code}, {scheme}){suffix}")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status_code": self.status_code,
+            "challenge": self.challenge,
+            "raw_www_authenticate_header_included": False,
+        }
+
+
 class McpStdioClient:
     def __init__(self, argv: list[str], *, timeout_seconds: float = 10.0, max_response_bytes: int = 1_000_000) -> None:
         self.argv = argv
@@ -49,6 +77,14 @@ class McpStdioClient:
             raise McpProtocolError("MCP tools/list result is invalid")
         return [tool for tool in tools if isinstance(tool, dict)]
 
+    def capabilities(self) -> dict[str, Any]:
+        with _process(self.argv) as process:
+            result = self._initialize(process)
+        capabilities = result.get("capabilities", {}) if isinstance(result, dict) else {}
+        if not isinstance(capabilities, dict):
+            raise McpProtocolError("MCP initialize capabilities are invalid")
+        return capabilities
+
     def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         with _process(self.argv) as process:
             self._initialize(process)
@@ -57,8 +93,40 @@ class McpStdioClient:
             raise McpProtocolError("MCP tools/call result is invalid")
         return result
 
-    def _initialize(self, process: subprocess.Popen[bytes]) -> None:
-        self._request(
+    def list_resources(self) -> dict[str, Any]:
+        with _process(self.argv) as process:
+            self._initialize(process)
+            result = self._request(process, "resources/list", {})
+        if not isinstance(result.get("resources", []), list):
+            raise McpProtocolError("MCP resources/list result is invalid")
+        return result
+
+    def read_resource(self, uri: str) -> dict[str, Any]:
+        with _process(self.argv) as process:
+            self._initialize(process)
+            result = self._request(process, "resources/read", {"uri": uri})
+        if not isinstance(result.get("contents", []), list):
+            raise McpProtocolError("MCP resources/read result is invalid")
+        return result
+
+    def list_prompts(self) -> dict[str, Any]:
+        with _process(self.argv) as process:
+            self._initialize(process)
+            result = self._request(process, "prompts/list", {})
+        if not isinstance(result.get("prompts", []), list):
+            raise McpProtocolError("MCP prompts/list result is invalid")
+        return result
+
+    def get_prompt(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        with _process(self.argv) as process:
+            self._initialize(process)
+            result = self._request(process, "prompts/get", {"name": name, "arguments": arguments})
+        if not isinstance(result.get("messages", []), list):
+            raise McpProtocolError("MCP prompts/get result is invalid")
+        return result
+
+    def _initialize(self, process: subprocess.Popen[bytes]) -> dict[str, Any]:
+        return self._request(
             process,
             "initialize",
             {
@@ -82,6 +150,199 @@ class McpStdioClient:
         if not isinstance(result, dict):
             raise McpProtocolError("MCP response result is invalid")
         return result
+
+
+class McpStreamableHttpClient:
+    def __init__(
+        self,
+        endpoint_url: str,
+        *,
+        timeout_seconds: float = 10.0,
+        max_response_bytes: int = 1_000_000,
+        protocol_version: str = MCP_PROTOCOL_VERSION,
+        authorization_bearer: str | None = None,
+    ) -> None:
+        self.endpoint_url = endpoint_url
+        self.timeout_seconds = timeout_seconds
+        self.max_response_bytes = max_response_bytes
+        self.protocol_version = protocol_version
+        self.authorization_bearer = authorization_bearer
+        self._negotiated_protocol_version = protocol_version
+        self._session_id: str | None = None
+        self._next_id = 1
+
+    def list_tools(self) -> list[dict[str, Any]]:
+        result = self._with_session("tools/list", {})
+        tools = result.get("tools", []) if isinstance(result, dict) else []
+        if not isinstance(tools, list):
+            raise McpProtocolError("MCP tools/list result is invalid")
+        return [tool for tool in tools if isinstance(tool, dict)]
+
+    def capabilities(self) -> dict[str, Any]:
+        result = self._initialize()
+        self._initialized()
+        capabilities = result.get("capabilities", {}) if isinstance(result, dict) else {}
+        if not isinstance(capabilities, dict):
+            raise McpProtocolError("MCP initialize capabilities are invalid")
+        return capabilities
+
+    def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        result = self._with_session("tools/call", {"name": name, "arguments": arguments})
+        if not isinstance(result, dict):
+            raise McpProtocolError("MCP tools/call result is invalid")
+        return result
+
+    def list_resources(self) -> dict[str, Any]:
+        result = self._with_session("resources/list", {})
+        if not isinstance(result.get("resources", []), list):
+            raise McpProtocolError("MCP resources/list result is invalid")
+        return result
+
+    def read_resource(self, uri: str) -> dict[str, Any]:
+        result = self._with_session("resources/read", {"uri": uri})
+        if not isinstance(result.get("contents", []), list):
+            raise McpProtocolError("MCP resources/read result is invalid")
+        return result
+
+    def list_prompts(self) -> dict[str, Any]:
+        result = self._with_session("prompts/list", {})
+        if not isinstance(result.get("prompts", []), list):
+            raise McpProtocolError("MCP prompts/list result is invalid")
+        return result
+
+    def get_prompt(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        result = self._with_session("prompts/get", {"name": name, "arguments": arguments})
+        if not isinstance(result.get("messages", []), list):
+            raise McpProtocolError("MCP prompts/get result is invalid")
+        return result
+
+    def _with_session(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        self._initialize()
+        self._initialized()
+        return self._request(method, params)
+
+    def _initialize(self) -> dict[str, Any]:
+        self._session_id = None
+        self._negotiated_protocol_version = self.protocol_version
+        self._next_id = 1
+        result = self._request(
+            "initialize",
+            {
+                "protocolVersion": self.protocol_version,
+                "capabilities": {},
+                "clientInfo": {"name": "aegis-agent", "version": "0.1.0"},
+            },
+        )
+        negotiated = result.get("protocolVersion") if isinstance(result, dict) else None
+        if negotiated:
+            self._negotiated_protocol_version = str(negotiated)
+        return result
+
+    def _initialized(self) -> None:
+        self._notification("notifications/initialized", {})
+
+    def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        request_id = self._next_id
+        self._next_id += 1
+        payload = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+        response = self._post_json(payload, request_id=request_id)
+        if response.get("id") != request_id:
+            raise McpProtocolError("MCP response id mismatch")
+        if "error" in response:
+            raise McpProtocolError(f"MCP error response: {response['error']}")
+        result = response.get("result", {})
+        if not isinstance(result, dict):
+            raise McpProtocolError("MCP response result is invalid")
+        return result
+
+    def _notification(self, method: str, params: dict[str, Any]) -> None:
+        payload = {"jsonrpc": "2.0", "method": method, "params": params}
+        self._post_json(payload, request_id=None)
+
+    def _post_json(self, payload: dict[str, Any], *, request_id: int | None) -> dict[str, Any]:
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+            "MCP-Protocol-Version": self._negotiated_protocol_version,
+            "User-Agent": "Aegis-Agent/0.1",
+        }
+        if self._session_id:
+            headers["Mcp-Session-Id"] = self._session_id
+        if self.authorization_bearer:
+            headers["Authorization"] = f"Bearer {self.authorization_bearer}"
+        request = Request(self.endpoint_url, data=body, headers=headers, method="POST")
+        try:
+            response_context = _open_without_redirects(request, timeout=self.timeout_seconds)
+        except HTTPError as exc:
+            if exc.code == 401:
+                raise McpHttpAuthError(exc.code, _parse_www_authenticate(exc.headers)) from exc
+            raise McpProtocolError(f"MCP HTTP request failed with status {exc.code}") from exc
+        except URLError as exc:
+            raise McpProtocolError(f"MCP HTTP request failed: {exc.reason}") from exc
+        with response_context as response:
+            session_id = response.headers.get("Mcp-Session-Id")
+            if session_id:
+                self._session_id = session_id
+            status = response.getcode()
+            if request_id is None and status == 202:
+                return {}
+            content_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+            body_bytes = response.read(self.max_response_bytes + 1)
+        if len(body_bytes) > self.max_response_bytes:
+            raise McpProtocolError("MCP HTTP response exceeds maximum size")
+        if content_type == "application/json":
+            return _decode_json_rpc_message(body_bytes)
+        if content_type == "text/event-stream":
+            if request_id is None:
+                return {}
+            return _decode_sse_response(body_bytes, request_id=request_id)
+        raise McpProtocolError(f"MCP HTTP response content type {content_type!r} is unsupported")
+
+
+_AUTH_PARAM_RE = re.compile(r'([A-Za-z][A-Za-z0-9_-]*)\s*=\s*("(?:\\.|[^"])*"|[^,]+)')
+_SENSITIVE_AUTH_PARAM_NAMES = ("token", "secret", "password", "credential", "assertion", "authorization")
+
+
+def _parse_www_authenticate(headers: Any) -> dict[str, Any]:
+    raw_values = headers.get_all("WWW-Authenticate", []) if hasattr(headers, "get_all") else []
+    if not raw_values and hasattr(headers, "get"):
+        value = headers.get("WWW-Authenticate")
+        raw_values = [value] if value else []
+    raw_header = ", ".join(str(value) for value in raw_values if value)
+    redacted_header = redact_secret_values(raw_header)
+    if not redacted_header.strip():
+        return {"present": False, "parameters": {}, "raw_header_included": False}
+    scheme, _, rest = redacted_header.strip().partition(" ")
+    parameters: dict[str, str] = {}
+    for key, value in _AUTH_PARAM_RE.findall(rest):
+        normalized_key = key.strip().lower().replace("-", "_")
+        parameters[normalized_key] = _sanitize_auth_param(normalized_key, _unquote_auth_value(value))
+    return {
+        "present": True,
+        "scheme": re.sub(r"[^A-Za-z0-9_.-]+", "", scheme)[:40] or "unknown",
+        "parameters": parameters,
+        "raw_header_included": False,
+    }
+
+
+def _unquote_auth_value(value: str) -> str:
+    stripped = value.strip()
+    if len(stripped) >= 2 and stripped[0] == '"' and stripped[-1] == '"':
+        return stripped[1:-1].replace(r"\"", '"').replace(r"\\", "\\")
+    return stripped
+
+
+def _sanitize_auth_param(key: str, value: str) -> str:
+    if any(marker in key for marker in _SENSITIVE_AUTH_PARAM_NAMES):
+        return "[REDACTED]"
+    if key == "error_description" and re.search(r"(bearer|token|secret|password|credential|key)", value, re.IGNORECASE):
+        return "[REDACTED_AUTH_DESCRIPTION]"
+    redacted = redact_secret_values(value)
+    parsed = urlparse(redacted)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        redacted = urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+    return redacted[:240]
 
 
 class _process:
@@ -178,3 +439,33 @@ def _content_length(header: bytes) -> int:
         if line.lower().startswith("content-length:"):
             return int(line.split(":", 1)[1].strip())
     raise McpProtocolError("MCP response missing Content-Length header")
+
+
+def _decode_json_rpc_message(body: bytes) -> dict[str, Any]:
+    decoded = json.loads(body.decode("utf-8"))
+    if not isinstance(decoded, dict):
+        raise McpProtocolError("MCP response must be a JSON object")
+    return decoded
+
+
+def _decode_sse_response(body: bytes, *, request_id: int) -> dict[str, Any]:
+    events: list[str] = []
+    data_lines: list[str] = []
+    for raw_line in body.decode("utf-8", errors="replace").splitlines():
+        line = raw_line.rstrip("\r")
+        if not line:
+            if data_lines:
+                events.append("\n".join(data_lines))
+                data_lines = []
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line[5:].lstrip())
+    if data_lines:
+        events.append("\n".join(data_lines))
+    for event in events:
+        decoded = _decode_json_rpc_message(event.encode("utf-8"))
+        if decoded.get("id") == request_id:
+            return decoded
+    raise McpProtocolError("MCP SSE stream ended before the JSON-RPC response")

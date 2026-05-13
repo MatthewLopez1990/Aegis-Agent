@@ -24,11 +24,157 @@ class WebGuiBrowserSmokeTests(unittest.TestCase):
         self.assertIn("Shielded local-first agent runtime", markup)
         self.assertIn("Aegis Shield Console", markup)
         self.assertIn('class="hero-shield"', markup)
+        self.assertIn('class="hero-ascii"', markup)
+        self.assertIn("d88888b", markup)
+        self.assertIn("tone-10", markup)
+        self.assertIn('id="model-auth-method"', markup)
+        self.assertIn('id="model-auth-verify-external"', markup)
+        self.assertIn('id="model-auth-run-external"', markup)
+        self.assertIn('id="model-auth-doctor-run"', markup)
+        self.assertIn('id="model-auth-readiness-packet"', markup)
+        self.assertIn('id="model-auth-output"', markup)
+        self.assertIn('value="oauth_device"', markup)
+        self.assertIn('value="github-copilot"', markup)
+        self.assertIn('value="google-gemini-oauth"', markup)
+        self.assertIn('id="subagent-form"', markup)
+        self.assertIn('id="subagent-role"', markup)
+        self.assertIn('id="subagent-task"', markup)
+        self.assertIn('id="subagent-summary"', markup)
+        self.assertIn('id="subagent-output"', markup)
+        self.assertIn('id="subagent-cards"', markup)
+        self.assertIn('id="model-auth-targets"', markup)
+        self.assertIn('id="model-auth-doctor"', markup)
+        self.assertIn('<option value="deepseek">DeepSeek</option>', markup)
+        self.assertIn('<option value="xai">xAI</option>', markup)
+        self.assertIn('<option value="qwen">Qwen</option>', markup)
+        self.assertIn("Aegis Control Plane", markup)
         self.assertIn(".brand-shield", styles)
         self.assertIn(".hero-shield", styles)
+        self.assertIn(".hero-ascii", styles)
+        self.assertIn('"Courier New"', styles)
+        self.assertIn("10px 10px 0", styles)
+        app_js = Path(__file__).resolve().parents[1].joinpath("src", "aegis", "web", "static", "app.js").read_text(encoding="utf-8")
+        self.assertIn("subscription_auth_supported", app_js)
+        self.assertIn('api("/models/auth/targets")', app_js)
+        self.assertIn('api("/models/auth/doctor")', app_js)
+        self.assertIn('api("/models/auth/readiness-packet"', app_js)
+        self.assertIn('api("/models/auth/verify-readiness-packet"', app_js)
+        self.assertIn("data-model-auth-readiness-packet", app_js)
+        self.assertIn("data-model-auth-verify-readiness-packet", app_js)
+        self.assertIn("activation_state", app_js)
+        self.assertIn("missing_config", app_js)
+        self.assertIn('if (method === "api_key")', app_js)
+        self.assertIn("payload.verify_external", app_js)
+        self.assertIn("payload.run_external", app_js)
+        self.assertIn("renderModelAuthOutput", app_js)
+        self.assertIn('api("/subagents/status?limit=12")', app_js)
+        self.assertIn('api("/subagents/delegate"', app_js)
+        self.assertIn('api("/subagents/handoff"', app_js)
+        self.assertIn('api("/subagents/run"', app_js)
+        self.assertIn('api("/subagents/run-batch"', app_js)
+        self.assertIn('api("/subagents/review-packet"', app_js)
+        self.assertIn('api("/subagents/verify-packet"', app_js)
+        self.assertIn('api("/subagents/autonomy-preflight?limit=12&actor=web-operator"', app_js)
+        self.assertIn('id="subagent-autonomy-preflight"', markup)
+        self.assertIn('id="subagent-run-batch"', markup)
+        self.assertIn("payload.enabled_profile_count", app_js)
+        self.assertIn("operator_approved_batch_runtime", app_js)
+        self.assertIn('document.getElementById("subagent-form").addEventListener("submit"', app_js)
+        self.assertIn('document.getElementById("subagent-autonomy-preflight").addEventListener("click"', app_js)
+        self.assertIn('document.getElementById("subagent-run-batch").addEventListener("click"', app_js)
+        self.assertIn('document.getElementById("subagent-cards").addEventListener("click"', app_js)
+        self.assertIn('data-subagent-approved', app_js)
+        self.assertIn('data-subagent-lane', app_js)
+        self.assertIn('data-subagent-run', app_js)
+        self.assertIn('data-subagent-review-packet', app_js)
+        self.assertIn('data-subagent-verify-packet', app_js)
+        self.assertIn("card.subagent_runs_recorded", app_js)
+        self.assertIn("card.review_packets_recorded", app_js)
+        self.assertIn("card.model_ready_review_packet", app_js)
+        self.assertIn('setList("subagent-cards"', app_js)
+        self.assertIn('name: "subagent_delegate"', app_js)
+        self.assertIn('setList("model-auth-targets"', app_js)
+        self.assertIn('setList("model-auth-doctor"', app_js)
+        self.assertIn('document.getElementById("model-auth-doctor-run").addEventListener("click"', app_js)
+        self.assertIn('document.getElementById("model-auth-readiness-packet").addEventListener("click"', app_js)
+        self.assertIn('document.getElementById("model-auth-output").addEventListener("click"', app_js)
+        self.assertIn('document.getElementById("model-auth-doctor").addEventListener("click"', app_js)
+        self.assertIn("modelAuthTargets.targets", app_js)
+        self.assertIn("modelAuthDoctorActions", app_js)
+        self.assertIn("modelAuthOutputSummary", app_js)
+        self.assertIn("data-copy-command", app_js)
+        self.assertIn("Web requests never execute interactive provider login", app_js)
+        self.assertIn("The web console did not execute provider login.", app_js)
         self.assertIn("--shield:", styles)
         self.assertIn("--shield-glow:", styles)
         self.assertIn(".brand-shield::before", styles)
+        self.assertIn("@keyframes shield-pulse", styles)
+
+    def test_web_model_auth_output_renders_terminal_only_command_actions(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        app_js = Path(__file__).resolve().parents[1] / "src" / "aegis" / "web" / "static" / "app.js"
+        node_script = r"""
+const fs = require("fs");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const start = source.indexOf("const modelAuthDoctorDetail =");
+const end = source.indexOf("\n\nconst renderModelUsage =", start);
+if (start < 0 || end < 0) {
+  throw new Error("model auth render helpers not found");
+}
+const node = { innerHTML: "" };
+const document = { getElementById: (id) => {
+  if (id !== "model-auth-output") throw new Error(`unexpected node ${id}`);
+  return node;
+}};
+const escapeHtml = (value) => String(value ?? "")
+  .replaceAll("&", "&amp;")
+  .replaceAll("<", "&lt;")
+  .replaceAll(">", "&gt;")
+  .replaceAll('"', "&quot;")
+  .replaceAll("'", "&#039;");
+const text = (value) => escapeHtml(Array.isArray(value) ? value.join(", ") : value);
+const copyButton = (label, value) =>
+  value ? `<button type="button" class="secondary" data-copy-command="${escapeHtml(value)}">${text(label)}</button>` : "";
+eval(`${source.slice(start, end)}\nglobalThis.renderModelAuthOutput = renderModelAuthOutput;\nglobalThis.modelAuthDoctorActions = modelAuthDoctorActions;`);
+const actions = modelAuthDoctorActions({
+  login_command: "PYTHONPATH=src python3 -m aegis.cli.main model auth login openai --subscription --run-external",
+  verify_command: "PYTHONPATH=src python3 -m aegis.cli.main model auth login openai --subscription --verify-external",
+});
+if (!actions.includes("data-copy-command") || !actions.includes("Copy Login") || !actions.includes("Copy Verify")) {
+  throw new Error(`copyable doctor actions missing: ${actions}`);
+}
+renderModelAuthOutput({
+  auth_doctor: {
+    status: "operator_login_required",
+    operator_login_required_count: 2,
+    verified_external_auth_count: 0,
+    missing_external_commands: ["claude"],
+    activation_state_counts: { login_required: 2 },
+    next_steps: ["Run the listed login commands from a local terminal."],
+  },
+});
+if (!node.innerHTML.includes("Web requests never execute interactive provider login") || !node.innerHTML.includes("operator_login_required") || !node.innerHTML.includes("Create Readiness Packet")) {
+  throw new Error(`doctor summary missing terminal-only readiness content: ${node.innerHTML}`);
+}
+renderModelAuthOutput({
+  auth: {
+    provider: "openai",
+    method: "subscription",
+    status: "external_login_requires_local_terminal",
+    external_command: "codex login",
+    external_status_command: "codex login status",
+    token_capture_supported: false,
+  },
+});
+if (!node.innerHTML.includes("Terminal handoff required") || !node.innerHTML.includes("Copy Login") || !node.innerHTML.includes("Copy Verify") || !node.innerHTML.includes("does not execute interactive provider login")) {
+  throw new Error(`external login output missing copyable terminal handoff: ${node.innerHTML}`);
+}
+"""
+        result = subprocess.run((node, "-e", node_script, str(app_js)), capture_output=True, text=True, timeout=5, check=False)
+        if result.returncode != 0:
+            raise AssertionError(result.stderr.strip() or result.stdout.strip())
 
     def test_web_event_stream_parser_handles_chunk_boundaries(self) -> None:
         node = shutil.which("node")
@@ -65,6 +211,177 @@ if (frames.length !== 2 || frames[1].event !== "task" || frames[1].data.status !
 }
 """
         result = subprocess.run((node, "-e", script, str(app_js)), capture_output=True, text=True, timeout=5, check=False)
+        if result.returncode != 0:
+            raise AssertionError(result.stderr.strip() or result.stdout.strip())
+
+    def test_web_slash_palette_matches_tui_fuzzy_submit_flow(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "src" / "aegis" / "web" / "static"
+        markup = (root / "index.html").read_text(encoding="utf-8")
+        styles = (root / "styles.css").read_text(encoding="utf-8")
+        script = (root / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="slash-palette"', markup)
+        self.assertIn(".slash-palette-row.active", styles)
+        self.assertIn("WEB_SLASH_COMMANDS", script)
+        self.assertIn('api("/commands")', script)
+        self.assertIn("mergeWebSlashCommands", script)
+        self.assertIn("privacy-settings", script)
+        self.assertIn("setup-bedrock", script)
+        self.assertIn("setup-vertex", script)
+        self.assertIn("autofix-pr", script)
+        self.assertIn("ultraplan", script)
+        self.assertIn("ultrareview", script)
+        self.assertIn("release-notes", script)
+        self.assertIn("chrome", script)
+        self.assertIn('taskView: "status"', script)
+        self.assertIn('taskView: "events"', script)
+        self.assertIn('taskView: "timeline"', script)
+        self.assertIn('taskView: "evidence"', script)
+        self.assertIn("const selectedTaskId = () =>", script)
+        self.assertIn("const slashTaskId = (parsed)", script)
+        self.assertIn('parsed.kind === "task-inspection"', script)
+        self.assertIn("slashCommandMatches(prefix).slice(0, 8)", script)
+        self.assertIn('document.getElementById("slash-palette").addEventListener("click"', script)
+        self.assertIn('document.getElementById("task-form").requestSubmit()', script)
+        self.assertIn('const request = (parsed.kind === "submit" ? parsed.request : input.value).trim()', script)
+
+        node = shutil.which("node")
+        if node is None:
+            return
+        app_js = root / "app.js"
+        node_script = r"""
+const fs = require("fs");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const catalogStart = source.indexOf("const WEB_SLASH_COMMANDS =");
+const catalogEnd = source.indexOf("\n\nconst api =", catalogStart);
+const helperStart = source.indexOf("const slashCommandTerms =", catalogEnd);
+const helperEnd = source.indexOf("\n\nconst renderSlashPalette =", helperStart);
+if (catalogStart < 0 || catalogEnd < 0 || helperStart < 0 || helperEnd < 0) {
+  throw new Error("slash palette helpers not found");
+}
+const api = {};
+eval(`${source.slice(catalogStart, catalogEnd)}\n${source.slice(helperStart, helperEnd)}\napi.matches = slashCommandMatches;\napi.parse = parseTaskSlashCommand;\napi.merge = mergeWebSlashCommands;\napi.commands = () => webSlashCommands;`);
+const su = api.matches("su").map((entry) => entry.command);
+if (su[0] !== "submit" || !su.includes("resume") || su.includes("settings")) {
+  throw new Error(`/su fuzzy matches are wrong: ${JSON.stringify(su)}`);
+}
+const parsed = api.parse("/q inspect the failing test");
+if (parsed.kind !== "submit" || parsed.command !== "background" || parsed.request !== "inspect the failing test") {
+  throw new Error(`queue alias parsed incorrectly: ${JSON.stringify(parsed)}`);
+}
+const nav = api.parse("/models");
+if (nav.kind !== "section" || nav.section !== "models") {
+  throw new Error(`models navigation parsed incorrectly: ${JSON.stringify(nav)}`);
+}
+const status = api.parse("/status task-123");
+if (status.kind !== "task-inspection" || status.taskView !== "status" || status.request !== "task-123") {
+  throw new Error(`status task command parsed incorrectly: ${JSON.stringify(status)}`);
+}
+const events = api.matches("ev").map((entry) => entry.command);
+if (!events.includes("events")) {
+  throw new Error(`/events command did not fuzzy match: ${JSON.stringify(events)}`);
+}
+const timeline = api.matches("timeline").map((entry) => entry.command);
+if (!timeline.includes("timeline")) {
+  throw new Error(`/timeline command did not resolve: ${JSON.stringify(timeline)}`);
+}
+const audit = api.parse("/audit task-456");
+if (audit.kind !== "task-inspection" || audit.taskView !== "evidence" || audit.command !== "evidence") {
+  throw new Error(`/audit alias did not resolve to task evidence: ${JSON.stringify(audit)}`);
+}
+const privacy = api.matches("privacy").map((entry) => entry.command);
+if (!privacy.includes("approvals")) {
+  throw new Error(`/privacy-settings alias did not resolve to approvals: ${JSON.stringify(privacy)}`);
+}
+const setup = api.matches("setup").map((entry) => entry.command);
+if (!setup.includes("models")) {
+  throw new Error(`/setup-* aliases did not resolve to models: ${JSON.stringify(setup)}`);
+}
+const chrome = api.matches("chrome").map((entry) => entry.command);
+if (!chrome.includes("browser")) {
+  throw new Error(`/chrome alias did not resolve to browser: ${JSON.stringify(chrome)}`);
+}
+const ultra = api.matches("ultra").map((entry) => entry.command);
+if (!ultra.includes("commands")) {
+  throw new Error(`/ultra* aliases did not resolve to commands: ${JSON.stringify(ultra)}`);
+}
+const release = api.matches("release").map((entry) => entry.command);
+if (!release.includes("settings")) {
+  throw new Error(`/release-notes alias did not resolve to settings: ${JSON.stringify(release)}`);
+}
+api.merge([
+  { command: "debug", label: "/debug", detail: "TUI diagnostics", kind: "palette", source: "tui" },
+  { command: "submit", label: "/submit duplicate", detail: "duplicate should be ignored", kind: "palette" },
+  { command: "aegis-project-summary", label: "/aegis-project-summary", detail: "Skill command", kind: "palette", source: "skill" },
+]);
+const debug = api.parse("/debug");
+if (debug.kind !== "palette" || debug.command !== "debug") {
+  throw new Error(`/debug catalog command parsed incorrectly: ${JSON.stringify(debug)}`);
+}
+const skill = api.matches("aegis-project").map((entry) => entry.command);
+if (!skill.includes("aegis-project-summary")) {
+  throw new Error(`dynamic skill slash command missing: ${JSON.stringify(skill)}`);
+}
+const submitCount = api.commands().filter((entry) => entry.command === "submit").length;
+if (submitCount !== 1) {
+  throw new Error(`core submit command duplicated: ${submitCount}`);
+}
+"""
+        result = subprocess.run((node, "-e", node_script, str(app_js)), capture_output=True, text=True, timeout=5, check=False)
+        if result.returncode != 0:
+            raise AssertionError(result.stderr.strip() or result.stdout.strip())
+
+    def test_web_task_inspection_slash_commands_call_task_loaders(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        app_js = Path(__file__).resolve().parents[1] / "src" / "aegis" / "web" / "static" / "app.js"
+        node_script = r"""
+const fs = require("fs");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const start = source.indexOf("const selectedTaskId =");
+const end = source.indexOf("\n\nconst renderBrowserOutput =", start);
+if (start < 0 || end < 0) {
+  throw new Error("task inspection slash dispatcher not found");
+}
+const calls = [];
+const state = { lastTask: { id: "latest-task" }, activeSection: "security" };
+const applySectionVisibility = () => calls.push(["section", state.activeSection]);
+const loadTaskStatus = async (taskId) => calls.push(["status", taskId, state.activeSection]);
+const loadTaskEvents = async (taskId) => calls.push(["events", taskId, state.activeSection]);
+const loadTaskTimeline = async (taskId) => calls.push(["timeline", taskId, state.activeSection]);
+const loadTaskEvidence = async (taskId) => calls.push(["evidence", taskId, state.activeSection]);
+const renderTaskNotice = (title, detail) => calls.push(["notice", title, detail, state.activeSection]);
+const renderTaskError = (message) => calls.push(["error", message]);
+const resumeTask = async (taskId) => calls.push(["resume", taskId]);
+eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = executeLocalSlashCommand;`);
+(async () => {
+  await executeLocalSlashCommand({ kind: "task-inspection", command: "status", taskView: "status", request: "task-1" });
+  await executeLocalSlashCommand({ kind: "task-inspection", command: "events", taskView: "events", request: "" });
+  await executeLocalSlashCommand({ kind: "task-inspection", command: "timeline", taskView: "timeline", request: "task-3 extra" });
+  await executeLocalSlashCommand({ kind: "task-inspection", command: "evidence", taskView: "evidence", request: "task-4" });
+  state.lastTask = null;
+  state.lastEvents = null;
+  state.lastEvidence = null;
+  await executeLocalSlashCommand({ kind: "task-inspection", command: "status", label: "/status [task_id]", taskView: "status", request: "" });
+  const expected = [
+    ["section", "activity"],
+    ["status", "task-1", "activity"],
+    ["events", "latest-task", "activity"],
+    ["timeline", "task-3", "activity"],
+    ["evidence", "task-4", "activity"],
+    ["section", "activity"],
+    ["notice", "/status [task_id]", "Open a task or include a task id, then run this command again.", "activity"],
+  ];
+  if (JSON.stringify(calls) !== JSON.stringify(expected)) {
+    throw new Error(`unexpected task inspection dispatch: ${JSON.stringify(calls)}`);
+  }
+})().catch((error) => {
+  console.error(error.stack || error.message);
+  process.exit(1);
+});
+"""
+        result = subprocess.run((node, "-e", node_script, str(app_js)), capture_output=True, text=True, timeout=5, check=False)
         if result.returncode != 0:
             raise AssertionError(result.stderr.strip() or result.stdout.strip())
 
@@ -148,8 +465,11 @@ renderBrowserOutput({
   approval_id: "approval-123",
   artifact_url: "/browser-artifacts/snapshot.png",
   metadata_url: "/browser-artifacts/snapshot.json",
+  packet: { packet_schema: "aegis.browser.live_activation_packet.v1", packet_id: "packet-123" },
+  receipt: { receipt_schema: "aegis.browser.live_activation_packet.v1", packet_id: "packet-123" },
   session: {
     interactive_elements: [
+      { tag: "a", label: "Docs", selector_hint: "#docs", supported_virtual_actions: ["navigate"] },
       { tag: "button", label: "Save", selector_hint: "#save" },
       { tag: "input", label: "Email", form_hint: "input[name=email]" },
     ],
@@ -158,7 +478,7 @@ renderBrowserOutput({
 if (state.pendingBrowserAction.approval_id !== "approval-123") {
   throw new Error("approval id was not stored for replay");
 }
-for (const expected of ["Open Snapshot", "Open Metadata", 'data-browser-selector="#save"', 'data-browser-label="Save"', 'data-browser-run-approved="approval-123"']) {
+for (const expected of ["Open Snapshot", "Open Metadata", "Create Live Activation Packet", "Verify Activation Packet", 'data-browser-live-activation-packet="1"', 'data-browser-verify-activation-packet="packet-123"', 'data-browser-selector="#docs"', '"navigate"', 'data-browser-selector="#save"', 'data-browser-label="Save"', 'data-browser-run-approved="approval-123"']) {
   if (!node.innerHTML.includes(expected)) {
     throw new Error(`missing browser renderer output ${expected}: ${node.innerHTML}`);
   }
@@ -379,12 +699,16 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn('data-task-scope="session"', markup)
         self.assertIn('data-task-scope="all"', markup)
         self.assertIn('id="tasks-session-label"', markup)
+        self.assertIn('id="active-work"', markup)
         self.assertIn('id="session-linked-tasks"', markup)
         self.assertIn('id="session-compact-keep" type="number" min="0"', markup)
         self.assertIn('taskScope: "session"', script)
         self.assertIn("inspectedTaskSessionId: null", script)
         self.assertIn("const taskSessionId = state.inspectedTaskSessionId || state.activeSessionId;", script)
         self.assertIn("taskSessionLabel(x)", script)
+        self.assertIn("runtime.active_work_count", script)
+        self.assertIn("dashboard.active_work_tasks || []", script)
+        self.assertIn('setList("active-work"', script)
         self.assertIn("dashboard.recent_session_tasks || []", script)
         self.assertIn('setList("session-linked-tasks"', script)
         self.assertIn("task.session.title", script)
@@ -438,6 +762,11 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn("Blockers:", script)
         self.assertIn("x.next_steps", script)
         self.assertIn("x.live_read_surfaces", script)
+        self.assertIn("x.target_provider_count", script)
+        self.assertIn("x.subscription_bridge_targets", script)
+        self.assertIn("x.not_started_targets", script)
+        self.assertIn("Provider targets:", script)
+        self.assertIn("Auth bridges:", script)
         self.assertIn("x.implemented_live_adapters", script)
         self.assertIn("x.available_live_adapters", script)
         self.assertIn("x.operator_checklist", script)
@@ -477,7 +806,14 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         script = (root / "app.js").read_text(encoding="utf-8")
 
         self.assertIn('id="tool-run-presets"', markup)
+        self.assertIn('id="mcp-server-transport"', markup)
+        self.assertIn('id="mcp-server-token-secret"', markup)
+        self.assertIn('value="streamable-http"', markup)
         self.assertIn("TOOL_RUN_PRESETS", script)
+        self.assertIn('name: "message_send"', script)
+        self.assertIn('transport: document.getElementById("mcp-server-transport").value', script)
+        self.assertIn('token_secret: document.getElementById("mcp-server-token-secret").value || undefined', script)
+        self.assertIn('x.metadata?.transport || "stdio"', script)
         self.assertIn('name: "service_ticket_read"', script)
         self.assertIn('name: "github_issue"', script)
         self.assertIn('name: "gitlab_issue"', script)
@@ -495,6 +831,14 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn("browser-inspect", markup)
         self.assertIn("/browser/render-screenshot", script)
         self.assertIn("browser-render-screenshot", markup)
+        self.assertIn('data-browser-live-activation-packet="1"', script)
+        self.assertIn("Create Live Activation Packet", script)
+        self.assertIn("data-browser-verify-activation-packet", script)
+        self.assertIn("Verify Activation Packet", script)
+        self.assertIn('api("/browser/live-activation-packet"', script)
+        self.assertIn('api("/browser/verify-activation-packet"', script)
+        self.assertIn('body: JSON.stringify({ actor: "web-operator" })', script)
+        self.assertIn('body: JSON.stringify({ packet: activationPacket, actor: "web-operator" })', script)
         self.assertIn("data-browser-selector", script)
         self.assertIn('document.getElementById("browser-selector").value = selector', script)
         self.assertIn('document.getElementById("browser-fill-fields").value = JSON.stringify({ [selector]: "" }, null, 2)', script)
@@ -510,6 +854,7 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn('id="model-usage-providers"', markup)
         self.assertIn('id="model-usage-models"', markup)
         self.assertIn('id="model-usage-events"', markup)
+        self.assertIn('value="minimax-token-plan"', markup)
         self.assertIn('api("/model-usage")', script)
         self.assertIn("const renderModelUsage = (payload) => {", script)
         self.assertIn('setList("model-usage-providers", payload.by_provider', script)
@@ -548,6 +893,148 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertNotIn("x.source", script)
         self.assertNotIn("x.commands", script)
         self.assertNotIn("x.secrets", script)
+
+    def test_web_plugins_panel_exposes_governed_local_lifecycle(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "src" / "aegis" / "web" / "static"
+        markup = (root / "index.html").read_text(encoding="utf-8")
+        script = (root / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="plugin-install-form"', markup)
+        self.assertIn('id="plugin-manifest-path"', markup)
+        self.assertIn('id="plugin-install-enable"', markup)
+        self.assertIn('id="plugin-install-unsigned"', markup)
+        self.assertIn('id="plugin-reload"', markup)
+        self.assertIn('id="plugin-marketplace-form"', markup)
+        self.assertIn('id="plugin-marketplace-query"', markup)
+        self.assertIn('id="plugin-marketplace-catalog"', markup)
+        self.assertIn('id="installed-plugins"', markup)
+        self.assertIn('id="plugin-marketplace"', markup)
+        self.assertIn('id="plugin-updates"', markup)
+        self.assertIn('id="plugin-output"', markup)
+        self.assertIn('api("/plugins")', script)
+        self.assertIn('api("/plugins/reload"', script)
+        self.assertIn("/plugins/marketplace?q=", script)
+        self.assertIn("/plugins/updates", script)
+        self.assertIn('api("/plugins/marketplace/install"', script)
+        self.assertIn('api("/plugins/marketplace/fetch-bundle"', script)
+        self.assertIn('api("/plugins/marketplace/install-bundle"', script)
+        self.assertIn('api("/plugins/marketplace/update"', script)
+        self.assertIn("approved: true", script)
+        self.assertIn('setList("installed-plugins"', script)
+        self.assertIn('setList("plugin-marketplace"', script)
+        self.assertIn('setList("plugin-updates"', script)
+        self.assertIn("data-plugin-enable", script)
+        self.assertIn("data-plugin-disable", script)
+        self.assertIn("data-plugin-remove", script)
+        self.assertIn("data-plugin-marketplace-install", script)
+        self.assertIn("data-plugin-marketplace-fetch-bundle", script)
+        self.assertIn("data-plugin-marketplace-install-bundle", script)
+        self.assertIn("data-plugin-marketplace-update", script)
+        self.assertIn('document.getElementById("plugin-install-form").addEventListener("submit"', script)
+        self.assertIn('document.getElementById("plugin-marketplace-form").addEventListener("submit"', script)
+        self.assertIn('document.getElementById("plugin-marketplace").addEventListener("click"', script)
+        self.assertIn('document.getElementById("plugin-updates").addEventListener("click"', script)
+        self.assertIn('document.getElementById("installed-plugins").addEventListener("click"', script)
+        self.assertIn('api(`/plugins/${encodeURIComponent(pluginId)}/${action}`', script)
+        self.assertIn("renderPluginOutput", script)
+        self.assertNotIn("x.manifest", script)
+        self.assertNotIn("x.commands", script)
+        self.assertNotIn("x.secrets", script)
+
+    def test_web_remote_control_panel_exposes_scoped_pairing_lifecycle(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "src" / "aegis" / "web" / "static"
+        markup = (root / "index.html").read_text(encoding="utf-8")
+        script = (root / "app.js").read_text(encoding="utf-8")
+
+        self.assertIn('id="remote-control-form"', markup)
+        self.assertIn('id="remote-control-label"', markup)
+        self.assertIn('id="remote-control-session-id"', markup)
+        self.assertIn('id="remote-control-task-id"', markup)
+        self.assertIn('id="remote-control-actions"', markup)
+        self.assertIn('id="remote-control-ttl"', markup)
+        self.assertIn('id="remote-control-relay-form"', markup)
+        self.assertIn('id="remote-control-relay-url"', markup)
+        self.assertIn('id="remote-control-relay-pairing-id"', markup)
+        self.assertIn('id="remote-control-relay-secret"', markup)
+        self.assertIn('id="remote-control-relay-event"', markup)
+        self.assertIn('id="remote-control-relay-task-id"', markup)
+        self.assertIn('id="remote-control-relay-outbox-id"', markup)
+        self.assertIn('id="remote-control-push-target-id"', markup)
+        self.assertIn('id="remote-control-push-label"', markup)
+        self.assertIn('id="remote-control-push-provider"', markup)
+        self.assertIn('id="remote-control-push-secret"', markup)
+        self.assertIn('id="remote-control-device-secret"', markup)
+        self.assertIn('id="remote-control-apns-topic"', markup)
+        self.assertIn('id="remote-control-fcm-project"', markup)
+        self.assertIn('id="remote-control-relay-approved"', markup)
+        self.assertIn('id="remote-control-push-approved"', markup)
+        self.assertIn('id="remote-control-relay-dry-run"', markup)
+        self.assertIn('id="remote-control-relay-check"', markup)
+        self.assertIn('id="remote-control-directory"', markup)
+        self.assertIn('id="remote-control-relay-directory"', markup)
+        self.assertIn('id="remote-control-relay-notify"', markup)
+        self.assertIn('id="remote-control-push-register"', markup)
+        self.assertIn('id="remote-control-push-rotate"', markup)
+        self.assertIn('id="remote-control-push-disable"', markup)
+        self.assertIn('id="remote-control-native-push"', markup)
+        self.assertIn('id="remote-control-relay-outbox-refresh"', markup)
+        self.assertIn('id="remote-control-relay-retry"', markup)
+        self.assertIn('id="remote-control-relay-confirm"', markup)
+        self.assertIn('id="remote-control-relay-preview"', markup)
+        self.assertIn('id="remote-control-relay-apply"', markup)
+        self.assertIn('id="remote-control-relay-summary"', markup)
+        self.assertIn('id="remote-control-relay"', markup)
+        self.assertIn('id="remote-control-relay-outbox"', markup)
+        self.assertIn('id="remote-control-push-targets"', markup)
+        self.assertIn('id="remote-control-pairings"', markup)
+        self.assertIn('id="remote-control-output"', markup)
+        self.assertIn('api("/remote-control/status")', script)
+        self.assertIn('api("/remote-control/relay")', script)
+        self.assertIn('api("/remote-control/relay/outbox")', script)
+        self.assertIn('api("/remote-control/relay/directory"', script)
+        self.assertIn('api("/remote-control/relay/notify"', script)
+        self.assertIn('api("/remote-control/relay/confirm"', script)
+        self.assertIn('api("/remote-control/push/register"', script)
+        self.assertIn('api("/remote-control/push/rotate"', script)
+        self.assertIn('api("/remote-control/push/disable"', script)
+        self.assertIn('api("/remote-control/push"', script)
+        self.assertIn('api("/remote-control/relay/retry"', script)
+        self.assertIn('api("/remote-control/relay/pull"', script)
+        self.assertIn('api(`/remote-control/directory?pairing_id=${encodeURIComponent', script)
+        self.assertIn('api(`/remote-control/relay${relayUrl', script)
+        self.assertIn("relay_auth_secret", script)
+        self.assertIn("remoteControlRelayBody", script)
+        self.assertIn("renderRemoteControlRelayPull", script)
+        self.assertIn("pullRemoteControlRelayActions", script)
+        self.assertIn("remote-control-relay-event", script)
+        self.assertIn("remote-control-relay-task-id", script)
+        self.assertIn("remote-control-relay-outbox-id", script)
+        self.assertIn("remote-control-push-provider", script)
+        self.assertIn("remote-control-push-target-id", script)
+        self.assertIn("push_auth_secret", script)
+        self.assertIn("device_token_secret", script)
+        self.assertIn("fcm_project_id", script)
+        self.assertIn('setList("remote-control-push-targets"', script)
+        self.assertIn("remote-control-relay-dry-run", script)
+        self.assertIn('document.getElementById("remote-control-relay-preview").addEventListener("click"', script)
+        self.assertIn('document.getElementById("remote-control-relay-apply").addEventListener("click"', script)
+        self.assertIn("dry_run: dryRun", script)
+        self.assertIn('api("/remote-control/pair"', script)
+        self.assertIn('api("/remote-control/revoke"', script)
+        self.assertIn('setList("remote-control-relay"', script)
+        self.assertIn('setList("remote-control-relay-outbox"', script)
+        self.assertIn('setList("remote-control-pairings"', script)
+        self.assertIn("allowed_actions", script)
+        self.assertIn("expires_in_seconds", script)
+        self.assertIn("data-remote-control-revoke", script)
+        self.assertIn("data-remote-control-directory", script)
+        self.assertIn('document.getElementById("remote-control-form").addEventListener("submit"', script)
+        self.assertIn('document.getElementById("remote-control-relay-form").addEventListener("submit"', script)
+        self.assertIn('document.getElementById("remote-control-pairings").addEventListener("click"', script)
+        self.assertIn("renderRemoteControlRelay", script)
+        self.assertIn("renderRemoteControlOutbox", script)
+        self.assertIn("renderRemoteControlOutput", script)
+        self.assertNotIn("token_sha256", script)
 
     def test_web_channel_control_exposes_live_channel_sends(self) -> None:
         root = Path(__file__).resolve().parents[1] / "src" / "aegis" / "web" / "static"

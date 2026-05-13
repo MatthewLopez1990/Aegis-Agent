@@ -17,15 +17,27 @@ from aegis.agent.orchestrator import build_orchestrator
 from aegis.approvals.actions import approval_action_hints
 from aegis.approvals.models import ApprovalRequest
 from aegis.channels.base import ChannelResponse
+from aegis.hooks.manager import HOOK_EVENTS
+from aegis.kanban.manager import subagent_review_action_hints
 from aegis.memory.models import MemoryType
 from aegis.migration.openclaw import preview_hermes_memory_import, preview_openclaw_memory_import
 from aegis.product.capabilities import build_product_dashboard
 from aegis.research.harness import ResearchHarness
+from aegis.remote_control import (
+    REMOTE_CONTROL_TOKEN_HEADER,
+    RemoteControlPairingRegistry,
+    build_remote_control_directory,
+    build_remote_control_notification,
+    build_remote_control_task_events,
+    build_remote_control_task_status,
+)
 from aegis.scheduler.worker import ScheduleWorker
 from aegis.security.policy_engine import PolicyDecision, PolicyRequest
 from aegis.security.policy_profile import activate_due_policy_rollouts, apply_policy_bundle, apply_policy_bundle_text, diff_policy_bundle, diff_policy_bundle_text, import_policy_bundle_text, list_policy_bundles, list_policy_promotions, list_policy_rollouts, policy_profile_to_dict, promote_policy_bundle, rollback_policy_bundle, schedule_policy_bundle
 from aegis.security.taint import RiskLevel, Sensitivity, TrustClass
+from aegis.skills.signing import DEFAULT_SKILL_SIGNING_KEY
 from aegis.tools.executor import ToolExecutionError
+from aegis.tui.main import COMMAND_MENU_GROUPS, TOP_LEVEL_COMMANDS
 
 
 _TERMINAL_TASK_STATUSES = {"completed", "failed", "blocked", "cancelled"}
@@ -34,9 +46,12 @@ _LIVE_STREAM_TIMEOUT_MAX_SECONDS = 300.0
 _SAFE_ARTIFACT_CONTENT_TYPES = {
     ".csv": "text/csv; charset=utf-8",
     ".json": "application/json",
+    ".jpg": "image/jpeg",
+    ".mp4": "video/mp4",
     ".png": "image/png",
     ".txt": "text/plain; charset=utf-8",
     ".wav": "audio/wav",
+    ".webp": "image/webp",
 }
 
 
@@ -50,6 +65,115 @@ def _browser_artifact_dir(orchestrator: Any) -> Path:
 
 def _safe_artifact_content_type(path: Path) -> str:
     return _SAFE_ARTIFACT_CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
+
+
+def _hooks_payload(orchestrator: Any) -> dict[str, Any]:
+    return {
+        "status": "governed_local_ready",
+        "hooks": orchestrator.hooks.list_hooks(),
+        "supported_events": list(HOOK_EVENTS),
+        "allowed_executables": list(orchestrator.config.allowed_shell_commands),
+        "raw_secret_values_included": False,
+    }
+
+
+def _web_command_catalog(orchestrator: Any) -> dict[str, Any]:
+    command_rows: dict[str, dict[str, Any]] = {}
+    top_level = {command.replace("_", "-") for command in TOP_LEVEL_COMMANDS}
+    for group, commands in COMMAND_MENU_GROUPS:
+        for label, detail in commands:
+            for token in _command_label_tokens(label, top_level):
+                command_rows.setdefault(
+                    token,
+                    {
+                        "command": token,
+                        "label": f"/{token}",
+                        "detail": detail,
+                        "kind": "palette",
+                        "section": _command_group_section(group),
+                        "group": group.lower(),
+                        "source": "tui",
+                    },
+                )
+    for command in sorted(top_level):
+        command_rows.setdefault(
+            command,
+            {
+                "command": command,
+                "label": f"/{command}",
+                "detail": "TUI command available from the local governed runtime",
+                "kind": "palette",
+                "section": "settings",
+                "group": "all",
+                "source": "tui",
+            },
+        )
+    skill_rows: list[dict[str, Any]] = []
+    for skill in orchestrator.skills.list_public():
+        if not skill.get("enabled"):
+            continue
+        for command in _skill_slash_labels(str(skill.get("id") or "")):
+            skill_rows.append(
+                {
+                    "command": command,
+                    "label": f"/{command}",
+                    "detail": f"Skill: {skill.get('name') or skill.get('id')}",
+                    "kind": "palette",
+                    "section": "tools",
+                    "group": "skills",
+                    "source": "skill",
+                }
+            )
+    return {
+        "status": "command_catalog",
+        "mode": "read_only_navigation",
+        "commands": [*sorted(command_rows.values(), key=lambda row: str(row["command"])), *skill_rows],
+        "groups": [{"name": group.lower(), "label": group, "command_count": len(commands)} for group, commands in COMMAND_MENU_GROUPS],
+        "skill_command_count": len(skill_rows),
+        "generic_command_execution_enabled": False,
+        "raw_secret_values_included": False,
+    }
+
+
+def _command_label_tokens(label: str, top_level: set[str]) -> list[str]:
+    tokens: list[str] = []
+    for match in re.findall(r"[A-Za-z][A-Za-z0-9_.-]*", label):
+        token = match.replace("_", "-").lower()
+        if token in top_level and token not in tokens:
+            tokens.append(token)
+    return tokens
+
+
+def _command_group_section(group: str) -> str:
+    return {
+        "Operate": "activity",
+        "Govern": "security",
+        "Build": "models",
+        "Explore": "automation",
+    }.get(group, "settings")
+
+
+def _skill_slash_labels(skill_id: str) -> tuple[str, ...]:
+    normalized = re.sub(r"[^a-z0-9]+", "-", skill_id.lower()).strip("-")
+    labels = [normalized]
+    if skill_id and all(part.isalnum() or part in "._-" for part in skill_id):
+        labels.append(skill_id)
+    seen: list[str] = []
+    for label in labels:
+        if label and label not in seen:
+            seen.append(label)
+    return tuple(seen)
+
+
+def _plugins_payload(orchestrator: Any) -> dict[str, Any]:
+    return {
+        "status": "governed_local_ready",
+        "plugins": orchestrator.plugins.list_plugins(),
+        "skills": orchestrator.skills.list_public(),
+        "mcp_servers": orchestrator.mcp.list_servers(),
+        "hooks": orchestrator.hooks.list_hooks(),
+        "raw_secret_values_included": False,
+    }
 
 
 def _with_tool_artifact_url(orchestrator: Any, result: dict[str, Any]) -> dict[str, Any]:
@@ -95,6 +219,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
     api_token = secrets.token_urlsafe(32)
     allowed_hosts = _allowed_hosts(host, port)
     allowed_origins = _allowed_origins(host, port)
+    remote_control = RemoteControlPairingRegistry(orchestrator.config.data_dir / "remote_control_pairings.json")
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "AegisAgent/0.1"
@@ -140,6 +265,64 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 self._require_allowed_host()
                 self._json({"token": api_token})
                 return
+            if path == "/remote-control/status":
+                auth = self._authorize_remote_control_status()
+                if auth.get("auth_kind") == "remote_control":
+                    self._json({"status": "remote_pairing_active", "pairing": auth["pairing"], "token_header": REMOTE_CONTROL_TOKEN_HEADER})
+                else:
+                    self._json(remote_control.status())
+                return
+            if path == "/remote-control/directory":
+                auth = self._authorize_remote_control_status()
+                if auth.get("auth_kind") == "remote_control":
+                    pairing = auth["pairing"]
+                else:
+                    pairing_id = query.get("pairing_id", [None])[0]
+                    if not pairing_id:
+                        raise ValueError("pairing_id is required for local remote-control directory reads")
+                    pairing = remote_control.public_pairing(pairing_id)
+                self._json(
+                    build_remote_control_directory(
+                        pairing,
+                        store=orchestrator.store,
+                        limit=_limit(query, default=10),
+                    )
+                )
+                return
+            if path == "/remote-control/relay":
+                self._authorize_remote_control_status()
+                self._json(remote_control.relay_preflight(relay_url=query.get("relay_url", [None])[0]))
+                return
+            if path == "/remote-control/relay/outbox":
+                self._authorize_remote_control_status()
+                self._json(remote_control.relay_outbox(status=query.get("status", [None])[0], limit=_limit(query, default=20)))
+                return
+            if path == "/remote-control/push/targets":
+                self._authorize_read()
+                target_id = query.get("target_id", [None])[0]
+                if target_id:
+                    self._json(
+                        {
+                            "status": "native_push_target",
+                            "target": remote_control.native_push_target(target_id),
+                            "raw_secret_values_included": False,
+                        }
+                    )
+                else:
+                    self._json(remote_control.native_push_targets())
+                return
+            match_remote_task = re.fullmatch(r"/remote-control/tasks/([^/]+)", path)
+            if match_remote_task:
+                task_id = match_remote_task.group(1)
+                self._authorize_remote_control_action("status", task_id)
+                self._json(build_remote_control_task_status(orchestrator.status(task_id)))
+                return
+            match_remote_task_events = re.fullmatch(r"/remote-control/tasks/([^/]+)/events", path)
+            if match_remote_task_events:
+                task_id = match_remote_task_events.group(1)
+                self._authorize_remote_control_action("events", task_id)
+                self._json(build_remote_control_task_events(orchestrator.evidence.run_events(task_id)))
+                return
             self._authorize_read()
             if path.startswith("/tool-artifacts/"):
                 self._tool_artifact(path.removeprefix("/tool-artifacts/"))
@@ -149,6 +332,9 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 return
             if path == "/dashboard":
                 self._json(build_product_dashboard(orchestrator))
+                return
+            if path == "/commands":
+                self._json(_web_command_catalog(orchestrator))
                 return
             if path == "/connectors":
                 self._json({"connectors": orchestrator.connectors.list()})
@@ -177,6 +363,12 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
             if path == "/model-providers":
                 self._json({"providers": orchestrator.models.list_providers()})
                 return
+            if path == "/models/auth/targets":
+                self._json(orchestrator.models.auth_targets())
+                return
+            if path == "/models/auth/doctor":
+                self._json(orchestrator.models.auth_doctor())
+                return
             if path == "/model-usage":
                 self._json(orchestrator.models.usage_summary())
                 return
@@ -187,7 +379,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 self._json(_model_route_payload(orchestrator.models.route(identifier)))
                 return
             if path == "/tools":
-                self._json({"tools": orchestrator.tool_catalog.list()})
+                self._json({"tools": [*orchestrator.tool_catalog.list(), *orchestrator.mcp.virtual_tool_specs()]})
                 return
             if path == "/backends":
                 self._json({"backends": orchestrator.execution_backends.list()})
@@ -201,8 +393,20 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
             if path == "/skills":
                 self._json({"skills": orchestrator.skills.list_public()})
                 return
+            if path == "/plugins":
+                self._json(_plugins_payload(orchestrator))
+                return
+            if path == "/plugins/marketplace":
+                self._json(orchestrator.plugins.marketplace(query=query.get("q", [""])[0], catalog_path=query.get("catalog_path", [None])[0]))
+                return
+            if path == "/plugins/updates":
+                self._json(orchestrator.plugins.update_plan(catalog_path=query.get("catalog_path", [None])[0]))
+                return
             if path == "/mcp/servers":
                 self._json({"servers": orchestrator.mcp.list_servers()})
+                return
+            if path == "/hooks":
+                self._json(_hooks_payload(orchestrator))
                 return
             if path == "/schedules/due":
                 self._json({"schedules": orchestrator.schedules.due()})
@@ -368,6 +572,20 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
             if match_cards:
                 self._json({"cards": orchestrator.kanban.list_cards(match_cards.group(1))})
                 return
+            if path == "/subagents/status":
+                self._json(orchestrator.kanban.subagent_status(limit=_limit(query, default=20)))
+                return
+            if path == "/subagents/autonomy-preflight":
+                self._json(
+                    orchestrator.kanban.subagent_autonomy_preflight(
+                        actor=str(query.get("actor", ["api-operator"])[0]),
+                        limit=_limit(query, default=20),
+                    )
+                )
+                return
+            if path == "/subagents/profiles":
+                self._json({"profiles": orchestrator.kanban.list_subagent_profiles(), "subagents": orchestrator.kanban.subagent_status(limit=_limit(query, default=20))})
+                return
             match = re.fullmatch(r"/tasks/([^/]+)", path)
             if match:
                 self._json(orchestrator.status(match.group(1)))
@@ -391,12 +609,558 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
         def _do_POST(self) -> None:
             parsed = urlparse(self.path)
             path = parsed.path
-            if path != "/channels/webhook":
+            if path in {
+                "/remote-control/pair",
+                "/remote-control/revoke",
+                "/remote-control/relay",
+                "/remote-control/relay/pull",
+                "/remote-control/relay/directory",
+                "/remote-control/relay/notify",
+                "/remote-control/relay/confirm",
+                "/remote-control/push/register",
+                "/remote-control/push/disable",
+                "/remote-control/push/rotate",
+                "/remote-control/push",
+                "/remote-control/relay/retry",
+            }:
+                self._authorize_local_mutation()
+            elif path == "/remote-control/relay/action":
+                pass
+            elif re.fullmatch(r"/remote-control/tasks/[^/]+/(resume|pause|cancel)", path):
+                pass
+            elif path != "/channels/webhook":
                 self._authorize_mutation()
 
             if path == "/tasks":
                 payload = self._read_json()
                 self._json(orchestrator.submit_task(str(_required(payload, "request")), path=payload.get("path"), session_id=payload.get("session_id")))
+                return
+            if path == "/remote-control/pair":
+                payload = self._read_json()
+                result = remote_control.create_pairing(
+                    label=str(payload.get("label") or ""),
+                    session_id=_optional_str(payload, "session_id"),
+                    task_id=_optional_str(payload, "task_id"),
+                    allowed_actions=_optional_str_list(payload, "allowed_actions"),
+                    ttl_seconds=_optional_int(payload, "expires_in_seconds"),
+                    endpoint_host=host,
+                    endpoint_port=port,
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.pairing_created",
+                    {
+                        "pairing_id": result["pairing"]["id"],
+                        "label": result["pairing"]["label"],
+                        "session_id": result["pairing"].get("session_id"),
+                        "task_id": result["pairing"].get("task_id"),
+                        "allowed_actions": result["pairing"].get("allowed_actions"),
+                        "expires_at": result["pairing"]["expires_at"],
+                        "token_header": result["token_header"],
+                        "token_captured": False,
+                    },
+                )
+                self._json(result)
+                return
+            if path == "/remote-control/revoke":
+                payload = self._read_json()
+                relay_auth_token = None
+                if payload.get("relay_auth_secret") or payload.get("approved"):
+                    if not bool(payload.get("approved", False)):
+                        raise PermissionError("remote-control relay revocation requires explicit approval")
+                    relay_secret = str(_required(payload, "relay_auth_secret"))
+                    handle = orchestrator.secrets_broker.request_handle(
+                        name=relay_secret,
+                        requester="remote_control_relay",
+                        reason="propagate scoped remote-control relay revocation",
+                        scopes=("remote_control:relay",),
+                    )
+                    relay_auth_token = orchestrator.secrets_broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                result = remote_control.revoke(
+                    str(_required(payload, "pairing_id")),
+                    relay_auth_token=relay_auth_token,
+                    notify_relay=bool(relay_auth_token),
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.pairing_revoked",
+                    {
+                        "pairing_id": result["pairing"]["id"],
+                        "label": result["pairing"]["label"],
+                        "session_id": result["pairing"].get("session_id"),
+                        "token_captured": False,
+                        "relay_revocation_propagated": result["relay_revocation_propagated"],
+                    },
+                )
+                self._json(result)
+                return
+            if path == "/remote-control/relay":
+                payload = self._read_json()
+                if not bool(payload.get("approved", False)):
+                    raise PermissionError("remote-control relay registration requires explicit approval")
+                relay_secret = str(_required(payload, "relay_auth_secret"))
+                handle = orchestrator.secrets_broker.request_handle(
+                    name=relay_secret,
+                    requester="remote_control_relay",
+                    reason="register scoped remote-control pairing with relay",
+                    scopes=("remote_control:relay",),
+                )
+                relay_auth_token = orchestrator.secrets_broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                result = remote_control.relay_pairing(
+                    str(_required(payload, "pairing_id")),
+                    relay_url=str(_required(payload, "relay_url")),
+                    allowlist=orchestrator.config.network_allowlist,
+                    relay_auth_token=relay_auth_token,
+                    approved=True,
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.relay_registered",
+                    {
+                        "pairing_id": result["pairing"]["id"],
+                        "relay_target": result["relay_target"],
+                        "relay_auth_secret": "[REDACTED]",
+                        "pairing_token_relayed": result["pairing_token_relayed"],
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(result)
+                return
+            if path == "/remote-control/relay/pull":
+                payload = self._read_json()
+                relay_secret = str(_required(payload, "relay_auth_secret"))
+                handle = orchestrator.secrets_broker.request_handle(
+                    name=relay_secret,
+                    requester="remote_control_relay",
+                    reason="pull queued scoped remote-control relay actions",
+                    scopes=("remote_control:relay",),
+                )
+                relay_auth_token = orchestrator.secrets_broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                pulled = remote_control.pull_relay_actions(
+                    str(_required(payload, "pairing_id")),
+                    relay_auth_token=relay_auth_token,
+                    allowlist=orchestrator.config.network_allowlist,
+                    approved=bool(payload.get("approved", False)),
+                    limit=int(payload.get("limit", 10)),
+                )
+                dry_run = bool(payload.get("dry_run", False))
+                actor = f"remote-control-relay:{pulled['pairing'].get('label') or pulled['pairing']['id']}"
+                executed_actions = []
+                if not dry_run:
+                    for action_row in pulled["actions"]:
+                        if not action_row["accepted"]:
+                            continue
+                        result = _execute_remote_control_action(orchestrator, action_row, actor=actor)
+                        orchestrator.audit_logger.append(
+                            "remote_control.relay_action",
+                            {
+                                "pairing_id": pulled["pairing"]["id"],
+                                "relay_target": pulled["relay_target"],
+                                "task_id": action_row["task_id"],
+                                "action": action_row["action"],
+                                "actor": actor,
+                                "request_id": action_row.get("request_id"),
+                                "pairing_token_relayed": False,
+                                "relay_auth_token_captured": False,
+                                "raw_secret_values_included": False,
+                                "source": "api_pull",
+                            },
+                        )
+                        executed_actions.append(
+                            {
+                                "request_id": action_row.get("request_id"),
+                                "action": action_row["action"],
+                                "task_id": action_row["task_id"],
+                                "status": "executed",
+                                "result": result,
+                            }
+                        )
+                orchestrator.audit_logger.append(
+                    "remote_control.relay_actions_pulled",
+                    {
+                        "pairing_id": pulled["pairing"]["id"],
+                        "relay_target": pulled["relay_target"],
+                        "action_count": pulled["action_count"],
+                        "executable_action_count": pulled["executable_action_count"],
+                        "executed_action_count": len(executed_actions),
+                        "dry_run": dry_run,
+                        "pairing_token_relayed": False,
+                        "relay_auth_token_captured": False,
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(
+                    {
+                        **pulled,
+                        "mode": "relay_action_preview" if dry_run else "relay_action_apply",
+                        "dry_run": dry_run,
+                        "executed_action_count": len(executed_actions),
+                        "executed_actions": executed_actions,
+                    }
+                )
+                return
+            if path == "/remote-control/relay/directory":
+                payload = self._read_json()
+                relay_secret = str(_required(payload, "relay_auth_secret"))
+                handle = orchestrator.secrets_broker.request_handle(
+                    name=relay_secret,
+                    requester="remote_control_relay",
+                    reason="publish scoped remote-control directory to relay",
+                    scopes=("remote_control:relay",),
+                )
+                relay_auth_token = orchestrator.secrets_broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                pairing = remote_control.public_pairing(str(_required(payload, "pairing_id")))
+                directory = build_remote_control_directory(
+                    pairing,
+                    store=orchestrator.store,
+                    limit=int(payload.get("limit", 10)),
+                )
+                result = remote_control.publish_relay_directory(
+                    str(_required(payload, "pairing_id")),
+                    directory=directory,
+                    relay_auth_token=relay_auth_token,
+                    allowlist=orchestrator.config.network_allowlist,
+                    approved=bool(payload.get("approved", False)),
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.relay_directory_published",
+                    {
+                        "pairing_id": result["pairing"]["id"],
+                        "relay_target": result["relay_target"],
+                        "scope": result["directory_scope"].get("type"),
+                        "task_count": result["directory_task_count"],
+                        "pairing_token_relayed": False,
+                        "relay_auth_token_captured": False,
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(result)
+                return
+            if path == "/remote-control/relay/notify":
+                payload = self._read_json()
+                relay_secret = str(_required(payload, "relay_auth_secret"))
+                handle = orchestrator.secrets_broker.request_handle(
+                    name=relay_secret,
+                    requester="remote_control_relay",
+                    reason="publish scoped remote-control notification to relay",
+                    scopes=("remote_control:relay",),
+                )
+                relay_auth_token = orchestrator.secrets_broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                pairing = remote_control.public_pairing(str(_required(payload, "pairing_id")))
+                notification = build_remote_control_notification(
+                    pairing,
+                    store=orchestrator.store,
+                    event=str(payload.get("event") or "directory-updated"),
+                    task_id=str(payload["task_id"]) if payload.get("task_id") else None,
+                )
+                result = remote_control.publish_relay_notification(
+                    str(_required(payload, "pairing_id")),
+                    notification=notification,
+                    relay_auth_token=relay_auth_token,
+                    allowlist=orchestrator.config.network_allowlist,
+                    approved=bool(payload.get("approved", False)),
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.relay_notification_published",
+                    {
+                        "pairing_id": result["pairing"]["id"],
+                        "relay_target": result["relay_target"],
+                        "event": result["notification_event"],
+                        "task_id": result["notification"].get("task_id"),
+                        "pairing_token_relayed": False,
+                        "relay_auth_token_captured": False,
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(result)
+                return
+            if path == "/remote-control/push/register":
+                payload = self._read_json()
+                result = remote_control.register_native_push_target(
+                    label=str(payload.get("label") or "native push"),
+                    provider=str(_required(payload, "provider")),
+                    push_auth_secret=str(_required(payload, "push_auth_secret")),
+                    device_token_secret=str(_required(payload, "device_token_secret")),
+                    approved=bool(payload.get("approved", False)),
+                    apns_topic=str(payload["apns_topic"]) if payload.get("apns_topic") else None,
+                    fcm_project_id=str(payload["fcm_project_id"]) if payload.get("fcm_project_id") else None,
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.native_push_target_registered",
+                    {
+                        "target_id": result["target"]["id"],
+                        "provider": result["target"]["provider"],
+                        "push_auth_secret_captured": False,
+                        "device_token_secret_captured": False,
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(result)
+                return
+            if path == "/remote-control/push/disable":
+                payload = self._read_json()
+                result = remote_control.disable_native_push_target(
+                    str(_required(payload, "target_id")),
+                    approved=bool(payload.get("approved", False)),
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.native_push_target_disabled",
+                    {
+                        "target_id": result["target"]["id"],
+                        "provider": result["target"]["provider"],
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(result)
+                return
+            if path == "/remote-control/push/rotate":
+                payload = self._read_json()
+                result = remote_control.rotate_native_push_target(
+                    str(_required(payload, "target_id")),
+                    push_auth_secret=str(payload["push_auth_secret"]) if payload.get("push_auth_secret") else None,
+                    device_token_secret=str(payload["device_token_secret"]) if payload.get("device_token_secret") else None,
+                    apns_topic=str(payload["apns_topic"]) if payload.get("apns_topic") else None,
+                    fcm_project_id=str(payload["fcm_project_id"]) if payload.get("fcm_project_id") else None,
+                    approved=bool(payload.get("approved", False)),
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.native_push_target_rotated",
+                    {
+                        "target_id": result["target"]["id"],
+                        "provider": result["target"]["provider"],
+                        "rotated_fields": result["rotated_fields"],
+                        "push_auth_secret_captured": False,
+                        "device_token_secret_captured": False,
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(result)
+                return
+            if path == "/remote-control/push":
+                payload = self._read_json()
+                if not bool(payload.get("approved", False)):
+                    raise PermissionError("remote-control native push requires explicit approval")
+                target_id = str(payload["target_id"]) if payload.get("target_id") else None
+                if target_id:
+                    target_refs = remote_control.native_push_target_secret_refs(target_id)
+                    provider = str(target_refs["provider"])
+                    push_auth_secret = str(target_refs["push_auth_secret"])
+                    device_token_secret = str(target_refs["device_token_secret"])
+                    apns_topic = str(payload["apns_topic"]) if payload.get("apns_topic") else target_refs.get("apns_topic")
+                    fcm_project_id = str(payload["fcm_project_id"]) if payload.get("fcm_project_id") else target_refs.get("fcm_project_id")
+                else:
+                    provider = str(_required(payload, "provider"))
+                    push_auth_secret = str(_required(payload, "push_auth_secret"))
+                    device_token_secret = str(_required(payload, "device_token_secret"))
+                    apns_topic = str(payload["apns_topic"]) if payload.get("apns_topic") else None
+                    fcm_project_id = str(payload["fcm_project_id"]) if payload.get("fcm_project_id") else None
+                auth_handle = orchestrator.secrets_broker.request_handle(
+                    name=push_auth_secret,
+                    requester="remote_control_push",
+                    reason=f"publish scoped remote-control {provider} notification",
+                    scopes=("remote_control:push",),
+                )
+                device_handle = orchestrator.secrets_broker.request_handle(
+                    name=device_token_secret,
+                    requester="remote_control_push",
+                    reason=f"resolve brokered remote-control {provider} device token",
+                    scopes=("remote_control:push",),
+                )
+                push_auth_token = orchestrator.secrets_broker.resolve_for_authorized_tool(auth_handle, requester="remote_control_push")
+                device_token = orchestrator.secrets_broker.resolve_for_authorized_tool(device_handle, requester="remote_control_push")
+                pairing = remote_control.public_pairing(str(_required(payload, "pairing_id")))
+                notification = build_remote_control_notification(
+                    pairing,
+                    store=orchestrator.store,
+                    event=str(payload.get("event") or "directory-updated"),
+                    task_id=str(payload["task_id"]) if payload.get("task_id") else None,
+                )
+                result = remote_control.publish_native_push_notification(
+                    str(_required(payload, "pairing_id")),
+                    notification=notification,
+                    provider=provider,
+                    push_auth_token=push_auth_token,
+                    device_token=device_token,
+                    allowlist=orchestrator.config.network_allowlist,
+                    approved=True,
+                    apns_topic=apns_topic,
+                    fcm_project_id=fcm_project_id,
+                    target_id=target_id,
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.native_push_published",
+                    {
+                        "pairing_id": result["pairing"]["id"],
+                        "provider": result["provider"],
+                        "target_id": result.get("target_id"),
+                        "push_target": result["push_target"],
+                        "event": result["notification_event"],
+                        "task_id": result["notification"].get("task_id"),
+                        "pairing_token_relayed": False,
+                        "push_auth_token_captured": False,
+                        "raw_device_token_captured": False,
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(result)
+                return
+            if path == "/remote-control/relay/retry":
+                payload = self._read_json()
+                relay_secret = str(_required(payload, "relay_auth_secret"))
+                handle = orchestrator.secrets_broker.request_handle(
+                    name=relay_secret,
+                    requester="remote_control_relay",
+                    reason="retry scoped remote-control relay notification outbox",
+                    scopes=("remote_control:relay",),
+                )
+                relay_auth_token = orchestrator.secrets_broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                result = remote_control.retry_relay_notifications(
+                    str(_required(payload, "pairing_id")),
+                    relay_auth_token=relay_auth_token,
+                    allowlist=orchestrator.config.network_allowlist,
+                    approved=bool(payload.get("approved", False)),
+                    limit=int(payload.get("limit", 10)),
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.relay_notification_outbox_retried",
+                    {
+                        "pairing_id": result["pairing"]["id"],
+                        "relay_target": result["relay_target"],
+                        "attempted_count": result["attempted_count"],
+                        "acknowledged_count": result["acknowledged_count"],
+                        "failed_count": result["failed_count"],
+                        "pairing_token_relayed": False,
+                        "relay_auth_token_captured": False,
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(result)
+                return
+            if path == "/remote-control/relay/confirm":
+                payload = self._read_json()
+                relay_secret = str(_required(payload, "relay_auth_secret"))
+                handle = orchestrator.secrets_broker.request_handle(
+                    name=relay_secret,
+                    requester="remote_control_relay",
+                    reason="confirm scoped remote-control relay notification delivery",
+                    scopes=("remote_control:relay",),
+                )
+                relay_auth_token = orchestrator.secrets_broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                result = remote_control.confirm_relay_delivery(
+                    str(_required(payload, "pairing_id")),
+                    outbox_id=str(_required(payload, "outbox_id")),
+                    relay_auth_token=relay_auth_token,
+                    allowlist=orchestrator.config.network_allowlist,
+                    approved=bool(payload.get("approved", False)),
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.relay_delivery_confirmed",
+                    {
+                        "pairing_id": result["pairing"]["id"],
+                        "outbox_id": result["outbox_id"],
+                        "relay_target": result["relay_target"],
+                        "relay_acknowledged": result["relay_acknowledged"],
+                        "outbox_updated": result["outbox_updated"],
+                        "pairing_token_relayed": False,
+                        "relay_auth_token_captured": False,
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(result)
+                return
+            if path == "/remote-control/relay/action":
+                require_allowed_host(self.headers, allowed_hosts=allowed_hosts)
+                origin = self.headers.get("Origin")
+                if origin and origin not in allowed_origins:
+                    raise PermissionError("origin is not allowed")
+                payload = self._read_json()
+                action = str(_required(payload, "action")).strip().lower().replace("-", "_")
+                task_id = str(_required(payload, "task_id"))
+                relay_auth = remote_control.authorize_relay_action(
+                    str(_required(payload, "pairing_id")),
+                    _authorization_bearer(self.headers),
+                    action=action,
+                    task_id=task_id,
+                )
+                if relay_auth is None:
+                    raise PermissionError("missing or invalid remote-control relay authorization")
+                actor = f"remote-control-relay:{relay_auth['pairing'].get('label') or relay_auth['pairing']['id']}"
+                if action == "status":
+                    result = build_remote_control_task_status(orchestrator.status(task_id))
+                elif action == "events":
+                    result = build_remote_control_task_events(orchestrator.evidence.run_events(task_id))
+                elif action == "resume":
+                    orchestrator.resume_task(task_id, session_id=payload.get("session_id"), actor=actor)
+                    result = build_remote_control_task_status(orchestrator.status(task_id))
+                elif action == "pause":
+                    orchestrator.pause_task(task_id, session_id=payload.get("session_id"), actor=actor, reason=str(payload.get("reason", "remote control relay pause")))
+                    result = build_remote_control_task_status(orchestrator.status(task_id))
+                elif action == "cancel":
+                    orchestrator.cancel_task(task_id, session_id=payload.get("session_id"), actor=actor, reason=str(payload.get("reason", "remote control relay cancel")))
+                    result = build_remote_control_task_status(orchestrator.status(task_id))
+                else:
+                    raise PermissionError("remote-control relay action is not allowed")
+                orchestrator.audit_logger.append(
+                    "remote_control.relay_action",
+                    {
+                        "pairing_id": relay_auth["pairing"]["id"],
+                        "relay_target": relay_auth["relay_target"],
+                        "task_id": task_id,
+                        "action": action,
+                        "actor": actor,
+                        "pairing_token_relayed": False,
+                        "relay_auth_token_captured": False,
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(
+                    {
+                        "status": "relay_action_proxied",
+                        "mode": "approved_relay_action_proxy",
+                        "action": action,
+                        "task_id": task_id,
+                        "pairing": relay_auth["pairing"],
+                        "relay_target": relay_auth["relay_target"],
+                        "pairing_token_relayed": False,
+                        "relay_auth_token_captured": False,
+                        "raw_secret_values_included": False,
+                        "result": result,
+                    }
+                )
+                return
+            match_remote_action = re.fullmatch(r"/remote-control/tasks/([^/]+)/(resume|pause|cancel)", path)
+            if match_remote_action:
+                task_id = match_remote_action.group(1)
+                action = match_remote_action.group(2)
+                auth = self._authorize_remote_control_action(action, task_id)
+                payload = self._read_json()
+                actor = f"remote-control:{auth['pairing'].get('label') or auth['pairing']['id']}"
+                if action == "resume":
+                    orchestrator.resume_task(task_id, session_id=payload.get("session_id"), actor=actor)
+                elif action == "pause":
+                    orchestrator.pause_task(task_id, session_id=payload.get("session_id"), actor=actor, reason=str(payload.get("reason", "remote control pause")))
+                else:
+                    orchestrator.cancel_task(task_id, session_id=payload.get("session_id"), actor=actor, reason=str(payload.get("reason", "remote control cancel")))
+                result = build_remote_control_task_status(orchestrator.status(task_id))
+                orchestrator.audit_logger.append(
+                    "remote_control.task_action",
+                    {
+                        "pairing_id": auth["pairing"]["id"],
+                        "task_id": task_id,
+                        "action": action,
+                        "actor": actor,
+                        "token_captured": False,
+                    },
+                )
+                self._json(result)
                 return
             if path == "/sessions":
                 payload = self._read_json()
@@ -450,11 +1214,40 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 return
             if path == "/models/auth/login":
                 payload = self._read_json()
+                provider = str(_required(payload, "provider"))
+                method = str(payload.get("method") or "api_key").replace("-", "_")
+                if method in {"subscription", "oauth", "oauth_device", "cloud_identity"}:
+                    if payload.get("api_key"):
+                        raise ValueError(f"{method} login does not accept API key input")
+                    auth = orchestrator.models.login_provider_external(provider, method=method, verify_external=bool(payload.get("verify_external")) and not bool(payload.get("run_external")))
+                    if payload.get("run_external"):
+                        auth = {
+                            **auth,
+                            "status": "external_login_requires_local_terminal",
+                            "api_run_external_allowed": False,
+                            "external_login_attempted": False,
+                            "external_login_error": "interactive provider login must be run from the local CLI or TUI",
+                        }
+                else:
+                    auth = orchestrator.models.login_provider(provider, str(_required(payload, "api_key")))
                 self._json(
                     {
                         "ok": True,
-                        "auth": orchestrator.models.login_provider(str(_required(payload, "provider")), str(_required(payload, "api_key"))),
+                        "auth": auth,
                     }
+                )
+                return
+            if path == "/models/auth/readiness-packet":
+                payload = self._read_json()
+                self._json(orchestrator.models.create_auth_readiness_packet(actor=str(payload.get("actor", "api-operator"))))
+                return
+            if path == "/models/auth/verify-readiness-packet":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.models.verify_auth_readiness_packet(
+                        str(_required(payload, "packet")),
+                        actor=str(payload.get("actor", "api-operator")),
+                    )
                 )
                 return
             if path == "/models/auth/logout":
@@ -538,9 +1331,31 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     )
                 )
                 return
+            if path == "/browser/dom-snapshot":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.browser.dom_snapshot(
+                        session_id=str(_required(payload, "session_id")),
+                        selector=str(payload["selector"]) if payload.get("selector") else None,
+                    )
+                )
+                return
             if path == "/browser/inspect":
                 payload = self._read_json()
                 self._json(orchestrator.browser.inspect(session_id=str(_required(payload, "session_id"))))
+                return
+            if path == "/browser/live-activation-packet":
+                payload = self._read_json()
+                self._json(orchestrator.browser.create_live_activation_packet(actor=str(payload.get("actor", "api-operator"))))
+                return
+            if path == "/browser/verify-activation-packet":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.browser.verify_live_activation_packet(
+                        str(_required(payload, "packet")),
+                        actor=str(payload.get("actor", "api-operator")),
+                    )
+                )
                 return
             if path == "/browser/screenshot":
                 payload = self._read_json()
@@ -583,6 +1398,22 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     self._json(approval["response"])
                     return
                 self._json(orchestrator.browser.fill(session_id=session_id, fields=fields, approved=True))
+                return
+            if path == "/browser/submit":
+                payload = self._read_json()
+                session_id = str(_required(payload, "session_id"))
+                selector = str(payload["selector"]) if payload.get("selector") else None
+                approval = _browser_action_approval(
+                    orchestrator,
+                    action="submit",
+                    session_id=session_id,
+                    selector=selector,
+                    approval_id=payload.get("approval_id"),
+                )
+                if not approval["approved"]:
+                    self._json(approval["response"])
+                    return
+                self._json(orchestrator.browser.submit(session_id=session_id, selector=selector, approved=True))
                 return
             if path == "/channels/render":
                 payload = self._read_json()
@@ -904,21 +1735,181 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 orchestrator.memory.delete_memory(match_memory_delete.group(1))
                 self._json({"ok": True, "deleted": match_memory_delete.group(1)})
                 return
+            if path == "/hooks":
+                payload = self._read_json()
+                command = payload.get("command")
+                if not isinstance(command, list):
+                    raise ValueError("command must be a JSON array")
+                self._json(
+                    {
+                        "hook": orchestrator.hooks.register_hook(
+                            event=str(_required(payload, "event")),
+                            command=[str(part) for part in command],
+                            hook_id=_optional_str(payload, "id"),
+                            enabled=bool(payload.get("enabled", False)),
+                            approval_required=bool(payload.get("approval_required", True)),
+                            timeout_seconds=int(payload.get("timeout_seconds", 10)),
+                            max_output_bytes=int(payload.get("max_output_bytes", 4096)),
+                        )
+                    }
+                )
+                return
+            if path == "/hooks/run":
+                payload = self._read_json()
+                context = payload.get("context", {})
+                if not isinstance(context, dict):
+                    raise ValueError("context must be a JSON object")
+                self._json(orchestrator.hooks.run_event(str(_required(payload, "event")), context=context, approved=bool(payload.get("approved", False))))
+                return
+            match_hook_action = re.fullmatch(r"/hooks/([^/]+)/(enable|disable|remove)", path)
+            if match_hook_action:
+                hook_id = unquote(match_hook_action.group(1))
+                action = match_hook_action.group(2)
+                if action == "enable":
+                    self._json({"hook": orchestrator.hooks.set_enabled(hook_id, True)})
+                elif action == "disable":
+                    self._json({"hook": orchestrator.hooks.set_enabled(hook_id, False)})
+                else:
+                    self._json({"hook": orchestrator.hooks.remove_hook(hook_id), "removed": True})
+                return
+            if path == "/plugins":
+                payload = self._read_json()
+                self._json(
+                    {
+                        "plugin": orchestrator.plugins.install_plugin(
+                            str(_required(payload, "manifest_path")),
+                            enable=bool(payload.get("enable", False)),
+                            unsigned_local=bool(payload.get("unsigned_local", False)),
+                        )
+                    }
+                )
+                return
+            if path == "/plugins/reload":
+                self._json({"ok": True, **_plugins_payload(orchestrator)})
+                return
+            if path == "/plugins/marketplace/install":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.plugins.install_marketplace_plugin(
+                        str(_required(payload, "plugin_id")),
+                        catalog_path=_optional_str(payload, "catalog_path"),
+                        allowlist=orchestrator.config.network_allowlist,
+                        enable=bool(payload.get("enable", False)),
+                    )
+                )
+                return
+            if path == "/plugins/marketplace/update":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.plugins.update_marketplace_plugin(
+                        str(_required(payload, "plugin_id")),
+                        approved=bool(payload.get("approved", False)),
+                        catalog_path=_optional_str(payload, "catalog_path"),
+                        allowlist=orchestrator.config.network_allowlist,
+                        enable=payload.get("enable") if "enable" in payload else None,
+                        force=bool(payload.get("force", False)),
+                    )
+                )
+                return
+            if path == "/plugins/marketplace/prepare-update":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.plugins.prepare_marketplace_update(
+                        str(_required(payload, "plugin_id")),
+                        catalog_path=_optional_str(payload, "catalog_path"),
+                        allowlist=orchestrator.config.network_allowlist,
+                        force=bool(payload.get("force", False)),
+                    )
+                )
+                return
+            if path == "/plugins/marketplace/apply-prepared-update":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.plugins.apply_prepared_marketplace_update(
+                        str(_required(payload, "candidate_id")),
+                        approved=bool(payload.get("approved", False)),
+                        enable=payload.get("enable") if "enable" in payload else None,
+                    )
+                )
+                return
+            if path == "/plugins/marketplace/fetch-bundle":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.plugins.fetch_marketplace_bundle(
+                        str(_required(payload, "plugin_id")),
+                        catalog_path=_optional_str(payload, "catalog_path"),
+                        allowlist=orchestrator.config.network_allowlist,
+                        key_name=str(payload.get("key_name") or DEFAULT_SKILL_SIGNING_KEY),
+                    )
+                )
+                return
+            if path == "/plugins/marketplace/install-bundle":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.plugins.install_marketplace_bundle(
+                        str(_required(payload, "plugin_id")),
+                        catalog_path=_optional_str(payload, "catalog_path"),
+                        allowlist=orchestrator.config.network_allowlist,
+                        key_name=str(payload.get("key_name") or DEFAULT_SKILL_SIGNING_KEY),
+                        enable=bool(payload.get("enable", False)),
+                    )
+                )
+                return
+            match_plugin_action = re.fullmatch(r"/plugins/([^/]+)/(enable|disable|remove)", path)
+            if match_plugin_action:
+                plugin_id = unquote(match_plugin_action.group(1))
+                action = match_plugin_action.group(2)
+                if action == "enable":
+                    self._json(orchestrator.plugins.enable_plugin(plugin_id))
+                elif action == "disable":
+                    self._json(orchestrator.plugins.disable_plugin(plugin_id))
+                else:
+                    self._json(orchestrator.plugins.remove_plugin(plugin_id))
+                return
             if path == "/mcp/servers":
                 payload = self._read_json()
-                tools = payload.get("allowed_tools", payload.get("tools", []))
+                tools = payload.get("allowed_tools", payload.get("tools", payload.get("include_tools", [])))
                 if not isinstance(tools, list):
                     raise ValueError("allowed_tools must be a JSON array")
+                exclude_tools = payload.get("exclude_tools", [])
+                if not isinstance(exclude_tools, list):
+                    raise ValueError("exclude_tools must be a JSON array")
+                if bool(payload.get("discover", False)):
+                    self._json(
+                        orchestrator.mcp.register_discovered_server(
+                            name=str(_required(payload, "name")),
+                            command=str(_required(payload, "command")),
+                            allowed_executables=orchestrator.config.allowed_shell_commands,
+                            transport=str(payload.get("transport") or "stdio"),
+                            network_allowlist=orchestrator.config.network_allowlist,
+                            auth_token_secret=_optional_str(payload, "token_secret"),
+                            include_tools=tuple(str(tool) for tool in tools),
+                            exclude_tools=tuple(str(tool) for tool in exclude_tools),
+                            include_resources=bool(payload.get("resources", True)),
+                            include_prompts=bool(payload.get("prompts", True)),
+                            enabled=bool(payload.get("enabled", False)),
+                            approval_required=bool(payload.get("approval_required", True)),
+                            metadata={"source": "web-console"},
+                        )
+                    )
+                    return
                 self._json(
                     orchestrator.mcp.register_server(
                         name=str(_required(payload, "name")),
                         command=str(_required(payload, "command")),
                         allowed_tools=tuple(str(tool) for tool in tools),
+                        transport=str(payload.get("transport") or "stdio"),
                         enabled=bool(payload.get("enabled", False)),
                         approval_required=bool(payload.get("approval_required", True)),
                         metadata={"source": "web-console"},
+                        network_allowlist=orchestrator.config.network_allowlist,
+                        auth_token_secret=_optional_str(payload, "token_secret"),
                     )
                 )
+                return
+            if path == "/mcp/auth/token":
+                payload = self._read_json()
+                self._json(orchestrator.mcp.configure_auth_token(str(_required(payload, "server")), token_secret=str(_required(payload, "token_secret"))))
                 return
             if path == "/mcp/call":
                 payload = self._read_json()
@@ -1067,6 +2058,93 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 lane = str(_required(payload, "lane"))
                 orchestrator.kanban.move_card(match_move.group(1), lane)
                 self._json({"ok": True, "card_id": match_move.group(1), "lane": lane})
+                return
+            if path == "/subagents/delegate":
+                payload = self._read_json()
+                params = {"role": str(_required(payload, "role")), "task": str(_required(payload, "task"))}
+                approval = _tool_run_approval(orchestrator, name="subagent_delegate", params=params, approval_id=payload.get("approval_id"))
+                if approval["approved"]:
+                    result = orchestrator.tools.execute(
+                        "subagent_delegate",
+                        params,
+                        approved=True,
+                        admin_approved=bool(approval.get("admin_approved")),
+                        task_id=str(payload.get("task_id")) if payload.get("task_id") else None,
+                    )
+                    self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
+                    return
+                result = orchestrator.tools.execute("subagent_delegate", params, approved=False, task_id=str(payload.get("task_id")) if payload.get("task_id") else None)
+                if result.get("status") == "approval_required":
+                    self._json({**result, **approval["response"], "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
+                    return
+                self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
+                return
+            if path == "/subagents/handoff":
+                payload = self._read_json()
+                result = orchestrator.kanban.move_subagent_delegation(
+                    str(_required(payload, "card_id")),
+                    str(_required(payload, "lane")),
+                    actor=str(payload.get("actor", "api-operator")),
+                    reason=str(payload.get("reason", "")),
+                )
+                self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
+                return
+            if path == "/subagents/run":
+                payload = self._read_json()
+                result = orchestrator.kanban.run_subagent_delegation(
+                    str(_required(payload, "card_id")),
+                    actor=str(payload.get("actor", "api-operator")),
+                    approved=payload.get("approved") is True,
+                )
+                self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
+                return
+            if path == "/subagents/review-packet":
+                payload = self._read_json()
+                result = orchestrator.kanban.create_subagent_review_packet(
+                    str(_required(payload, "card_id")),
+                    actor=str(payload.get("actor", "api-operator")),
+                )
+                self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)), include_previews=False)})
+                return
+            if path == "/subagents/verify-packet":
+                payload = self._read_json()
+                result = orchestrator.kanban.verify_subagent_review_packet(
+                    str(_required(payload, "packet")),
+                    actor=str(payload.get("actor", "api-operator")),
+                )
+                self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)), include_previews=False)})
+                return
+            if path == "/subagents/run-batch":
+                payload = self._read_json()
+                result = orchestrator.kanban.run_subagent_batch(
+                    card_ids=_optional_str_list(payload, "card_ids") or (),
+                    actor=str(payload.get("actor", "api-operator")),
+                    approved=payload.get("approved") is True,
+                    limit=int(payload.get("run_limit", payload.get("limit", 5))),
+                )
+                self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
+                return
+            if path == "/subagents/profiles":
+                payload = self._read_json()
+                result = orchestrator.kanban.create_subagent_profile(
+                    str(_required(payload, "name")),
+                    role=str(payload["role"]) if payload.get("role") else None,
+                    tool_allowlist=_optional_str_list(payload, "tool_allowlist") or (),
+                    max_parallel_cards=int(payload.get("max_parallel_cards", 1)),
+                    recursive_depth_limit=int(payload.get("recursive_depth_limit", 0)),
+                    max_tool_calls=int(payload.get("max_tool_calls", 0)),
+                    max_runtime_seconds=int(payload.get("max_runtime_seconds", 0)),
+                    network_policy=str(payload.get("network_policy", "disabled")),
+                    workspace_scope=str(payload.get("workspace_scope", "current_workspace")),
+                    actor=str(payload.get("actor", "api-operator")),
+                )
+                self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
+                return
+            match_profile_disable = re.fullmatch(r"/subagents/profiles/([^/]+)/disable", path)
+            if match_profile_disable:
+                payload = self._read_json()
+                result = orchestrator.kanban.disable_subagent_profile(unquote(match_profile_disable.group(1)), actor=str(payload.get("actor", "api-operator")))
+                self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
                 return
             match_approval_approve = re.fullmatch(r"/approvals/([^/]+)/approve", path)
             if match_approval_approve:
@@ -1248,6 +2326,23 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
         def _authorize_read(self) -> None:
             authorize_local_request(self.headers, token=api_token, allowed_hosts=allowed_hosts, allowed_origins=allowed_origins)
 
+        def _authorize_local_mutation(self) -> None:
+            authorize_local_request(self.headers, token=api_token, allowed_hosts=allowed_hosts, allowed_origins=allowed_origins)
+
+        def _authorize_remote_control_status(self) -> dict[str, Any]:
+            return authorize_remote_control_request(self.headers, token=api_token, allowed_hosts=allowed_hosts, allowed_origins=allowed_origins, remote_control=remote_control)
+
+        def _authorize_remote_control_action(self, action: str, task_id: str) -> dict[str, Any]:
+            return authorize_remote_control_request(
+                self.headers,
+                token=api_token,
+                allowed_hosts=allowed_hosts,
+                allowed_origins=allowed_origins,
+                remote_control=remote_control,
+                action=action,
+                task_id=task_id,
+            )
+
         def _require_allowed_host(self) -> None:
             require_allowed_host(self.headers, allowed_hosts=allowed_hosts)
 
@@ -1428,13 +2523,13 @@ def _task_summary(row: dict[str, Any], *, orchestrator: Any | None = None) -> di
     receipt_json = decoded.pop("receipt_json", None)
     decoded["receipt"] = json.loads(receipt_json) if receipt_json else None
     decoded["session"] = None
-    decoded["action_hints"] = _task_action_hints(decoded.get("id"), decoded.get("session_id"), status=decoded.get("status"))
+    decoded["action_hints"] = _task_action_hints(decoded.get("id"), decoded.get("session_id"), status=decoded.get("status"), checkpoint=decoded["checkpoint"])
     if orchestrator is not None and decoded.get("session_id"):
         decoded["session"] = orchestrator.status(str(decoded["id"])).get("session")
     return decoded
 
 
-def _task_action_hints(task_id: Any, session_id: Any, *, status: Any) -> list[dict[str, str]]:
+def _task_action_hints(task_id: Any, session_id: Any, *, status: Any, checkpoint: dict[str, Any] | None = None) -> list[dict[str, str]]:
     hints: list[dict[str, str]] = []
     task_id_text = str(task_id) if task_id else ""
     if session_id:
@@ -1447,6 +2542,8 @@ def _task_action_hints(task_id: Any, session_id: Any, *, status: Any) -> list[di
         )
     if task_id_text and status in {"waiting_approval", "paused"}:
         hints.append({"label": "Resume", "command": f"task resume {task_id_text}", "action": "task_resume", "task_id": task_id_text})
+    if isinstance(checkpoint, dict):
+        hints.extend(subagent_review_action_hints(checkpoint))
     return hints
 
 
@@ -1508,6 +2605,7 @@ def _model_route_payload(route: Any) -> dict[str, Any]:
         "model": route.model,
         "fallbacks": list(route.fallback_identifiers),
         "secret_handle_id": route.secret_handle_id,
+        "auth_method": route.auth_method,
     }
 
 
@@ -1636,6 +2734,21 @@ def _optional_str(payload: dict[str, Any], key: str) -> str | None:
     return None if value is None else str(value)
 
 
+def _optional_int(payload: dict[str, Any], key: str) -> int | None:
+    if key not in payload or payload[key] is None:
+        return None
+    return int(payload[key])
+
+
+def _optional_str_list(payload: dict[str, Any], key: str) -> list[str] | None:
+    if key not in payload or payload[key] is None:
+        return None
+    value = payload[key]
+    if not isinstance(value, list):
+        raise ValueError(f"{key} must be a JSON array")
+    return [str(item) for item in value]
+
+
 def _exception_detail(exc: KeyError) -> str:
     if exc.args:
         return str(exc.args[0])
@@ -1661,14 +2774,21 @@ def _tool_run_approval(orchestrator: Any, *, name: str, params: dict[str, Any], 
         decision = approval.get("decision") or {}
         return {"approved": True, "admin_approved": bool(decision.get("admin"))}
 
-    spec = orchestrator.tool_catalog.get(name)
-    if not spec.approval_required:
+    virtual_mcp_tool = orchestrator.mcp.resolve_virtual_tool(name)
+    if virtual_mcp_tool is not None:
+        approval_required = bool(virtual_mcp_tool.get("approval_required", True))
+        risk_level = RiskLevel.HIGH
+    else:
+        spec = orchestrator.tool_catalog.get(name)
+        approval_required = spec.approval_required
+        risk_level = spec.risk_level
+    if not approval_required:
         return {"approved": False, "response": {}}
     approval = orchestrator.approvals.request_approval(
         ApprovalRequest(
             task_id=None,
             reason=f"tool {name} requires approval",
-            risk_level=spec.risk_level,
+            risk_level=risk_level,
             payload=payload,
         )
     )
@@ -1704,7 +2824,7 @@ def _browser_action_approval(
     fields: dict[str, Any] | None = None,
     approval_id: Any = None,
 ) -> dict[str, Any]:
-    payload = _browser_action_payload(action=action, session_id=session_id, selector=selector, fields=fields)
+    payload = orchestrator.browser.action_approval_payload(action=action, session_id=session_id, selector=selector, fields=fields)
     if approval_id:
         approval = orchestrator.approvals.get(str(approval_id))
         if _approved_payload(approval) != payload:
@@ -1734,20 +2854,6 @@ def _browser_action_approval(
             "reason": f"browser {action} requires approval",
         },
     }
-
-
-def _browser_action_payload(*, action: str, session_id: str, selector: str | None = None, fields: dict[str, Any] | None = None) -> dict[str, Any]:
-    payload: dict[str, Any] = {"kind": "browser_action", "action": action, "session_id": session_id}
-    if action == "click":
-        payload["selector"] = selector or ""
-        return payload
-    if action == "fill":
-        safe_fields = {str(key): str(value) for key, value in (fields or {}).items()}
-        encoded = json.dumps(safe_fields, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        payload["field_selectors"] = sorted(safe_fields)
-        payload["fields_sha256"] = hashlib.sha256(encoded).hexdigest()
-        return payload
-    raise ValueError(f"unsupported browser approval action: {action}")
 
 
 def _mcp_call_approval(
@@ -1788,6 +2894,27 @@ def _mcp_call_approval(
             "reason": f"MCP tool {server}.{tool} requires approval",
         },
     }
+
+
+def _execute_remote_control_action(orchestrator: Any, action_row: dict[str, Any], *, actor: str) -> dict[str, Any]:
+    task_id = str(action_row["task_id"])
+    action = str(action_row["action"])
+    session_id = action_row.get("session_id")
+    reason = str(action_row.get("reason") or "")
+    if action == "status":
+        return build_remote_control_task_status(orchestrator.status(task_id))
+    if action == "events":
+        return build_remote_control_task_events(orchestrator.evidence.run_events(task_id))
+    if action == "resume":
+        orchestrator.resume_task(task_id, session_id=session_id, actor=actor)
+        return build_remote_control_task_status(orchestrator.status(task_id))
+    if action == "pause":
+        orchestrator.pause_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay pause")
+        return build_remote_control_task_status(orchestrator.status(task_id))
+    if action == "cancel":
+        orchestrator.cancel_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay cancel")
+        return build_remote_control_task_status(orchestrator.status(task_id))
+    raise PermissionError("remote-control relay action is not allowed")
 
 
 def _mcp_call_payload(*, server: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1840,3 +2967,37 @@ def authorize_local_request(headers: Any, *, token: str, allowed_hosts: set[str]
     supplied = headers.get("X-Aegis-Token", "")
     if not secrets.compare_digest(supplied, token):
         raise PermissionError("missing or invalid local API token")
+
+
+def _authorization_bearer(headers: Any) -> str:
+    value = str(headers.get("Authorization", "") or "")
+    if not value.lower().startswith("bearer "):
+        return ""
+    return value[7:].strip()
+
+
+def authorize_remote_control_request(
+    headers: Any,
+    *,
+    token: str,
+    allowed_hosts: set[str],
+    allowed_origins: set[str],
+    remote_control: RemoteControlPairingRegistry,
+    action: str | None = None,
+    task_id: str | None = None,
+) -> dict[str, Any]:
+    require_allowed_host(headers, allowed_hosts=allowed_hosts)
+    origin = headers.get("Origin")
+    if origin and origin not in allowed_origins:
+        raise PermissionError("origin is not allowed")
+    supplied = headers.get("X-Aegis-Token", "")
+    if secrets.compare_digest(supplied, token):
+        return {"auth_kind": "local_api"}
+    remote_token = headers.get(REMOTE_CONTROL_TOKEN_HEADER, "")
+    if action and task_id:
+        pairing = remote_control.authorize_action(remote_token, action=action, task_id=task_id)
+    else:
+        pairing = remote_control.authorize(remote_token)
+    if pairing is not None:
+        return {"auth_kind": "remote_control", "pairing": pairing}
+    raise PermissionError("missing or invalid remote-control token")

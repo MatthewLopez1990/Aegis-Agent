@@ -78,6 +78,12 @@ class SkillRegistry:
         self.store.set_skill_enabled(skill_id, False)
         self.audit_logger.append("skill.disabled", {"skill_id": skill_id})
 
+    def remove(self, skill_id: str) -> dict[str, Any]:
+        manifest, enabled = self.get(skill_id)
+        self.store.delete_skill(skill_id)
+        self.audit_logger.append("skill.removed", {"skill_id": skill_id, "was_enabled": enabled, "risk_level": manifest.risk_level.value})
+        return {"skill_id": skill_id, "was_enabled": enabled, "risk_level": manifest.risk_level.value}
+
     def enable(self, skill_id: str, *, approved: bool = False, admin_approved: bool = False) -> None:
         manifest, _ = self.get(skill_id)
         if manifest.risk_level == RiskLevel.HIGH and not approved:

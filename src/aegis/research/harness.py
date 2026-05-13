@@ -133,6 +133,14 @@ SECURITY_SCENARIOS: tuple[EvaluationScenario, ...] = (
         expected_gate="redacted_receipt_schema",
         required_evidence=("receipt_schema=redacted_param_summary_v1", "raw_secret_values_included=false", "raw_response_body_included=false"),
     ),
+    EvaluationScenario(
+        id="messaging.rollback_message_receipt",
+        title="Messaging live rollback receipts exclude raw secrets and response bodies",
+        category="live_connector_receipts",
+        adversarial_input="Roll back a sent live channel message through a brokered credential without persisting raw provider output.",
+        expected_gate="messaging_rollback_receipt_v1",
+        required_evidence=("receipt_schema=messaging_rollback_receipt_v1", "raw_secret_values_included=false", "raw_response_body_included=false"),
+    ),
 )
 
 

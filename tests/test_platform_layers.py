@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import stat
 import tempfile
@@ -52,6 +53,9 @@ class PlatformLayerTests(unittest.TestCase):
 
             models = orchestrator.models.list_models()
             self.assertTrue(any(model["identifier"] == "openai/gpt-4o" for model in models))
+            self.assertTrue(any(model["identifier"] == "deepseek/deepseek-v4-flash" for model in models))
+            self.assertTrue(any(model["identifier"] == "xai/grok-4" for model in models))
+            self.assertTrue(any(model["identifier"] == "qwen/qwen-plus" for model in models))
             route = orchestrator.models.route("alias/smart")
             self.assertEqual(route.identifier, "openrouter/anthropic/claude-sonnet-4.6")
             usage = orchestrator.models.record_usage(identifier="openai/gpt-4o", input_tokens=1000, output_tokens=500)
@@ -68,6 +72,8 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(implementation_statuses["vision_analyze"], "local_metadata")
             self.assertEqual(implementation_statuses["image_generate"], "allowlisted_live_or_local")
             self.assertEqual(implementation_statuses["video_analyze"], "local_metadata")
+            self.assertEqual(implementation_statuses["video_generate"], "allowlisted_live_or_local")
+            self.assertEqual(implementation_statuses["voice_transcribe"], "allowlisted_live_or_local")
             self.assertEqual(implementation_statuses["browser_screenshot"], "local_png_snapshot")
             self.assertEqual(implementation_statuses["tts"], "allowlisted_live_or_local")
             self.assertEqual(implementation_statuses["voice_record"], "local_wav_silence")
@@ -85,6 +91,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(implementation_statuses["contacts_write"], "allowlisted_live_write_or_mock_connector")
             self.assertEqual(implementation_statuses["service_ticket_read"], "allowlisted_live_read_or_mock_connector")
             self.assertEqual(implementation_statuses["service_ticket_write"], "allowlisted_live_write_or_mock_connector")
+            self.assertEqual(implementation_statuses["message_send"], "allowlisted_live_write_or_mock_connector")
             self.assertEqual(implementation_statuses["weather"], "allowlisted_live_or_local")
             self.assertEqual(implementation_statuses["maps_geocode"], "allowlisted_live_or_local")
             self.assertEqual(implementation_statuses["image_edit"], "allowlisted_live_or_local")
@@ -100,6 +107,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertTrue(implemented["service_ticket_read"])
             self.assertTrue(implemented["service_ticket_write"])
             self.assertTrue(implemented["image_generate"])
+            self.assertTrue(implemented["video_generate"])
             self.assertTrue(implemented["tts"])
             self.assertFalse(implemented["package_install"])
             self.assertTrue(implemented["voice_record"])
@@ -147,7 +155,7 @@ class PlatformLayerTests(unittest.TestCase):
                     {
                         "url": "https://example.com",
                         "domain": "example.com",
-                        "content": '<html><title>Example</title><a id="docs-link" href="/docs">Docs</a><button id="submit">Submit</button><input name="email" placeholder="Email"><table id="main" class="results"><tr><th>Name</th><th>Status</th></tr><tr><td>Aegis</td><td>Ready</td></tr></table><table id="secondary"><tr><td>Other</td></tr></table></html>',
+                        "content": '<html><title>Example</title><main id="profile" class="card"><a id="docs-link" href="/docs">Docs</a><button id="submit">Submit</button><input name="email" placeholder="Email"><span data-testid="owner">Owner token=abc123</span><script>window.secret="abc123"</script><table id="main" class="results"><tr><th>Name</th><th>Status</th></tr><tr><td>Aegis</td><td>Ready</td></tr></table><table id="secondary"><tr><td>Other</td></tr></table></main></html>',
                     },
                 ),
             ):
@@ -169,6 +177,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(browser_inspect["interactive_element_count"], 3)
             self.assertEqual(browser_inspect["selector_inventory"][0]["selector"], "#docs-link")
             self.assertEqual(browser_inspect["selector_inventory"][0]["action"], "navigate")
+            self.assertEqual(browser_inspect["selector_inventory"][0]["supported_virtual_actions"], ["navigate"])
             self.assertEqual(browser_inspect["selector_inventory"][1]["supported_virtual_actions"], ["click"])
             self.assertEqual(browser_inspect["selector_inventory"][2]["supported_virtual_actions"], ["fill"])
             self.assertTrue(browser_inspect["selector_inventory"][2]["requires_approval"])
@@ -195,6 +204,33 @@ class PlatformLayerTests(unittest.TestCase):
             browser_extract = orchestrator.tools.execute("browser", {"action": "extract", "session_id": browser_session_id}, approved=True)
             self.assertTrue(browser_extract["ok"])
             self.assertEqual(browser_extract["mode"], "http_content_no_js")
+            browser_dom = orchestrator.tools.execute("browser_dom_snapshot", {"session_id": browser_session_id})
+            self.assertTrue(browser_dom["ok"])
+            self.assertEqual(browser_dom["mode"], "http_content_static_dom_no_js")
+            self.assertEqual(browser_dom["selector_status"], "not_provided")
+            self.assertGreater(browser_dom["node_count"], 0)
+            self.assertGreater(browser_dom["total_node_count"], 0)
+            self.assertFalse(browser_dom["javascript_executed"])
+            self.assertFalse(browser_dom["cookies_persisted"])
+            self.assertFalse(browser_dom["local_storage_persisted"])
+            self.assertFalse(browser_dom["dom_mutated"])
+            self.assertFalse(browser_dom["real_selector_events_dispatched"])
+            self.assertEqual(browser_dom["evidence"]["action"], "dom_snapshot")
+            self.assertEqual(browser_dom["evidence"]["mode"], "http_content_static_dom_no_js")
+            self.assertNotIn("abc123", json.dumps(browser_dom))
+            browser_dom_filtered = orchestrator.tools.execute("browser", {"action": "dom_snapshot", "session_id": browser_session_id, "selector": "#profile"}, approved=True)
+            self.assertEqual(browser_dom_filtered["selector_status"], "matched")
+            self.assertGreater(browser_dom_filtered["node_count"], 1)
+            self.assertEqual(browser_dom_filtered["dom"][0]["tag"], "main")
+            self.assertEqual(browser_dom_filtered["dom"][0]["attrs"]["id"], "profile")
+            self.assertEqual(browser_dom_filtered["dom"][0]["attrs"]["class"], "card")
+            self.assertNotIn("abc123", json.dumps(browser_dom_filtered))
+            browser_dom_missing = orchestrator.tools.execute("browser_dom_snapshot", {"session_id": browser_session_id, "selector": "#missing"})
+            self.assertEqual(browser_dom_missing["selector_status"], "no_match")
+            self.assertEqual(browser_dom_missing["node_count"], 0)
+            browser_dom_unsupported = orchestrator.tools.execute("browser_dom_snapshot", {"session_id": browser_session_id, "selector": "main table"})
+            self.assertEqual(browser_dom_unsupported["selector_status"], "unsupported")
+            self.assertEqual(browser_dom_unsupported["node_count"], 0)
             browser_table = orchestrator.tools.execute("browser_extract_table", {"session_id": browser_session_id, "selector": "#main"})
             self.assertTrue(browser_table["ok"])
             self.assertEqual(browser_table["selector_status"], "matched")
@@ -290,9 +326,30 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(browser_fill["evidence"]["action"], "fill")
             self.assertEqual(browser_fill["evidence"]["form_field_count"], 1)
             self.assertRegex(browser_fill["evidence"]["content_sha256_after"], r"^[0-9a-f]{64}$")
+            browser_static_fill = orchestrator.tools.execute(
+                "browser_fill",
+                {"session_id": browser_session_id, "fields": {'input[name="email"]': "local@example.test"}},
+                approved=True,
+            )
+            self.assertTrue(browser_static_fill["ok"])
+            self.assertEqual(browser_static_fill["mode"], "static_dom_form_fill_no_js")
+            self.assertTrue(browser_static_fill["dom_mutated"])
+            self.assertTrue(browser_static_fill["static_dom_mutated"])
+            self.assertFalse(browser_static_fill["real_page_mutated"])
+            self.assertEqual(browser_static_fill["mutated_selectors"], ['input[name="email"]'])
+            self.assertEqual(browser_static_fill["unmatched_selectors"], ["#token"])
+            self.assertEqual(browser_static_fill["evidence"]["mode"], "static_dom_form_fill_no_js")
+            self.assertTrue(browser_static_fill["evidence"]["content_changed"])
+            self.assertTrue(browser_static_fill["evidence"]["static_dom_mutated"])
+            self.assertFalse(browser_static_fill["evidence"]["real_page_mutated"])
+            self.assertEqual(browser_static_fill["evidence"]["form_field_count"], 2)
+            browser_email_dom = orchestrator.tools.execute("browser_dom_snapshot", {"session_id": browser_session_id, "selector": 'input[name="email"]'})
+            self.assertEqual(browser_email_dom["selector_status"], "matched")
+            self.assertEqual(browser_email_dom["dom"][0]["attrs"]["value"], "local@example.test")
             browser_state_extract = orchestrator.tools.execute("browser", {"action": "extract", "session_id": browser_session_id}, approved=True)
             self.assertIn("clicked #submit", browser_state_extract["text"])
             self.assertIn("field #token = [REDACTED_VALUE]", browser_state_extract["text"])
+            self.assertIn('field input[name="email"] = local@example.test', browser_state_extract["text"])
             persisted_browser_state = data_dir / "browser" / "sessions.json"
             self.assertTrue(persisted_browser_state.exists())
             self.assertNotIn("abc123", persisted_browser_state.read_text(encoding="utf-8"))
@@ -304,6 +361,9 @@ class PlatformLayerTests(unittest.TestCase):
             reloaded_extract = reloaded_orchestrator.tools.execute("browser", {"action": "extract", "session_id": browser_session_id}, approved=True)
             self.assertIn("clicked #submit", reloaded_extract["text"])
             self.assertIn("field #token = [REDACTED_VALUE]", reloaded_extract["text"])
+            self.assertIn('field input[name="email"] = local@example.test', reloaded_extract["text"])
+            reloaded_email_dom = reloaded_orchestrator.tools.execute("browser_dom_snapshot", {"session_id": browser_session_id, "selector": 'input[name="email"]'})
+            self.assertEqual(reloaded_email_dom["dom"][0]["attrs"]["value"], "local@example.test")
             reloaded_table = reloaded_orchestrator.tools.execute("browser_extract_table", {"session_id": browser_session_id, "selector": "#main"})
             self.assertEqual(reloaded_table["selector_status"], "matched")
             self.assertEqual(reloaded_table["rows"][1], ["Aegis", "Ready"])
@@ -355,10 +415,15 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(Path(generated_image["metadata_path"]).stat().st_mode), 0o600)
             self.assertEqual(stat.S_IMODE(Path(generated_image["asset_path"]).parent.stat().st_mode), 0o700)
             self.assertEqual(generated_metadata["artifact_receipt"]["artifact_sha256"], generated_image["artifact_sha256"])
+            self.assertEqual(generated_metadata["sandbox_receipt"]["receipt_schema"], "media_sandbox_profile_v1")
+            self.assertEqual(generated_metadata["sandbox_receipt"]["profile_version"], 1)
             self.assertEqual(generated_metadata["sandbox_receipt"]["sandbox_profile"], "local_artifact_worker_subprocess_no_provider")
+            self.assertEqual(generated_metadata["sandbox_receipt"]["sandbox_profile_id"], "local_artifact_worker_subprocess_no_provider_v1")
             self.assertEqual(generated_metadata["sandbox_receipt"]["worker_process"], "subprocess")
             self.assertTrue(generated_metadata["sandbox_receipt"]["minimal_environment"])
             self.assertTrue(generated_metadata["sandbox_receipt"]["stdin_payload_only"])
+            self.assertEqual(generated_metadata["sandbox_receipt"]["profile_boundaries"]["network"], "none")
+            self.assertFalse(generated_metadata["sandbox_receipt"]["profile_boundaries"]["devices"]["microphone"])
             self.assertTrue(generated_metadata["sandbox_receipt"]["os_resource_limits"])
             self.assertTrue(generated_metadata["sandbox_receipt"]["process_session_isolated"])
             self.assertFalse(generated_metadata["sandbox_receipt"]["ambient_workspace_read"])
@@ -475,6 +540,20 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(approved_email_draft["draft_id"], "mock-draft_email")
             email_send = orchestrator.tools.execute("email_send", {"message": {"subject": "Hello"}}, approved=True)
             self.assertEqual(email_send["status"], "sent")
+            message_send = orchestrator.tools.execute("message_send", {"message": {"text": "Hello", "channel": "general"}})
+            self.assertEqual(message_send["status"], "approval_required")
+            approved_message_send = orchestrator.tools.execute("message_send", {"message": {"text": "Hello", "channel": "general"}}, approved=True)
+            self.assertTrue(approved_message_send["ok"])
+            self.assertEqual(approved_message_send["status"], "sent")
+            self.assertEqual(approved_message_send["message_id"], "mock-send_message")
+            approved_message_rollback = orchestrator.tools.execute(
+                "message_send",
+                {"operation": "rollback", "message": {"message_id": "msg-1", "channel": "general"}},
+                approved=True,
+            )
+            self.assertTrue(approved_message_rollback["ok"])
+            self.assertEqual(approved_message_rollback["operation"], "rollback_message")
+            self.assertEqual(approved_message_rollback["status"], "rolled_back")
             calendar = orchestrator.tools.execute("calendar_read", {"range": "today"})
             calendar_write = orchestrator.tools.execute("calendar_write", {"event": {"subject": "Planning"}})
             self.assertEqual(calendar_write["status"], "approval_required")
@@ -625,6 +704,99 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertTrue(live_pr["data"]["draft"])
             self.assertEqual(live_pr["data"]["base_ref"], "main")
             self.assertEqual(github_pr_read.call_args.args[0].params["url"], "https://api.github.com/repos/example/aegis/pulls/8")
+            with patch.object(
+                orchestrator.connectors.get("http"),
+                "read",
+                return_value=ConnectorResult(
+                    "http",
+                    "read",
+                    True,
+                    {
+                        "url": "https://api.github.com/repos/example/aegis/pulls/8/comments",
+                        "domain": "api.github.com",
+                        "content": '[{"id":101,"path":"src/aegis/agent.py","line":42,"side":"RIGHT","html_url":"https://github.com/example/aegis/pull/8#discussion_r101","user":{"login":"reviewer"},"body":"Please handle revocation."}]',
+                    },
+                ),
+            ) as github_pr_comments_read:
+                live_pr_comments = orchestrator.tools.execute(
+                    "github_pr",
+                    {"operation": "comments", "provider_url": "https://api.github.com/repos/example/aegis/pulls/8/comments"},
+                    approved=True,
+                )
+            self.assertTrue(live_pr_comments["ok"])
+            self.assertEqual(live_pr_comments["operation"], "read_pull_request_comments")
+            self.assertEqual(live_pr_comments["mode"], "allowlisted_live_read")
+            self.assertEqual(live_pr_comments["data"]["comments"][0]["path"], "src/aegis/agent.py")
+            self.assertEqual(github_pr_comments_read.call_args.args[0].params["url"], "https://api.github.com/repos/example/aegis/pulls/8/comments")
+            pr_autofix_plan = orchestrator.tools.execute("github_pr", {"operation": "autofix_plan"}, approved=True)
+            self.assertEqual(pr_autofix_plan["status"], "autofix_plan_ready")
+            self.assertEqual(pr_autofix_plan["operation"], "pr_autofix_plan")
+            self.assertFalse(pr_autofix_plan["auto_apply"])
+            self.assertFalse(pr_autofix_plan["provider_writes_performed"])
+            self.assertEqual(pr_autofix_plan["action_items"][0]["path"], "src/aegis/example.py")
+            pending_pr_autofix_response = orchestrator.tools.execute(
+                "github_pr",
+                {"operation": "autofix_response", "action_items": pr_autofix_plan["action_items"]},
+            )
+            self.assertEqual(pending_pr_autofix_response["status"], "approval_required")
+            self.assertEqual(pending_pr_autofix_response["tool"], "github_pr")
+            pr_autofix_response = orchestrator.tools.execute(
+                "github_pr",
+                {"operation": "autofix_response", "action_items": pr_autofix_plan["action_items"]},
+                approved=True,
+            )
+            self.assertTrue(pr_autofix_response["ok"])
+            self.assertEqual(pr_autofix_response["operation"], "pr_autofix_provider_response")
+            self.assertEqual(pr_autofix_response["status"], "autofix_response_recorded")
+            self.assertTrue(pr_autofix_response["mock_write_recorded"])
+            self.assertFalse(pr_autofix_response["provider_writes_performed"])
+            self.assertFalse(pr_autofix_response["raw_secret_values_included"])
+            self.assertIn("body", pr_autofix_response["accepted"]["param_keys"])
+            review_target = root / "src" / "aegis" / "example.py"
+            review_target.parent.mkdir(parents=True, exist_ok=True)
+            review_target.write_text("before review\n", encoding="utf-8")
+            review_patch = "--- a/src/aegis/example.py\n+++ b/src/aegis/example.py\n@@ -1 +1 @@\n-before review\n+after review\n"
+            pending_pr_autofix_patch = orchestrator.tools.execute(
+                "github_pr",
+                {"operation": "autofix_apply", "autofix_plan": pr_autofix_plan, "patch": review_patch},
+            )
+            self.assertEqual(pending_pr_autofix_patch["status"], "approval_required")
+            self.assertEqual(review_target.read_text(encoding="utf-8"), "before review\n")
+            pr_autofix_patch = orchestrator.tools.execute(
+                "github_pr",
+                {"operation": "autofix_apply", "autofix_plan": pr_autofix_plan, "patch": review_patch},
+                approved=True,
+            )
+            self.assertTrue(pr_autofix_patch["ok"])
+            self.assertEqual(pr_autofix_patch["operation"], "pr_autofix_local_patch_application")
+            self.assertEqual(pr_autofix_patch["connector"], "github")
+            self.assertEqual(pr_autofix_patch["status"], "autofix_patch_applied")
+            self.assertEqual(pr_autofix_patch["changed_files"], ["src/aegis/example.py"])
+            self.assertEqual(pr_autofix_patch["linked_comment_ids"], [101])
+            self.assertFalse(pr_autofix_patch["provider_writes_performed"])
+            self.assertFalse(pr_autofix_patch["auto_generated_patch"])
+            self.assertEqual(review_target.read_text(encoding="utf-8"), "after review\n")
+            with patch.object(
+                orchestrator.connectors.get("http"),
+                "read",
+                return_value=ConnectorResult(
+                    "http",
+                    "read",
+                    True,
+                    {
+                        "url": "https://api.github.com/repos/example/aegis/pulls/8/comments",
+                        "domain": "api.github.com",
+                        "content": '[{"id":102,"path":"src/aegis/relay.py","line":7,"user":{"login":"reviewer"},"body":"Please add a revocation test."}]',
+                    },
+                ),
+            ):
+                live_pr_autofix_plan = orchestrator.tools.execute(
+                    "github_pr",
+                    {"operation": "autofix_plan", "provider_url": "https://api.github.com/repos/example/aegis/pulls/8/comments"},
+                    approved=True,
+                )
+            self.assertEqual(live_pr_autofix_plan["status"], "autofix_plan_ready")
+            self.assertEqual(live_pr_autofix_plan["action_items"][0]["recommended_action"], "add_or_update_test_coverage")
             gitlab_issue = orchestrator.tools.execute("gitlab_issue", {"operation": "create", "title": "Track GitLab parity"})
             self.assertEqual(gitlab_issue["status"], "approval_required")
             approved_gitlab_issue = orchestrator.tools.execute("gitlab_issue", {"operation": "create", "title": "Track GitLab parity"}, approved=True)
@@ -782,6 +954,10 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertFalse(unsupported_translation["ok"])
             self.assertEqual(unsupported_translation["mode"], "local_glossary")
             self.assertIn("Discussed launch.", orchestrator.tools.execute("meeting_summary", {"transcript": "Discussed launch. Assigned tasks."})["summary"])
+            profile = orchestrator.kanban.create_subagent_profile("Researcher", tool_allowlist=["web_search"], max_parallel_cards=1)
+            self.assertTrue(profile["ok"])
+            self.assertEqual(profile["profile"]["id"], "researcher")
+            self.assertFalse(profile["profile"]["autonomous_runtime"])
             delegate = orchestrator.tools.execute("subagent_delegate", {"role": "Researcher", "task": "Compare browser automation gaps."})
             self.assertEqual(delegate["status"], "approval_required")
             approved_delegate = orchestrator.tools.execute(
@@ -797,6 +973,119 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(delegation_cards[0]["lane"], "ready")
             self.assertEqual(delegation_cards[0]["task_id"], "parent-task")
             self.assertEqual(delegation_cards[0]["metadata"]["delegation_type"], "subagent")
+            self.assertEqual(delegation_cards[0]["metadata"]["profile_id"], "researcher")
+            self.assertEqual(delegation_cards[0]["metadata"]["profile_snapshot"]["tool_allowlist"], ["web_search"])
+            self.assertTrue(delegation_cards[0]["metadata"]["budget_enforced"])
+            self.assertEqual(delegation_cards[0]["metadata"]["budget_snapshot"]["max_parallel_cards"], 1)
+            self.assertEqual(delegation_cards[0]["metadata"]["budget_snapshot"]["recursive_depth_limit"], 0)
+            self.assertTrue(delegation_cards[0]["metadata"]["instructions_tainted"])
+            self.assertEqual(delegation_cards[0]["metadata"]["handoff_receipts_recorded"], 1)
+            self.assertFalse(delegation_cards[0]["metadata"]["raw_instruction_forwarded_to_model"])
+            with self.assertRaises(executor_module.ToolExecutionError):
+                orchestrator.tools.execute("subagent_delegate", {"role": "Researcher", "task": "Open a second parallel card."}, approved=True)
+            subagent_status = orchestrator.kanban.subagent_status()
+            self.assertEqual(subagent_status["status"], "delegation_queue_ready")
+            self.assertEqual(subagent_status["execution_mode"], "durable_card_queue")
+            self.assertFalse(subagent_status["autonomous_runtime"])
+            self.assertEqual(subagent_status["ready_cards"], 1)
+            self.assertEqual(subagent_status["open_cards"], 1)
+            self.assertEqual(subagent_status["active_roles"], ["Researcher"])
+            self.assertEqual(subagent_status["cards"][0]["id"], approved_delegate["card_id"])
+            self.assertTrue(subagent_status["cards"][0]["instructions_tainted"])
+            self.assertIn("handoff_receipts", subagent_status["implemented_controls"])
+            self.assertIn("agent_profile_lifecycle", subagent_status["implemented_controls"])
+            self.assertIn("recursive_budget_limits", subagent_status["implemented_controls"])
+            self.assertIn("autonomy_preflight_receipts", subagent_status["implemented_controls"])
+            self.assertNotIn("handoff_receipts", subagent_status["remaining_depth_work"])
+            self.assertNotIn("agent_profile_lifecycle", subagent_status["remaining_depth_work"])
+            self.assertNotIn("recursive_budget_limits", subagent_status["remaining_depth_work"])
+            self.assertFalse(subagent_status["cards"][0]["raw_instruction_forwarded_to_model"])
+            self.assertFalse(subagent_status["raw_instruction_included"])
+            autonomy_preflight = orchestrator.kanban.subagent_autonomy_preflight(actor="operator")
+            self.assertFalse(autonomy_preflight["ok"])
+            self.assertEqual(autonomy_preflight["receipt"]["receipt_schema"], "aegis.subagent.autonomy_preflight.v1")
+            self.assertFalse(autonomy_preflight["receipt"]["autonomous_runtime"])
+            self.assertFalse(autonomy_preflight["receipt"]["model_invocation_performed"])
+            self.assertIn("autonomous_loop_isolation", autonomy_preflight["receipt"]["missing_controls"])
+            self.assertIn("tool_call_sandbox_denial", autonomy_preflight["receipt"]["verification_gates"])
+            self.assertNotIn("Compare browser automation gaps", json.dumps(autonomy_preflight, sort_keys=True))
+            handoff = orchestrator.kanban.move_subagent_delegation(
+                approved_delegate["card_id"],
+                "in_progress",
+                actor="operator",
+                reason="do not store this raw reason",
+            )
+            self.assertTrue(handoff["ok"])
+            self.assertEqual(handoff["receipt"]["from_lane"], "ready")
+            self.assertEqual(handoff["receipt"]["to_lane"], "in_progress")
+            self.assertTrue(handoff["receipt"]["reason_included"])
+            self.assertFalse(handoff["receipt"]["raw_reason_included"])
+            self.assertFalse(handoff["receipt"]["raw_instruction_included"])
+            subagent_status = orchestrator.kanban.subagent_status()
+            self.assertEqual(subagent_status["in_progress_cards"], 1)
+            self.assertEqual(subagent_status["cards"][0]["handoff_receipt"], "subagent.handoff_recorded")
+            self.assertEqual(subagent_status["cards"][0]["handoff_receipts_recorded"], 2)
+            self.assertIn("isolated_parallel_runtime", subagent_status["implemented_controls"])
+            run_gated = orchestrator.kanban.run_subagent_delegation(approved_delegate["card_id"])
+            self.assertEqual(run_gated["status"], "approval_required")
+            self.assertFalse(run_gated["autonomous_runtime"])
+            run = orchestrator.kanban.run_subagent_delegation(approved_delegate["card_id"], approved=True, actor="operator")
+            self.assertTrue(run["ok"])
+            self.assertEqual(run["status"], "completed")
+            self.assertEqual(run["lane"], "review")
+            self.assertEqual(run["receipt"]["worker_process"], "python_isolated_subprocess")
+            self.assertEqual(run["receipt"]["worker_result"]["network_access"], "disabled")
+            self.assertFalse(run["receipt"]["worker_result"]["model_invocation"])
+            self.assertFalse(run["receipt"]["worker_result"]["raw_instruction_included"])
+            self.assertFalse(run["receipt"]["raw_instruction_forwarded_to_model"])
+            self.assertEqual(run["review_receipt"]["receipt_schema"], "aegis.subagent.review_binding.v1")
+            self.assertEqual(run["review_receipt"]["parent_task_id"], "parent-task")
+            self.assertFalse(run["review_receipt"]["parent_task_exists"])
+            self.assertFalse(run["review_receipt"]["raw_worker_output_included"])
+            self.assertIn("parent_bound_review_receipts", orchestrator.kanban.subagent_status()["implemented_controls"])
+            subagent_status = orchestrator.kanban.subagent_status()
+            self.assertEqual(subagent_status["review_cards"], 1)
+            self.assertNotIn("isolated_parallel_runtime", subagent_status["remaining_depth_work"])
+            self.assertTrue(subagent_status["cards"][0]["isolated_parallel_runtime"])
+            self.assertEqual(subagent_status["cards"][0]["subagent_runs_recorded"], 1)
+            self.assertEqual(subagent_status["cards"][0]["review_status"], "awaiting_operator_review")
+            self.assertEqual(subagent_status["cards"][0]["parent_review_receipt"]["receipt_schema"], "aegis.subagent.review_binding.v1")
+            self.assertFalse(subagent_status["cards"][0]["raw_worker_output_included"])
+            self.assertFalse(subagent_status["cards"][0]["last_worker_result"]["raw_instruction_forwarded_to_model"])
+            review_packet = orchestrator.kanban.create_subagent_review_packet(approved_delegate["card_id"], actor="operator")
+            self.assertTrue(review_packet["ok"])
+            self.assertEqual(review_packet["packet"]["packet_schema"], "aegis.subagent.model_review_packet.v1")
+            self.assertEqual(review_packet["receipt"]["receipt_schema"], "aegis.subagent.model_review_packet.v1")
+            self.assertTrue(review_packet["packet"]["controls"]["model_ready"])
+            self.assertFalse(review_packet["packet"]["controls"]["raw_instruction_included"])
+            self.assertFalse(review_packet["packet"]["controls"]["raw_worker_output_included"])
+            self.assertFalse(review_packet["packet"]["controls"]["autonomous_runtime"])
+            packet_path = Path(review_packet["receipt"]["artifact"])
+            checksum_path = Path(review_packet["receipt"]["checksum"])
+            self.assertTrue(packet_path.exists())
+            self.assertTrue(checksum_path.exists())
+            self.assertEqual(stat.S_IMODE(packet_path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(checksum_path.stat().st_mode), 0o600)
+            self.assertEqual(review_packet["receipt"]["artifact_sha256"], checksum_path.read_text(encoding="utf-8").strip())
+            packet_text = packet_path.read_text(encoding="utf-8")
+            packet_response = json.dumps(review_packet, sort_keys=True)
+            self.assertIn('"instruction_sha256"', packet_text)
+            self.assertNotIn("Compare browser automation gaps", packet_text)
+            self.assertNotIn("Isolated subagent work packet prepared", packet_text)
+            self.assertNotIn("Compare browser automation gaps", packet_response)
+            self.assertNotIn("Isolated subagent work packet prepared", packet_response)
+            verified_packet = orchestrator.kanban.verify_subagent_review_packet(str(packet_path), actor="operator")
+            self.assertTrue(verified_packet["ok"])
+            self.assertEqual(verified_packet["receipt"]["receipt_schema"], "aegis.subagent.model_review_packet_verification.v1")
+            self.assertTrue(verified_packet["receipt"]["checksum_matches"])
+            self.assertTrue(verified_packet["receipt"]["packet_integrity_ok"])
+            self.assertEqual(verified_packet["packet"]["card_id"], approved_delegate["card_id"])
+            self.assertNotIn("Compare browser automation gaps", json.dumps(verified_packet, sort_keys=True))
+            subagent_status = orchestrator.kanban.subagent_status()
+            self.assertIn("model_ready_review_packets", subagent_status["implemented_controls"])
+            self.assertEqual(subagent_status["cards"][0]["review_packets_recorded"], 1)
+            self.assertTrue(subagent_status["cards"][0]["model_ready_review_packet_available"])
+            self.assertEqual(subagent_status["cards"][0]["review_packet"]["receipt_schema"], "aegis.subagent.model_review_packet.v1")
             kanban_tool = orchestrator.tools.execute("kanban_create", {"title": "Review connector parity", "description": "Track remaining stubs"}, approved=True, task_id="parent-task")
             self.assertTrue(kanban_tool["ok"])
             self.assertEqual(orchestrator.kanban.list_cards(kanban_tool["board_id"])[0]["title"], "Review connector parity")
@@ -937,14 +1226,59 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertTrue(any(group["name"] == "Session continuity" and group["state"] == "durable" for group in dashboard["capability_groups"]))
             self.assertTrue(any(target["platform"] == "Hermes Agent" for target in dashboard["competitive_targets"]))
             self.assertTrue(any("session resume continuity" in target["covered"] for target in dashboard["competitive_targets"] if target["platform"] == "Hermes Agent"))
+            self.assertTrue(any("model-ready subagent review packets" in target["covered"] for target in dashboard["competitive_targets"] if target["platform"] == "Hermes Agent"))
+            self.assertTrue(any(target["platform"] == "Claude Code" for target in dashboard["competitive_targets"]))
+            self.assertTrue(any("remote-control readiness" in target["covered"] for target in dashboard["competitive_targets"] if target["platform"] == "Claude Code"))
+            self.assertTrue(any("model-ready subagent review packets" in target["covered"] for target in dashboard["competitive_targets"] if target["platform"] == "Claude Code"))
             self.assertTrue(any("session-bound run visibility" in target["covered"] for target in dashboard["competitive_targets"] if target["platform"] == "OpenClaw"))
             self.assertTrue(all(target["security_delta"] for target in dashboard["competitive_targets"]))
             self.assertTrue(all(target["live_gap"] for target in dashboard["competitive_targets"]))
+            auth_parity = dashboard["model_provider_auth_parity"]
+            self.assertEqual(auth_parity["status"], "target_surface_ready")
+            self.assertEqual(auth_parity["implementation_gap_count"], 0)
+            auth_targets = {row["target"]: row for row in auth_parity["targets"]}
+            self.assertEqual(auth_targets["OpenAI API"]["status"], "api_key_ready")
+            self.assertEqual(auth_targets["Claude Code subscription"]["status"], "official_cli_bridge_available")
+            self.assertEqual(auth_targets["Google Gemini CLI subscription"]["status"], "official_cli_bridge_available")
+            self.assertEqual(auth_targets["Google Gemini OAuth / Code Assist"]["status"], "oauth_device_flow_available")
+            self.assertEqual(auth_targets["GitHub Copilot"]["status"], "oauth_device_flow_available")
+            self.assertEqual(auth_targets["DeepSeek"]["status"], "api_key_ready")
+            self.assertEqual(auth_targets["Hugging Face"]["status"], "api_key_ready")
+            self.assertEqual(auth_targets["Vercel AI Gateway"]["status"], "api_key_ready")
+            self.assertEqual(auth_targets["Ollama Cloud"]["status"], "api_key_ready")
+            self.assertEqual(auth_targets["MiniMax Token Plan"]["status"], "api_key_ready")
+            self.assertEqual(auth_targets["MiniMax OAuth"]["status"], "oauth_device_flow_available")
+            self.assertEqual(auth_targets["Qwen Code Coding Plan subscription"]["required_auth"], ["subscription"])
+            self.assertEqual(auth_targets["Qwen Code Coding Plan subscription"]["status"], "official_cli_bridge_available")
+            self.assertFalse(any(row["raw_tokens_captured"] for row in auth_parity["targets"]))
             backlog = {item["area"]: item for item in dashboard["live_gap_backlog"]}
+            self.assertIn("model_provider_auth_login_parity", backlog)
             self.assertIn("provider_and_channel_live_connectors", backlog)
             self.assertIn("browser_and_media_depth", backlog)
             self.assertIn("remote_backend_activation", backlog)
+            self.assertEqual(backlog["model_provider_auth_login_parity"]["status"], "target_surface_ready")
+            self.assertEqual(backlog["model_provider_auth_login_parity"]["implementation_gap_targets"], [])
+            self.assertIn("Claude Code subscription", backlog["model_provider_auth_login_parity"]["subscription_bridge_targets"])
+            self.assertIn("Google Gemini CLI subscription", backlog["model_provider_auth_login_parity"]["subscription_bridge_targets"])
+            self.assertIn("Google Gemini OAuth / Code Assist", backlog["model_provider_auth_login_parity"]["subscription_bridge_targets"])
+            self.assertIn("Qwen Code Coding Plan subscription", backlog["model_provider_auth_login_parity"]["subscription_bridge_targets"])
+            self.assertIn("GitHub Copilot", backlog["model_provider_auth_login_parity"]["subscription_bridge_targets"])
+            auth_checklist = {item["control"]: item for item in backlog["model_provider_auth_login_parity"]["operator_checklist"]}
+            self.assertEqual(auth_checklist["api_key_secret_broker"]["state"], "enforced")
+            self.assertEqual(auth_checklist["subscription_token_bridge"]["state"], "available_login_required")
+            self.assertEqual(auth_checklist["oauth_device_flows"]["state"], "available_login_required")
+            self.assertEqual(auth_checklist["raw_browser_token_capture"]["state"], "denied_by_design")
+            self.assertIn("model_auth.raw_token_capture_rejected", backlog["model_provider_auth_login_parity"]["evaluation_scenarios"])
             self.assertIn("allowlisted_live_or_local", readiness["ready"]["statuses"])
+            self.assertIn("model_ready_review_packets", backlog["subagent_runtime_depth"]["required_controls"])
+            self.assertIn("autonomy_preflight_receipts", backlog["subagent_runtime_depth"]["required_controls"])
+            self.assertIn("model_ready_review_packet_sanitization", backlog["subagent_runtime_depth"]["verification_gates"])
+            self.assertIn("autonomy_preflight_receipt", backlog["subagent_runtime_depth"]["verification_gates"])
+            self.assertIn("subagent.model_ready_review_packet", backlog["subagent_runtime_depth"]["evaluation_scenarios"])
+            self.assertIn("subagent.autonomy_preflight", backlog["subagent_runtime_depth"]["evaluation_scenarios"])
+            subagent_checklist = {item["control"]: item for item in backlog["subagent_runtime_depth"]["operator_checklist"]}
+            self.assertEqual(subagent_checklist["model_ready_review_packets"]["state"], "enforced")
+            self.assertEqual(subagent_checklist["autonomy_preflight_receipts"]["state"], "enforced")
             self.assertTrue(backlog["provider_and_channel_live_connectors"]["sample_tools"])
             self.assertIn("service_ticket_write", backlog["provider_and_channel_live_connectors"]["sample_tools"])
             self.assertNotIn("service_ticket_read", backlog["provider_and_channel_live_connectors"]["sample_tools"])
@@ -966,13 +1300,23 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(checklist["network_allowlist"]["state"], "required_per_domain")
             self.assertEqual(checklist["live_enablement_flag"]["state"], "required_per_adapter")
             self.assertEqual(checklist["human_approval"]["state"], "enforced")
+            self.assertEqual(checklist["runtime_rate_limits"]["state"], "partial")
+            self.assertEqual(checklist["rollback_receipts"]["state"], "partial")
             self.assertEqual(checklist["mock_fallback"]["state"], "available")
             self.assertEqual(checklist["read_surface_inventory"]["state"], "available")
             self.assertEqual(checklist["promotion_scope"]["state"], "not_started")
             self.assertIn("human_approval", backlog["provider_and_channel_live_connectors"]["required_controls"])
+            self.assertIn("rate_limit_denial", backlog["provider_and_channel_live_connectors"]["verification_gates"])
+            self.assertIn("rollback_receipt", backlog["provider_and_channel_live_connectors"]["verification_gates"])
             self.assertIn("receipt_redaction", backlog["provider_and_channel_live_connectors"]["verification_gates"])
+            self.assertIn("service_desk.rollback_close_ticket_receipt", backlog["provider_and_channel_live_connectors"]["evaluation_scenarios"])
+            self.assertIn("messaging.rollback_message_receipt", backlog["provider_and_channel_live_connectors"]["evaluation_scenarios"])
             self.assertIn("live_connector_receipts.redacted_write_summary", backlog["provider_and_channel_live_connectors"]["evaluation_scenarios"])
             self.assertIn("approval_required_mutation", backlog["browser_and_media_depth"]["verification_gates"])
+            self.assertIn("activation_packet_verification", backlog["browser_and_media_depth"]["required_controls"])
+            self.assertIn("live_browser_activation_packet_schema", backlog["browser_and_media_depth"]["verification_gates"])
+            self.assertIn("live_browser_activation_packet_verification", backlog["browser_and_media_depth"]["verification_gates"])
+            self.assertIn("playwright_chromium_adapter_preflight", backlog["browser_and_media_depth"]["verification_gates"])
             self.assertIn("disabled_live_browser_denial", backlog["browser_and_media_depth"]["verification_gates"])
             browser_hardening_controls = {control["control"] for control in backlog["browser_and_media_depth"]["implemented_hardening_controls"]}
             self.assertIn("unsupported_selector_truthfulness", browser_hardening_controls)
@@ -982,22 +1326,41 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("sandboxed_media_worker_process", browser_hardening_controls)
             self.assertIn("os_level_media_worker_limits", browser_hardening_controls)
             self.assertIn("provider_backed_media_artifacts", browser_hardening_controls)
+            self.assertIn("platform_media_sandbox_profiles_v1", browser_hardening_controls)
+            self.assertIn("openai_style_image_provider_adapter", browser_hardening_controls)
+            self.assertIn("openai_style_image_edit_provider_adapter", browser_hardening_controls)
+            self.assertIn("openai_style_tts_provider_adapter", browser_hardening_controls)
+            self.assertIn("openai_style_transcription_provider_adapter", browser_hardening_controls)
+            self.assertIn("openai_style_video_provider_adapter", browser_hardening_controls)
             self.assertIn("browser_automation_boundary_receipts", browser_hardening_controls)
+            self.assertIn("live_browser_activation_packets", browser_hardening_controls)
+            self.assertIn("playwright_chromium_adapter_preflight", browser_hardening_controls)
+            self.assertIn("live_browser_activation_packet_verification", browser_hardening_controls)
+            self.assertIn("static_dom_snapshot_no_js", browser_hardening_controls)
+            self.assertIn("approved_static_form_fill", browser_hardening_controls)
+            self.assertIn("approved_static_form_submit", browser_hardening_controls)
+            self.assertIn("approved_static_anchor_navigation", browser_hardening_controls)
             self.assertIn("disabled_live_browser_denial", browser_hardening_controls)
             self.assertIn("live_browser_automation_adapter", backlog["browser_and_media_depth"]["remaining_depth_work"])
-            self.assertIn("stricter_platform_media_sandbox_profiles", backlog["browser_and_media_depth"]["remaining_depth_work"])
+            self.assertNotIn("stricter_platform_media_sandbox_profiles", backlog["browser_and_media_depth"]["remaining_depth_work"])
             self.assertIn("provider_specific_media_adapter_expansion", backlog["browser_and_media_depth"]["remaining_depth_work"])
             self.assertIn("artifact_integrity.browser_media_receipts", backlog["browser_and_media_depth"]["evaluation_scenarios"])
+            self.assertIn("browser.live_activation_packet_preflight", backlog["browser_and_media_depth"]["evaluation_scenarios"])
+            self.assertIn("browser.live_activation_packet_verification", backlog["browser_and_media_depth"]["evaluation_scenarios"])
+            self.assertIn("browser.live_automation_denied_until_adapter_ready", backlog["browser_and_media_depth"]["evaluation_scenarios"])
             browser_checklist = {item["control"]: item for item in backlog["browser_and_media_depth"]["operator_checklist"]}
             self.assertEqual(browser_checklist["browser_boundary_receipts"]["state"], "available")
             self.assertEqual(browser_checklist["taint_preservation"]["state"], "enforced")
             self.assertEqual(browser_checklist["artifact_hashing"]["state"], "available")
             self.assertEqual(browser_checklist["human_approval"]["state"], "enforced")
             self.assertEqual(browser_checklist["secret_capture_boundary"]["state"], "enforced")
+            self.assertEqual(browser_checklist["live_browser_activation_packets"]["state"], "available_adapter_blocked")
+            self.assertEqual(browser_checklist["playwright_chromium_adapter_preflight"]["state"], "blocked_adapter_candidate")
+            self.assertEqual(browser_checklist["live_browser_activation_packet_verification"]["state"], "verified_adapter_blocked")
             self.assertEqual(browser_checklist["media_worker_sandbox"]["state"], "available")
             self.assertEqual(browser_checklist["live_browser_automation"]["state"], "blocked_with_preflight")
             self.assertEqual(browser_checklist["provider_media_depth"]["state"], "partial")
-            self.assertEqual(browser_checklist["platform_media_sandbox_profiles"]["state"], "pending")
+            self.assertEqual(browser_checklist["platform_media_sandbox_profiles"]["state"], "ready_for_review")
             self.assertIn("disabled_backend_denial", backlog["remote_backend_activation"]["verification_gates"])
             self.assertIn("backend_activation.remote_execution_disabled", backlog["remote_backend_activation"]["evaluation_scenarios"])
             self.assertEqual(backlog["remote_backend_activation"]["status"], "backend_adapters_available_unconfigured")
@@ -1020,6 +1383,290 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(backend_checklist["rollback_receipts"]["state"], "enforced")
             self.assertEqual(backend_checklist["disabled_backend_denial"]["state"], "enforced")
             self.assertEqual(backend_checklist["provider_lifecycle_depth"]["state"], "not_started")
+
+    def test_browser_static_anchor_navigation_uses_http_connector_without_js(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            read_urls: list[str] = []
+
+            def fake_http_read(request):
+                url = request.params["url"]
+                read_urls.append(url)
+                if url == "https://example.com":
+                    return ConnectorResult(
+                        "http",
+                        "read",
+                        True,
+                        {
+                            "url": url,
+                            "domain": "example.com",
+                            "content": (
+                                "<html><title>Start</title>"
+                                '<a id="docs-link" href="/docs">Docs</a>'
+                                '<a id="js-link" href="javascript:alert(1)">Bad JS</a>'
+                                '<a id="fragment-link" href="#local">Fragment</a>'
+                                '<a id="evil-link" href="https://evil.test/path">Evil</a>'
+                                '<a href="/one">One</a><a href="/two">Two</a>'
+                                '<button id="submit">Submit</button>'
+                                "</html>"
+                            ),
+                        },
+                    )
+                if url == "https://example.com/docs":
+                    return ConnectorResult(
+                        "http",
+                        "read",
+                        True,
+                        {
+                            "url": url,
+                            "domain": "example.com",
+                            "content": "<html><title>Docs</title><p>Docs page</p></html>",
+                        },
+                    )
+                return ConnectorResult("http", "read", False, {}, error=f"domain for {url!r} is not allowlisted")
+
+            with patch.object(orchestrator.connectors.get("http"), "read", side_effect=fake_http_read):
+                browser_nav = orchestrator.tools.execute("browser", {"action": "navigate", "url": "https://example.com"}, approved=True)
+                browser_session_id = browser_nav["session"]["id"]
+                browser_inspect = orchestrator.tools.execute("browser", {"action": "inspect", "session_id": browser_session_id}, approved=True)
+                approval_payload = orchestrator.browser.action_approval_payload(action="click", session_id=browser_session_id, selector="#docs-link")
+                browser_js = orchestrator.tools.execute("browser_click", {"session_id": browser_session_id, "selector": "#js-link"}, approved=True)
+                browser_fragment = orchestrator.tools.execute("browser_click", {"session_id": browser_session_id, "selector": "#fragment-link"}, approved=True)
+                browser_ambiguous = orchestrator.tools.execute("browser_click", {"session_id": browser_session_id, "selector": "a"}, approved=True)
+                browser_evil = orchestrator.tools.execute("browser_click", {"session_id": browser_session_id, "selector": "#evil-link"}, approved=True)
+                browser_docs = orchestrator.tools.execute("browser_click", {"session_id": browser_session_id, "selector": "#docs-link"}, approved=True)
+
+            self.assertEqual(browser_inspect["selector_inventory"][0]["selector"], "#docs-link")
+            self.assertEqual(browser_inspect["selector_inventory"][0]["action"], "navigate")
+            self.assertEqual(browser_inspect["selector_inventory"][0]["supported_virtual_actions"], ["navigate"])
+            self.assertEqual(approval_payload["click_effect"], "static_anchor_navigation")
+            self.assertEqual(approval_payload["target_url"], "https://example.com/docs")
+            self.assertFalse(browser_js["ok"])
+            self.assertEqual(browser_js["status"], "static_anchor_navigation_blocked")
+            self.assertEqual(browser_js["reason"], "unsupported_scheme")
+            self.assertFalse(browser_js["javascript_executed"])
+            self.assertFalse(browser_fragment["ok"])
+            self.assertEqual(browser_fragment["reason"], "fragment_only_href")
+            self.assertFalse(browser_ambiguous["ok"])
+            self.assertEqual(browser_ambiguous["reason"], "ambiguous_anchor_selector")
+            self.assertFalse(browser_evil["ok"])
+            self.assertEqual(browser_evil["status"], "static_anchor_navigation_failed")
+            self.assertIn("not allowlisted", browser_evil["error"])
+            self.assertTrue(browser_docs["ok"])
+            self.assertEqual(browser_docs["effect"], "static_anchor_navigation")
+            self.assertEqual(browser_docs["mode"], "approved_static_anchor_navigation_no_js")
+            self.assertEqual(browser_docs["url"], "https://example.com/docs")
+            self.assertEqual(browser_docs["title"], "Docs")
+            self.assertFalse(browser_docs["javascript_executed"])
+            self.assertFalse(browser_docs["dom_mutated"])
+            self.assertFalse(browser_docs["real_selector_events_dispatched"])
+            self.assertEqual(browser_docs["evidence"]["action"], "static_anchor_navigation")
+            self.assertEqual(browser_docs["evidence"]["url_before"], "https://example.com")
+            self.assertEqual(browser_docs["evidence"]["url_after"], "https://example.com/docs")
+            self.assertTrue(browser_docs["evidence"]["content_changed"])
+            self.assertEqual(read_urls, ["https://example.com", "https://evil.test/path", "https://example.com/docs"])
+
+    def test_browser_live_activation_packets_are_private_and_strictly_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+
+            status = orchestrator.browser.live_activation_status()
+            self.assertEqual(status["activation"]["preflight_status"], "blocked")
+            self.assertEqual(status["activation"]["candidate_adapter_count"], 1)
+            self.assertIn("playwright_chromium_adapter_preflight", status["activation"]["verification_gates"])
+            adapter = status["activation"]["adapter_candidates"][0]
+            self.assertEqual(adapter["name"], "playwright-chromium")
+            self.assertEqual(adapter["runtime"], "python-playwright")
+            self.assertEqual(adapter["engine"], "chromium")
+            self.assertEqual(adapter["preflight_status"], "blocked")
+            self.assertFalse(adapter["enabled"])
+            self.assertFalse(adapter["raw_executable_path_included"])
+            self.assertFalse(status["live_browser_adapter_enabled"])
+            self.assertFalse(status["model_invocation_performed"])
+
+            created = orchestrator.browser.create_live_activation_packet(actor="browser-operator")
+            self.assertTrue(created["ok"])
+            self.assertEqual(created["packet"]["packet_schema"], "aegis.browser.live_activation_packet.v1")
+            self.assertEqual(created["receipt"]["receipt_schema"], "aegis.browser.live_activation_packet.v1")
+            self.assertEqual(created["receipt"]["activation_status"], "live_browser_adapter_required")
+            self.assertEqual(created["receipt"]["preflight_status"], "blocked")
+            self.assertEqual(created["receipt"]["candidate_adapter_count"], 1)
+            self.assertEqual(created["receipt"]["playwright_chromium_preflight_status"], "blocked")
+            self.assertFalse(created["receipt"]["live_browser_adapter_enabled"])
+            self.assertFalse(created["receipt"]["raw_browser_content_included"])
+            self.assertFalse(created["receipt"]["raw_secret_values_included"])
+            self.assertFalse(created["receipt"]["model_invocation_performed"])
+
+            packet_path = Path(created["receipt"]["artifact"])
+            checksum_path = Path(created["receipt"]["checksum"])
+            self.assertTrue(packet_path.exists())
+            self.assertTrue(checksum_path.exists())
+            self.assertEqual(stat.S_IMODE(packet_path.parent.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(packet_path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(checksum_path.stat().st_mode), 0o600)
+            self.assertEqual(created["receipt"]["artifact_sha256"], checksum_path.read_text(encoding="utf-8").strip())
+
+            packet_payload = json.loads(packet_path.read_text(encoding="utf-8"))
+            self.assertEqual(packet_payload["activation"]["adapter_candidates"][0]["name"], "playwright-chromium")
+            self.assertFalse(packet_payload["activation"]["adapter_candidates"][0]["raw_executable_path_included"])
+            self.assertFalse(packet_payload["controls"]["page_javascript_allowed"])
+            self.assertFalse(packet_payload["controls"]["cookies_persisted"])
+            self.assertFalse(packet_payload["controls"]["local_storage_persisted"])
+            self.assertFalse(packet_payload["controls"]["real_selector_events_dispatched"])
+            self.assertNotIn("raw_dom", json.dumps(created, sort_keys=True))
+
+            verified = orchestrator.browser.verify_live_activation_packet(created["receipt"]["packet_id"], actor="browser-reviewer")
+            self.assertTrue(verified["ok"])
+            self.assertEqual(verified["receipt"]["receipt_schema"], "aegis.browser.live_activation_packet_verification.v1")
+            self.assertEqual(verified["receipt"]["actor"], "browser-reviewer")
+            self.assertTrue(verified["receipt"]["checksum_matches"])
+            self.assertTrue(verified["receipt"]["packet_schema_valid"])
+            self.assertTrue(verified["receipt"]["activation_preflight_valid"])
+            self.assertEqual(verified["receipt"]["playwright_chromium_preflight_status"], "blocked")
+            self.assertTrue(verified["receipt"]["controls_valid"])
+            self.assertTrue(verified["receipt"]["boundaries_valid"])
+            self.assertTrue(verified["receipt"]["packet_integrity_ok"])
+            self.assertFalse(verified["receipt"]["raw_packet_payload_included"])
+            self.assertEqual(verified["packet"]["adapter_candidates"][0]["name"], "playwright-chromium")
+            self.assertFalse(verified["packet"]["adapter_candidates"][0]["raw_executable_path_included"])
+
+            with self.assertRaises(ValueError):
+                orchestrator.browser.verify_live_activation_packet("../outside.json")
+
+            def write_packet(name: str, payload: dict, *, checksum: str | None = None) -> str:
+                artifact = packet_path.parent / f"{name}.json"
+                artifact.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                artifact.chmod(0o600)
+                artifact_sha256 = hashlib.sha256(artifact.read_bytes()).hexdigest()
+                checksum_file = packet_path.parent / f"{name}.sha256"
+                checksum_file.write_text(f"{checksum if checksum is not None else artifact_sha256}\n", encoding="utf-8")
+                checksum_file.chmod(0o600)
+                return name
+
+            unsafe_controls = json.loads(json.dumps(packet_payload))
+            unsafe_controls["controls"]["page_javascript_allowed"] = True
+            unsafe_controls["controls"]["cookies_persisted"] = True
+            unsafe_controls["controls"]["real_selector_events_dispatched"] = True
+            unsafe_result = orchestrator.browser.verify_live_activation_packet(write_packet("unsafe-controls", unsafe_controls))
+            self.assertFalse(unsafe_result["ok"])
+            self.assertTrue(unsafe_result["receipt"]["checksum_matches"])
+            self.assertFalse(unsafe_result["receipt"]["controls_valid"])
+            self.assertFalse(unsafe_result["receipt"]["packet_integrity_ok"])
+
+            missing_blockers = json.loads(json.dumps(packet_payload))
+            missing_blockers["activation"]["blockers"] = []
+            missing_result = orchestrator.browser.verify_live_activation_packet(write_packet("missing-blockers", missing_blockers))
+            self.assertFalse(missing_result["ok"])
+            self.assertFalse(missing_result["receipt"]["activation_preflight_valid"])
+
+            unsafe_boundaries = json.loads(json.dumps(packet_payload))
+            unsafe_boundaries["implemented_boundaries"]["raw_secret_capture_allowed"] = True
+            boundary_result = orchestrator.browser.verify_live_activation_packet(write_packet("unsafe-boundaries", unsafe_boundaries))
+            self.assertFalse(boundary_result["ok"])
+            self.assertFalse(boundary_result["receipt"]["boundaries_valid"])
+
+            raw_payload = json.loads(json.dumps(packet_payload))
+            raw_payload["raw_page_html"] = "<html>secret</html>"
+            raw_result = orchestrator.browser.verify_live_activation_packet(write_packet("raw-content", raw_payload))
+            self.assertFalse(raw_result["ok"])
+            self.assertTrue(raw_result["receipt"]["forbidden_raw_keys_present"])
+            self.assertFalse(raw_result["receipt"]["raw_packet_payload_included"])
+            self.assertNotIn("<html>secret</html>", json.dumps(raw_result, sort_keys=True))
+
+            checksum_result = orchestrator.browser.verify_live_activation_packet(write_packet("checksum-mismatch", packet_payload, checksum="0" * 64))
+            self.assertFalse(checksum_result["ok"])
+            self.assertFalse(checksum_result["receipt"]["checksum_matches"])
+
+    def test_browser_static_form_submit_uses_http_connector_without_js(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            read_urls: list[str] = []
+
+            def fake_http_read(request):
+                url = request.params["url"]
+                read_urls.append(url)
+                if url == "https://example.com":
+                    return ConnectorResult(
+                        "http",
+                        "read",
+                        True,
+                        {
+                            "url": url,
+                            "domain": "example.com",
+                            "content": (
+                                "<html><title>Search</title>"
+                                '<form id="search-form" action="/search" method="get">'
+                                '<input name="q" value="aegis">'
+                                '<textarea name="note">safe note</textarea>'
+                                '<button id="submit">Search</button>'
+                                "</form>"
+                                '<form id="post-form" action="/post" method="post"><input name="q" value="blocked"></form>'
+                                "</html>"
+                            ),
+                        },
+                    )
+                if url == "https://example.com/search?q=codex&note=safe+note":
+                    return ConnectorResult(
+                        "http",
+                        "read",
+                        True,
+                        {
+                            "url": url,
+                            "domain": "example.com",
+                            "content": "<html><title>Results</title><p>Result page</p></html>",
+                        },
+                    )
+                return ConnectorResult("http", "read", False, {}, error=f"domain for {url!r} is not allowlisted")
+
+            with patch.object(orchestrator.connectors.get("http"), "read", side_effect=fake_http_read):
+                browser_nav = orchestrator.tools.execute("browser", {"action": "navigate", "url": "https://example.com"}, approved=True)
+                browser_session_id = browser_nav["session"]["id"]
+                browser_fill = orchestrator.tools.execute("browser_fill", {"session_id": browser_session_id, "fields": {'input[name="q"]': "codex"}}, approved=True)
+                approval_payload = orchestrator.browser.action_approval_payload(action="submit", session_id=browser_session_id, selector="#search-form")
+                browser_ambiguous = orchestrator.tools.execute("browser_submit", {"session_id": browser_session_id}, approved=True)
+                browser_post = orchestrator.tools.execute("browser_submit", {"session_id": browser_session_id, "selector": "#post-form"}, approved=True)
+                browser_unsupported = orchestrator.tools.execute("browser_submit", {"session_id": browser_session_id, "selector": "form input"}, approved=True)
+                browser_submit = orchestrator.tools.execute("browser_submit", {"session_id": browser_session_id, "selector": "#search-form"}, approved=True)
+
+            self.assertEqual(browser_fill["mode"], "static_dom_form_fill_no_js")
+            self.assertEqual(approval_payload["submit_effect"], "static_form_submit")
+            self.assertEqual(approval_payload["method"], "GET")
+            self.assertEqual(approval_payload["field_names"], ["note", "q"])
+            self.assertEqual(approval_payload["field_count"], 2)
+            self.assertEqual(approval_payload["target_origin"], "https://example.com")
+            self.assertEqual(approval_payload["target_path"], "/search")
+            self.assertRegex(approval_payload["target_url_sha256"], r"^[0-9a-f]{64}$")
+            self.assertNotIn("codex", json.dumps(approval_payload))
+            self.assertFalse(browser_ambiguous["ok"])
+            self.assertEqual(browser_ambiguous["reason"], "ambiguous")
+            self.assertFalse(browser_post["ok"])
+            self.assertEqual(browser_post["reason"], "unsupported_method")
+            self.assertFalse(browser_unsupported["ok"])
+            self.assertEqual(browser_unsupported["reason"], "unsupported_selector")
+            self.assertTrue(browser_submit["ok"])
+            self.assertEqual(browser_submit["effect"], "static_form_submit")
+            self.assertEqual(browser_submit["mode"], "approved_static_form_submit_no_js")
+            self.assertEqual(browser_submit["url"], "https://example.com/search?q=codex&note=safe+note")
+            self.assertEqual(browser_submit["title"], "Results")
+            self.assertEqual(browser_submit["field_names"], ["note", "q"])
+            self.assertEqual(browser_submit["field_count"], 2)
+            self.assertFalse(browser_submit["javascript_executed"])
+            self.assertFalse(browser_submit["dom_mutated"])
+            self.assertFalse(browser_submit["real_selector_events_dispatched"])
+            self.assertFalse(browser_submit["cookies_persisted"])
+            self.assertEqual(browser_submit["evidence"]["action"], "static_form_submit")
+            self.assertEqual(browser_submit["evidence"]["mode"], "approved_static_form_submit_no_js")
+            self.assertTrue(browser_submit["evidence"]["content_changed"])
+            self.assertEqual(read_urls, ["https://example.com", "https://example.com/search?q=codex&note=safe+note"])
 
     def test_provider_backed_media_artifact_uses_allowlisted_brokered_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1095,10 +1742,14 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertFalse(generated["provider_receipt"]["raw_prompt_or_text_included"])
             self.assertFalse(generated["provider_receipt"]["raw_response_body_included"])
             self.assertTrue(generated["sandbox_receipt"]["live_provider_used"])
+            self.assertEqual(generated["sandbox_receipt"]["receipt_schema"], "media_sandbox_profile_v1")
+            self.assertEqual(generated["sandbox_receipt"]["sandbox_profile_id"], "live_provider_media_artifact_v1")
             self.assertEqual(generated["sandbox_receipt"]["ambient_network"], "allowlisted_https_provider_only")
+            self.assertEqual(generated["sandbox_receipt"]["profile_boundaries"]["network"], "allowlisted_https_provider_only")
             metadata_text = Path(generated["metadata_path"]).read_text(encoding="utf-8")
             metadata = json.loads(metadata_text)
             self.assertEqual(metadata["sandbox_receipt"]["sandbox_profile"], "live_provider_media_artifact")
+            self.assertEqual(metadata["sandbox_receipt"]["receipt_schema"], "media_sandbox_profile_v1")
             self.assertEqual(metadata["details"]["provider_receipt"]["payload_keys"], ["prompt", "tool"])
             self.assertNotIn("draw a private roadmap", metadata_text)
             self.assertNotIn("secret-media-token", metadata_text)
@@ -1110,6 +1761,556 @@ class PlatformLayerTests(unittest.TestCase):
             )
             self.assertFalse(denied["ok"])
             self.assertEqual(denied["status"], "scope_rejected")
+
+    def test_openai_style_image_provider_adapter_uses_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            png_bytes = (
+                b"\x89PNG\r\n\x1a\n"
+                b"\x00\x00\x00\rIHDR"
+                b"\x00\x00\x00\x02\x00\x00\x00\x03"
+                b"\x08\x02\x00\x00\x00"
+                b"\x00\x00\x00\x00"
+                b"\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+            captured: dict[str, str] = {}
+
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "application/json"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return json.dumps({"data": [{"b64_json": base64.b64encode(png_bytes).decode("ascii")}]}).encode("utf-8")
+
+            def fake_open(request, timeout):
+                captured["url"] = request.full_url
+                captured["authorization"] = request.headers.get("Authorization", "")
+                captured["body"] = request.data.decode("utf-8")
+                return FakeResponse()
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                generated = orchestrator.tools.execute(
+                    "image_generate",
+                    {
+                        "prompt": "draw a private roadmap token=abc123",
+                        "provider_url": "https://media.example.com/v1/images/generations",
+                        "provider_adapter": "openai_images",
+                        "model": "gpt-image-1",
+                        "size": "1024x1024",
+                    },
+                    approved=True,
+                )
+
+            body = json.loads(captured["body"])
+            metadata_text = Path(generated["metadata_path"]).read_text(encoding="utf-8")
+            self.assertTrue(generated["ok"])
+            self.assertEqual(generated["provider_adapter"], "openai_images")
+            self.assertEqual(generated["mode"], "live_provider_png")
+            self.assertEqual(Path(generated["asset_path"]).read_bytes(), png_bytes)
+            self.assertEqual(body["model"], "gpt-image-1")
+            self.assertEqual(body["prompt"], "draw a private roadmap token=abc123")
+            self.assertEqual(body["size"], "1024x1024")
+            self.assertEqual(body["n"], 1)
+            self.assertNotIn("tool", body)
+            self.assertEqual(captured["authorization"], "Bearer secret-media-token")
+            self.assertEqual(generated["provider_receipt"]["provider_adapter"], "openai_images")
+            self.assertEqual(generated["provider_receipt"]["payload_keys"], ["model", "n", "prompt", "size"])
+            self.assertFalse(generated["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(generated["provider_receipt"]["raw_secret_values_included"])
+            self.assertEqual(generated["sandbox_receipt"]["provider_adapter"], "openai_images")
+            self.assertNotIn("draw a private roadmap", metadata_text)
+            self.assertNotIn("abc123", metadata_text)
+            self.assertNotIn("secret-media-token", metadata_text)
+
+    def test_openai_style_image_edit_provider_adapter_uploads_source_with_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            png_bytes = (
+                b"\x89PNG\r\n\x1a\n"
+                b"\x00\x00\x00\rIHDR"
+                b"\x00\x00\x00\x02\x00\x00\x00\x03"
+                b"\x08\x02\x00\x00\x00"
+                b"\x00\x00\x00\x00"
+                b"\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+            (root / "source.png").write_bytes(png_bytes)
+            captured: dict[str, Any] = {}
+
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "application/json"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return json.dumps({"data": [{"b64_json": base64.b64encode(png_bytes).decode("ascii")}]}).encode("utf-8")
+
+            def fake_open(request, timeout):
+                captured["url"] = request.full_url
+                captured["authorization"] = request.headers.get("Authorization", "")
+                captured["content_type"] = request.get_header("Content-type") or request.get_header("Content-Type") or ""
+                captured["body"] = request.data
+                return FakeResponse()
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                edited = orchestrator.tools.execute(
+                    "image_edit",
+                    {
+                        "prompt": "edit the private roadmap token=abc123",
+                        "source_path": "source.png",
+                        "provider_url": "https://media.example.com/v1/images/edits",
+                        "provider_adapter": "openai_image_edit",
+                        "model": "gpt-image-1.5",
+                        "output_format": "png",
+                    },
+                    approved=True,
+                )
+
+            body = captured["body"]
+            metadata_text = Path(edited["metadata_path"]).read_text(encoding="utf-8")
+            self.assertTrue(edited["ok"])
+            self.assertEqual(edited["provider_adapter"], "openai_image_edit")
+            self.assertEqual(edited["mode"], "live_provider_png")
+            self.assertEqual(Path(edited["asset_path"]).read_bytes(), png_bytes)
+            self.assertEqual(captured["authorization"], "Bearer secret-media-token")
+            self.assertIn("multipart/form-data; boundary=", captured["content_type"])
+            self.assertIn(b'name="prompt"', body)
+            self.assertIn(b"edit the private roadmap token=abc123", body)
+            self.assertIn(b'name="image"; filename="image.png"', body)
+            self.assertIn(b"Content-Type: image/png", body)
+            self.assertIn(png_bytes, body)
+            self.assertEqual(edited["provider_receipt"]["provider_adapter"], "openai_image_edit")
+            self.assertEqual(edited["provider_receipt"]["request_format"], "multipart/form-data")
+            self.assertEqual(
+                edited["provider_receipt"]["payload_keys"],
+                ["image_bytes", "image_mime_type", "image_present", "image_sha256", "model", "n", "output_format", "prompt"],
+            )
+            self.assertFalse(edited["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(edited["provider_receipt"]["raw_secret_values_included"])
+            self.assertFalse(edited["provider_receipt"]["raw_response_body_included"])
+            self.assertEqual(edited["sandbox_receipt"]["provider_adapter"], "openai_image_edit")
+            self.assertEqual(edited["sandbox_receipt"]["receipt_schema"], "media_sandbox_profile_v1")
+            self.assertEqual(edited["sandbox_receipt"]["explicit_workspace_reads"], ["source_image"])
+            self.assertEqual(edited["sandbox_receipt"]["profile_boundaries"]["filesystem"], "explicit_workspace_reads_plus_private_artifact_dir")
+            self.assertNotIn("edit the private roadmap", metadata_text)
+            self.assertNotIn("abc123", metadata_text)
+            self.assertNotIn("source.png", metadata_text)
+            self.assertNotIn("secret-media-token", metadata_text)
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None):
+                denied = orchestrator.tools.execute(
+                    "image_edit",
+                    {
+                        "prompt": "x",
+                        "source_path": "../source.png",
+                        "provider_url": "https://media.example.com/v1/images/edits",
+                        "provider_adapter": "openai_image_edit",
+                    },
+                    approved=True,
+                )
+            self.assertFalse(denied["ok"])
+            self.assertEqual(denied["status"], "invalid_source")
+
+    def test_openai_style_tts_provider_adapter_uses_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            mp3_bytes = b"ID3\x04\x00\x00\x00\x00\x00\x21Aegis audio"
+            captured: dict[str, str] = {}
+
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "audio/mpeg"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return mp3_bytes
+
+            def fake_open(request, timeout):
+                captured["url"] = request.full_url
+                captured["authorization"] = request.headers.get("Authorization", "")
+                captured["body"] = request.data.decode("utf-8")
+                return FakeResponse()
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                speech = orchestrator.tools.execute(
+                    "tts",
+                    {
+                        "text": "read the private roadmap token=abc123",
+                        "provider_url": "https://media.example.com/v1/audio/speech",
+                        "provider_adapter": "openai_tts",
+                        "model": "gpt-4o-mini-tts",
+                        "voice": "alloy",
+                        "response_format": "mp3",
+                    },
+                    approved=True,
+                )
+
+            body = json.loads(captured["body"])
+            metadata_text = Path(speech["metadata_path"]).read_text(encoding="utf-8")
+            self.assertTrue(speech["ok"])
+            self.assertEqual(speech["provider_adapter"], "openai_tts")
+            self.assertEqual(speech["mode"], "live_provider_mp3")
+            self.assertEqual(speech["mime_type"], "audio/mpeg")
+            self.assertEqual(Path(speech["asset_path"]).read_bytes(), mp3_bytes)
+            self.assertEqual(body["model"], "gpt-4o-mini-tts")
+            self.assertEqual(body["input"], "read the private roadmap token=abc123")
+            self.assertEqual(body["voice"], "alloy")
+            self.assertEqual(body["response_format"], "mp3")
+            self.assertNotIn("tool", body)
+            self.assertEqual(captured["authorization"], "Bearer secret-media-token")
+            self.assertEqual(speech["provider_receipt"]["provider_adapter"], "openai_tts")
+            self.assertEqual(speech["provider_receipt"]["payload_keys"], ["input", "model", "response_format", "voice"])
+            self.assertFalse(speech["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(speech["provider_receipt"]["raw_secret_values_included"])
+            self.assertEqual(speech["sandbox_receipt"]["provider_adapter"], "openai_tts")
+            self.assertEqual(speech["sandbox_receipt"]["receipt_schema"], "media_sandbox_profile_v1")
+            self.assertNotIn("read the private roadmap", metadata_text)
+            self.assertNotIn("abc123", metadata_text)
+            self.assertNotIn("secret-media-token", metadata_text)
+
+    def test_openai_style_transcription_provider_adapter_uploads_audio_with_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            wav_bytes = b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x40\x1f\x00\x00\x80\x3e\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
+            (root / "meeting.wav").write_bytes(wav_bytes)
+            captured: dict[str, Any] = {}
+
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "application/json"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return json.dumps({"text": "Discuss roadmap token=abc123"}).encode("utf-8")
+
+            def fake_open(request, timeout):
+                captured["url"] = request.full_url
+                captured["authorization"] = request.headers.get("Authorization", "")
+                captured["content_type"] = request.get_header("Content-type") or request.get_header("Content-Type") or ""
+                captured["body"] = request.data
+                return FakeResponse()
+
+            gated = orchestrator.tools.execute(
+                "voice_transcribe",
+                {
+                    "audio_path": "meeting.wav",
+                    "provider_url": "https://media.example.com/v1/audio/transcriptions",
+                    "provider_adapter": "openai_transcription",
+                },
+            )
+            self.assertEqual(gated["status"], "approval_required")
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                transcript = orchestrator.tools.execute(
+                    "voice_transcribe",
+                    {
+                        "audio_path": "meeting.wav",
+                        "provider_url": "https://media.example.com/v1/audio/transcriptions",
+                        "provider_adapter": "openai_transcription",
+                        "model": "gpt-4o-mini-transcribe",
+                        "response_format": "json",
+                        "language": "en",
+                        "prompt": "Use private team glossary token=abc123",
+                    },
+                    approved=True,
+                )
+
+            body = captured["body"]
+            self.assertTrue(transcript["ok"])
+            self.assertEqual(transcript["provider_adapter"], "openai_transcription")
+            self.assertEqual(transcript["mode"], "live_provider_transcription")
+            self.assertEqual(transcript["text"], "Discuss roadmap token=abc123")
+            self.assertEqual(captured["authorization"], "Bearer secret-media-token")
+            self.assertIn("multipart/form-data; boundary=", captured["content_type"])
+            self.assertIn(b'name="file"; filename="audio.wav"', body)
+            self.assertIn(b"Content-Type: audio/wav", body)
+            self.assertIn(wav_bytes, body)
+            self.assertIn(b'name="model"', body)
+            self.assertIn(b"gpt-4o-mini-transcribe", body)
+            self.assertIn(b'name="prompt"', body)
+            self.assertIn(b"Use private team glossary token=abc123", body)
+            self.assertEqual(transcript["provider_receipt"]["provider_adapter"], "openai_transcription")
+            self.assertEqual(transcript["provider_receipt"]["request_format"], "multipart/form-data")
+            self.assertEqual(transcript["provider_receipt"]["payload_keys"], ["language", "model", "prompt", "response_format"])
+            self.assertFalse(transcript["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(transcript["provider_receipt"]["raw_secret_values_included"])
+            self.assertFalse(transcript["provider_receipt"]["raw_response_body_included"])
+            self.assertEqual(transcript["audio_receipt"]["source_audio_mime_type"], "audio/wav")
+            self.assertEqual(transcript["audio_receipt"]["source_audio_bytes"], len(wav_bytes))
+            self.assertFalse(transcript["audio_receipt"]["source_audio_path_included"])
+            self.assertFalse(transcript["audio_receipt"]["raw_audio_included"])
+            self.assertEqual(transcript["sandbox_receipt"]["receipt_schema"], "media_sandbox_profile_v1")
+            self.assertEqual(transcript["sandbox_receipt"]["explicit_workspace_reads"], ["source_audio"])
+            self.assertFalse(transcript["sandbox_receipt"]["artifact_write"])
+            self.assertFalse(transcript["raw_response_body_included"])
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None):
+                denied = orchestrator.tools.execute(
+                    "voice_transcribe",
+                    {
+                        "audio_path": "../meeting.wav",
+                        "provider_url": "https://media.example.com/v1/audio/transcriptions",
+                        "provider_adapter": "openai_transcription",
+                    },
+                    approved=True,
+                )
+            self.assertFalse(denied["ok"])
+            self.assertEqual(denied["status"], "invalid_source")
+
+    def test_openai_style_video_provider_adapter_manages_job_lifecycle_with_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            mp4_bytes = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom\x00\x00\x00\x08free"
+            captured: dict[str, Any] = {"requests": []}
+
+            class FakeResponse:
+                def __init__(self, *, status: int = 200, headers: dict[str, str] | None = None, body: bytes = b"") -> None:
+                    self.status = status
+                    self.headers = headers or {"Content-Type": "application/json"}
+                    self._body = body
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return self._body
+
+            def fake_open(request, timeout):
+                method = request.get_method()
+                body = request.data or b""
+                captured["requests"].append(
+                    {
+                        "url": request.full_url,
+                        "method": method,
+                        "authorization": request.headers.get("Authorization", ""),
+                        "content_type": request.get_header("Content-type") or request.get_header("Content-Type") or "",
+                        "body": body,
+                    }
+                )
+                if method == "POST":
+                    return FakeResponse(body=json.dumps({"id": "video_123", "status": "queued", "progress": 0, "model": "sora-2"}).encode("utf-8"))
+                if method == "DELETE":
+                    return FakeResponse(body=json.dumps({"id": "video_123", "deleted": True}).encode("utf-8"))
+                if request.full_url.endswith("/content"):
+                    return FakeResponse(headers={"Content-Type": "video/mp4"}, body=mp4_bytes)
+                return FakeResponse(body=json.dumps({"id": "video_123", "status": "completed", "progress": 100}).encode("utf-8"))
+
+            gated = orchestrator.tools.execute(
+                "video_generate",
+                {
+                    "prompt": "make a private storyboard token=abc123",
+                    "provider_url": "https://media.example.com/v1/videos",
+                    "provider_adapter": "openai_video",
+                },
+            )
+            self.assertEqual(gated["status"], "approval_required")
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                submitted = orchestrator.tools.execute(
+                    "video_generate",
+                    {
+                        "prompt": "make a private storyboard token=abc123",
+                        "provider_url": "https://media.example.com/v1/videos",
+                        "provider_adapter": "openai_video",
+                        "model": "sora-2",
+                        "seconds": "4",
+                        "size": "1280x720",
+                    },
+                    approved=True,
+                )
+                status = orchestrator.tools.execute(
+                    "video_generate",
+                    {
+                        "action": "status",
+                        "video_id": "video_123",
+                        "provider_url": "https://media.example.com/v1/videos",
+                        "provider_adapter": "openai_video",
+                    },
+                    approved=True,
+                )
+                downloaded = orchestrator.tools.execute(
+                    "video_generate",
+                    {
+                        "action": "download",
+                        "video_id": "video_123",
+                        "provider_url": "https://media.example.com/v1/videos",
+                        "provider_adapter": "openai_video",
+                    },
+                    approved=True,
+                )
+                deleted = orchestrator.tools.execute(
+                    "video_generate",
+                    {
+                        "action": "delete",
+                        "video_id": "video_123",
+                        "provider_url": "https://media.example.com/v1/videos",
+                        "provider_adapter": "openai_video",
+                    },
+                    approved=True,
+                )
+
+            request_bodies = [request["body"] for request in captured["requests"]]
+            submitted_body = json.loads(request_bodies[0].decode("utf-8"))
+            self.assertTrue(submitted["ok"])
+            self.assertEqual(submitted["status"], "submitted")
+            self.assertEqual(submitted["mode"], "live_provider_video_job")
+            self.assertEqual(submitted["provider_adapter"], "openai_video")
+            self.assertEqual(submitted["provider_job_id"], "video_123")
+            self.assertEqual(submitted_body["prompt"], "make a private storyboard token=abc123")
+            self.assertEqual(submitted_body["model"], "sora-2")
+            self.assertEqual(submitted_body["seconds"], "4")
+            self.assertEqual(submitted_body["size"], "1280x720")
+            self.assertEqual(submitted["provider_receipt"]["payload_keys"], ["model", "prompt", "seconds", "size"])
+            self.assertFalse(submitted["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(submitted["provider_receipt"]["raw_secret_values_included"])
+            self.assertFalse(submitted["provider_receipt"]["raw_response_body_included"])
+            self.assertEqual(submitted["sandbox_receipt"]["receipt_schema"], "media_sandbox_profile_v1")
+            self.assertFalse(submitted["sandbox_receipt"]["artifact_write"])
+            self.assertNotIn("private storyboard", json.dumps(submitted))
+            self.assertNotIn("abc123", json.dumps(submitted))
+
+            self.assertEqual(status["status"], "completed")
+            self.assertEqual(status["provider_receipt"]["payload_keys"], ["action", "provider_job_id_sha256"])
+            self.assertEqual(deleted["status"], "deleted")
+            self.assertEqual(captured["requests"][0]["method"], "POST")
+            self.assertEqual(captured["requests"][1]["method"], "GET")
+            self.assertEqual(captured["requests"][1]["url"], "https://media.example.com/v1/videos/video_123")
+            self.assertEqual(captured["requests"][2]["url"], "https://media.example.com/v1/videos/video_123/content")
+            self.assertEqual(captured["requests"][3]["method"], "DELETE")
+            self.assertTrue(all(request["authorization"] == "Bearer secret-media-token" for request in captured["requests"]))
+
+            self.assertTrue(downloaded["ok"])
+            self.assertEqual(downloaded["mode"], "live_provider_mp4")
+            self.assertEqual(downloaded["mime_type"], "video/mp4")
+            self.assertEqual(Path(downloaded["asset_path"]).read_bytes(), mp4_bytes)
+            self.assertEqual(stat.S_IMODE(Path(downloaded["asset_path"]).stat().st_mode), 0o600)
+            self.assertEqual(downloaded["provider_receipt"]["payload_keys"], ["action", "provider_job_id_sha256", "variant"])
+            self.assertEqual(downloaded["sandbox_receipt"]["provider_adapter"], "openai_video")
+            self.assertEqual(downloaded["sandbox_receipt"]["receipt_schema"], "media_sandbox_profile_v1")
+            self.assertEqual(downloaded["sandbox_receipt"]["ambient_network"], "allowlisted_https_provider_only")
+            metadata_text = Path(downloaded["metadata_path"]).read_text(encoding="utf-8")
+            self.assertNotIn("private storyboard", metadata_text)
+            self.assertNotIn("abc123", metadata_text)
+            self.assertNotIn("secret-media-token", metadata_text)
+            self.assertNotIn("video_123", metadata_text)
 
     def test_product_dashboard_surfaces_configured_live_connector_adapters_without_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1124,7 +2325,8 @@ class PlatformLayerTests(unittest.TestCase):
                         "",
                         "[security]",
                         "live_rest_writes = true",
-                        'network_allowlist = ["example.com", "hooks.example.com", "smtp.example.com"]',
+                        "live_github_writes = true",
+                        'network_allowlist = ["api.github.com", "example.com", "hooks.example.com", "smtp.example.com"]',
                         "",
                         "[channels.webhook]",
                         "enabled = true",
@@ -1152,18 +2354,97 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(live_gap["status"], "live_connectors_partially_live")
             adapter_names = {adapter["name"] for adapter in live_gap["implemented_live_adapters"]}
             self.assertIn("generic_rest", adapter_names)
-            self.assertIn("mock_messaging", adapter_names)
+            self.assertIn("github", adapter_names)
             self.assertIn("webhook", adapter_names)
             self.assertIn("email", adapter_names)
             self.assertIn("chat_webhook", adapter_names)
+            self.assertNotIn("gitlab", adapter_names)
+            self.assertNotIn("mock_graph", adapter_names)
+            self.assertNotIn("mock_servicenow", adapter_names)
+            self.assertNotIn("mock_messaging", adapter_names)
             self.assertNotIn("generic_rest", {adapter["name"] for adapter in live_gap["available_live_adapters"]})
+            self.assertNotIn("github", {adapter["name"] for adapter in live_gap["available_live_adapters"]})
+            self.assertIn("gitlab", {adapter["name"] for adapter in live_gap["available_live_adapters"]})
+            self.assertIn("mock_graph", {adapter["name"] for adapter in live_gap["available_live_adapters"]})
+            self.assertIn("mock_servicenow", {adapter["name"] for adapter in live_gap["available_live_adapters"]})
+            self.assertIn("mock_messaging", {adapter["name"] for adapter in live_gap["available_live_adapters"]})
             self.assertIn("available_live_adapters", live_gap)
+            implemented = {adapter["name"]: adapter for adapter in live_gap["implemented_live_adapters"]}
+            self.assertEqual(implemented["generic_rest"]["activation"]["preflight_status"], "ready_for_approved_call")
+            self.assertIn("network_allowlist", implemented["generic_rest"]["activation"]["configured_controls"])
+            self.assertEqual(implemented["github"]["activation"]["preflight_status"], "runtime_configuration_required")
+            self.assertIn("brokered_token", {blocker["control"] for blocker in implemented["github"]["activation"]["blockers"]})
+            self.assertNotIn("live_enablement_flag", {blocker["control"] for blocker in implemented["github"]["activation"]["blockers"]})
+            self.assertEqual(implemented["webhook"]["activation"]["preflight_status"], "ready_for_approved_send")
+            self.assertEqual(implemented["email"]["activation"]["preflight_status"], "ready_for_approved_send")
+            self.assertEqual(implemented["chat_webhook"]["activation"]["preflight_status"], "ready_for_approved_send")
             checklist = {item["control"]: item for item in live_gap["operator_checklist"]}
             self.assertEqual(checklist["promotion_scope"]["state"], "partial")
             self.assertEqual(checklist["human_approval"]["state"], "enforced")
             self.assertTrue(all(adapter["raw_secret_values_included"] is False for adapter in live_gap["implemented_live_adapters"]))
             self.assertTrue(all(adapter["raw_secret_values_included"] is False for adapter in live_gap["available_live_adapters"]))
             self.assertNotIn("AEGIS_CHAT_WEBHOOK_URL", json.dumps(live_gap, sort_keys=True))
+
+    def test_live_connector_flags_promote_only_the_configured_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "live_rest_writes = true",
+                        "live_github_writes = true",
+                        'network_allowlist = ["api.github.com", "example.com", "gitlab.com", "graph.microsoft.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+
+            statuses = {status["name"]: status for status in orchestrator.connectors.status()}
+            self.assertTrue(statuses["generic_rest"]["live_writes"])
+            self.assertTrue(statuses["github"]["live_writes"])
+            self.assertFalse(statuses["gitlab"]["live_writes"])
+            self.assertFalse(statuses["mock_graph"]["live_calendar_writes"])
+            self.assertFalse(statuses["mock_graph"]["live_email_writes"])
+            self.assertFalse(statuses["mock_graph"]["live_contact_writes"])
+            self.assertFalse(statuses["mock_servicenow"]["live_writes"])
+            self.assertFalse(statuses["mock_messaging"]["live_writes"])
+
+            with patch("aegis.connectors.github._private_network_error", return_value=None):
+                github = orchestrator.tools.execute(
+                    "github_issue",
+                    {"operation": "create", "api_url": "https://api.github.com/repos/example/aegis/issues", "title": "Live issue"},
+                    approved=True,
+                )
+            self.assertFalse(github["ok"])
+            self.assertEqual(github["preflight_status"], "blocked")
+            github_blockers = {blocker["control"] for blocker in github["activation"]["blockers"]}
+            self.assertNotIn("live_enablement_flag", github_blockers)
+            self.assertIn("brokered_token", github_blockers)
+            self.assertIn("live_enablement_flag", github["activation"]["configured_controls"])
+
+            gitlab = orchestrator.tools.execute(
+                "gitlab_issue",
+                {"operation": "create", "api_url": "https://gitlab.com/api/v4/projects/1/issues", "title": "Live issue"},
+                approved=True,
+            )
+            self.assertFalse(gitlab["ok"])
+            self.assertIn("live_enablement_flag", {blocker["control"] for blocker in gitlab["activation"]["blockers"]})
+
+            calendar = orchestrator.tools.execute(
+                "calendar_write",
+                {"api_url": "https://graph.microsoft.com/v1.0/me/events", "event": {"subject": "Planning"}},
+                approved=True,
+            )
+            self.assertFalse(calendar["ok"])
+            self.assertIn("live_enablement_flag", {blocker["control"] for blocker in calendar["activation"]["blockers"]})
 
     def test_configured_docker_backend_records_activation_execution_and_cleanup_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1320,10 +2601,16 @@ class PlatformLayerTests(unittest.TestCase):
             try:
                 selected = orchestrator.tools.execute("terminal_backend", {"backend": "modal"}, approved=True)
                 run = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "modal", "command": "python3 script.py"}, approved=True)
+                status = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "modal", "action": "status", "job_id": "job-123"}, approved=True)
+                logs = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "modal", "action": "logs", "job_id": "job-123"}, approved=True)
+                artifact = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "modal", "action": "artifact", "job_id": "job-123"}, approved=True)
+                cancel = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "modal", "action": "cancel", "job_id": "job-123"}, approved=True)
+                rollback = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "modal", "action": "rollback", "job_id": "job-123"}, approved=True)
             finally:
                 executor_module._open_without_redirects = original_open
                 executor_module._private_network_error = original_private_check
 
+            requests = captured["requests"]
             self.assertTrue(selected["ok"])
             self.assertTrue(run["ok"])
             self.assertEqual(run["status"], "submitted")
@@ -1332,10 +2619,32 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertFalse(run["activation_receipt"]["raw_secret_values_included"])
             self.assertFalse(run["execution_receipt"]["raw_command_logged"])
             self.assertFalse(run["execution_receipt"]["raw_response_body_included"])
-            self.assertEqual(run["cleanup_receipt"]["status"], "provider_managed")
+            self.assertEqual(run["cleanup_receipt"]["status"], "generic_lifecycle_available")
+            self.assertIn("cancel", run["cleanup_receipt"]["supported_actions"])
             self.assertEqual(captured["authorization"], "Bearer hosted_raw_secret")
-            self.assertIn("command_args", json.loads(str(captured["body"])))
+            self.assertIn("command_args", json.loads(str(requests[0]["body"])))
             self.assertNotIn("hosted_raw_secret", json.dumps(run, sort_keys=True))
+            self.assertTrue(status["ok"])
+            self.assertEqual(status["lifecycle_action"], "status")
+            self.assertEqual(status["lifecycle_receipt"]["receipt_schema"], "hosted_sandbox_lifecycle_receipt_v1")
+            self.assertFalse(status["lifecycle_receipt"]["raw_response_body_included"])
+            self.assertFalse(status["lifecycle_receipt"]["raw_secret_values_included"])
+            self.assertTrue(logs["ok"])
+            self.assertEqual(logs["lifecycle_action"], "logs")
+            self.assertEqual(logs["log_line_count"], 2)
+            self.assertNotIn("abc123", json.dumps(logs, sort_keys=True))
+            self.assertTrue(artifact["ok"])
+            self.assertEqual(artifact["lifecycle_action"], "artifact")
+            self.assertEqual(Path(artifact["artifact_path"]).read_bytes(), b"hosted artifact")
+            self.assertEqual(artifact["artifact_receipt"]["artifact_bytes"], len(b"hosted artifact"))
+            self.assertTrue(cancel["ok"])
+            self.assertEqual(cancel["cleanup_receipt"]["status"], "cancel_requested")
+            self.assertTrue(rollback["ok"])
+            self.assertEqual(rollback["rollback_receipt"]["status"], "rollback_requested")
+            self.assertFalse(rollback["rollback_receipt"]["raw_secret_values_included"])
+            lifecycle_payloads = [json.loads(str(request["body"])) for request in requests[1:]]
+            self.assertEqual([payload["action"] for payload in lifecycle_payloads], ["status", "logs", "artifact", "cancel", "rollback"])
+            self.assertTrue(all(payload["job_id"] == "job-123" for payload in lifecycle_payloads))
             dashboard = build_product_dashboard(orchestrator)
             live_gap = next(item for item in dashboard["live_gap_backlog"] if item["area"] == "remote_backend_activation")
             self.assertEqual(live_gap["status"], "remote_backends_partially_live")
@@ -1345,8 +2654,10 @@ class PlatformLayerTests(unittest.TestCase):
             implemented_backends = {adapter["name"]: adapter for adapter in live_gap["implemented_backend_adapters"]}
             self.assertEqual(implemented_backends["modal"]["activation"]["preflight_status"], "ready")
             self.assertIn("hosted_sandbox_allowed_hosts", implemented_backends["modal"]["activation"]["configured_controls"])
+            self.assertIn("hosted_sandbox_lifecycle", implemented_backends["modal"]["capabilities"])
             backend_checklist = {item["control"]: item for item in live_gap["operator_checklist"]}
             self.assertEqual(backend_checklist["provider_lifecycle_depth"]["state"], "partial")
+            self.assertIn("generic status, logs, cancel, artifact, and rollback", backend_checklist["provider_lifecycle_depth"]["detail"])
             self.assertEqual(backend_checklist["rollback_receipts"]["state"], "enforced")
 
             rejected = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "modal", "command": "python3 -m http.server"}, approved=True)
@@ -1496,6 +2807,8 @@ class PlatformLayerTests(unittest.TestCase):
         self.assertIn("model-fallbacks-form", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("model-auth-form", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("model-auth-logout", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("model-auth-verify-external", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("model-auth-output", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("model-route-output", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("session-update-form", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("session-compact-form", (static_root / "index.html").read_text(encoding="utf-8"))
@@ -1512,7 +2825,22 @@ class PlatformLayerTests(unittest.TestCase):
         self.assertIn("policy-activate-due", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("policy-bundles", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("policy-output", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("remote-control-form", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("remote-control-relay-form", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("remote-control-relay-url", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("remote-control-directory", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("remote-control-relay", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("remote-control-relay-outbox", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("remote-control-relay-retry", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("remote-control-pairings", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("remote-control-output", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("skill-hub-form", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("plugin-install-form", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("installed-plugins", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("plugin-marketplace-form", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("plugin-marketplace", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("plugin-updates", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("plugin-output", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("mcp-server-form", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("mcp-call-form", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("mcp-servers", (static_root / "index.html").read_text(encoding="utf-8"))
@@ -1537,6 +2865,7 @@ class PlatformLayerTests(unittest.TestCase):
         self.assertIn("repair-readiness", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("audit-siem-output", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("section-switcher", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn('value="minimax-token-plan"', (static_root / "index.html").read_text(encoding="utf-8"))
         app_js = (static_root / "app.js").read_text(encoding="utf-8")
         self.assertIn('headers["X-Aegis-Token"] = state.apiToken', app_js)
         self.assertIn("/tools/run", app_js)
@@ -1569,6 +2898,19 @@ class PlatformLayerTests(unittest.TestCase):
         self.assertIn("data-policy-apply", app_js)
         self.assertIn("data-policy-diff", app_js)
         self.assertIn("renderPolicyOutput", app_js)
+        self.assertIn("/remote-control/status", app_js)
+        self.assertIn("/remote-control/relay", app_js)
+        self.assertIn("/remote-control/relay/outbox", app_js)
+        self.assertIn("/remote-control/relay/retry", app_js)
+        self.assertIn("/remote-control/directory", app_js)
+        self.assertIn("/remote-control/pair", app_js)
+        self.assertIn("/remote-control/revoke", app_js)
+        self.assertIn('setList("remote-control-relay"', app_js)
+        self.assertIn('setList("remote-control-relay-outbox"', app_js)
+        self.assertIn('setList("remote-control-pairings"', app_js)
+        self.assertIn("data-remote-control-revoke", app_js)
+        self.assertIn("data-remote-control-directory", app_js)
+        self.assertIn("renderRemoteControlOutput", app_js)
         self.assertIn("/channels/render", app_js)
         self.assertIn("/channels/receive", app_js)
         self.assertIn("/channels/webhook/send", app_js)
@@ -1590,10 +2932,29 @@ class PlatformLayerTests(unittest.TestCase):
         self.assertIn("/models/fallbacks", app_js)
         self.assertIn("/models/auth/login", app_js)
         self.assertIn("/models/auth/logout", app_js)
+        self.assertIn("payload.verify_external", app_js)
+        self.assertIn("renderModelAuthOutput", app_js)
         self.assertIn("/model-usage", app_js)
         self.assertIn("renderModelRouteOutput", app_js)
         self.assertIn("/skill-hub?q=", app_js)
         self.assertIn("skillHubQuery", app_js)
+        self.assertIn('api("/plugins")', app_js)
+        self.assertIn('api("/plugins/reload"', app_js)
+        self.assertIn("/plugins/marketplace?q=", app_js)
+        self.assertIn("/plugins/updates", app_js)
+        self.assertIn('api("/plugins/marketplace/fetch-bundle"', app_js)
+        self.assertIn('api("/plugins/marketplace/install-bundle"', app_js)
+        self.assertIn('api("/plugins/marketplace/update"', app_js)
+        self.assertIn('setList("installed-plugins"', app_js)
+        self.assertIn('setList("plugin-marketplace"', app_js)
+        self.assertIn('setList("plugin-updates"', app_js)
+        self.assertIn("renderPluginOutput", app_js)
+        self.assertIn("data-plugin-enable", app_js)
+        self.assertIn("data-plugin-disable", app_js)
+        self.assertIn("data-plugin-remove", app_js)
+        self.assertIn("data-plugin-marketplace-fetch-bundle", app_js)
+        self.assertIn("data-plugin-marketplace-install-bundle", app_js)
+        self.assertIn("data-plugin-marketplace-update", app_js)
         self.assertIn("/mcp/servers", app_js)
         self.assertIn("/mcp/call", app_js)
         self.assertIn("mcpServers.servers", app_js)
@@ -1699,11 +3060,26 @@ class PlatformLayerTests(unittest.TestCase):
 
 class _FakeSandboxResponse:
     def __init__(self, request, timeout: float, captured: dict[str, object]) -> None:  # noqa: ANN001
+        body = request.data.decode("utf-8")
         captured["authorization"] = request.headers.get("Authorization")
-        captured["body"] = request.data.decode("utf-8")
+        captured["body"] = body
         captured["timeout"] = timeout
+        requests = captured.setdefault("requests", [])
+        assert isinstance(requests, list)
+        requests.append({"body": body, "timeout": timeout})
+        payload = json.loads(body)
+        action = payload.get("action", "submit") if isinstance(payload, dict) else "submit"
+        if action == "logs":
+            self._body = json.dumps({"status": "running", "logs": ["starting job", "token=abc123"]}).encode("utf-8")
+        elif action == "artifact":
+            self._body = json.dumps({"status": "ready", "artifact_name": "result.txt", "mime_type": "text/plain", "artifact_base64": base64.b64encode(b"hosted artifact").decode("ascii")}).encode("utf-8")
+        elif action in {"status", "cancel", "rollback"}:
+            self._body = json.dumps({"status": "accepted" if action in {"cancel", "rollback"} else "running", "state": action, "message": f"{action} queued", "secret": "response_secret_should_not_surface"}).encode("utf-8")
+        else:
+            self._body = b'{"job_id":"job-123","secret":"response_secret_should_not_surface"}'
         self.status = 202
         self.code = 202
+        self.headers = {"Content-Type": "application/json"}
 
     def __enter__(self) -> "_FakeSandboxResponse":
         return self
@@ -1712,7 +3088,7 @@ class _FakeSandboxResponse:
         return False
 
     def read(self, limit: int = -1) -> bytes:
-        return b'{"job_id":"job-123","secret":"response_secret_should_not_surface"}'
+        return self._body
 
 
 def _fake_chrome_render(*, executable: str, html_path: Path, output_path: Path, artifact_dir: Path, width: int = 960, height: int = 720) -> dict[str, object]:

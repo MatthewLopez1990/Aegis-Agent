@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 import tomllib
 
 from aegis.config.defaults import (
@@ -75,6 +76,13 @@ class ExecutionConfig:
 
 
 @dataclass(frozen=True)
+class QuickCommandConfig:
+    kind: str
+    command: str = ""
+    target: str = ""
+
+
+@dataclass(frozen=True)
 class AegisConfig:
     data_dir: Path
     database_path: Path
@@ -85,13 +93,24 @@ class AegisConfig:
     default_read_only: bool = True
     live_http_reads: bool = False
     live_rest_writes: bool = False
+    live_github_writes: bool = False
+    live_gitlab_writes: bool = False
+    live_graph_calendar_writes: bool = False
+    live_graph_email_writes: bool = False
+    live_graph_contact_writes: bool = False
+    live_service_desk_writes: bool = False
+    live_messaging_writes: bool = False
     custom_model_base_url: str | None = None
+    azure_foundry_base_url: str | None = None
+    google_vertex_project: str | None = None
+    google_vertex_location: str | None = None
     webhook: WebhookChannelConfig = field(default_factory=WebhookChannelConfig)
     email: EmailChannelConfig = field(default_factory=EmailChannelConfig)
     chat_webhook: ChatWebhookChannelConfig = field(default_factory=ChatWebhookChannelConfig)
     policy_profile: PolicyProfile = field(default_factory=PolicyProfile.secure_default)
     memory_retention: MemoryRetentionConfig = field(default_factory=MemoryRetentionConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
+    quick_commands: dict[str, QuickCommandConfig] = field(default_factory=dict)
 
 
 def load_config(data_dir: str | Path | None = None, config_path: str | Path | None = None) -> AegisConfig:
@@ -109,6 +128,7 @@ def load_config(data_dir: str | Path | None = None, config_path: str | Path | No
     models = raw.get("models", {}) if isinstance(raw.get("models", {}), dict) else {}
     execution = raw.get("execution", {}) if isinstance(raw.get("execution", {}), dict) else {}
     memory = raw.get("memory", {}) if isinstance(raw.get("memory", {}), dict) else {}
+    quick_commands_raw = raw.get("quick_commands", {}) if isinstance(raw.get("quick_commands", {}), dict) else {}
     channels = raw.get("channels", {}) if isinstance(raw.get("channels", {}), dict) else {}
     webhook = channels.get("webhook", {}) if isinstance(channels.get("webhook", {}), dict) else {}
     email = channels.get("email", {}) if isinstance(channels.get("email", {}), dict) else {}
@@ -130,7 +150,17 @@ def load_config(data_dir: str | Path | None = None, config_path: str | Path | No
     default_read_only = bool(security.get("default_read_only", True))
     live_http_reads = bool(security.get("live_http_reads", False))
     live_rest_writes = bool(security.get("live_rest_writes", False))
+    live_github_writes = bool(security.get("live_github_writes", False))
+    live_gitlab_writes = bool(security.get("live_gitlab_writes", False))
+    live_graph_calendar_writes = bool(security.get("live_graph_calendar_writes", False))
+    live_graph_email_writes = bool(security.get("live_graph_email_writes", False))
+    live_graph_contact_writes = bool(security.get("live_graph_contact_writes", False))
+    live_service_desk_writes = bool(security.get("live_service_desk_writes", False))
+    live_messaging_writes = bool(security.get("live_messaging_writes", False))
     custom_model_base_url = str(models["custom_base_url"]) if models.get("custom_base_url") else None
+    azure_foundry_base_url = str(models["azure_foundry_base_url"]) if models.get("azure_foundry_base_url") else None
+    google_vertex_project = str(models["google_vertex_project"]) if models.get("google_vertex_project") else None
+    google_vertex_location = str(models["google_vertex_location"]) if models.get("google_vertex_location") else None
     memory_retention = MemoryRetentionConfig(
         default_ttl_days=_optional_positive_int(memory.get("default_ttl_days")),
         ttl_days_by_type={str(key): int(value) for key, value in memory_ttl_days.items() if int(value) > 0},
@@ -202,13 +232,24 @@ def load_config(data_dir: str | Path | None = None, config_path: str | Path | No
         default_read_only=default_read_only,
         live_http_reads=live_http_reads,
         live_rest_writes=live_rest_writes,
+        live_github_writes=live_github_writes,
+        live_gitlab_writes=live_gitlab_writes,
+        live_graph_calendar_writes=live_graph_calendar_writes,
+        live_graph_email_writes=live_graph_email_writes,
+        live_graph_contact_writes=live_graph_contact_writes,
+        live_service_desk_writes=live_service_desk_writes,
+        live_messaging_writes=live_messaging_writes,
         custom_model_base_url=custom_model_base_url,
+        azure_foundry_base_url=azure_foundry_base_url,
+        google_vertex_project=google_vertex_project,
+        google_vertex_location=google_vertex_location,
         webhook=webhook_config,
         email=email_config,
         chat_webhook=chat_webhook_config,
         policy_profile=policy_profile,
         memory_retention=memory_retention,
         execution=execution_config,
+        quick_commands=_quick_commands(quick_commands_raw),
     )
 
 
@@ -231,11 +272,28 @@ def write_default_config(data_dir: str | Path | None = None) -> Path:
                     "default_read_only = true",
                     "live_http_reads = false",
                     "live_rest_writes = false",
+                    "live_github_writes = false",
+                    "live_gitlab_writes = false",
+                    "live_graph_calendar_writes = false",
+                    "live_graph_email_writes = false",
+                    "live_graph_contact_writes = false",
+                    "live_service_desk_writes = false",
+                    "live_messaging_writes = false",
                     f"allowed_shell_commands = {list(DEFAULT_ALLOWED_SHELL_COMMANDS)!r}",
                     f"network_allowlist = {list(DEFAULT_NETWORK_ALLOWLIST)!r}",
                     "",
                     "[models]",
                     "# custom_base_url = \"http://localhost:8000/v1\"",
+                    "# azure_foundry_base_url = \"https://YOUR-RESOURCE-NAME.openai.azure.com/openai/v1\"",
+                    "# google_vertex_project = \"YOUR-GCP-PROJECT-ID\"",
+                    "# google_vertex_location = \"us-central1\"",
+                    "",
+                    "# [quick_commands.status]",
+                    "# type = \"exec\"",
+                    "# command = \"pwd\"",
+                    "# [quick_commands.models]",
+                    "# type = \"alias\"",
+                    "# target = \"/models\"",
                     "",
                     "[execution]",
                     'enabled_backends = ["local"]',
@@ -344,6 +402,31 @@ def _enabled_backends(value: object) -> tuple[str, ...]:
     if "local" not in normalized:
         normalized.insert(0, "local")
     return tuple(normalized)
+
+
+def _quick_commands(raw: dict[str, object]) -> dict[str, QuickCommandConfig]:
+    commands: dict[str, QuickCommandConfig] = {}
+    for raw_name, raw_entry in raw.items():
+        name = str(raw_name).strip().lower()
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,79}", name):
+            raise ValueError("quick command names must be 1-80 lowercase letters, digits, dot, underscore, or dash")
+        if not isinstance(raw_entry, dict):
+            raise ValueError(f"quick command {name!r} must be a TOML table")
+        kind = str(raw_entry.get("type") or "").strip().lower()
+        if kind == "exec":
+            command = str(raw_entry.get("command") or "").strip()
+            if not command:
+                raise ValueError(f"quick command {name!r} requires command")
+            commands[name] = QuickCommandConfig(kind=kind, command=command)
+            continue
+        if kind == "alias":
+            target = str(raw_entry.get("target") or "").strip()
+            if not target.startswith("/"):
+                raise ValueError(f"quick command {name!r} alias target must start with /")
+            commands[name] = QuickCommandConfig(kind=kind, target=target)
+            continue
+        raise ValueError(f"quick command {name!r} type must be exec or alias")
+    return commands
 
 
 def _memory_escalation_routes(value: dict[object, object]) -> dict[str, dict[str, object]]:

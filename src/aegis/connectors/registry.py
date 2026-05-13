@@ -63,18 +63,42 @@ def build_default_registry(config: AegisConfig, audit_logger: AuditLogger, *, wo
     registry.register(LocalFilesystemConnector(workspace, allow_write=not config.default_read_only))
     registry.register(ShellConnector(workspace, allowed_commands=config.allowed_shell_commands))
     registry.register(HttpConnector(allowlist=config.network_allowlist, live_network=config.live_http_reads))
-    registry.register(GitHubConnectorStub(allowlist=config.network_allowlist, live_writes=config.live_rest_writes, secrets_broker=SecretsBroker(config.secrets_path)))
-    registry.register(GitLabConnectorStub(allowlist=config.network_allowlist, live_writes=config.live_rest_writes, secrets_broker=SecretsBroker(config.secrets_path)))
+    registry.register(
+        GitHubConnectorStub(
+            allowlist=config.network_allowlist,
+            live_writes=config.live_github_writes,
+            secrets_broker=SecretsBroker(config.secrets_path),
+        )
+    )
+    registry.register(
+        GitLabConnectorStub(
+            allowlist=config.network_allowlist,
+            live_writes=config.live_gitlab_writes,
+            secrets_broker=SecretsBroker(config.secrets_path),
+        )
+    )
     registry.register(GenericRestConnector(allowlist=config.network_allowlist, live_writes=config.live_rest_writes))
     registry.register(
         MockGraphConnector(
             allowlist=config.network_allowlist,
-            live_calendar_writes=config.live_rest_writes,
-            live_email_writes=config.live_rest_writes,
-            live_contact_writes=config.live_rest_writes,
+            live_calendar_writes=config.live_graph_calendar_writes,
+            live_email_writes=config.live_graph_email_writes,
+            live_contact_writes=config.live_graph_contact_writes,
             secrets_broker=SecretsBroker(config.secrets_path),
         )
     )
-    registry.register(MockServiceNowConnector(allowlist=config.network_allowlist, live_writes=config.live_rest_writes, secrets_broker=SecretsBroker(config.secrets_path)))
-    registry.register(MockMessagingConnector(allowlist=config.network_allowlist, live_writes=config.live_rest_writes, secrets_broker=SecretsBroker(config.secrets_path)))
+    registry.register(
+        MockServiceNowConnector(
+            allowlist=config.network_allowlist,
+            live_writes=config.live_service_desk_writes,
+            secrets_broker=SecretsBroker(config.secrets_path),
+        )
+    )
+    registry.register(
+        MockMessagingConnector(
+            allowlist=config.network_allowlist,
+            live_writes=config.live_messaging_writes,
+            secrets_broker=SecretsBroker(config.secrets_path),
+        )
+    )
     return registry

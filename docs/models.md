@@ -10,6 +10,29 @@ Provider support:
 - Mistral.
 - Cohere.
 - OpenRouter.
+- Nous Portal API key or brokered Nous Portal OAuth.
+- DeepSeek.
+- xAI/Grok.
+- Kimi/Moonshot.
+- Kimi/Moonshot China.
+- Arcee AI.
+- GMI Cloud.
+- MiniMax pay-as-you-go.
+- MiniMax China.
+- MiniMax OAuth.
+- MiniMax Token Plan.
+- Z.AI/GLM.
+- Qwen/DashScope.
+- Alibaba Cloud Coding Plan API.
+- StepFun Step Plan.
+- Hugging Face Inference Providers.
+- NVIDIA NIM.
+- Vercel AI Gateway.
+- OpenCode Zen and OpenCode Go.
+- Kilo Code.
+- Xiaomi MiMo.
+- Tencent TokenHub.
+- Ollama Cloud.
 - Ollama.
 - LM Studio.
 - Custom OpenAI-compatible endpoints.
@@ -22,8 +45,15 @@ Features:
 - Usage and cost tracking with aggregate totals, provider/model breakdowns, and recent sanitized usage receipts.
 - Provider context-window metadata and conservative prompt budget trimming before live calls.
 - Secret handles through the secrets broker.
-- Local auth login for OpenAI, Anthropic, Google, Mistral, Cohere, OpenRouter, and custom API keys.
-- Live chat completion calls for OpenAI, Anthropic, Mistral, Cohere, OpenRouter, Ollama, LM Studio, and configured custom OpenAI-compatible routes. LM Studio accepts arbitrary local model IDs after the `lmstudio/` prefix.
+- Local auth login for OpenAI, Anthropic, Google, Mistral, Cohere, OpenRouter, Nous, DeepSeek, xAI, Kimi, Kimi China, Arcee AI, GMI Cloud, MiniMax pay-as-you-go, MiniMax China, MiniMax Token Plan, Z.AI, Qwen, Alibaba Cloud Coding Plan, StepFun, Hugging Face, NVIDIA NIM, Vercel AI Gateway, OpenCode Zen, OpenCode Go, Kilo Code, Xiaomi MiMo, Tencent TokenHub, Ollama Cloud, Azure Foundry/OpenAI, and custom API keys.
+- Guarded provider-native login handoff for OpenAI/ChatGPT Codex, Anthropic/claude.ai, GitHub Copilot, Gemini CLI/Gemini Code Assist, Google Gemini OAuth / Code Assist, Google Cloud/Vertex AI, Qwen Code, AWS Bedrock, Azure Foundry, MiniMax, and Nous Portal. Aegis can report or launch official local CLI commands such as `codex login`, `claude auth login`, `gemini`, `gcloud auth login --update-adc`, `qwen auth coding-plan`, `aws sso login`, and `az login`; successful non-secret status checks such as `gemini -p "Respond with OK only." --output-format=json --approval-mode=plan --sandbox --skip-trust`, `gcloud auth list --filter=status:ACTIVE --format=value(account)`, `qwen auth status`, `aws sts get-caller-identity`, and `az account show` are remembered as verified external auth links. Google Gemini OAuth / Code Assist uses a browser PKCE flow, stores only brokered access/refresh tokens locally, and calls Cloud Code Assist `generateContent` at invocation time. GitHub Copilot uses the official GitHub device-code OAuth flow, stores only the brokered OAuth token locally, and exchanges it for a Copilot API token at invocation time. Nous Portal OAuth uses the official device-code flow, stores brokered access/refresh tokens locally, and mints a short-lived brokered agent key for live calls. MiniMax OAuth uses the provider's PKCE user-code flow and stores only brokered access/refresh tokens in the local secret store. Aegis does not accept pasted browser cookies, subscription session tokens, OAuth tokens, refresh tokens, ADC JSON, access-token output, Coding Plan API keys, Qwen settings files, or pasted Nous agent keys.
+- Verified OpenAI/ChatGPT, Claude Code, Gemini CLI, and Qwen Code subscription login can act as tokenless live model bridges through isolated official CLI invocation: Aegis checks `codex login status`, `claude auth status`, a minimal `gemini -p` JSON prompt, or `qwen auth status`, records only non-secret link metadata, and invokes Codex/Claude/Gemini/Qwen from an empty temporary workspace when no API key is configured. Gemini runs headless with JSON output, `--approval-mode=plan`, `--sandbox`, and `--skip-trust`; Qwen runs headless with JSON output and `--approval-mode plan`.
+- Verified Google Vertex AI cloud identity can act as a tokenless live model bridge through the official gcloud account flow: Aegis checks `gcloud auth list --filter=status:ACTIVE --format=value(account)`, records only non-secret link metadata, and invokes the Vertex AI REST `generateContent` endpoint without storing Google OAuth tokens or ADC JSON. Configure `models.google_vertex_project` and `models.google_vertex_location` before routing `google/<model-id>` without a Gemini API key.
+- Verified AWS Bedrock cloud identity can act as a tokenless live model bridge through the official AWS CLI: Aegis checks `aws sts get-caller-identity`, records only non-secret link metadata, and invokes `aws bedrock-runtime converse` without importing AWS access keys, session tokens, or SSO cache entries.
+- Verified Azure Foundry cloud identity can act as a tokenless live model bridge through the official Azure CLI: Aegis checks `az account show`, records only non-secret link metadata, and invokes `az rest` against the configured `/openai/v1/chat/completions` endpoint without importing Azure access tokens.
+- Hermes/Claude provider-auth target tracking for OpenAI Codex, Claude Code, Copilot, Nous Portal, OpenRouter, Gemini API, Google Gemini OAuth / Code Assist, Google Cloud/Vertex AI, Qwen Coding Plan, Bedrock, Azure Foundry, xAI/Grok, Z.AI, Kimi, Kimi China, Arcee AI, GMI Cloud, MiniMax pay-as-you-go, MiniMax China, MiniMax OAuth, MiniMax Token Plan, DeepSeek, Alibaba Cloud Coding Plan, StepFun, Hugging Face, NVIDIA NIM, Vercel AI Gateway, OpenCode Zen, OpenCode Go, Kilo Code, Xiaomi MiMo, Tencent TokenHub, Ollama Cloud, Ollama, LM Studio, and custom endpoints. Implemented but unconfigured provider-native login bridges are surfaced as operator login/configuration work, and `model auth doctor` lists the local login and verification commands plus activation states for login-required, config-required, verified-ready, and verified-but-invocation-blocked targets without returning secret values. The web GUI renders those doctor commands as copyable terminal-only actions and still refuses to run interactive provider login from the browser. Future targets without governed bridges remain explicit gaps instead of silent stubs. Qwen OAuth is marked as a discontinued provider surface because Qwen Code ended OAuth free-tier access on 2026-04-15.
+- `model auth readiness-packet` creates a private checksum-backed JSON review artifact under `.aegis/model-auth-readiness-packets/` with sanitized provider-login readiness, required controls, missing official CLI executables, activation states, and next commands. `model auth verify-readiness-packet <packet>` rechecks the checksum, schema, controls, login-check summaries, and forbidden raw-secret keys, returns only a summary plus receipt, and never imports browser cookies, credential files, OAuth/session token values, or invokes a model.
+- Live chat completion calls for OpenAI, Anthropic, Google Gemini API key, verified Gemini CLI subscription, brokered Google Gemini OAuth / Code Assist, or configured Vertex AI cloud identity, Mistral, Cohere, OpenRouter, Nous API key or brokered Nous Portal OAuth, DeepSeek, xAI, Kimi, Kimi China, Arcee AI, GMI Cloud, MiniMax pay-as-you-go, MiniMax China through its Anthropic-compatible endpoint, brokered MiniMax OAuth, MiniMax Token Plan through its Anthropic-compatible endpoint, Z.AI, Qwen API key or verified Qwen Code Coding Plan subscription, Alibaba Cloud Coding Plan API, StepFun, Hugging Face, NVIDIA NIM, Vercel AI Gateway, OpenCode Zen, OpenCode Go, Kilo Code, Xiaomi MiMo, Tencent TokenHub, Ollama Cloud, GitHub Copilot through brokered GitHub OAuth device-code login, AWS Bedrock through verified AWS CLI cloud identity, Ollama, LM Studio, configured Azure Foundry/OpenAI v1 routes through API key or verified Azure CLI cloud identity, and configured custom OpenAI-compatible routes. Google, Google Gemini OAuth, Copilot, Qwen, AWS Bedrock, LM Studio, Nous OAuth, MiniMax OAuth, dynamic Hermes-compatible API-key providers, and Azure Foundry accept supported deployment IDs after their provider prefix.
 - Policy-gated model egress through the configured network allowlist, including local endpoints with a base URL.
 
 Auth commands:
@@ -35,8 +65,66 @@ PYTHONPATH=src python3 -m aegis.cli.main model auth login google --api-key-stdin
 PYTHONPATH=src python3 -m aegis.cli.main model auth login mistral --api-key-stdin
 PYTHONPATH=src python3 -m aegis.cli.main model auth login cohere --api-key-stdin
 PYTHONPATH=src python3 -m aegis.cli.main model auth login openrouter --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login nous --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login deepseek --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login xai --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login kimi --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login kimi-cn --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login arcee --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login gmi --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login minimax --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login minimax-cn --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login zai --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login qwen --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login alibaba-coding-plan --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login stepfun --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login huggingface --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login nvidia --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login ai-gateway --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login opencode-zen --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login opencode-go --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login kilocode --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login xiaomi --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login tencent-tokenhub --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login ollama-cloud --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth login azure-foundry --api-key-stdin
 PYTHONPATH=src python3 -m aegis.cli.main model auth login custom --api-key-stdin
+PYTHONPATH=src python3 -m aegis.cli.main model auth methods openai
+PYTHONPATH=src python3 -m aegis.cli.main model auth login openai --subscription
+PYTHONPATH=src python3 -m aegis.cli.main model auth login openai --subscription --run-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth login openai --subscription --verify-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth login anthropic --subscription
+PYTHONPATH=src python3 -m aegis.cli.main model auth login anthropic --subscription --run-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth login anthropic --subscription --verify-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth login google --subscription
+PYTHONPATH=src python3 -m aegis.cli.main model auth login google --subscription --run-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth login google --subscription --verify-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth login qwen --subscription
+PYTHONPATH=src python3 -m aegis.cli.main model auth login qwen --subscription --run-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth login qwen --subscription --verify-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth login github-copilot --method oauth-device --run-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth login github-copilot --method oauth-device --verify-external
+# Google Gemini OAuth / Code Assist requires a locally supplied authorized desktop OAuth client:
+# export AEGIS_GOOGLE_GEMINI_OAUTH_CLIENT_ID=...
+# export AEGIS_GOOGLE_GEMINI_OAUTH_CLIENT_SECRET=...
+PYTHONPATH=src python3 -m aegis.cli.main model auth login google-gemini-oauth --method oauth --run-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth login google-gemini-oauth --method oauth --verify-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth login google --method cloud-identity --run-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth login google --method cloud-identity --verify-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth login aws-bedrock --method cloud-identity --run-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth login aws-bedrock --method cloud-identity --verify-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth login azure-foundry --method cloud-identity --run-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth login azure-foundry --method cloud-identity --verify-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth login minimax-oauth --method oauth --run-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth login nous --method oauth --run-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth login nous --method oauth --verify-external
+PYTHONPATH=src python3 -m aegis.cli.main model auth status github-copilot
+PYTHONPATH=src python3 -m aegis.cli.main model auth logout github-copilot
 PYTHONPATH=src python3 -m aegis.cli.main model auth status
+PYTHONPATH=src python3 -m aegis.cli.main model auth targets
+PYTHONPATH=src python3 -m aegis.cli.main model auth doctor
+PYTHONPATH=src python3 -m aegis.cli.main model auth readiness-packet
+PYTHONPATH=src python3 -m aegis.cli.main model auth verify-readiness-packet <packet-id-or-path>
 PYTHONPATH=src python3 -m aegis.cli.main model providers
 PYTHONPATH=src python3 -m aegis.cli.main model route alias/smart
 PYTHONPATH=src python3 -m aegis.cli.main model alias localfast ollama/llama3
@@ -44,18 +132,22 @@ PYTHONPATH=src python3 -m aegis.cli.main model fallbacks ollama/llama3 lmstudio/
 PYTHONPATH=src python3 -m aegis.cli.main model usage
 ```
 
-Keys are stored in the local secret store and are not returned to model-facing code or audit logs. Environment variables such as `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY`, `COHERE_API_KEY`, `OPENROUTER_API_KEY`, and `CUSTOM_API_KEY` still take precedence when present.
+Keys and brokered OAuth tokens are stored in the local secret store and are not returned to model-facing code or audit logs. Environment variables such as `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `MISTRAL_API_KEY`, `COHERE_API_KEY`, `OPENROUTER_API_KEY`, `NOUS_API_KEY`, `DEEPSEEK_API_KEY`, `XAI_API_KEY`, `KIMI_API_KEY`, `KIMI_CN_API_KEY`, `ARCEEAI_API_KEY`, `GMI_API_KEY`, `MINIMAX_API_KEY`, `MINIMAX_CN_API_KEY`, `MINIMAX_TOKEN_PLAN_API_KEY`, `GLM_API_KEY`, `DASHSCOPE_API_KEY`, `ALIBABA_CODING_PLAN_API_KEY`, `STEPFUN_API_KEY`, `HF_TOKEN`, `NVIDIA_API_KEY`, `AI_GATEWAY_API_KEY`, `OPENCODE_ZEN_API_KEY`, `OPENCODE_GO_API_KEY`, `KILOCODE_API_KEY`, `XIAOMI_API_KEY`, `TOKENHUB_API_KEY`, `OLLAMA_API_KEY`, `AZURE_OPENAI_API_KEY`, and `CUSTOM_API_KEY` still take precedence when present.
+Inside the TUI, `/gquota [google-gemini-oauth/<model-id>]` reports sanitized Gemini Code Assist quota bucket metadata through the brokered OAuth token. The command returns model IDs, token bucket types, remaining percentages, reset times, and project-source metadata without exposing access or refresh token values.
 Model aliases and fallback routes are persisted in the local SQLite state so CLI, TUI, and web sessions resolve the same routes after restart.
 
 Before a live model call, Aegis estimates prompt size with the routed provider's tokenizer profile, reserves output space, preserves the system instruction and current task request, keeps the newest session and memory context that fits, and records context-budget plus tokenizer metadata in the model response receipt. If `tiktoken` is installed, OpenAI-compatible profiles use exact `cl100k_base` counting. Llama and Mistral-style local profiles can use exact SentencePiece counting when the optional `sentencepiece` package is installed and `AEGIS_SENTENCEPIECE_MODEL_LLAMA`, `AEGIS_SENTENCEPIECE_MODEL_MISTRAL`, or the generic `AEGIS_SENTENCEPIECE_MODEL` points at a local tokenizer model. Otherwise Aegis stays dependency-light and falls back to built-in provider-specific estimators. Long-running sessions therefore retain recent continuity without sending unbounded history to a provider.
 
-OpenAI, Anthropic, Mistral, Cohere, OpenRouter, LM Studio, and custom routes invoke live chat completions through the local secrets broker when their provider domains are allowed by policy. Ollama uses its local chat API without auth. Google routes currently prepare secure routing, accounting, auth state, and secret isolation for a later provider-specific client.
+OpenAI, Anthropic, Google Gemini, Google Gemini OAuth, Mistral, Cohere, OpenRouter, Nous, DeepSeek, xAI, Kimi, Kimi China, Arcee AI, GMI Cloud, MiniMax pay-as-you-go, MiniMax China, MiniMax OAuth, MiniMax Token Plan, Z.AI, Qwen, Alibaba Cloud Coding Plan, StepFun, Hugging Face, NVIDIA NIM, Vercel AI Gateway, OpenCode Zen, OpenCode Go, Kilo Code, Xiaomi MiMo, Tencent TokenHub, Ollama Cloud, GitHub Copilot, AWS Bedrock, LM Studio, configured Azure Foundry/OpenAI v1 routes, and custom routes invoke live chat completions through governed adapters when their provider domains or official CLI bridges are allowed by policy. Ollama uses its local chat API without auth. For OpenAI and Anthropic, verified Codex/Claude Code subscriptions can be used as fallback live model bridges when no API key is configured; Google can use `GOOGLE_API_KEY`, verified Gemini CLI subscription through `gemini -p` JSON mode, brokered `google-gemini-oauth/<model-id>` through Cloud Code Assist, or configured Vertex AI cloud identity; Qwen can use either `DASHSCOPE_API_KEY` or verified Qwen Code Coding Plan subscription through `qwen` headless JSON mode; GitHub Copilot uses brokered GitHub OAuth device-code login and direct Copilot chat-completions calls; AWS Bedrock uses verified AWS CLI cloud identity through `bedrock-runtime converse`; configured Azure Foundry can use either `AZURE_OPENAI_API_KEY` or verified Azure CLI identity through `az rest`; Nous Portal OAuth uses brokered device-code access/refresh tokens to mint a short-lived agent key for the OpenAI-compatible Nous inference endpoint; MiniMax China, MiniMax OAuth, and MiniMax Token Plan use Anthropic-compatible message surfaces with brokered API key or OAuth token handling as appropriate.
 
 Custom OpenAI-compatible endpoints are configured in `.aegis/config.toml`:
 
 ```toml
 [models]
 custom_base_url = "https://models.example.com/v1"
+azure_foundry_base_url = "https://YOUR-RESOURCE-NAME.openai.azure.com/openai/v1"
+google_vertex_project = "YOUR-GCP-PROJECT-ID"
+google_vertex_location = "us-central1"
 ```
 
-Non-local custom URLs must use HTTPS and cannot include URL credentials. `http://` is accepted only for loopback hosts such as `localhost` or `127.0.0.1`. Model HTTP redirects are blocked instead of followed, so provider credentials are not forwarded to a redirect target.
+Non-local custom URLs must use HTTPS and cannot include URL credentials. `http://` is accepted only for loopback hosts such as `localhost` or `127.0.0.1`. Azure Foundry base URLs must be HTTPS Azure OpenAI or Azure AI Foundry endpoints ending in `.openai.azure.com` or `.services.ai.azure.com`, include the `/openai/v1` path, and use deployment IDs as the model name, for example `azure-foundry/prod-gpt-4o`. Google Vertex cloud identity routes use `google_vertex_project`, `google_vertex_location`, and the model name after `google/`, for example `google/gemini-2.5-flash`. Model HTTP redirects are blocked instead of followed, so provider credentials are not forwarded to a redirect target.

@@ -199,6 +199,7 @@ fi
 chmod 755 "$SHIM"
 
 "$SHIM" --help >/dev/null
+"$SHIM" --data-dir "$INSTALL_DIR/smoke-data" model auth targets >/dev/null
 
 log ""
 log "$APP_NAME installed."

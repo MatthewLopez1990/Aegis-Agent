@@ -11,21 +11,31 @@ from urllib.request import Request
 
 from aegis.connectors.base import ConnectorRequest, ConnectorResult, live_connector_activation, require_scope
 from aegis.connectors.http import HttpConnector, _open_without_redirects, _private_network_error, _validate_url
+from aegis.connectors.rate_limit import InMemoryRateLimiter
 
 
 class GenericRestConnector(HttpConnector):
-    def __init__(self, *, allowlist: tuple[str, ...], live_writes: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        allowlist: tuple[str, ...],
+        live_writes: bool = False,
+        rate_limits: dict[str, Any] | None = None,
+        rate_limiter: InMemoryRateLimiter | None = None,
+    ) -> None:
         super().__init__(allowlist=allowlist, live_network=False)
         self.live_writes = live_writes
+        self._rate_limiter = rate_limiter or InMemoryRateLimiter()
+        configured_rate_limits = rate_limits or self.spec.rate_limits
         self.spec = self.spec.__class__(
             name="generic_rest",
-            version=self.spec.version,
+            version="0.2.0",
             auth_type="brokered",
             required_scopes=self.spec.required_scopes,
             optional_scopes=("write",),
             supported_operations=("read", "dry_run", "write"),
             risk_by_operation=self.spec.risk_by_operation,
-            rate_limits=self.spec.rate_limits,
+            rate_limits=configured_rate_limits,
             data_sensitivity=self.spec.data_sensitivity,
             default_mode="mock",
             approval_required=("write",),
@@ -55,7 +65,18 @@ class GenericRestConnector(HttpConnector):
             live_error = _validate_live_write_target(parsed, domain)
             if live_error:
                 return ConnectorResult(self.spec.name, request.operation, False, {}, error=live_error)
-            live_result = _send_live_rest_write(method=_method_for_operation(request.operation), url=url, payload=payload)
+            method = _method_for_operation(request.operation)
+            rate_limit = self._check_live_rate_limit(domain=domain, operation=request.operation)
+            if not rate_limit["allowed"]:
+                return ConnectorResult(
+                    self.spec.name,
+                    request.operation,
+                    False,
+                    {"mode": "live_write", "domain": domain, "rate_limit": rate_limit},
+                    rollback="no action performed",
+                    error="REST live write rate limit exceeded",
+                )
+            live_result = _send_live_rest_write(method=method, url=url, payload=payload)
             return ConnectorResult(
                 self.spec.name,
                 request.operation,
@@ -66,6 +87,8 @@ class GenericRestConnector(HttpConnector):
                     "status": live_result["http_status"],
                     "mode": "live_write",
                     "accepted": summary,
+                    "rate_limit": rate_limit,
+                    "rollback_receipt": _rollback_offer_receipt(method=method, url=url),
                 },
                 rollback="provider-specific rollback required for REST writes",
                 error=live_result.get("error"),
@@ -80,6 +103,7 @@ class GenericRestConnector(HttpConnector):
                 "status": 202,
                 "mode": "mock_write",
                 "accepted": summary,
+                "rollback_receipt": _rollback_offer_receipt(method=_method_for_operation(request.operation), url=url),
                 "activation": live_connector_activation(connector=self.spec.name, operation=request.operation, enabled=False, approved=True, allowlist=self.allowlist, domain=domain),
             },
             rollback="provider-specific rollback required for REST writes",
@@ -87,6 +111,13 @@ class GenericRestConnector(HttpConnector):
 
     def health_check(self) -> dict[str, Any]:
         return {**super().health_check(), "live_writes": self.live_writes}
+
+    def _check_live_rate_limit(self, *, domain: str, operation: str) -> dict[str, int | bool]:
+        per_minute = _positive_int(self.spec.rate_limits.get("per_minute"))
+        if per_minute is None:
+            return {"allowed": True, "limit": 0, "window_seconds": 60, "remaining": 0, "retry_after_seconds": 0}
+        decision = self._rate_limiter.check(f"{self.spec.name}:{domain}:{operation}", limit=per_minute, window_seconds=60)
+        return decision.to_dict()
 
 
 def _summarize_payload(payload: Any) -> dict[str, Any]:
@@ -109,6 +140,19 @@ def _method_for_operation(operation: str) -> str:
     if operation == "webhook_call":
         return "POST"
     return "POST"
+
+
+def _rollback_offer_receipt(*, method: str, url: str) -> dict[str, Any]:
+    return {
+        "receipt_schema": "generic_rest_rollback_offer_v1",
+        "rollback_available": False,
+        "rollback_operation": None,
+        "method": method,
+        "target_url_sha256": hashlib.sha256(url.encode("utf-8")).hexdigest(),
+        "requires_provider_specific_implementation": True,
+        "raw_secret_values_included": False,
+        "raw_response_body_included": False,
+    }
 
 
 def _validate_live_write_target(parsed, domain: str) -> str | None:  # noqa: ANN001
@@ -137,3 +181,11 @@ def _send_live_rest_write(*, method: str, url: str, payload: Any) -> dict[str, A
         status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
         response.read(4096)
     return {"ok": 200 <= status < 300, "http_status": status, "error": None if 200 <= status < 300 else f"REST write failed with status {status}"}
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None

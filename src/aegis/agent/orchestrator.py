@@ -34,7 +34,8 @@ from aegis.channels.chat_webhook import deliver_chat_webhook
 from aegis.channels.email import deliver_smtp_email
 from aegis.channels.webhook import deliver_signed_webhook, verify_signed_webhook
 from aegis.execution.backends import ExecutionBackendRegistry
-from aegis.kanban.manager import KanbanManager
+from aegis.hooks.manager import HookManager
+from aegis.kanban.manager import KanbanManager, subagent_review_action_hints
 from aegis.learning.loop import LearningLoop
 from aegis.memory.manager import MemoryManager, MemorySafetyError
 from aegis.memory.models import MemoryType
@@ -42,6 +43,7 @@ from aegis.memory.store import LocalStore
 from aegis.mcp.registry import McpRegistry
 from aegis.models.client import LiveModelClient
 from aegis.models.registry import ModelRegistry
+from aegis.plugins.manager import PluginManager
 from aegis.research.harness import ResearchHarness
 from aegis.scheduler.manager import ScheduleManager
 from aegis.security.context_firewall import ContextFirewall
@@ -52,6 +54,7 @@ from aegis.security.taint import RiskLevel, Sensitivity, TrustClass, now_utc
 from aegis.sessions.manager import SessionManager
 from aegis.skills.manifest import SkillManifest
 from aegis.skills.hub import SkillHubCatalog
+from aegis.skills.curator import SkillCurator
 from aegis.skills.registry import SkillRegistry
 from aegis.skills.runtime import builtin_project_summary_manifest, builtin_workflow_candidate_manifest
 from aegis.tools.catalog import ToolCatalog
@@ -105,15 +108,26 @@ class AgentOrchestrator:
             escalation_routes=config.memory_retention.escalation_routes,
         )
         self.skills = SkillRegistry(store, audit_logger, self.secrets_broker)
+        self.skill_curator = SkillCurator(config.data_dir / "skill-curator.json", audit_logger, skills=self.skills)
         self.evidence = EvidenceBundleBuilder(store, audit_logger)
         self.sessions = SessionManager(store, audit_logger)
         self.channels = ChannelRegistry(store, audit_logger)
         self.browser = BrowserController(connectors, audit_logger, config.data_dir / "browser")
-        self.models = ModelRegistry(store, audit_logger, self.secrets_broker, custom_base_url=config.custom_model_base_url)
-        self.model_client = LiveModelClient(self.models.secrets_broker)
+        self.models = ModelRegistry(
+            store,
+            audit_logger,
+            self.secrets_broker,
+            custom_base_url=config.custom_model_base_url,
+            azure_foundry_base_url=config.azure_foundry_base_url,
+            google_vertex_project=config.google_vertex_project,
+            google_vertex_location=config.google_vertex_location,
+        )
+        self.model_client = LiveModelClient(self.models.secrets_broker, auth_metadata_recorder=self.models.record_external_auth_metadata)
+        self.hooks = HookManager(config.data_dir / "hooks.json", audit_logger, allowed_executables=config.allowed_shell_commands, workspace=self.workspace)
         self.schedules = ScheduleManager(store, audit_logger)
         self.kanban = KanbanManager(store, audit_logger)
-        self.mcp = McpRegistry(store, audit_logger)
+        self.mcp = McpRegistry(store, audit_logger, self.secrets_broker)
+        self.plugins = PluginManager(config.data_dir / "plugins.json", audit_logger, skills=self.skills, mcp=self.mcp, hooks=self.hooks, secrets_broker=self.secrets_broker)
         self.execution_backends = ExecutionBackendRegistry(
             enabled_backends=config.execution.enabled_backends,
             docker_executable=config.execution.docker_executable,
@@ -138,6 +152,7 @@ class AgentOrchestrator:
             PolicyEngine(profile=config.policy_profile),
             mcp_registry=self.mcp,
             allowed_executables=config.allowed_shell_commands,
+            network_allowlist=config.network_allowlist,
             browser_controller=self.browser,
             kanban_manager=self.kanban,
             execution_backends=self.execution_backends,
@@ -215,10 +230,27 @@ class AgentOrchestrator:
             },
             task_id=task_id,
         )
+        self._run_hooks(
+            "task.created",
+            context={"task_id": task_id, "session_id": session_id, "risk_level": plan.risk_level.value, "request": sanitized_user_request},
+            task_id=task_id,
+        )
 
         result = self._run_plan(task_id, approval_context=None, session_id=session_id)
         self._record_session_turn(session_id, sanitized_user_request, result)
+        self._run_hooks(
+            "task.completed" if result.get("status") != "failed" else "task.failed",
+            context={"task_id": task_id, "session_id": session_id, "status": result.get("status"), "risk_level": plan.risk_level.value},
+            task_id=task_id,
+        )
         return result
+
+    def _run_hooks(self, event: str, *, context: dict[str, Any], task_id: str | None = None, approved: bool = False) -> dict[str, Any]:
+        try:
+            return self.hooks.run_event(event, context=context, task_id=task_id, approved=approved)
+        except Exception as exc:  # noqa: BLE001 - hooks must never break task execution.
+            self.audit_logger.append("hook.dispatch_failed", {"event": event, "error": str(exc)}, task_id=task_id)
+            return {"event": event, "status": "dispatch_failed", "error": str(exc), "hook_count": 0, "results": []}
 
     def resume_task(self, task_id: str, *, session_id: str | None = None) -> dict[str, Any]:
         task = self._require_task(task_id)
@@ -320,6 +352,7 @@ class AgentOrchestrator:
     def status(self, task_id: str) -> dict[str, Any]:
         task = self._require_task(task_id)
         session = self._task_session_snapshot(task)
+        checkpoint = json.loads(task["checkpoint_json"])
         return {
             "id": task["id"],
             "status": task["status"],
@@ -327,9 +360,9 @@ class AgentOrchestrator:
             "risk_level": task["risk_level"],
             "session_id": task.get("session_id"),
             "session": session,
-            "action_hints": _task_action_hints(task["id"], task.get("session_id"), status=task["status"]),
+            "action_hints": _task_action_hints(task["id"], task.get("session_id"), status=task["status"], checkpoint=checkpoint),
             "plan": json.loads(task["plan_json"]),
-            "checkpoint": json.loads(task["checkpoint_json"]),
+            "checkpoint": checkpoint,
             "receipt": json.loads(task["receipt_json"]) if task["receipt_json"] else None,
         }
 
@@ -2940,7 +2973,7 @@ def _checkpoint_approval_id(result: dict[str, Any]) -> str | None:
     return None
 
 
-def _task_action_hints(task_id: Any, session_id: Any, *, status: Any) -> list[dict[str, str]]:
+def _task_action_hints(task_id: Any, session_id: Any, *, status: Any, checkpoint: dict[str, Any] | None = None) -> list[dict[str, str]]:
     hints: list[dict[str, str]] = []
     task_id_text = str(task_id) if task_id else ""
     if session_id:
@@ -2953,6 +2986,8 @@ def _task_action_hints(task_id: Any, session_id: Any, *, status: Any) -> list[di
         )
     if task_id_text and status in {TaskStatus.WAITING_APPROVAL.value, TaskStatus.PAUSED.value}:
         hints.append({"label": "Resume", "command": f"task resume {task_id_text}", "action": "task_resume", "task_id": task_id_text})
+    if isinstance(checkpoint, dict):
+        hints.extend(subagent_review_action_hints(checkpoint))
     return hints
 
 

@@ -20,7 +20,11 @@ const state = {
   taskScope: "session",
   memoryQuery: "",
   skillHubQuery: "",
+  pluginMarketplaceQuery: "",
+  pluginMarketplaceCatalogPath: "",
+  pendingSubagentDelegation: null,
   pendingSkillEnable: {},
+  slashSelectionIndex: 0,
 };
 
 const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "blocked", "cancelled"]);
@@ -34,9 +38,63 @@ const TOOL_RUN_PRESETS = [
   { label: "Calendar", name: "calendar_read", params: { provider_url: "https://graph.example.com/me/events" } },
   { label: "Contacts", name: "contacts_search", params: { query: "local", provider_url: "https://graph.example.com/me/contacts" } },
   { label: "Create Contact", name: "contacts_write", params: { operation: "create", contact: { displayName: "Local User", email: "local@example.test" } } },
+  { label: "Subagent", name: "subagent_delegate", params: { role: "Researcher", task: "Compare provider auth gaps." } },
   { label: "Service Ticket", name: "service_ticket_read", params: { operation: "search", query: "incident" } },
   { label: "Close Ticket", name: "service_ticket_write", params: { operation: "close", ticket: { id: "INC000001" } } },
+  { label: "Message", name: "message_send", params: { message: { text: "Hello from Aegis", channel: "general" } } },
 ];
+
+const WEB_SLASH_COMMANDS = [
+  { command: "submit", label: "/submit <request>", detail: "Submit a governed task", kind: "submit", acceptsRequest: true },
+  { command: "background", aliases: ["bg", "btw", "queue", "q"], label: "/background|/bg|/btw <request>", detail: "Queue governed work from the active session", kind: "submit", acceptsRequest: true },
+  { command: "resume", aliases: ["continue"], label: "/resume", detail: "Resume the last waiting or paused task", kind: "resume" },
+  { command: "tasks", aliases: ["task", "list"], label: "/tasks", detail: "Open the task feed", kind: "section", section: "activity" },
+  { command: "approvals", aliases: ["approve", "permissions", "privacy-settings", "whoami", "yolo"], label: "/approvals", detail: "Open pending approval and privacy gates", kind: "section", section: "security" },
+  { command: "models", aliases: ["model", "login", "logout", "setup-bedrock", "setup-vertex", "upgrade"], label: "/models", detail: "Open provider login and model routing controls", kind: "section", section: "models" },
+  { command: "tools", aliases: ["tool", "allowed-tools"], label: "/tools", detail: "Open governed tool and MCP controls", kind: "section", section: "tools" },
+  { command: "browser", aliases: ["chrome"], label: "/browser|/chrome", detail: "Open guarded browser controls", kind: "section", section: "tools" },
+  { command: "memory", aliases: ["mem"], label: "/memory", detail: "Open governed memory controls", kind: "section", section: "memory" },
+  { command: "remote-control", aliases: ["rc", "remote"], label: "/remote-control", detail: "Open remote pairing and relay controls", kind: "section", section: "automation" },
+  { command: "schedules", aliases: ["schedule", "hooks"], label: "/schedules", detail: "Open automation, hooks, and scheduled runs", kind: "section", section: "automation" },
+  { command: "status", label: "/status [task_id]", detail: "Show task status for an id or the selected task", kind: "task-inspection", taskView: "status" },
+  { command: "events", label: "/events [task_id]", detail: "Stream grouped run events for an id or the selected task", kind: "task-inspection", taskView: "events" },
+  { command: "timeline", label: "/timeline [task_id]", detail: "Open ordered plan, receipt, and audit events", kind: "task-inspection", taskView: "timeline" },
+  { command: "evidence", aliases: ["audit"], label: "/evidence [task_id]", detail: "Open receipts and audit evidence for an id or the selected task", kind: "task-inspection", taskView: "evidence" },
+  { command: "settings", aliases: ["dashboard", "controls", "recap", "release-notes", "tui", "scroll-speed", "radio", "stickers"], label: "/settings", detail: "Open runtime posture and UI controls", kind: "section", section: "security" },
+  { command: "commands", aliases: ["help", "keybindings", "autofix-pr", "simplify", "ultraplan", "ultrareview"], label: "/commands", detail: "Show slash command suggestions", kind: "palette" },
+];
+
+let webSlashCommands = WEB_SLASH_COMMANDS.slice();
+
+const normalizeWebSlashCommand = (entry) => {
+  const command = String(entry?.command || "").replace(/^\/+/, "").trim();
+  if (!command) return null;
+  return {
+    command,
+    aliases: Array.isArray(entry.aliases) ? entry.aliases.map((alias) => String(alias).replace(/^\/+/, "").trim()).filter(Boolean) : [],
+    label: entry.label || `/${command}`,
+    detail: entry.detail || "Open governed local command metadata",
+    kind: entry.kind || "palette",
+    section: entry.section || "settings",
+    source: entry.source || "web",
+    acceptsRequest: Boolean(entry.acceptsRequest),
+  };
+};
+
+const mergeWebSlashCommands = (commands = []) => {
+  const merged = WEB_SLASH_COMMANDS.map((entry) => ({ ...entry }));
+  const knownTerms = new Set(merged.flatMap((entry) => slashCommandTerms(entry)));
+  commands
+    .map(normalizeWebSlashCommand)
+    .filter(Boolean)
+    .forEach((entry) => {
+      const terms = slashCommandTerms(entry);
+      if (terms.some((term) => knownTerms.has(term))) return;
+      terms.forEach((term) => knownTerms.add(term));
+      merged.push(entry);
+    });
+  webSlashCommands = merged;
+};
 
 const api = async (url, options = {}) => {
   const method = String(options.method || "GET").toUpperCase();
@@ -69,6 +127,92 @@ const escapeHtml = (value) =>
     .replaceAll("'", "&#039;");
 
 const text = (value) => escapeHtml(Array.isArray(value) ? value.join(", ") : value);
+
+const copyButton = (label, value) =>
+  value ? `<button type="button" class="secondary" data-copy-command="${escapeHtml(value)}">${text(label)}</button>` : "";
+
+const slashCommandTerms = (entry) => [entry.command, ...(entry.aliases || [])].map((term) => String(term).toLowerCase());
+
+const slashMatchRank = (prefix, entry) => {
+  const normalized = String(prefix || "").replace(/^\/+/, "").toLowerCase();
+  if (!normalized) return [0, entry.command];
+  const terms = slashCommandTerms(entry);
+  if (terms.includes(normalized)) return [0, entry.command];
+  if (terms.some((term) => term.startsWith(normalized))) return [1, entry.command];
+  if (terms.some((term) => term.includes(normalized))) return [2, entry.command];
+  if (String(entry.detail || "").toLowerCase().includes(normalized)) return [3, entry.command];
+  return [9, entry.command];
+};
+
+const slashCommandMatches = (prefix) =>
+  webSlashCommands
+    .filter((entry) => slashMatchRank(prefix, entry)[0] < 9)
+    .sort((left, right) => {
+      const leftRank = slashMatchRank(prefix, left);
+      const rightRank = slashMatchRank(prefix, right);
+      return leftRank[0] - rightRank[0] || leftRank[1].localeCompare(rightRank[1]);
+    });
+
+const slashCommandForToken = (token) => {
+  const normalized = String(token || "").replace(/^\/+/, "").toLowerCase();
+  return webSlashCommands.find((entry) => slashCommandTerms(entry).includes(normalized)) || null;
+};
+
+const parseTaskSlashCommand = (rawValue) => {
+  const raw = String(rawValue || "");
+  const trimmedStart = raw.trimStart();
+  if (!trimmedStart.startsWith("/")) {
+    return { kind: "task", request: raw };
+  }
+  const match = trimmedStart.match(/^\/([a-zA-Z0-9_.:-]+)(?:\s+([\s\S]*))?$/);
+  if (!match) {
+    return { kind: "unknown", token: trimmedStart.slice(1).split(/\s+/, 1)[0], request: "" };
+  }
+  const entry = slashCommandForToken(match[1]);
+  if (!entry) {
+    return { kind: "unknown", token: match[1], request: match[2] || "" };
+  }
+  return { ...entry, request: match[2] || "", token: match[1] };
+};
+
+const renderSlashPalette = () => {
+  const input = document.getElementById("task-request");
+  const palette = document.getElementById("slash-palette");
+  const value = input.value.trimStart();
+  if (!value.startsWith("/")) {
+    palette.hidden = true;
+    palette.replaceChildren();
+    state.slashSelectionIndex = 0;
+    return;
+  }
+  const prefix = value.slice(1).split(/\s+/, 1)[0];
+  const matches = slashCommandMatches(prefix).slice(0, 8);
+  if (!matches.length) {
+    palette.hidden = false;
+    palette.innerHTML = `<div class="slash-palette-header"><span>No slash matches</span><span>/${text(prefix)}</span></div>`;
+    return;
+  }
+  state.slashSelectionIndex = Math.min(state.slashSelectionIndex, matches.length - 1);
+  palette.hidden = false;
+  palette.innerHTML = `
+    <div class="slash-palette-header"><span>Slash Commands</span><span>Tab completes · Ctrl+Enter sends</span></div>
+    ${matches.map((entry, index) => `
+      <button type="button" class="slash-palette-row ${index === state.slashSelectionIndex ? "active" : ""}" data-slash-command="${text(entry.command)}">
+        <strong>${text(entry.label)}</strong>
+        <span>${text(entry.detail)}</span>
+      </button>
+    `).join("")}
+  `;
+};
+
+const applySlashCompletion = (entry) => {
+  const input = document.getElementById("task-request");
+  const parsed = parseTaskSlashCommand(input.value);
+  const suffix = parsed.request ? ` ${parsed.request}` : entry.acceptsRequest ? " " : "";
+  input.value = `/${entry.command}${suffix}`;
+  input.focus();
+  renderSlashPalette();
+};
 
 const item = ({ title, detail = "", meta = "", tone = "", actions = "", data = {} }) => {
   const node = document.createElement("div");
@@ -164,6 +308,7 @@ const renderMetrics = (dashboard) => {
     ["Tools", runtime.tools, "neutral"],
     ["Approval Gates", runtime.approval_gated_tools, "warn"],
     ["Providers", runtime.model_providers, "neutral"],
+    ["Active Work", runtime.active_work_count || 0, runtime.active_work_count ? "warn" : "good"],
     ["Pending", runtime.pending_approvals, runtime.pending_approvals ? "warn" : "good"],
   ];
   document.getElementById("runtime-stats").replaceChildren(
@@ -182,6 +327,9 @@ const refresh = async () => {
   try {
     const [
       dashboard,
+      remoteControl,
+      remoteControlRelay,
+      remoteControlOutbox,
       connectors,
       policy,
       policyBundles,
@@ -189,12 +337,17 @@ const refresh = async () => {
       channelEvents,
       models,
       modelProviders,
+      modelAuthTargets,
+      modelAuthDoctor,
       modelUsage,
       tools,
       backends,
       browserSessions,
       skillHub,
       skills,
+      plugins,
+      pluginMarketplace,
+      pluginUpdates,
       mcpServers,
       schedules,
       sessions,
@@ -207,12 +360,17 @@ const refresh = async () => {
       approvedApprovals,
       deniedApprovals,
       boards,
+      subagents,
       evaluationQueue,
       evaluationTrends,
       evaluationDelta,
       evaluationReadiness,
+      commandCatalog,
     ] = await Promise.all([
       api("/dashboard"),
+      api("/remote-control/status"),
+      api("/remote-control/relay"),
+      api("/remote-control/relay/outbox"),
       api("/connectors"),
       api("/policy"),
       api("/policy/bundles"),
@@ -220,12 +378,17 @@ const refresh = async () => {
       api("/channel-events?limit=20"),
       api("/models"),
       api("/model-providers"),
+      api("/models/auth/targets"),
+      api("/models/auth/doctor"),
       api("/model-usage"),
       api("/tools"),
       api("/backends"),
       api("/browser/sessions"),
       api(`/skill-hub?q=${encodeURIComponent(state.skillHubQuery)}`),
       api("/skills"),
+      api("/plugins"),
+      api(`/plugins/marketplace?q=${encodeURIComponent(state.pluginMarketplaceQuery)}${state.pluginMarketplaceCatalogPath ? `&catalog_path=${encodeURIComponent(state.pluginMarketplaceCatalogPath)}` : ""}`),
+      api(`/plugins/updates${state.pluginMarketplaceCatalogPath ? `?catalog_path=${encodeURIComponent(state.pluginMarketplaceCatalogPath)}` : ""}`),
       api("/mcp/servers"),
       api("/schedules"),
       api("/sessions"),
@@ -238,14 +401,34 @@ const refresh = async () => {
       api("/approvals?status=approved&limit=8"),
       api("/approvals?status=denied&limit=8"),
       api("/kanban/boards"),
+      api("/subagents/status?limit=12"),
       api("/evaluation/queue?limit=20"),
       api("/evaluation/trends?limit=20"),
       api("/evaluation/delta"),
       api("/evaluation/readiness?limit=20&include_live_gaps=1"),
+      api("/commands"),
     ]);
 
+    mergeWebSlashCommands(commandCatalog.commands || []);
     syncPendingSkillEnableApprovals([...(approvedApprovals.approvals || []), ...(approvals.approvals || [])]);
     renderMetrics(dashboard);
+    renderRemoteControlRelay(remoteControlRelay);
+    renderRemoteControlOutbox(remoteControlOutbox);
+    setList("remote-control-push-targets", remoteControl.native_push_targets || [], (x) => ({
+      title: x.label || x.id,
+      detail: `${x.provider || "provider"} · auth ${x.push_auth_secret_configured ? "configured" : "missing"} · device ${x.device_token_secret_configured ? "configured" : "missing"}`,
+      meta: `${x.status} · rotated ${x.rotation_count || 0} · ${x.last_push_delivery_state || "not pushed"}${x.last_push_at ? ` · ${x.last_push_at}` : ""}`,
+      tone: x.status === "active" ? "ready" : "attention",
+    }), "No native push targets");
+    setList("remote-control-pairings", remoteControl.pairings || [], (x) => ({
+      title: x.label || x.id,
+      detail: `Session ${x.session_id || "any"} · task ${x.task_id || "any"} · actions ${(x.allowed_actions || []).join(", ") || "none"}`,
+      meta: `${x.status} · expires ${x.expires_at}`,
+      tone: x.status === "active" ? "ready" : "attention",
+      actions: x.status === "active"
+        ? `<button type="button" class="secondary" data-remote-control-directory="${escapeHtml(x.id)}">Directory</button><button type="button" class="secondary" data-remote-control-revoke="${escapeHtml(x.id)}">Revoke</button>`
+        : "",
+    }), "No remote-control pairings");
     setFeatureGrid("security-controls", dashboard.security_controls, (x) => ({
       title: x.name,
       detail: x.detail,
@@ -273,7 +456,7 @@ const refresh = async () => {
     }));
     setList("live-gap-backlog", dashboard.live_gap_backlog || [], (x) => ({
       title: x.area,
-      detail: `${x.detail} Live reads: ${(x.live_read_surfaces || []).slice(0, 6).join(", ") || "none"}. Live adapters: ${(x.implemented_live_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Available adapters: ${(x.available_live_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Backend adapters: ${(x.implemented_backend_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Available backends: ${(x.available_backend_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Backend preflight: ${backendActivationSummary([...(x.implemented_backend_adapters || []), ...(x.available_backend_adapters || [])])}. Readiness checklist: ${(x.operator_checklist || []).slice(0, 8).map((item) => `${item.control}:${item.state}`).join(", ") || "none"}. Hardened: ${(x.implemented_hardening_controls || []).slice(0, 8).map((control) => control.control).join(", ") || "none"}. Remaining depth: ${(x.remaining_depth_work || []).slice(0, 6).join(", ") || "none"}. Controls: ${(x.required_controls || []).join(", ") || "none"}. Gates: ${(x.verification_gates || []).join(", ") || "none"}. Evaluations: ${(x.evaluation_scenarios || []).join(", ") || "none"}. Next: ${(x.next_steps || []).slice(0, 2).join(" ")}`,
+      detail: `${x.detail} Provider targets: ${x.target_provider_count || "n/a"}. Auth bridges: ${(x.subscription_bridge_targets || []).slice(0, 6).join(", ") || "none"}. Not started: ${(x.not_started_targets || []).slice(0, 6).join(", ") || "none"}. Live reads: ${(x.live_read_surfaces || []).slice(0, 6).join(", ") || "none"}. Live adapters: ${(x.implemented_live_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Available adapters: ${(x.available_live_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Backend adapters: ${(x.implemented_backend_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Available backends: ${(x.available_backend_adapters || []).slice(0, 6).map((adapter) => adapter.name).join(", ") || "none"}. Backend preflight: ${backendActivationSummary([...(x.implemented_backend_adapters || []), ...(x.available_backend_adapters || [])])}. Readiness checklist: ${(x.operator_checklist || []).slice(0, 8).map((item) => `${item.control}:${item.state}`).join(", ") || "none"}. Hardened: ${(x.implemented_hardening_controls || []).slice(0, 8).map((control) => control.control).join(", ") || "none"}. Remaining depth: ${(x.remaining_depth_work || []).slice(0, 6).join(", ") || "none"}. Controls: ${(x.required_controls || []).join(", ") || "none"}. Gates: ${(x.verification_gates || []).join(", ") || "none"}. Evaluations: ${(x.evaluation_scenarios || []).join(", ") || "none"}. Next: ${(x.next_steps || []).slice(0, 2).join(" ")}`,
       meta: `${x.status} · ${(x.platforms || []).join(", ")} · tools ${(x.sample_tools || []).slice(0, 6).join(", ") || "none"}`,
     }), "No live gaps");
     setList("competitor-targets", dashboard.competitive_targets, (x) => ({
@@ -305,11 +488,30 @@ const refresh = async () => {
       modelProviders.providers,
       (x) => ({
         title: x.provider,
-        detail: x.local ? "Local provider" : x.auth_configured ? `Auth configured via ${x.auth_source}` : "Auth missing",
-        meta: `${x.models.length} models · tools ${formatBool(x.supports_tools)}`,
+        detail: x.local
+          ? "Local provider"
+          : x.auth_configured
+            ? `Auth configured via ${x.auth_source}`
+            : x.subscription_auth_supported
+              ? `Auth missing · subscription setup: ${x.subscription_auth?.external_command || "external login required"}`
+              : "Auth missing",
+        meta: `${x.models.length} models · tools ${formatBool(x.supports_tools)} · auth ${(x.auth_methods || []).join(", ") || "none"} · subscription ${formatBool(x.subscription_auth_supported)}`,
         tone: x.local || x.auth_configured ? "ready" : "attention",
       })
     );
+    setList("model-auth-targets", modelAuthTargets.targets || dashboard.model_provider_auth_parity?.targets || [], (x) => ({
+      title: x.target,
+      detail: `${(x.platforms || []).join(", ") || "provider"} · ${x.account_surface || ""}`,
+      meta: `${x.status} · auth ${(x.required_auth || []).join(", ") || "unknown"} · methods ${(x.existing_auth_methods || []).join(", ") || "none"} · bridge ${x.bridge_status || "not_started"}`,
+      tone: x.status === "api_key_ready" || x.status === "local_ready" ? "ready" : "attention",
+    }), "No provider auth targets");
+    setList("model-auth-doctor", modelAuthDoctor.checks || [], (x) => ({
+      title: x.target,
+      detail: modelAuthDoctorDetail(x),
+      meta: `${x.activation_state || (x.verified ? "verified" : "login_required")} · ${x.method} · command ${x.external_command_available ? "available" : "missing"} · provider ${x.provider}`,
+      tone: x.activation_state === "verified_ready" ? "ready" : "attention",
+      actions: modelAuthDoctorActions(x),
+    }), "No provider login checks");
     setList("models", models.models.slice(0, 24), (x) => ({
       title: x.identifier,
       detail: x.local ? "local" : x.auth_configured ? "cloud · auth configured" : "cloud · auth missing",
@@ -358,10 +560,35 @@ const refresh = async () => {
           : `<button type="button" class="secondary" data-skill-enable="${escapeHtml(x.id)}">${pendingApprovalId ? "Replay Enable" : "Enable"}</button>`,
       };
     }, "No installed skills");
+    setList("installed-plugins", plugins.plugins || [], (x) => ({
+      title: x.name || x.id,
+      detail: `${x.description || "Local plugin"} Resources: ${(x.resources || []).map((resource) => `${resource.kind}:${resource.id || resource.name}`).join(", ") || "none"}`,
+      meta: `${x.enabled ? "enabled" : "disabled"} · v${x.version || "0.0.0"} · ${x.unsigned_local ? "unsigned local" : "signed resources"} · ${x.resources?.length || 0} resources`,
+      tone: x.enabled ? "ready" : "",
+      actions: `
+        <button type="button" class="secondary" data-plugin-enable="${escapeHtml(x.id)}">Enable</button>
+        <button type="button" class="secondary" data-plugin-disable="${escapeHtml(x.id)}">Disable</button>
+        <button type="button" class="secondary" data-plugin-remove="${escapeHtml(x.id)}">Remove</button>
+      `,
+    }), "No installed plugins");
+    setList("plugin-marketplace", pluginMarketplace.entries || [], (x) => ({
+      title: x.name || x.id,
+      detail: `${x.description || "Marketplace metadata"} Resources: ${(x.resource_kinds || []).join(", ") || "none"}`,
+      meta: `${x.installed ? `installed ${x.installed_version || "unknown"}` : "not installed"} · catalog v${x.version || "0.0.0"} · ${x.install_mode || "manual"} · verified manifest ${formatBool(x.marketplace_install_supported)} · signed bundle ${formatBool(x.marketplace_bundle_install_supported)}`,
+      tone: x.update_available ? "attention" : x.installed ? "ready" : "",
+      actions: `${x.bundle_fetch_supported ? `<button type="button" class="secondary" data-plugin-marketplace-fetch-bundle="${escapeHtml(x.id)}">Fetch Bundle</button>` : ""}${x.marketplace_bundle_install_supported ? `<button type="button" class="secondary" data-plugin-marketplace-install-bundle="${escapeHtml(x.id)}">Install Bundle</button>` : ""}${x.marketplace_install_supported ? `<button type="button" class="secondary" data-plugin-marketplace-install="${escapeHtml(x.id)}">Install</button>` : ""}`,
+    }), "No marketplace plugin metadata");
+    setList("plugin-updates", pluginUpdates.updates || [], (x) => ({
+      title: x.name || x.id,
+      detail: `${x.installed_version} -> ${x.available_version}. ${(x.next_actions || []).join(" ")}`,
+      meta: `${x.status} · ${x.install_mode || "manual_manifest_review"} · review ${formatBool(x.requires_review)}`,
+      tone: "attention",
+      actions: `<button type="button" class="secondary" data-plugin-marketplace-update="${escapeHtml(x.id)}">Apply Update</button>`,
+    }), "No plugin updates");
     setList("mcp-servers", mcpServers.servers, (x) => ({
       title: x.name,
       detail: x.command,
-      meta: `${x.enabled ? "enabled" : "disabled"} · ${x.approval_required ? "approval required" : "approval optional"} · ${x.allowed_tools.join(", ") || "no tools"}`,
+      meta: `${x.metadata?.transport || "stdio"} · ${x.enabled ? "enabled" : "disabled"} · ${x.approval_required ? "approval required" : "approval optional"} · ${x.allowed_tools.join(", ") || "no tools"}`,
     }), "No MCP servers");
     setList("schedules", schedules.schedules, (x) => ({
       title: x.name,
@@ -465,6 +692,13 @@ const refresh = async () => {
       meta: `${x.proposal_count || 0} proposals · ${x.candidate_counts?.total || 0} candidates · ${x.attempt_count || 0} attempts`,
       tone: x.ready ? "ready" : "attention",
     }), "No repair readiness summary");
+    setList("active-work", dashboard.active_work_tasks || [], (x) => ({
+      title: x.user_request,
+      detail: x.interpretation,
+      meta: `${shortId(x.id)} · ${x.status} · session ${taskSessionLabel(x)}`,
+      tone: x.status === "waiting_approval" || x.status === "paused" ? "attention" : "",
+      actions: taskActions(x),
+    }), "No active work");
     setList("tasks", visibleTasks.tasks, (x) => ({
       title: x.user_request,
       detail: x.interpretation,
@@ -511,6 +745,7 @@ const refresh = async () => {
     }
     renderBoards();
     await renderCards();
+    renderSubagents(subagents);
     await renderSessionTranscript();
     applySectionVisibility();
   } catch (error) {
@@ -518,6 +753,82 @@ const refresh = async () => {
     document.getElementById("app-status").className = "status-pill bad";
     renderTaskError(error.message);
   }
+};
+
+const renderSubagents = (payload) => {
+  const summary = document.getElementById("subagent-summary");
+  const batchControl = (payload.implemented_controls || []).includes("operator_approved_batch_runtime") ? " · batch run ready" : "";
+  const reviewPacketControl = (payload.implemented_controls || []).includes("model_ready_review_packets") ? " · review packets ready" : "";
+  summary.textContent = `${payload.open_cards || 0} open · ${payload.ready_cards || 0} ready · ${payload.in_progress_cards || 0} active · ${payload.review_cards || 0} review · ${payload.done_cards || 0} done · profiles ${payload.enabled_profile_count || 0}/${payload.profile_count || 0} · autonomous runtime ${payload.autonomous_runtime ? "enabled" : "blocked"}${batchControl}${reviewPacketControl}`;
+  setList("subagent-cards", payload.cards || [], (x) => ({
+    title: x.title,
+    detail: x.description_preview || "No preview",
+    meta: subagentCardMeta(x),
+    actions: subagentLaneActions(x),
+    tone: x.lane === "done" ? "ready" : x.lane === "blocked" ? "attention" : "",
+  }), "No subagent delegation cards");
+};
+
+const subagentCardMeta = (card) => {
+  const reviewPacketCount = Number(card.review_packets_recorded || 0);
+  const hasReviewPacket = Boolean(card.model_ready_review_packet || card.model_ready_review_packet_available || card.model_review_packet || card.review_packet);
+  const parts = [
+    card.lane,
+    card.owner || "unassigned",
+    `tainted ${card.instructions_tainted ? "yes" : "no"}`,
+    `handoffs ${card.handoff_receipts_recorded || 0}`,
+    `runs ${card.subagent_runs_recorded || 0}`,
+  ];
+  if (card.review_status) {
+    parts.push(`review ${card.review_status}`);
+  }
+  if (reviewPacketCount || hasReviewPacket) {
+    parts.push(`packets ${reviewPacketCount || 1}`);
+  }
+  if (hasReviewPacket) {
+    parts.push("model-ready");
+  }
+  return parts.join(" · ");
+};
+
+const subagentHasReviewPacket = (card) =>
+  Boolean(card.model_ready_review_packet || card.model_ready_review_packet_available || card.model_review_packet || card.review_packet);
+
+const subagentLaneActions = (card) => {
+  const nextLane = {
+    backlog: "ready",
+    ready: "in_progress",
+    in_progress: "review",
+    review: "done",
+    blocked: "ready",
+  }[card.lane];
+  const actions = [];
+  if (["ready", "in_progress"].includes(card.lane)) {
+    actions.push(`<button type="button" data-subagent-run="${escapeHtml(card.id)}">Run</button>`);
+  }
+  if (card.lane !== "done") {
+    const label = subagentHasReviewPacket(card) ? "Refresh Review Packet" : "Create Review Packet";
+    actions.push(`<button type="button" class="secondary" data-subagent-review-packet="${escapeHtml(card.id)}">${text(label)}</button>`);
+  }
+  const reviewPacket = card.review_packet || card.model_review_packet || {};
+  if (reviewPacket.packet_id) {
+    actions.push(`<button type="button" class="secondary" data-subagent-verify-packet="${escapeHtml(reviewPacket.packet_id)}">Verify Packet</button>`);
+  }
+  if (nextLane) {
+    actions.push(`<button type="button" class="secondary" data-subagent-card="${escapeHtml(card.id)}" data-subagent-lane="${escapeHtml(nextLane)}">${text(nextLane.replaceAll("_", " "))}</button>`);
+  }
+  if (!["blocked", "done"].includes(card.lane)) {
+    actions.push(`<button type="button" class="secondary" data-subagent-card="${escapeHtml(card.id)}" data-subagent-lane="blocked">Block</button>`);
+  }
+  return actions.join("");
+};
+
+const renderSubagentOutput = (payload) => {
+  const node = document.getElementById("subagent-output");
+  const replay = payload.status === "approval_required" && payload.approval_id
+    ? `<div class="item-actions"><button type="button" class="secondary" data-subagent-approved="${escapeHtml(payload.approval_id)}">Run Approved Delegation</button></div>`
+    : "";
+  node.innerHTML = `<pre>${escapeHtml(JSON.stringify(payload, null, 2))}</pre>${replay}`;
 };
 
 const renderBoards = () => {
@@ -1323,10 +1634,97 @@ const renderEvaluationOutput = (payload) => {
   `;
 };
 
+const modelAuthDoctorDetail = (check = {}) => {
+  const missingConfig = check.activation?.missing_config || [];
+  return [
+    check.external_command ? `provider ${check.external_command}` : "",
+    check.login_command ? `login ${check.login_command}` : "",
+    check.verify_command ? `verify ${check.verify_command}` : "",
+    missingConfig.length ? `config ${missingConfig.join(", ")}` : "",
+    check.setup_required ? `setup ${check.setup_required}` : "",
+  ].filter(Boolean).join(" · ");
+};
+
+const modelAuthDoctorActions = (check = {}) =>
+  [
+    copyButton("Copy Login", check.login_command),
+    copyButton("Copy Verify", check.verify_command),
+  ].filter(Boolean).join("");
+
+const modelAuthCommandActions = (auth = {}) =>
+  [
+    copyButton("Copy Login", auth.login_command || auth.external_command),
+    copyButton("Copy Verify", auth.verify_command || auth.external_status_command),
+  ].filter(Boolean).join("");
+
+const modelAuthDoctorSummary = (doctor = {}) => {
+  const counts = Object.entries(doctor.activation_state_counts || {})
+    .map(([stateName, count]) => `${stateName}:${count}`)
+    .join(" · ");
+  const nextSteps = (doctor.next_steps || []).slice(0, 3);
+  return `
+    <dl class="task-facts">
+      <div><dt>Status</dt><dd>${text(doctor.status || "unknown")}</dd></div>
+      <div><dt>Login Needed</dt><dd>${text(doctor.operator_login_required_count || 0)}</dd></div>
+      <div><dt>Verified</dt><dd>${text(doctor.verified_external_auth_count || 0)}</dd></div>
+      <div><dt>Missing CLI</dt><dd>${text((doctor.missing_external_commands || []).join(", ") || "none")}</dd></div>
+      <div><dt>States</dt><dd>${text(counts || "none")}</dd></div>
+    </dl>
+    <div class="next-action">Web requests never execute interactive provider login. Copy login and verify commands, run them in a local terminal, then verify the readiness packet.</div>
+    ${nextSteps.length ? `<div class="evidence-block"><strong>Next Steps</strong>${nextSteps.map((step) => `<code>${text(step)}</code>`).join("")}</div>` : ""}
+  `;
+};
+
+const modelAuthOutputSummary = (payload = {}) => {
+  const doctor = payload.auth_doctor || (Array.isArray(payload.checks) ? payload : null);
+  if (doctor) {
+    return modelAuthDoctorSummary(doctor);
+  }
+  const auth = payload.auth || payload;
+  if (!auth || !["subscription", "oauth", "oauth_device", "cloud_identity"].includes(auth.method)) {
+    return "";
+  }
+  const stateLabel = auth.status === "external_login_requires_local_terminal" ? "Terminal handoff required" : auth.status || "External login";
+  return `
+    <dl class="task-facts">
+      <div><dt>Provider</dt><dd>${text(auth.provider || "unknown")}</dd></div>
+      <div><dt>Method</dt><dd>${text(auth.method)}</dd></div>
+      <div><dt>State</dt><dd>${text(stateLabel)}</dd></div>
+      <div><dt>Token Capture</dt><dd>${text(auth.token_capture_supported === false ? "denied" : "not used")}</dd></div>
+    </dl>
+    <div class="next-action">Run provider-owned login commands from a local terminal. The web console can show and copy commands, but it does not execute interactive provider login or accept browser/session tokens.</div>
+  `;
+};
+
 const renderModelRouteOutput = (payload) => {
   const node = document.getElementById("model-route-output");
   node.innerHTML = `
     <strong>${text(payload.identifier || payload.alias || payload.events !== undefined ? "Model Control" : "Model")}</strong>
+    <code>${text(JSON.stringify(payload, null, 2))}</code>
+  `;
+};
+
+const renderModelAuthOutput = (payload) => {
+  const auth = payload.auth || payload;
+  const packet = payload.packet && typeof payload.packet === "object" ? payload.packet : {};
+  const receipt = payload.receipt && typeof payload.receipt === "object" ? payload.receipt : {};
+  const readinessPacketRef = packet.packet_id || receipt.packet_id || payload.packet_id || "";
+  const commandActions = modelAuthCommandActions(auth);
+  const label = auth.external_command
+    ? `${auth.status || "auth"} · ${auth.external_command}`
+    : auth.provider || auth.status || payload.auth_doctor?.status || "Model auth";
+  const readinessActions = `
+    <div class="item-actions">
+      <button type="button" class="secondary" data-model-auth-readiness-packet="1">Create Readiness Packet</button>
+      ${readinessPacketRef ? `<button type="button" class="secondary" data-model-auth-verify-readiness-packet="${escapeHtml(readinessPacketRef)}">Verify Readiness Packet</button>` : ""}
+    </div>
+  `;
+  const node = document.getElementById("model-auth-output");
+  node.innerHTML = `
+    <strong>${text(label)}</strong>
+    ${modelAuthOutputSummary(payload)}
+    ${commandActions ? `<div class="item-actions">${commandActions}</div>` : ""}
+    ${readinessActions}
     <code>${text(JSON.stringify(payload, null, 2))}</code>
   `;
 };
@@ -1368,11 +1766,88 @@ const renderTaskError = (message) => {
   node.replaceChildren(card);
 };
 
+const renderTaskNotice = (title, detail = "") => {
+  const node = document.getElementById("task-output");
+  const card = document.createElement("section");
+  card.className = "task-card";
+  card.innerHTML = `
+    <div class="task-card-header">
+      <div>
+        <span class="status-chip">local</span>
+        <h4>${text(title)}</h4>
+      </div>
+    </div>
+    ${detail ? `<div class="next-action">${text(detail)}</div>` : ""}
+  `;
+  node.replaceChildren(card);
+};
+
+const selectedTaskId = () =>
+  state.lastTask?.id || state.lastEvents?.task_id || state.lastEvidence?.task?.id || state.lastEvidence?.task_id || "";
+
+const slashTaskId = (parsed) => String(parsed.request || "").trim().split(/\s+/, 1)[0] || selectedTaskId();
+
+const executeLocalSlashCommand = async (parsed) => {
+  if (parsed.kind === "resume") {
+    if (!state.lastTask?.id) {
+      renderTaskNotice("No resumable task is selected", "Open a waiting or paused task, then run /resume again.");
+      return;
+    }
+    await resumeTask(state.lastTask.id);
+    return;
+  }
+  if (parsed.kind === "task-inspection") {
+    const taskId = slashTaskId(parsed);
+    if (!taskId) {
+      state.activeSection = parsed.taskView === "status" ? "activity" : "evidence";
+      applySectionVisibility();
+      renderTaskNotice(parsed.label || `/${parsed.command}`, "Open a task or include a task id, then run this command again.");
+      return;
+    }
+    if (parsed.taskView === "status") {
+      state.activeSection = "activity";
+      applySectionVisibility();
+      await loadTaskStatus(taskId);
+      return;
+    }
+    if (parsed.taskView === "events") {
+      await loadTaskEvents(taskId);
+      return;
+    }
+    if (parsed.taskView === "timeline") {
+      await loadTaskTimeline(taskId);
+      return;
+    }
+    await loadTaskEvidence(taskId);
+    return;
+  }
+  if (parsed.kind === "section") {
+    state.activeSection = parsed.section;
+    applySectionVisibility();
+    renderTaskNotice(parsed.label, parsed.detail);
+    return;
+  }
+  if (parsed.kind === "palette") {
+    renderSlashPalette();
+    renderTaskNotice("/commands", "Type / plus a few letters, then use Tab or click a row to complete.");
+    return;
+  }
+  renderTaskError(`unknown slash command: /${parsed.token || ""}`);
+};
+
 const renderBrowserOutput = (payload) => {
   const node = document.getElementById("browser-output");
   if (payload.status === "approval_required" && payload.approval_id && state.pendingBrowserAction) {
     state.pendingBrowserAction.approval_id = payload.approval_id;
   }
+  const packet = payload.packet && typeof payload.packet === "object" ? payload.packet : {};
+  const receipt = payload.receipt && typeof payload.receipt === "object" ? payload.receipt : {};
+  const browserActivationPacketRef =
+    (typeof payload.packet === "string" ? payload.packet : "") ||
+    packet.packet_id ||
+    receipt.packet_id ||
+    payload.packet_id ||
+    "";
   const interactiveElements = Array.isArray(payload.interactive_elements)
     ? payload.interactive_elements
     : Array.isArray(payload.session?.interactive_elements)
@@ -1396,10 +1871,17 @@ const renderBrowserOutput = (payload) => {
     payload.evidence_url ? `<a class="button secondary" href="${escapeHtml(payload.evidence_url)}" target="_blank" rel="noopener">Open Evidence</a>` : "",
   ].filter(Boolean).join("");
   const artifactActions = artifactLinks ? `<div class="item-actions">${artifactLinks}</div>` : "";
+  const activationPacketActions = `
+    <div class="item-actions">
+      <button type="button" class="secondary" data-browser-live-activation-packet="1">Create Live Activation Packet</button>
+      ${browserActivationPacketRef ? `<button type="button" class="secondary" data-browser-verify-activation-packet="${escapeHtml(browserActivationPacketRef)}">Verify Activation Packet</button>` : ""}
+    </div>
+  `;
   node.innerHTML = `
     <strong>${text(payload.ok ? "Browser Result" : payload.status || "Browser Notice")}</strong>
     <div class="muted">${text(payload.mode || "HTTP-content browser control; no rendered JavaScript DOM is available.")}</div>
     ${artifactActions}
+    ${activationPacketActions}
     ${interactiveRows}
     <code>${text(JSON.stringify(payload, null, 2))}</code>
     ${approvalAction}
@@ -1457,6 +1939,59 @@ const renderMcpCallOutput = (payload) => {
     <code>${text(JSON.stringify(payload, null, 2))}</code>
     ${approvalAction}
   `;
+};
+
+const renderPluginOutput = (payload) => {
+  const node = document.getElementById("plugin-output");
+  node.innerHTML = `
+    <strong>${text(payload.plugin?.name || payload.plugin?.id || payload.status || "Plugin")}</strong>
+    <code>${text(JSON.stringify(payload, null, 2))}</code>
+  `;
+};
+
+const renderRemoteControlOutput = (payload) => {
+  const node = document.getElementById("remote-control-output");
+  node.innerHTML = `
+    <strong>${text(payload.pairing?.label || payload.pairing?.id || payload.status || "Remote control")}</strong>
+    <code>${text(JSON.stringify(payload, null, 2))}</code>
+  `;
+};
+
+const renderRemoteControlRelay = (payload = {}) => {
+  const summary = document.getElementById("remote-control-relay-summary");
+  summary.textContent = `${payload.status || "relay_preflight"} · outbound ${payload.outbound_relay_enabled ? "enabled" : "blocked"} · relay action ${payload.relay_action_proxy_enabled ? "enabled" : "blocked"} · target ${payload.relay_target || "not configured"}`;
+  setList("remote-control-relay", payload.blockers || [], (x) => ({
+    title: x.control,
+    detail: x.detail,
+    meta: payload.mode || "preflight_only",
+    tone: "attention",
+  }), "Relay preflight has no blockers");
+};
+
+const renderRemoteControlRelayPull = (payload = {}) => {
+  const summary = document.getElementById("remote-control-relay-summary");
+  const mode = payload.dry_run ? "preview" : "apply";
+  summary.textContent = `${mode} · actions ${payload.action_count || 0} · executable ${payload.executable_action_count || 0} · executed ${payload.executed_action_count || 0} · target ${payload.relay_target || "not configured"}`;
+  setList("remote-control-relay", payload.actions || [], (x) => ({
+    title: `${x.action || "action"} · ${x.task_id || "no task"}`,
+    detail: x.accepted ? "Accepted by local pairing scope" : x.rejection_reason || "Rejected by local pairing scope",
+    meta: `${x.request_id || "no request id"} · ${payload.dry_run ? "preview only" : "apply requested"}`,
+    tone: x.accepted ? "ready" : "attention",
+  }), "Relay returned no queued actions");
+  renderRemoteControlOutput(payload);
+};
+
+const renderRemoteControlOutbox = (payload = {}) => {
+  const counts = payload.status_counts || {};
+  const summary = Object.entries(counts)
+    .map(([status, count]) => `${status}:${count}`)
+    .join(" · ");
+  setList("remote-control-relay-outbox", payload.items || [], (x) => ({
+    title: x.event || x.id,
+    detail: `Pairing ${x.pairing_id || "unknown"} · task ${x.task_id || "any"} · attempts ${x.attempt_count || 0}`,
+    meta: `${x.status || "pending"} · ${x.updated_at || x.created_at || "not timestamped"}${summary ? ` · ${summary}` : ""}`,
+    tone: x.status === "acknowledged" ? "ready" : "attention",
+  }), "No relay notification outbox rows");
 };
 
 const renderChannelOutput = (payload) => {
@@ -1593,13 +2128,64 @@ document.querySelector(".section-switcher").addEventListener("click", (event) =>
   applySectionVisibility();
 });
 
+const taskRequestInput = document.getElementById("task-request");
+
+taskRequestInput.addEventListener("input", renderSlashPalette);
+
+taskRequestInput.addEventListener("keydown", (event) => {
+  const value = taskRequestInput.value.trimStart();
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault();
+    document.getElementById("task-form").requestSubmit();
+    return;
+  }
+  if (!value.startsWith("/")) return;
+  const prefix = value.slice(1).split(/\s+/, 1)[0];
+  const matches = slashCommandMatches(prefix).slice(0, 8);
+  if (!matches.length) return;
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    state.slashSelectionIndex = (state.slashSelectionIndex + 1) % matches.length;
+    renderSlashPalette();
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    state.slashSelectionIndex = (state.slashSelectionIndex + matches.length - 1) % matches.length;
+    renderSlashPalette();
+  } else if (event.key === "Tab") {
+    event.preventDefault();
+    applySlashCompletion(matches[state.slashSelectionIndex] || matches[0]);
+  } else if (event.key === "Escape") {
+    document.getElementById("slash-palette").hidden = true;
+  }
+});
+
+document.getElementById("slash-palette").addEventListener("click", (event) => {
+  const command = event.target.closest("[data-slash-command]")?.dataset.slashCommand;
+  if (!command) return;
+  const entry = slashCommandForToken(command);
+  if (entry) {
+    applySlashCompletion(entry);
+  }
+});
+
 document.getElementById("task-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
-    const request = document.getElementById("task-request").value || "Summarize my project safely";
+    const input = document.getElementById("task-request");
+    const parsed = parseTaskSlashCommand(input.value);
+    if (!["task", "submit"].includes(parsed.kind)) {
+      await executeLocalSlashCommand(parsed);
+      return;
+    }
+    const request = (parsed.kind === "submit" ? parsed.request : input.value).trim() || (parsed.kind === "submit" ? "" : "Summarize my project safely");
+    if (!request) {
+      renderTaskNotice(parsed.label || "/submit", "Add a request after the slash command before sending.");
+      return;
+    }
     const path = document.getElementById("task-path").value || undefined;
     const result = await api("/tasks", { method: "POST", body: JSON.stringify({ request, path, session_id: state.activeSessionId }) });
-    document.getElementById("task-request").value = "";
+    input.value = "";
+    renderSlashPalette();
     renderTaskResult(result);
     await refresh();
   } catch (error) {
@@ -2010,16 +2596,76 @@ document.getElementById("repair-rollback-form").addEventListener("submit", async
 document.getElementById("model-auth-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const provider = document.getElementById("model-provider").value;
+  const method = document.getElementById("model-auth-method").value;
   const apiKey = document.getElementById("model-api-key").value;
-  await api("/models/auth/login", { method: "POST", body: JSON.stringify({ provider, api_key: apiKey }) });
+  const payload = { provider, method };
+  if (method === "api_key") {
+    payload.api_key = apiKey;
+  } else {
+    payload.verify_external = document.getElementById("model-auth-verify-external").checked;
+    payload.run_external = document.getElementById("model-auth-run-external").checked;
+  }
+  const result = await api("/models/auth/login", { method: "POST", body: JSON.stringify(payload) });
+  renderModelAuthOutput(result);
   document.getElementById("model-api-key").value = "";
   await refresh();
 });
 
 document.getElementById("model-auth-logout").addEventListener("click", async () => {
   const provider = document.getElementById("model-provider").value;
-  await api("/models/auth/logout", { method: "POST", body: JSON.stringify({ provider }) });
+  const result = await api("/models/auth/logout", { method: "POST", body: JSON.stringify({ provider }) });
+  renderModelAuthOutput(result);
   await refresh();
+});
+
+document.getElementById("model-auth-doctor-run").addEventListener("click", async () => {
+  renderModelAuthOutput({ auth_doctor: await api("/models/auth/doctor") });
+  await refresh();
+});
+
+document.getElementById("model-auth-readiness-packet").addEventListener("click", async () => {
+  renderModelAuthOutput(await api("/models/auth/readiness-packet", { method: "POST", body: JSON.stringify({ actor: "web-operator" }) }));
+  await refresh();
+});
+
+const copyModelAuthCommand = async (target) => {
+  const command = target.closest("[data-copy-command]")?.dataset.copyCommand;
+  if (!command) return false;
+  if (navigator.clipboard) {
+    await navigator.clipboard.writeText(command);
+  }
+  renderModelAuthOutput({
+    status: "command_copied",
+    command,
+    note: "Run this command from a local terminal. The web console did not execute provider login.",
+  });
+  return true;
+};
+
+document.getElementById("model-auth-doctor").addEventListener("click", async (event) => {
+  await copyModelAuthCommand(event.target);
+});
+
+document.getElementById("model-auth-output").addEventListener("click", async (event) => {
+  if (await copyModelAuthCommand(event.target)) {
+    return;
+  }
+  const createPacket = event.target.closest("[data-model-auth-readiness-packet]");
+  if (createPacket) {
+    renderModelAuthOutput(await api("/models/auth/readiness-packet", { method: "POST", body: JSON.stringify({ actor: "web-operator" }) }));
+    await refresh();
+    return;
+  }
+  const verifyPacket = event.target.closest("[data-model-auth-verify-readiness-packet]");
+  if (verifyPacket) {
+    renderModelAuthOutput(
+      await api("/models/auth/verify-readiness-packet", {
+        method: "POST",
+        body: JSON.stringify({ packet: verifyPacket.dataset.modelAuthVerifyReadinessPacket, actor: "web-operator" }),
+      })
+    );
+    await refresh();
+  }
 });
 
 document.getElementById("model-route-form").addEventListener("submit", async (event) => {
@@ -2214,6 +2860,229 @@ document.getElementById("policy-activate-due").addEventListener("click", async (
   await refresh();
 });
 
+document.getElementById("remote-control-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const allowedActions = document.getElementById("remote-control-actions").value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const ttl = Number.parseInt(document.getElementById("remote-control-ttl").value || "600", 10);
+  const result = await api("/remote-control/pair", {
+    method: "POST",
+    body: JSON.stringify({
+      label: document.getElementById("remote-control-label").value || "web pairing",
+      session_id: document.getElementById("remote-control-session-id").value || undefined,
+      task_id: document.getElementById("remote-control-task-id").value || undefined,
+      allowed_actions: allowedActions,
+      expires_in_seconds: Number.isFinite(ttl) ? ttl : 600,
+    }),
+  });
+  document.getElementById("remote-control-relay-outbox-id").value = result.outbox_id || "";
+  renderRemoteControlOutput(result);
+  await refresh();
+});
+
+document.getElementById("remote-control-relay-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const relayUrl = document.getElementById("remote-control-relay-url").value.trim();
+  const approved = document.getElementById("remote-control-relay-approved").checked;
+  let result;
+  if (approved) {
+    result = await api("/remote-control/relay", {
+      method: "POST",
+      body: JSON.stringify({
+        relay_url: relayUrl,
+        pairing_id: document.getElementById("remote-control-relay-pairing-id").value.trim(),
+        relay_auth_secret: document.getElementById("remote-control-relay-secret").value.trim(),
+        approved: true,
+      }),
+    });
+  } else {
+    result = await api(`/remote-control/relay${relayUrl ? `?relay_url=${encodeURIComponent(relayUrl)}` : ""}`);
+  }
+  renderRemoteControlRelay(result);
+  renderRemoteControlOutput(result);
+});
+
+const remoteControlRelayBody = () => ({
+  pairing_id: document.getElementById("remote-control-relay-pairing-id").value.trim(),
+  relay_auth_secret: document.getElementById("remote-control-relay-secret").value.trim(),
+  approved: document.getElementById("remote-control-relay-approved").checked,
+});
+
+const remoteControlPushBody = () => ({
+  label: document.getElementById("remote-control-push-label").value.trim() || "native push",
+  target_id: document.getElementById("remote-control-push-target-id").value.trim() || undefined,
+  provider: document.getElementById("remote-control-push-provider").value,
+  push_auth_secret: document.getElementById("remote-control-push-secret").value.trim(),
+  device_token_secret: document.getElementById("remote-control-device-secret").value.trim(),
+  approved: document.getElementById("remote-control-push-approved").checked,
+  apns_topic: document.getElementById("remote-control-apns-topic").value.trim() || undefined,
+  fcm_project_id: document.getElementById("remote-control-fcm-project").value.trim() || undefined,
+});
+
+document.getElementById("remote-control-relay-directory").addEventListener("click", async () => {
+  const result = await api("/remote-control/relay/directory", {
+    method: "POST",
+    body: JSON.stringify({
+      ...remoteControlRelayBody(),
+      limit: 12,
+    }),
+  });
+  renderRemoteControlOutput(result);
+  await refresh();
+});
+
+document.getElementById("remote-control-relay-notify").addEventListener("click", async () => {
+  const taskId = document.getElementById("remote-control-relay-task-id").value.trim();
+  const result = await api("/remote-control/relay/notify", {
+    method: "POST",
+    body: JSON.stringify({
+      ...remoteControlRelayBody(),
+      event: document.getElementById("remote-control-relay-event").value.trim() || "directory-updated",
+      task_id: taskId || undefined,
+    }),
+  });
+  renderRemoteControlOutput(result);
+  await refresh();
+});
+
+document.getElementById("remote-control-push-register").addEventListener("click", async () => {
+  const result = await api("/remote-control/push/register", {
+    method: "POST",
+    body: JSON.stringify(remoteControlPushBody()),
+  });
+  document.getElementById("remote-control-push-target-id").value = result.target?.id || "";
+  renderRemoteControlOutput(result);
+  await refresh();
+});
+
+document.getElementById("remote-control-push-rotate").addEventListener("click", async () => {
+  const pushBody = remoteControlPushBody();
+  const result = await api("/remote-control/push/rotate", {
+    method: "POST",
+    body: JSON.stringify({
+      target_id: pushBody.target_id,
+      push_auth_secret: pushBody.push_auth_secret || undefined,
+      device_token_secret: pushBody.device_token_secret || undefined,
+      approved: pushBody.approved,
+      apns_topic: pushBody.apns_topic,
+      fcm_project_id: pushBody.fcm_project_id,
+    }),
+  });
+  renderRemoteControlOutput(result);
+  await refresh();
+});
+
+document.getElementById("remote-control-push-disable").addEventListener("click", async () => {
+  const result = await api("/remote-control/push/disable", {
+    method: "POST",
+    body: JSON.stringify({
+      target_id: document.getElementById("remote-control-push-target-id").value.trim(),
+      approved: document.getElementById("remote-control-push-approved").checked,
+    }),
+  });
+  renderRemoteControlOutput(result);
+  await refresh();
+});
+
+document.getElementById("remote-control-native-push").addEventListener("click", async () => {
+  const taskId = document.getElementById("remote-control-relay-task-id").value.trim();
+  const pushBody = remoteControlPushBody();
+  const result = await api("/remote-control/push", {
+    method: "POST",
+    body: JSON.stringify({
+      pairing_id: document.getElementById("remote-control-relay-pairing-id").value.trim(),
+      target_id: pushBody.target_id,
+      provider: pushBody.provider,
+      push_auth_secret: pushBody.push_auth_secret,
+      device_token_secret: pushBody.device_token_secret,
+      approved: pushBody.approved,
+      event: document.getElementById("remote-control-relay-event").value.trim() || "directory-updated",
+      task_id: taskId || undefined,
+      apns_topic: pushBody.apns_topic,
+      fcm_project_id: pushBody.fcm_project_id,
+    }),
+  });
+  renderRemoteControlOutput(result);
+  await refresh();
+});
+
+document.getElementById("remote-control-relay-outbox-refresh").addEventListener("click", async () => {
+  const result = await api("/remote-control/relay/outbox");
+  renderRemoteControlOutbox(result);
+  renderRemoteControlOutput(result);
+});
+
+document.getElementById("remote-control-relay-retry").addEventListener("click", async () => {
+  const result = await api("/remote-control/relay/retry", {
+    method: "POST",
+    body: JSON.stringify({
+      ...remoteControlRelayBody(),
+      limit: 10,
+    }),
+  });
+  renderRemoteControlOutput(result);
+  await refresh();
+});
+
+document.getElementById("remote-control-relay-confirm").addEventListener("click", async () => {
+  const result = await api("/remote-control/relay/confirm", {
+    method: "POST",
+    body: JSON.stringify({
+      ...remoteControlRelayBody(),
+      outbox_id: document.getElementById("remote-control-relay-outbox-id").value.trim(),
+    }),
+  });
+  renderRemoteControlOutput(result);
+  await refresh();
+});
+
+const pullRemoteControlRelayActions = async ({ dryRun }) => {
+  const result = await api("/remote-control/relay/pull", {
+    method: "POST",
+    body: JSON.stringify({
+      ...remoteControlRelayBody(),
+      dry_run: dryRun,
+      limit: 10,
+    }),
+  });
+  document.getElementById("remote-control-relay-dry-run").checked = dryRun;
+  await refresh();
+  renderRemoteControlRelayPull(result);
+};
+
+document.getElementById("remote-control-relay-preview").addEventListener("click", async () => {
+  await pullRemoteControlRelayActions({ dryRun: true });
+});
+
+document.getElementById("remote-control-relay-apply").addEventListener("click", async () => {
+  await pullRemoteControlRelayActions({ dryRun: false });
+});
+
+document.getElementById("remote-control-directory").addEventListener("click", async () => {
+  const pairingId = document.getElementById("remote-control-relay-pairing-id").value.trim();
+  const result = await api(`/remote-control/directory?pairing_id=${encodeURIComponent(pairingId)}&limit=12`);
+  renderRemoteControlOutput(result);
+});
+
+document.getElementById("remote-control-pairings").addEventListener("click", async (event) => {
+  const directoryId = event.target.dataset.remoteControlDirectory;
+  if (directoryId) {
+    const result = await api(`/remote-control/directory?pairing_id=${encodeURIComponent(directoryId)}&limit=12`);
+    renderRemoteControlOutput(result);
+    return;
+  }
+  const pairingId = event.target.dataset.remoteControlRevoke;
+  if (!pairingId) return;
+  const result = await api("/remote-control/revoke", {
+    method: "POST",
+    body: JSON.stringify({ pairing_id: pairingId }),
+  });
+  renderRemoteControlOutput(result);
+  await refresh();
+});
+
 document.getElementById("mcp-server-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const tools = document
@@ -2226,6 +3095,8 @@ document.getElementById("mcp-server-form").addEventListener("submit", async (eve
     body: JSON.stringify({
       name: document.getElementById("mcp-server-name").value || "local-mcp",
       command: document.getElementById("mcp-server-command").value,
+      transport: document.getElementById("mcp-server-transport").value,
+      token_secret: document.getElementById("mcp-server-token-secret").value || undefined,
       allowed_tools: tools,
       enabled: false,
       approval_required: true,
@@ -2256,6 +3127,101 @@ document.getElementById("installed-skills").addEventListener("click", async (eve
   } else if (result.ok && action === "enable") {
     delete state.pendingSkillEnable[skillId];
   }
+  await refresh();
+});
+
+document.getElementById("plugin-install-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const manifestPath = document.getElementById("plugin-manifest-path").value;
+  const result = await api("/plugins", {
+    method: "POST",
+    body: JSON.stringify({
+      manifest_path: manifestPath,
+      enable: document.getElementById("plugin-install-enable").checked,
+      unsigned_local: document.getElementById("plugin-install-unsigned").checked,
+    }),
+  });
+  renderPluginOutput(result);
+  await refresh();
+});
+
+document.getElementById("plugin-reload").addEventListener("click", async () => {
+  const result = await api("/plugins/reload", { method: "POST", body: JSON.stringify({}) });
+  renderPluginOutput(result);
+  await refresh();
+});
+
+document.getElementById("plugin-marketplace-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  state.pluginMarketplaceQuery = document.getElementById("plugin-marketplace-query").value || "";
+  state.pluginMarketplaceCatalogPath = document.getElementById("plugin-marketplace-catalog").value || "";
+  await refresh();
+});
+
+document.getElementById("plugin-marketplace").addEventListener("click", async (event) => {
+  const bundlePluginId = event.target.dataset.pluginMarketplaceFetchBundle;
+  const bundleInstallPluginId = event.target.dataset.pluginMarketplaceInstallBundle;
+  const pluginId = bundlePluginId || bundleInstallPluginId || event.target.dataset.pluginMarketplaceInstall;
+  if (!pluginId) return;
+  if (bundlePluginId) {
+    const result = await api("/plugins/marketplace/fetch-bundle", {
+      method: "POST",
+      body: JSON.stringify({
+        plugin_id: bundlePluginId,
+        catalog_path: state.pluginMarketplaceCatalogPath || undefined,
+      }),
+    });
+    renderPluginOutput(result);
+    await refresh();
+    return;
+  }
+  if (bundleInstallPluginId) {
+    const result = await api("/plugins/marketplace/install-bundle", {
+      method: "POST",
+      body: JSON.stringify({
+        plugin_id: bundleInstallPluginId,
+        catalog_path: state.pluginMarketplaceCatalogPath || undefined,
+      }),
+    });
+    renderPluginOutput(result);
+    await refresh();
+    return;
+  }
+  const result = await api("/plugins/marketplace/install", {
+    method: "POST",
+    body: JSON.stringify({
+      plugin_id: pluginId,
+      catalog_path: state.pluginMarketplaceCatalogPath || undefined,
+    }),
+  });
+  renderPluginOutput(result);
+  await refresh();
+});
+
+document.getElementById("plugin-updates").addEventListener("click", async (event) => {
+  const pluginId = event.target.dataset.pluginMarketplaceUpdate;
+  if (!pluginId) return;
+  const result = await api("/plugins/marketplace/update", {
+    method: "POST",
+    body: JSON.stringify({
+      plugin_id: pluginId,
+      approved: true,
+      catalog_path: state.pluginMarketplaceCatalogPath || undefined,
+    }),
+  });
+  renderPluginOutput(result);
+  await refresh();
+});
+
+document.getElementById("installed-plugins").addEventListener("click", async (event) => {
+  const enableId = event.target.dataset.pluginEnable;
+  const disableId = event.target.dataset.pluginDisable;
+  const removeId = event.target.dataset.pluginRemove;
+  const pluginId = enableId || disableId || removeId;
+  if (!pluginId) return;
+  const action = enableId ? "enable" : disableId ? "disable" : "remove";
+  const result = await api(`/plugins/${encodeURIComponent(pluginId)}/${action}`, { method: "POST", body: JSON.stringify({}) });
+  renderPluginOutput(result);
   await refresh();
 });
 
@@ -2381,6 +3347,15 @@ document.getElementById("browser-inspect").addEventListener("click", async () =>
   renderBrowserOutput(await api("/browser/inspect", { method: "POST", body: JSON.stringify({ session_id: state.browserSessionId }) }));
 });
 
+document.getElementById("browser-dom-snapshot").addEventListener("click", async () => {
+  if (!state.browserSessionId) {
+    renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
+    return;
+  }
+  const selector = document.getElementById("browser-selector").value.trim();
+  renderBrowserOutput(await api("/browser/dom-snapshot", { method: "POST", body: JSON.stringify({ session_id: state.browserSessionId, selector: selector || undefined }) }));
+});
+
 document.getElementById("browser-table").addEventListener("click", async () => {
   if (!state.browserSessionId) {
     renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
@@ -2446,7 +3421,41 @@ document.getElementById("browser-fill").addEventListener("click", async () => {
   await refresh();
 });
 
+document.getElementById("browser-submit").addEventListener("click", async () => {
+  if (!state.browserSessionId) {
+    renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
+    return;
+  }
+  const selector = document.getElementById("browser-selector").value.trim();
+  state.pendingBrowserAction = { action: "submit", session_id: state.browserSessionId, selector: selector || undefined };
+  renderBrowserOutput(
+    await api("/browser/submit", {
+      method: "POST",
+      body: JSON.stringify({ session_id: state.browserSessionId, selector: selector || undefined }),
+    })
+  );
+  await refresh();
+});
+
 document.getElementById("browser-output").addEventListener("click", async (event) => {
+  const createActivationPacket = event.target.closest("[data-browser-live-activation-packet]");
+  if (createActivationPacket) {
+    renderBrowserOutput(await api("/browser/live-activation-packet", { method: "POST", body: JSON.stringify({ actor: "web-operator" }) }));
+    await refresh();
+    return;
+  }
+  const verifyActivationPacket = event.target.closest("[data-browser-verify-activation-packet]");
+  if (verifyActivationPacket) {
+    const activationPacket = verifyActivationPacket.dataset.browserVerifyActivationPacket;
+    renderBrowserOutput(
+      await api("/browser/verify-activation-packet", {
+        method: "POST",
+        body: JSON.stringify({ packet: activationPacket, actor: "web-operator" }),
+      })
+    );
+    await refresh();
+    return;
+  }
   const elementButton = event.target.closest("[data-browser-selector]");
   if (elementButton) {
     const selector = elementButton.dataset.browserSelector || "";
@@ -2459,10 +3468,12 @@ document.getElementById("browser-output").addEventListener("click", async (event
   const approvalId = event.target.dataset.browserRunApproved;
   if (!approvalId || !state.pendingBrowserAction || state.pendingBrowserAction.approval_id !== approvalId) return;
   const action = state.pendingBrowserAction;
-  const path = action.action === "fill" ? "/browser/fill" : "/browser/click";
+  const path = action.action === "fill" ? "/browser/fill" : action.action === "submit" ? "/browser/submit" : "/browser/click";
   const body =
     action.action === "fill"
       ? { session_id: action.session_id, fields: action.fields, approval_id: approvalId }
+      : action.action === "submit"
+        ? { session_id: action.session_id, selector: action.selector, approval_id: approvalId }
       : { session_id: action.session_id, selector: action.selector, approval_id: approvalId };
   const result = await api(path, { method: "POST", body: JSON.stringify(body) });
   if (result.ok) {
@@ -3043,6 +4054,98 @@ document.getElementById("card-form").addEventListener("submit", async (event) =>
     }),
   });
   state.selectedBoardId = boardId;
+  await refresh();
+});
+
+document.getElementById("subagent-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const payload = {
+    role: document.getElementById("subagent-role").value || "Researcher",
+    task: document.getElementById("subagent-task").value || "Review the current work queue.",
+  };
+  state.pendingSubagentDelegation = payload;
+  const result = await api("/subagents/delegate", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  renderSubagentOutput(result);
+  renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
+  await refresh();
+});
+
+document.getElementById("subagent-output").addEventListener("click", async (event) => {
+  const approvalId = event.target.dataset.subagentApproved;
+  if (!approvalId || !state.pendingSubagentDelegation) return;
+  const result = await api("/subagents/delegate", {
+    method: "POST",
+    body: JSON.stringify({ ...state.pendingSubagentDelegation, approval_id: approvalId }),
+  });
+  state.pendingSubagentDelegation = null;
+  renderSubagentOutput(result);
+  renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
+  await refresh();
+});
+
+document.getElementById("subagent-cards").addEventListener("click", async (event) => {
+  const verifyPacket = event.target.dataset.subagentVerifyPacket;
+  if (verifyPacket) {
+    const result = await api("/subagents/verify-packet", {
+      method: "POST",
+      body: JSON.stringify({ packet: verifyPacket, actor: "web-operator" }),
+    });
+    renderSubagentOutput(result);
+    renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
+    await refresh();
+    return;
+  }
+  const reviewPacketCard = event.target.dataset.subagentReviewPacket;
+  if (reviewPacketCard) {
+    const result = await api("/subagents/review-packet", {
+      method: "POST",
+      body: JSON.stringify({ card_id: reviewPacketCard, actor: "web-operator" }),
+    });
+    renderSubagentOutput(result);
+    renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
+    await refresh();
+    return;
+  }
+  const runCard = event.target.dataset.subagentRun;
+  if (runCard) {
+    const result = await api("/subagents/run", {
+      method: "POST",
+      body: JSON.stringify({ card_id: runCard, actor: "web-operator", approved: true }),
+    });
+    renderSubagentOutput(result);
+    renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
+    await refresh();
+    return;
+  }
+  const card = event.target.dataset.subagentCard;
+  const lane = event.target.dataset.subagentLane;
+  if (!card || !lane) return;
+  const result = await api("/subagents/handoff", {
+    method: "POST",
+    body: JSON.stringify({ card_id: card, lane, actor: "web-operator" }),
+  });
+  renderSubagentOutput(result);
+  renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
+  await refresh();
+});
+
+document.getElementById("subagent-run-batch").addEventListener("click", async () => {
+  const result = await api("/subagents/run-batch", {
+    method: "POST",
+    body: JSON.stringify({ actor: "web-operator", approved: true, run_limit: 5, limit: 12 }),
+  });
+  renderSubagentOutput(result);
+  renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
+  await refresh();
+});
+
+document.getElementById("subagent-autonomy-preflight").addEventListener("click", async () => {
+  const result = await api("/subagents/autonomy-preflight?limit=12&actor=web-operator");
+  renderSubagentOutput(result);
+  renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
   await refresh();
 });
 

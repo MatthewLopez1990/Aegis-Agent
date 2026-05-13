@@ -25,10 +25,23 @@
       <section class="hero-panel">
         <div class="hero-copy">
           <div class="hero-brand-row">
-            <span class="hero-shield" aria-hidden="true"><span>A</span></span>
+            <div class="hero-mark" aria-hidden="true">
+              <span class="hero-shield"><span>A</span></span>
+              <pre class="hero-ascii"><span class="ascii-row tone-1">::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::</span>
+<span class="ascii-row tone-2">\                                                                                            \</span>
+<span class="ascii-row tone-3">\  .d8b.  d88888b d888b  d888888b .d8888.     .d8b.  d888b  d88888b d8b   db d888888b  \</span>
+<span class="ascii-row tone-4">\ d8' `8b 88'     88' Y8b   `88'   88'  YP    d8' `8b 88' Y8b 88'     888o  88 `~~88~~' \</span>
+<span class="ascii-row tone-5">\ 88ooo88 88ooooo 88         88    `8bo.      88ooo88 88      88ooooo 88V8o 88    88     \</span>
+<span class="ascii-row tone-6">\ 88~~~88 88~~~~~ 88  ooo    88      `Y8b.    88~~~88 88  ooo 88~~~~~ 88 V8o88    88     \</span>
+<span class="ascii-row tone-7">\ 88   88 88.     88. ~8~   .88.   db   8D    88   88 88. ~8~ 88.     88  V888    88     \</span>
+<span class="ascii-row tone-8">\ YP   YP Y88888P  Y888P  Y888888P `8888Y'    YP   YP  Y888P  Y88888P VP   V8P    YP     \</span>
+<span class="ascii-row tone-9">\                                                                                            \</span>
+<span class="ascii-row tone-10">::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::</span></pre>
+            </div>
             <div>
               <p class="eyebrow">Aegis Shield Console</p>
-              <h2>Govern every tool, channel, model, and memory before it touches real data.</h2>
+              <h2>Aegis Control Plane</h2>
+              <p class="hero-subtitle">A quiet local console for tasks, approvals, memory, models, and evidence.</p>
             </div>
           </div>
         </div>
@@ -47,6 +60,7 @@
           <div id="session-transcript" class="transcript" aria-live="polite"></div>
           <form id="task-form" class="task-form">
             <textarea id="task-request" rows="5" placeholder="Ask Aegis to inspect, plan, or act"></textarea>
+            <div id="slash-palette" class="slash-palette" hidden aria-live="polite"></div>
             <div class="input-row">
               <input id="task-path" placeholder="Optional scoped path">
               <button type="submit">Send</button>
@@ -99,6 +113,9 @@
                 <button id="tasks-scope-all" type="button" class="secondary" data-task-scope="all">All</button>
               </div>
             </div>
+            <p class="section-label">Active Work</p>
+            <div id="active-work" class="list compact-list"></div>
+            <p class="section-label">Task Feed</p>
             <div id="tasks" class="list compact-list"></div>
             <p class="section-label">Session Links</p>
             <div id="session-linked-tasks" class="list compact-list"></div>
@@ -269,14 +286,57 @@
               <option value="google">Google</option>
               <option value="mistral">Mistral</option>
               <option value="cohere">Cohere</option>
-              <option value="custom">Custom</option>
               <option value="openrouter">OpenRouter</option>
+              <option value="nous">Nous</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="xai">xAI</option>
+              <option value="kimi">Kimi</option>
+              <option value="kimi-cn">Kimi China</option>
+              <option value="arcee">Arcee AI</option>
+              <option value="gmi">GMI Cloud</option>
+              <option value="minimax">MiniMax</option>
+              <option value="minimax-cn">MiniMax China</option>
+              <option value="minimax-token-plan">MiniMax Token Plan</option>
+              <option value="zai">Z.AI</option>
+              <option value="qwen">Qwen</option>
+              <option value="alibaba-coding-plan">Alibaba Coding Plan</option>
+              <option value="stepfun">StepFun</option>
+              <option value="huggingface">Hugging Face</option>
+              <option value="nvidia">NVIDIA NIM</option>
+              <option value="ai-gateway">Vercel AI Gateway</option>
+              <option value="opencode-zen">OpenCode Zen</option>
+              <option value="opencode-go">OpenCode Go</option>
+              <option value="kilocode">Kilo Code</option>
+              <option value="xiaomi">Xiaomi MiMo</option>
+              <option value="tencent-tokenhub">Tencent TokenHub</option>
+              <option value="ollama-cloud">Ollama Cloud</option>
+              <option value="github-copilot">GitHub Copilot</option>
+              <option value="google-gemini-oauth">Google Gemini OAuth</option>
+              <option value="aws-bedrock">AWS Bedrock</option>
+              <option value="azure-foundry">Azure Foundry</option>
+              <option value="nous-oauth">Nous OAuth</option>
+              <option value="minimax-oauth">MiniMax OAuth</option>
+              <option value="custom">Custom</option>
+            </select>
+            <select id="model-auth-method">
+              <option value="api_key">API key</option>
+              <option value="subscription">Subscription</option>
+              <option value="oauth">OAuth</option>
+              <option value="oauth_device">OAuth device</option>
+              <option value="cloud_identity">Cloud identity</option>
             </select>
             <input id="model-api-key" type="password" autocomplete="off" placeholder="API key">
+            <label class="checkline"><input id="model-auth-verify-external" type="checkbox"> Verify external</label>
+            <label class="checkline"><input id="model-auth-run-external" type="checkbox"> Local terminal handoff</label>
             <button type="submit">Login</button>
             <button id="model-auth-logout" type="button" class="secondary">Logout</button>
+            <button id="model-auth-doctor-run" type="button" class="secondary">Doctor</button>
+            <button id="model-auth-readiness-packet" type="button" class="secondary">Readiness Packet</button>
           </form>
+          <div id="model-auth-output" class="evidence-block"></div>
           <div id="model-providers" class="list card-grid"></div>
+          <div id="model-auth-doctor" class="list compact-list"></div>
+          <div id="model-auth-targets" class="list compact-list"></div>
         </section>
 
         <section class="panel" data-section="models">
@@ -359,6 +419,7 @@
             <button id="browser-new-session" type="button" class="secondary">New Session</button>
             <button id="browser-extract" type="button" class="secondary">Extract</button>
             <button id="browser-inspect" type="button" class="secondary">Inspect</button>
+            <button id="browser-dom-snapshot" type="button" class="secondary">DOM Snapshot</button>
             <button id="browser-table" type="button" class="secondary">Table</button>
             <button id="browser-screenshot" type="button" class="secondary">Snapshot Note</button>
             <button id="browser-render-screenshot" type="button" class="secondary">Rendered PNG</button>
@@ -368,6 +429,7 @@
             <button id="browser-click" type="button" class="secondary">Record Click</button>
             <input id="browser-fill-fields" placeholder='{"#email":"local@example.test"}'>
             <button id="browser-fill" type="button" class="secondary">Record Fill</button>
+            <button id="browser-submit" type="button" class="secondary">Submit Form</button>
           </form>
           <div id="browser-sessions" class="list compact-list"></div>
           <div id="browser-output" class="evidence-block"></div>
@@ -400,13 +462,45 @@
         <section class="panel span-2" data-section="tools">
           <div class="panel-header">
             <div>
+              <p class="eyebrow">Extensions</p>
+              <h3>Plugins</h3>
+            </div>
+          </div>
+          <form id="plugin-install-form" class="inline-form two-col">
+            <input id="plugin-manifest-path" placeholder="/path/to/plugin.json">
+            <label class="checkline"><input id="plugin-install-enable" type="checkbox"> Enable</label>
+            <label class="checkline"><input id="plugin-install-unsigned" type="checkbox"> Unsigned local</label>
+            <button type="submit">Install</button>
+            <button id="plugin-reload" type="button" class="secondary">Reload</button>
+          </form>
+          <form id="plugin-marketplace-form" class="inline-form two-col">
+            <input id="plugin-marketplace-query" placeholder="Search marketplace metadata">
+            <input id="plugin-marketplace-catalog" placeholder="/path/to/catalog.json">
+            <button type="submit" class="secondary">Search Marketplace</button>
+          </form>
+          <div id="installed-plugins" class="list compact-list"></div>
+          <p class="section-label">Marketplace</p>
+          <div id="plugin-marketplace" class="list compact-list"></div>
+          <p class="section-label">Updates</p>
+          <div id="plugin-updates" class="list compact-list"></div>
+          <div id="plugin-output" class="evidence-block"></div>
+        </section>
+
+        <section class="panel span-2" data-section="tools">
+          <div class="panel-header">
+            <div>
               <p class="eyebrow">MCP</p>
               <h3>Servers</h3>
             </div>
           </div>
           <form id="mcp-server-form" class="inline-form two-col">
             <input id="mcp-server-name" placeholder="local-search">
-            <input id="mcp-server-command" placeholder="python3 /path/to/server.py">
+            <input id="mcp-server-command" placeholder="python3 /path/to/server.py or https://host/mcp">
+            <select id="mcp-server-transport" aria-label="MCP transport">
+              <option value="stdio">stdio</option>
+              <option value="streamable-http">streamable-http</option>
+            </select>
+            <input id="mcp-server-token-secret" placeholder="optional token secret">
             <input id="mcp-server-tools" placeholder="search,echo">
             <button type="submit">Register</button>
           </form>
@@ -418,6 +512,63 @@
           </form>
           <div id="mcp-servers" class="list compact-list"></div>
           <div id="mcp-call-output" class="evidence-block"></div>
+        </section>
+
+        <section class="panel span-2" data-section="automation">
+          <div class="panel-header">
+            <div>
+              <p class="eyebrow">Remote Control</p>
+              <h3>Pairing</h3>
+            </div>
+          </div>
+          <form id="remote-control-form" class="inline-form two-col">
+            <input id="remote-control-label" placeholder="phone or tablet">
+            <input id="remote-control-session-id" placeholder="session id">
+            <input id="remote-control-task-id" placeholder="task id">
+            <input id="remote-control-actions" placeholder="status,events,pause,cancel" value="status,events,pause,cancel">
+            <input id="remote-control-ttl" type="number" min="60" max="3600" value="600" placeholder="ttl seconds">
+            <button type="submit">Create Pairing</button>
+          </form>
+          <form id="remote-control-relay-form" class="inline-form two-col">
+            <input id="remote-control-relay-url" placeholder="https://relay.example/aegis">
+            <input id="remote-control-relay-pairing-id" placeholder="pairing id">
+            <input id="remote-control-relay-secret" placeholder="relay auth secret">
+            <input id="remote-control-relay-event" placeholder="notification event" value="directory-updated">
+            <input id="remote-control-relay-task-id" placeholder="notification task id">
+            <input id="remote-control-relay-outbox-id" placeholder="relay outbox id">
+            <input id="remote-control-push-target-id" placeholder="push target id">
+            <input id="remote-control-push-label" placeholder="push target label">
+            <select id="remote-control-push-provider">
+              <option value="fcm">FCM</option>
+              <option value="apns">APNS</option>
+            </select>
+            <input id="remote-control-push-secret" placeholder="push auth secret">
+            <input id="remote-control-device-secret" placeholder="device token secret">
+            <input id="remote-control-apns-topic" placeholder="apns topic">
+            <input id="remote-control-fcm-project" placeholder="fcm project id">
+            <label class="inline-check"><input id="remote-control-relay-approved" type="checkbox"> Approved relay operation</label>
+            <label class="inline-check"><input id="remote-control-push-approved" type="checkbox"> Approved native push</label>
+            <label class="inline-check"><input id="remote-control-relay-dry-run" type="checkbox" checked disabled> Preview mode</label>
+            <button id="remote-control-relay-check" type="submit">Check Relay</button>
+            <button id="remote-control-directory" type="button" class="secondary">Show Directory</button>
+            <button id="remote-control-relay-directory" type="button" class="secondary">Publish Directory</button>
+            <button id="remote-control-relay-notify" type="button" class="secondary">Notify Relay</button>
+            <button id="remote-control-push-register" type="button" class="secondary">Register Push</button>
+            <button id="remote-control-push-rotate" type="button" class="secondary">Rotate Push</button>
+            <button id="remote-control-push-disable" type="button" class="secondary">Disable Push</button>
+            <button id="remote-control-native-push" type="button" class="secondary">Push Native</button>
+            <button id="remote-control-relay-outbox-refresh" type="button" class="secondary">List Outbox</button>
+            <button id="remote-control-relay-retry" type="button" class="secondary">Retry Outbox</button>
+            <button id="remote-control-relay-confirm" type="button" class="secondary">Confirm Delivery</button>
+            <button id="remote-control-relay-preview" type="button" class="secondary">Preview Actions</button>
+            <button id="remote-control-relay-apply" type="button">Apply Actions</button>
+          </form>
+          <p id="remote-control-relay-summary" class="muted"></p>
+          <div id="remote-control-relay" class="list compact-list"></div>
+          <div id="remote-control-relay-outbox" class="list compact-list"></div>
+          <div id="remote-control-push-targets" class="list compact-list"></div>
+          <div id="remote-control-pairings" class="list compact-list"></div>
+          <div id="remote-control-output" class="evidence-block"></div>
         </section>
 
         <section class="panel span-2" data-section="automation">
@@ -493,6 +644,18 @@
             <input id="card-description" placeholder="Description">
             <button type="submit">Add Card</button>
           </form>
+          <form id="subagent-form" class="inline-form two-col">
+            <input id="subagent-role" placeholder="Researcher">
+            <input id="subagent-task" placeholder="Compare provider auth gaps">
+            <button type="submit">Delegate Subagent</button>
+          </form>
+          <div class="item-actions">
+            <button id="subagent-autonomy-preflight" type="button" class="secondary">Autonomy Preflight</button>
+            <button id="subagent-run-batch" type="button" class="secondary">Run Ready Batch</button>
+          </div>
+          <div id="subagent-summary" class="evidence-block"></div>
+          <div id="subagent-output" class="evidence-block"></div>
+          <div id="subagent-cards" class="list compact-list"></div>
           <div id="boards" class="list compact-list"></div>
           <div id="cards" class="kanban-lanes"></div>
         </section>

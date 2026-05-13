@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import html
+import importlib.util
 import json
 import hashlib
 from html.parser import HTMLParser
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
 import tempfile
 from typing import Any
+from urllib.parse import urlencode, urljoin, urlparse
 from uuid import uuid4
 import zlib
 
@@ -23,6 +26,25 @@ from aegis.storage.state import ensure_private_dir, ensure_private_file
 
 
 _MAX_PERSISTED_CONTENT_CHARS = 200_000
+_MAX_STATIC_DOM_NODES = 120
+_MAX_STATIC_DOM_DEPTH = 12
+_MAX_STATIC_DOM_TEXT_CHARS = 160
+_STATIC_DOM_ATTR_ALLOWLIST = {
+    "id",
+    "class",
+    "name",
+    "type",
+    "role",
+    "aria-label",
+    "placeholder",
+    "href",
+    "action",
+    "method",
+    "value",
+    "title",
+    "data-testid",
+}
+_DOM_SECRETISH_TOKEN_RE = re.compile(r"\b(?=[A-Za-z0-9_-]{6,}\b)(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{6,}\b")
 
 
 class BrowserController:
@@ -158,6 +180,49 @@ class BrowserController:
         )
         return response
 
+    def dom_snapshot(self, *, session_id: str, selector: str | None = None) -> dict[str, Any]:
+        session = self._require_session(session_id)
+        content = str(session.get("last_content", ""))
+        snapshot = _static_dom_snapshot(content, selector=selector)
+        response = {
+            "ok": True,
+            "session_id": session_id,
+            "url": _session_url(session),
+            "title": _redacted_string(session.get("title"), limit=200),
+            "selector": _redacted_string(selector, limit=500) if selector is not None else None,
+            "selector_status": snapshot["selector_status"],
+            "selector_note": snapshot["selector_note"],
+            "dom": snapshot["dom"],
+            "node_count": snapshot["node_count"],
+            "total_node_count": snapshot["total_node_count"],
+            "truncated": snapshot["truncated"],
+            "mode": "http_content_static_dom_no_js",
+            "taint": "WEB_CONTENT",
+            "javascript_executed": False,
+            "cookies_persisted": False,
+            "cookie_jar_persisted": False,
+            "local_storage_persisted": False,
+            "session_storage_persisted": False,
+            "remote_subresources_loaded": False,
+            "dom_mutated": False,
+            "real_selector_events_dispatched": False,
+            "automation_boundaries": _browser_automation_boundaries(rendered=False),
+            "evidence": _browser_evidence(session, action="dom_snapshot"),
+        }
+        self.audit_logger.append(
+            "browser.static_dom_snapshot",
+            {
+                "session_id": session_id,
+                "url": _session_url(session),
+                "selector": _redacted_string(selector, limit=500) if selector is not None else None,
+                "selector_status": snapshot["selector_status"],
+                "node_count": snapshot["node_count"],
+                "total_node_count": snapshot["total_node_count"],
+                "truncated": snapshot["truncated"],
+            },
+        )
+        return response
+
     def inspect(self, *, session_id: str) -> dict[str, Any]:
         session = self._require_session(session_id)
         interactive_elements = _normalize_interactive_elements(session.get("interactive_elements"))
@@ -179,6 +244,7 @@ class BrowserController:
                 "cookie_persistence": False,
                 "real_selector_events_dispatched": False,
                 "dom_mutation_supported": False,
+                "static_dom_form_fill_supported": True,
             },
             "activation": activation,
             "preflight_status": activation["preflight_status"],
@@ -191,6 +257,64 @@ class BrowserController:
             {"session_id": session_id, "url": _session_url(session), "interactive_element_count": len(interactive_elements)},
         )
         return response
+
+    def action_approval_payload(
+        self,
+        *,
+        action: str,
+        session_id: str,
+        selector: str | None = None,
+        fields: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"kind": "browser_action", "action": action, "session_id": session_id}
+        if action == "click":
+            session = self._require_session(session_id)
+            payload["selector"] = selector or ""
+            anchor_match = _matching_static_anchor_elements(session, selector or "")
+            if anchor_match["status"] == "ambiguous":
+                payload["click_effect"] = "blocked_static_anchor_navigation"
+                payload["blocked_reason"] = "ambiguous_anchor_selector"
+                return payload
+            if anchor_match["status"] == "matched":
+                target = _static_anchor_navigation_target(session, anchor_match["element"])
+                payload["click_effect"] = "static_anchor_navigation"
+                payload["href"] = _redacted_string(anchor_match["element"].get("href"), limit=500)
+                if target["ok"]:
+                    payload["target_url"] = _redacted_string(target["url"], limit=2000)
+                else:
+                    payload["blocked_reason"] = str(target["reason"])
+                return payload
+            payload["click_effect"] = "virtual_click_recorded"
+            return payload
+        if action == "fill":
+            safe_fields = {str(key): str(value) for key, value in (fields or {}).items()}
+            encoded = json.dumps(safe_fields, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            payload["field_selectors"] = sorted(safe_fields)
+            payload["fields_sha256"] = hashlib.sha256(encoded).hexdigest()
+            return payload
+        if action == "submit":
+            session = self._require_session(session_id)
+            payload["selector"] = selector or ""
+            form_match = _matching_static_form(session, selector)
+            if form_match["status"] != "matched":
+                payload["submit_effect"] = "blocked_static_form_submit"
+                payload["blocked_reason"] = form_match["status"]
+                return payload
+            target = _static_form_submission_target(session, form_match["form"])
+            if not target["ok"]:
+                payload["submit_effect"] = "blocked_static_form_submit"
+                payload["blocked_reason"] = str(target["reason"])
+                return payload
+            target_url = str(target["url"])
+            payload["submit_effect"] = "static_form_submit"
+            payload["method"] = target["method"]
+            payload["field_names"] = target["field_names"]
+            payload["field_count"] = target["field_count"]
+            payload["target_origin"] = _url_origin(target_url)
+            payload["target_path"] = _url_path(target_url)
+            payload["target_url_sha256"] = hashlib.sha256(target_url.encode("utf-8", errors="replace")).hexdigest()
+            return payload
+        raise ValueError(f"unsupported browser approval action: {action}")
 
     def deny_live_automation(self, *, action: str, session_id: str | None = None, selector: str | None = None) -> dict[str, Any]:
         session = self._require_session(session_id) if session_id else None
@@ -212,6 +336,109 @@ class BrowserController:
         }
         self.audit_logger.append("browser.live_automation_denied", response)
         return response
+
+    def live_activation_status(self) -> dict[str, Any]:
+        activation = _live_browser_activation_preflight()
+        return {
+            "status": "live_browser_activation_ready_for_review",
+            "activation": activation,
+            "live_browser_adapter_enabled": False,
+            "raw_browser_content_included": False,
+            "raw_secret_values_included": False,
+            "model_invocation_performed": False,
+        }
+
+    def create_live_activation_packet(self, *, actor: str = "operator") -> dict[str, Any]:
+        packet_id = str(uuid4())
+        created_at = now_utc()
+        packet_dir = ensure_private_dir(self.artifact_dir / "live-activation-packets")
+        packet_path = ensure_private_file(packet_dir / f"{packet_id}.json")
+        checksum_path = ensure_private_file(packet_dir / f"{packet_id}.sha256")
+        packet = _browser_live_activation_packet(packet_id=packet_id, actor=actor, created_at=created_at)
+        packet_path.write_text(json.dumps(packet, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        packet_path.chmod(0o600)
+        artifact_sha256 = hashlib.sha256(packet_path.read_bytes()).hexdigest()
+        checksum_path.write_text(f"{artifact_sha256}\n", encoding="utf-8")
+        checksum_path.chmod(0o600)
+        receipt = {
+            "receipt_schema": "aegis.browser.live_activation_packet.v1",
+            "event_type": "browser.live_activation_packet_created",
+            "packet_id": packet_id,
+            "actor": _redacted_string(actor, limit=80),
+            "artifact": str(packet_path),
+            "artifact_sha256": artifact_sha256,
+            "checksum": str(checksum_path),
+            "checksum_sha256": hashlib.sha256(checksum_path.read_bytes()).hexdigest(),
+            "activation_status": packet["activation"]["status"],
+            "preflight_status": packet["activation"]["preflight_status"],
+            "candidate_adapter_count": packet["activation"]["candidate_adapter_count"],
+            "playwright_chromium_preflight_status": _playwright_chromium_preflight_status(packet["activation"]),
+            "live_browser_adapter_enabled": False,
+            "raw_browser_content_included": False,
+            "raw_secret_values_included": False,
+            "raw_cookie_values_included": False,
+            "raw_storage_values_included": False,
+            "model_invocation_performed": False,
+            "created_at": created_at,
+        }
+        audit_entry = self.audit_logger.append("browser.live_activation_packet_created", receipt)
+        return {
+            "ok": True,
+            "packet": packet,
+            "receipt": receipt,
+            "audit_event_hash": audit_entry["event_hash"],
+        }
+
+    def verify_live_activation_packet(self, packet: str, *, actor: str = "operator") -> dict[str, Any]:
+        packet_path, checksum_path = _browser_live_activation_packet_paths(self.artifact_dir, packet)
+        packet_bytes = packet_path.read_bytes()
+        artifact_sha256 = hashlib.sha256(packet_bytes).hexdigest()
+        checksum_value = checksum_path.read_text(encoding="utf-8").strip() if checksum_path.exists() else ""
+        try:
+            decoded = json.loads(packet_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            decoded = {}
+        packet_payload = decoded if isinstance(decoded, dict) else {}
+        controls = packet_payload.get("controls") if isinstance(packet_payload.get("controls"), dict) else {}
+        activation = packet_payload.get("activation") if isinstance(packet_payload.get("activation"), dict) else {}
+        boundaries = packet_payload.get("implemented_boundaries") if isinstance(packet_payload.get("implemented_boundaries"), dict) else {}
+        checksum_matches = bool(checksum_value) and checksum_value == artifact_sha256
+        packet_schema_valid = packet_payload.get("packet_schema") == "aegis.browser.live_activation_packet.v1"
+        controls_valid = _browser_live_activation_controls_valid(controls)
+        activation_valid = _browser_live_activation_preflight_valid(activation)
+        boundaries_valid = _browser_live_activation_boundaries_valid(boundaries)
+        forbidden_keys_present = _browser_activation_packet_forbidden_keys_present(packet_payload)
+        receipt = {
+            "receipt_schema": "aegis.browser.live_activation_packet_verification.v1",
+            "event_type": "browser.live_activation_packet_verified",
+            "packet_id": str(packet_payload.get("packet_id") or packet_path.stem),
+            "actor": _redacted_string(actor, limit=80),
+            "artifact": str(packet_path),
+            "artifact_sha256": artifact_sha256,
+            "checksum": str(checksum_path),
+            "checksum_present": bool(checksum_value),
+            "checksum_matches": checksum_matches,
+            "packet_schema_valid": packet_schema_valid,
+            "activation_preflight_valid": activation_valid,
+            "playwright_chromium_preflight_status": _playwright_chromium_preflight_status(activation),
+            "controls_valid": controls_valid,
+            "boundaries_valid": boundaries_valid,
+            "forbidden_raw_keys_present": forbidden_keys_present,
+            "packet_integrity_ok": bool(packet_schema_valid and checksum_matches and activation_valid and controls_valid and boundaries_valid and not forbidden_keys_present),
+            "live_browser_adapter_enabled": False,
+            "raw_browser_content_included": False,
+            "raw_secret_values_included": False,
+            "raw_packet_payload_included": False,
+            "model_invocation_performed": False,
+            "verified_at": now_utc(),
+        }
+        audit_entry = self.audit_logger.append("browser.live_activation_packet_verified", receipt)
+        return {
+            "ok": bool(receipt["packet_integrity_ok"]),
+            "packet": _browser_live_activation_packet_summary(packet_payload),
+            "receipt": receipt,
+            "audit_event_hash": audit_entry["event_hash"],
+        }
 
     def screenshot(self, *, session_id: str) -> dict[str, Any]:
         session = self._require_session(session_id)
@@ -344,6 +571,62 @@ class BrowserController:
             return {"status": "approval_required", "session_id": session_id, "selector": selector, "reason": "browser click requires approval"}
         url_before = _session_url(session)
         content_hash_before = _content_hash(session)
+        anchor_match = _matching_static_anchor_elements(session, selector)
+        if anchor_match["status"] == "ambiguous":
+            response = _static_anchor_navigation_blocked(
+                session,
+                session_id=session_id,
+                selector=selector,
+                reason="ambiguous_anchor_selector",
+                detail="selector matched multiple static anchors",
+            )
+            self.audit_logger.append("browser.static_anchor_navigation_blocked", response)
+            return response
+        if anchor_match["status"] == "matched":
+            target = _static_anchor_navigation_target(session, anchor_match["element"])
+            if not target["ok"]:
+                response = _static_anchor_navigation_blocked(
+                    session,
+                    session_id=session_id,
+                    selector=selector,
+                    reason=str(target["reason"]),
+                    detail=str(target["detail"]),
+                    href=str(anchor_match["element"].get("href") or ""),
+                )
+                self.audit_logger.append("browser.static_anchor_navigation_blocked", response)
+                return response
+            navigation = self.navigate(session_id=session_id, url=str(target["url"]))
+            if not navigation.get("ok"):
+                response = {
+                    **navigation,
+                    "status": "static_anchor_navigation_failed",
+                    "effect": "static_anchor_navigation_failed",
+                    "selector": _redacted_string(selector, limit=500),
+                    "href": _redacted_string(anchor_match["element"].get("href"), limit=500),
+                    "target_url": _redacted_string(target["url"], limit=2000),
+                    "mode": "approved_static_anchor_navigation_no_js",
+                    "javascript_executed": False,
+                    "dom_mutated": False,
+                    "real_selector_events_dispatched": False,
+                }
+                self.audit_logger.append("browser.static_anchor_navigation_failed", response)
+                return response
+            current = self._require_session(session_id)
+            evidence = _browser_evidence(current, action="static_anchor_navigation", url_before=url_before, content_hash_before=content_hash_before)
+            response = {
+                **navigation,
+                "effect": "static_anchor_navigation",
+                "selector": _redacted_string(selector, limit=500),
+                "href": _redacted_string(anchor_match["element"].get("href"), limit=500),
+                "target_url": _redacted_string(target["url"], limit=2000),
+                "mode": "approved_static_anchor_navigation_no_js",
+                "javascript_executed": False,
+                "dom_mutated": False,
+                "real_selector_events_dispatched": False,
+                "evidence": evidence,
+            }
+            self.audit_logger.append("browser.static_anchor_navigated", response)
+            return response
         click = {"selector": _redacted_string(selector, limit=500), "clicked_at": now_utc()}
         clicks = list(session.get("clicks", []))
         clicks.append(click)
@@ -375,21 +658,96 @@ class BrowserController:
         for selector, value in fields.items():
             form_state[_redacted_string(selector, limit=500)] = _redacted_string(value, limit=500)
         session["form_state"] = form_state
+        fill_result = _apply_static_form_fill(str(session.get("last_content", "")), form_state)
+        static_dom_mutated = bool(fill_result["mutated_selectors"])
+        if static_dom_mutated:
+            mutated_content = _bounded_redacted_content(str(fill_result["content"]))
+            session["last_content"] = mutated_content
+            session["last_content_redacted"] = True
+            session["last_text_length"] = len(mutated_content)
+            session["interactive_elements"] = _normalize_interactive_elements(_extract_interactive_elements(mutated_content))
         session["updated_at"] = now_utc()
         self._persist_sessions()
         evidence = _browser_evidence(session, action="fill", url_before=url_before, content_hash_before=content_hash_before)
+        if static_dom_mutated:
+            evidence["dom_mutated"] = True
+            evidence["mode"] = "static_dom_form_fill_no_js"
+            evidence["real_page_mutated"] = False
+            evidence["static_dom_mutated"] = True
         response = {
             "ok": True,
             "session_id": session_id,
             "fields": sorted(form_state),
             "url": _session_url(session),
-            "effect": "virtual_form_state_updated",
-            "mode": "virtual_state_no_dom",
-            "dom_mutated": False,
+            "effect": "static_dom_form_state_updated" if static_dom_mutated else "virtual_form_state_updated",
+            "mode": "static_dom_form_fill_no_js" if static_dom_mutated else "virtual_state_no_dom",
+            "dom_mutated": static_dom_mutated,
+            "static_dom_mutated": static_dom_mutated,
+            "real_page_mutated": False,
+            "mutated_selectors": fill_result["mutated_selectors"],
+            "unmatched_selectors": fill_result["unmatched_selectors"],
             "form_state": dict(form_state),
             "evidence": evidence,
         }
         self.audit_logger.append("browser.fill_recorded", response)
+        return response
+
+    def submit(self, *, session_id: str, selector: str | None = None, approved: bool = False) -> dict[str, Any]:
+        session = self._require_session(session_id)
+        requested_selector = _redacted_string(selector, limit=500) if selector is not None else None
+        if not approved:
+            return {"status": "approval_required", "session_id": session_id, "selector": requested_selector, "reason": "browser form submit requires approval"}
+        url_before = _session_url(session)
+        content_hash_before = _content_hash(session)
+        form_match = _matching_static_form(session, selector)
+        if form_match["status"] != "matched":
+            response = _static_form_submit_blocked(session, session_id=session_id, selector=selector, reason=form_match["status"], detail=str(form_match["detail"]))
+            self.audit_logger.append("browser.static_form_submit_blocked", response)
+            return response
+        target = _static_form_submission_target(session, form_match["form"])
+        if not target["ok"]:
+            response = _static_form_submit_blocked(session, session_id=session_id, selector=selector, reason=str(target["reason"]), detail=str(target["detail"]))
+            self.audit_logger.append("browser.static_form_submit_blocked", response)
+            return response
+        navigation = self.navigate(session_id=session_id, url=str(target["url"]))
+        if not navigation.get("ok"):
+            response = {
+                **navigation,
+                "status": "static_form_submit_failed",
+                "effect": "static_form_submit_failed",
+                "selector": requested_selector,
+                "method": target["method"],
+                "target_origin": _url_origin(str(target["url"])),
+                "target_path": _url_path(str(target["url"])),
+                "field_names": target["field_names"],
+                "field_count": target["field_count"],
+                "mode": "approved_static_form_submit_no_js",
+                "javascript_executed": False,
+                "dom_mutated": False,
+                "real_selector_events_dispatched": False,
+                "cookies_persisted": False,
+            }
+            self.audit_logger.append("browser.static_form_submit_failed", response)
+            return response
+        current = self._require_session(session_id)
+        evidence = _browser_evidence(current, action="static_form_submit", url_before=url_before, content_hash_before=content_hash_before)
+        response = {
+            **navigation,
+            "effect": "static_form_submit",
+            "selector": requested_selector,
+            "method": target["method"],
+            "target_origin": _url_origin(str(target["url"])),
+            "target_path": _url_path(str(target["url"])),
+            "field_names": target["field_names"],
+            "field_count": target["field_count"],
+            "mode": "approved_static_form_submit_no_js",
+            "javascript_executed": False,
+            "dom_mutated": False,
+            "real_selector_events_dispatched": False,
+            "cookies_persisted": False,
+            "evidence": evidence,
+        }
+        self.audit_logger.append("browser.static_form_submitted", response)
         return response
 
     def _session_or_create(self, session_id: str | None) -> dict[str, Any]:
@@ -472,7 +830,7 @@ def _normalize_persisted_session(item: Any) -> dict[str, Any] | None:
 
 
 def _bounded_redacted_content(content: str) -> str:
-    return str(redact(content[:_MAX_PERSISTED_CONTENT_CHARS]))
+    return _redacted_dom_value(content, limit=_MAX_PERSISTED_CONTENT_CHARS)
 
 
 def _redacted_string(value: Any, *, limit: int) -> str:
@@ -537,7 +895,7 @@ def _selector_inventory(elements: list[dict[str, str]]) -> list[dict[str, Any]]:
         tag = _redacted_string(element.get("tag"), limit=80)
         selector = _redacted_string(element.get("selector_hint") or element.get("form_hint") or tag, limit=500)
         action = _selector_action(tag, element.get("type", ""))
-        supported_actions = ["fill"] if action == "fill" else ["click"]
+        supported_actions = ["fill"] if action == "fill" else ["navigate"] if action == "navigate" else ["click"]
         inventory.append(
             {
                 "selector": selector,
@@ -547,9 +905,338 @@ def _selector_inventory(elements: list[dict[str, str]]) -> list[dict[str, Any]]:
                 "supported_virtual_actions": supported_actions,
                 "requires_approval": True,
                 "dom_mutation_supported": False,
+                "static_dom_fill_supported": action == "fill",
             }
         )
     return inventory
+
+
+def _static_dom_snapshot(content: str, *, selector: str | None = None) -> dict[str, Any]:
+    parser = _StaticDomSnapshotParser(max_nodes=_MAX_STATIC_DOM_NODES, max_depth=_MAX_STATIC_DOM_DEPTH)
+    try:
+        parser.feed(content[:_MAX_PERSISTED_CONTENT_CHARS])
+        parser.close()
+    except Exception:
+        return {
+            "dom": [],
+            "node_count": 0,
+            "total_node_count": parser.total_node_count,
+            "truncated": True,
+            "selector_status": "parse_error",
+            "selector_note": "Static DOM parsing failed; no page JavaScript, cookies, or storage were used.",
+        }
+    matcher = _dom_selector_matcher(selector) if selector else None
+    if selector and matcher is None:
+        return {
+            "dom": [],
+            "node_count": 0,
+            "total_node_count": parser.total_node_count,
+            "truncated": parser.truncated,
+            "selector_status": "unsupported",
+            "selector_note": "Only tag, #id, .class, tag#id, tag.class, [name=value], and tag[name=value] selectors are supported by the dependency-light static DOM parser.",
+        }
+    if matcher is None:
+        nodes = parser.roots
+        selector_status = "not_provided"
+        selector_note = "The bounded static DOM tree was parsed from stored HTTP content without JavaScript, cookies, or storage."
+    else:
+        nodes = [node for node in parser.elements if matcher(node)]
+        selector_status = "matched" if nodes else "no_match"
+        selector_note = "Selector filtering used the dependency-light static DOM parser; no live DOM events were dispatched."
+    return {
+        "dom": nodes,
+        "node_count": _count_static_dom_nodes(nodes),
+        "total_node_count": parser.total_node_count,
+        "truncated": parser.truncated,
+        "selector_status": selector_status,
+        "selector_note": selector_note,
+    }
+
+
+def _apply_static_form_fill(content: str, form_state: dict[str, str]) -> dict[str, Any]:
+    if "<" not in content or not form_state:
+        return {"content": content, "mutated_selectors": [], "unmatched_selectors": sorted(form_state)}
+    safe_fields = {_redacted_string(selector, limit=500): _redacted_dom_value(value, limit=500) for selector, value in form_state.items()}
+    parser = _StaticFormFillParser(fields=safe_fields)
+    try:
+        parser.feed(content[:_MAX_PERSISTED_CONTENT_CHARS])
+        parser.close()
+    except Exception:
+        return {"content": content, "mutated_selectors": [], "unmatched_selectors": sorted(safe_fields)}
+    mutated_selectors = sorted(parser.mutated_selectors)
+    unmatched_selectors = sorted(selector for selector in safe_fields if selector not in parser.mutated_selectors)
+    return {"content": "".join(parser.output), "mutated_selectors": mutated_selectors, "unmatched_selectors": unmatched_selectors}
+
+
+class _StaticFormFillParser(HTMLParser):
+    def __init__(self, *, fields: dict[str, str]) -> None:
+        super().__init__(convert_charrefs=False)
+        self.fields = fields
+        self.output: list[str] = []
+        self.mutated_selectors: set[str] = set()
+        self._textarea_fill_selector: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        normalized_tag = tag.lower()
+        attrs_dict = {key.lower(): value or "" for key, value in attrs}
+        matched_selector = self._matching_selector(normalized_tag, attrs_dict)
+        if normalized_tag == "input" and matched_selector:
+            attrs = _replace_attr(attrs, "value", self.fields[matched_selector])
+            self.mutated_selectors.add(matched_selector)
+        self.output.append(_format_start_tag(normalized_tag, attrs))
+        if normalized_tag == "textarea" and matched_selector:
+            self.output.append(html.escape(self.fields[matched_selector], quote=False))
+            self._textarea_fill_selector = matched_selector
+            self.mutated_selectors.add(matched_selector)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        normalized_tag = tag.lower()
+        attrs_dict = {key.lower(): value or "" for key, value in attrs}
+        matched_selector = self._matching_selector(normalized_tag, attrs_dict)
+        if normalized_tag == "input" and matched_selector:
+            attrs = _replace_attr(attrs, "value", self.fields[matched_selector])
+            self.mutated_selectors.add(matched_selector)
+        self.output.append(_format_start_tag(normalized_tag, attrs, self_closing=True))
+
+    def handle_endtag(self, tag: str) -> None:
+        normalized_tag = tag.lower()
+        if normalized_tag == "textarea" and self._textarea_fill_selector:
+            self._textarea_fill_selector = None
+        self.output.append(f"</{normalized_tag}>")
+
+    def handle_data(self, data: str) -> None:
+        if self._textarea_fill_selector:
+            return
+        self.output.append(html.escape(_redacted_dom_value(data, limit=len(data)), quote=False))
+
+    def handle_entityref(self, name: str) -> None:
+        if not self._textarea_fill_selector:
+            self.output.append(f"&{name};")
+
+    def handle_charref(self, name: str) -> None:
+        if not self._textarea_fill_selector:
+            self.output.append(f"&#{name};")
+
+    def handle_comment(self, data: str) -> None:
+        self.output.append(f"<!--{html.escape(_redacted_dom_value(data, limit=len(data)), quote=False)}-->")
+
+    def _matching_selector(self, tag: str, attrs: dict[str, str]) -> str | None:
+        if tag not in {"input", "textarea"}:
+            return None
+        node = {"type": "element", "tag": tag, "attrs": _redacted_dom_attrs(attrs)}
+        for selector in self.fields:
+            matcher = _dom_selector_matcher(selector)
+            if matcher is not None and matcher(node):
+                return selector
+        return None
+
+
+def _replace_attr(attrs: list[tuple[str, str | None]], name: str, value: str) -> list[tuple[str, str | None]]:
+    replaced = False
+    output: list[tuple[str, str | None]] = []
+    for key, existing_value in attrs:
+        if key.lower() == name:
+            output.append((key, value))
+            replaced = True
+        else:
+            output.append((key, existing_value))
+    if not replaced:
+        output.append((name, value))
+    return output
+
+
+def _format_start_tag(tag: str, attrs: list[tuple[str, str | None]], *, self_closing: bool = False) -> str:
+    attr_text = "".join(_format_html_attr(key, value) for key, value in attrs)
+    suffix = " /" if self_closing else ""
+    return f"<{tag}{attr_text}{suffix}>"
+
+
+def _format_html_attr(key: str, value: str | None) -> str:
+    normalized_key = "".join(char for char in str(key).lower() if char.isalnum() or char in {"-", "_", ":"})
+    if not normalized_key:
+        return ""
+    if value is None:
+        return f" {normalized_key}"
+    return f' {normalized_key}="{html.escape(_redacted_dom_value(value, limit=1000), quote=True)}"'
+
+
+def _count_static_dom_nodes(nodes: list[dict[str, Any]]) -> int:
+    count = 0
+    stack = list(nodes)
+    while stack:
+        node = stack.pop()
+        count += 1
+        children = node.get("children")
+        if isinstance(children, list):
+            stack.extend(child for child in children if isinstance(child, dict))
+    return count
+
+
+class _StaticDomSnapshotParser(HTMLParser):
+    def __init__(self, *, max_nodes: int, max_depth: int) -> None:
+        super().__init__(convert_charrefs=True)
+        self.max_nodes = max_nodes
+        self.max_depth = max_depth
+        self.roots: list[dict[str, Any]] = []
+        self.elements: list[dict[str, Any]] = []
+        self.stack: list[dict[str, Any]] = []
+        self.total_node_count = 0
+        self.emitted_node_count = 0
+        self.truncated = False
+        self._suppressed_text_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if self._suppressed_text_depth:
+            if tag in {"script", "style", "noscript"}:
+                self._suppressed_text_depth += 1
+            return
+        if tag in {"script", "style", "noscript"}:
+            self._suppressed_text_depth = 1
+        attrs_dict = {key.lower(): value or "" for key, value in attrs}
+        self.total_node_count += 1
+        if self.emitted_node_count >= self.max_nodes or len(self.stack) >= self.max_depth:
+            self.truncated = True
+            return
+        node = {
+            "type": "element",
+            "tag": _redacted_string(tag, limit=80),
+            "attrs": _redacted_dom_attrs(attrs_dict),
+            "selector_hint": _redacted_string(_selector_hint(tag, attrs_dict), limit=500),
+            "path": _redacted_string(self._path_for(tag), limit=500),
+            "children": [],
+        }
+        self.emitted_node_count += 1
+        self.elements.append(node)
+        if self.stack:
+            self.stack[-1]["children"].append(node)
+        else:
+            self.roots.append(node)
+        if tag not in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "script", "source", "style", "track", "wbr", "noscript"}:
+            self.stack.append(node)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        if self.stack and self.stack[-1].get("tag") == tag.lower():
+            self.stack.pop()
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if self._suppressed_text_depth:
+            if tag in {"script", "style", "noscript"}:
+                self._suppressed_text_depth = max(0, self._suppressed_text_depth - 1)
+            return
+        while self.stack:
+            node = self.stack.pop()
+            if node.get("tag") == tag:
+                break
+
+    def handle_data(self, data: str) -> None:
+        if self._suppressed_text_depth or not self.stack:
+            return
+        text = " ".join(data.split())
+        if not text:
+            return
+        self.total_node_count += 1
+        if self.emitted_node_count >= self.max_nodes:
+            self.truncated = True
+            return
+        node = {
+            "type": "text",
+            "text": _redacted_dom_value(text, limit=_MAX_STATIC_DOM_TEXT_CHARS),
+            "path": _redacted_string(f"{self.stack[-1].get('path', '')}/text()", limit=500),
+        }
+        self.emitted_node_count += 1
+        self.stack[-1]["children"].append(node)
+
+    def _path_for(self, tag: str) -> str:
+        sibling_index = 1
+        siblings = self.roots if not self.stack else self.stack[-1]["children"]
+        for sibling in siblings:
+            if sibling.get("type") == "element" and sibling.get("tag") == tag:
+                sibling_index += 1
+        prefix = "" if not self.stack else f"{self.stack[-1].get('path', '')}/"
+        return f"{prefix}{tag}[{sibling_index}]"
+
+
+def _redacted_dom_attrs(attrs: dict[str, str]) -> dict[str, str]:
+    safe: dict[str, str] = {}
+    for key, value in attrs.items():
+        normalized = key.lower()
+        if normalized in _STATIC_DOM_ATTR_ALLOWLIST or normalized.startswith("aria-"):
+            if normalized in {"href", "action", "placeholder", "title", "value"} or normalized.startswith("aria-"):
+                safe[normalized] = _redacted_dom_value(value, limit=300)
+            else:
+                safe[normalized] = _redacted_string(value, limit=300)
+    return safe
+
+
+def _redacted_dom_value(value: Any, *, limit: int) -> str:
+    redacted_value = _redacted_string(value, limit=limit)
+    return _DOM_SECRETISH_TOKEN_RE.sub("[REDACTED_VALUE]", redacted_value)
+
+
+def _dom_selector_matcher(selector: str | None):
+    raw = str(selector or "").strip()
+    if not raw:
+        return None
+    tag = ""
+    expected_id = ""
+    expected_class = ""
+    expected_name = ""
+    if raw.startswith("#") and _simple_selector_value(raw[1:]):
+        expected_id = raw[1:]
+    elif raw.startswith(".") and _simple_selector_value(raw[1:]):
+        expected_class = raw[1:]
+    elif raw.startswith("[name=") and raw.endswith("]"):
+        expected_name = _unquote_selector_value(raw[6:-1])
+        if not _simple_selector_value(expected_name):
+            return None
+    elif "[name=" in raw and raw.endswith("]"):
+        tag_part, name_part = raw.split("[name=", 1)
+        tag = tag_part.lower()
+        expected_name = _unquote_selector_value(name_part[:-1])
+        if not _simple_selector_value(tag) or not _simple_selector_value(expected_name):
+            return None
+    elif "#" in raw:
+        tag_part, id_part = raw.split("#", 1)
+        tag = tag_part.lower()
+        expected_id = id_part
+        if not _simple_selector_value(tag) or not _simple_selector_value(expected_id):
+            return None
+    elif "." in raw:
+        tag_part, class_part = raw.split(".", 1)
+        tag = tag_part.lower()
+        expected_class = class_part
+        if not _simple_selector_value(tag) or not _simple_selector_value(expected_class):
+            return None
+    elif _simple_selector_value(raw):
+        tag = raw.lower()
+    else:
+        return None
+
+    def matcher(node: dict[str, Any]) -> bool:
+        if node.get("type") != "element":
+            return False
+        attrs = node.get("attrs") if isinstance(node.get("attrs"), dict) else {}
+        if tag and node.get("tag") != tag:
+            return False
+        if expected_id and attrs.get("id") != expected_id:
+            return False
+        if expected_class and expected_class not in str(attrs.get("class", "")).split():
+            return False
+        if expected_name and attrs.get("name") != expected_name:
+            return False
+        return True
+
+    return matcher
+
+
+def _unquote_selector_value(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
 
 
 def _selector_action(tag: str, input_type: str) -> str:
@@ -572,12 +1259,14 @@ def _unsupported_live_browser_actions() -> list[str]:
         "network_subresource_loading",
         "dom_event_dispatch",
         "real_page_mutation",
+        "live_form_submit",
     ]
 
 
 def _live_browser_activation_preflight() -> dict[str, Any]:
+    adapter_candidates = _live_browser_adapter_candidates()
     blockers = [
-        {"control": "live_browser_adapter", "detail": "no real browser automation adapter is enabled"},
+        {"control": "live_browser_adapter", "detail": "no Playwright/Chromium real browser automation adapter is enabled"},
         {"control": "ephemeral_profile", "detail": "live automation must use a per-run browser profile with no persistent cookies or storage"},
         {"control": "network_allowlist", "detail": "navigation and subresource requests must pass configured provider/domain allowlists"},
         {"control": "script_policy", "detail": "page JavaScript execution policy must be explicit before live DOM automation"},
@@ -588,6 +1277,10 @@ def _live_browser_activation_preflight() -> dict[str, Any]:
     return {
         "status": "live_browser_adapter_required",
         "preflight_status": "blocked",
+        "selected_adapter": None,
+        "candidate_adapter_count": len(adapter_candidates),
+        "adapter_candidates": adapter_candidates,
+        "live_browser_adapter_enabled": False,
         "configured_controls": [
             "http_connector_navigation_allowlist",
             "virtual_interaction_approval_gate",
@@ -595,6 +1288,8 @@ def _live_browser_activation_preflight() -> dict[str, Any]:
             "private_artifact_storage",
             "artifact_hash_receipts",
             "secret_redaction",
+            "live_activation_packet_receipts",
+            "live_activation_packet_verification",
         ],
         "required_controls": [blocker["control"] for blocker in blockers],
         "blockers": blockers,
@@ -605,13 +1300,329 @@ def _live_browser_activation_preflight() -> dict[str, Any]:
             "cookie_storage_isolation",
             "approval_required_mutation",
             "redacted_artifact_receipts",
+            "live_activation_packet_integrity",
+            "playwright_chromium_adapter_preflight",
         ],
         "next_steps": [
-            "Add a browser automation adapter only after navigation, subresource, script, cookie, and storage boundaries are enforceable.",
+            "Create and verify a private live activation packet before implementing or enabling the Playwright/Chromium adapter.",
+            "Keep the Playwright/Chromium adapter disabled until navigation, subresource, script, cookie, and storage boundaries are enforceable.",
             "Keep every real page mutation approval-gated and bind approvals to the exact selector/action payload.",
             "Record redacted hash receipts for screenshots, DOM snapshots, downloads, uploads, console logs, and network traces.",
         ],
     }
+
+
+def _live_browser_adapter_candidates() -> list[dict[str, Any]]:
+    chrome_path = _find_chrome_executable()
+    playwright_available = importlib.util.find_spec("playwright") is not None
+    blockers = [
+        {"control": "explicit_enablement", "detail": "browser live adapter execution is disabled by default"},
+        {"control": "adapter_execution_path", "detail": "the Playwright/Chromium adapter has no approved execution path yet"},
+        {"control": "approval_bound_mutation_receipts", "detail": "real selector events and page mutations still need exact approval binding and redacted receipts"},
+    ]
+    if not playwright_available:
+        blockers.append({"control": "playwright_runtime", "detail": "python package playwright is not installed in this runtime"})
+    if not chrome_path:
+        blockers.append({"control": "chromium_runtime", "detail": "google-chrome, chromium, or chromium-browser is not available on PATH"})
+    return [
+        {
+            "name": "playwright-chromium",
+            "engine": "chromium",
+            "runtime": "python-playwright",
+            "status": "adapter_disabled",
+            "preflight_status": "blocked",
+            "enabled": False,
+            "package_available": playwright_available,
+            "chromium_executable_available": bool(chrome_path),
+            "raw_executable_path_included": False,
+            "required_controls": [
+                "ephemeral_profile",
+                "network_allowlist",
+                "script_policy",
+                "cookie_and_storage_isolation",
+                "approval_gated_mutation",
+                "redacted_artifact_receipts",
+            ],
+            "configured_controls": [
+                "http_connector_navigation_allowlist",
+                "virtual_interaction_approval_gate",
+                "browser_automation_boundary_receipts",
+                "private_artifact_storage",
+                "artifact_hash_receipts",
+                "secret_redaction",
+            ],
+            "blockers": blockers,
+            "next_steps": [
+                "Install and review Playwright/Chromium locally only after the adapter execution path is implemented.",
+                "Enable only through an explicit policy/config switch after activation-packet verification passes.",
+                "Keep cookies, storage, JavaScript, downloads, uploads, and selector mutations disabled until receipt controls are enforced.",
+            ],
+        }
+    ]
+
+
+_BROWSER_ACTIVATION_FALSE_CONTROLS = (
+    "live_browser_adapter_enabled",
+    "real_page_mutation_allowed",
+    "real_selector_events_dispatched",
+    "page_javascript_allowed",
+    "cookies_persisted",
+    "cookie_jar_persisted",
+    "local_storage_persisted",
+    "session_storage_persisted",
+    "raw_browser_content_included",
+    "raw_secret_values_included",
+    "raw_cookie_values_included",
+    "raw_storage_values_included",
+    "model_invocation_performed",
+)
+
+_BROWSER_ACTIVATION_REQUIRED_BLOCKERS = (
+    "live_browser_adapter",
+    "ephemeral_profile",
+    "network_allowlist",
+    "script_policy",
+    "cookie_and_storage_isolation",
+    "approval_gated_mutation",
+    "redacted_artifact_receipts",
+)
+
+_BROWSER_ACTIVATION_REQUIRED_CONFIGURED_CONTROLS = (
+    "http_connector_navigation_allowlist",
+    "virtual_interaction_approval_gate",
+    "browser_automation_boundary_receipts",
+    "private_artifact_storage",
+    "artifact_hash_receipts",
+    "secret_redaction",
+    "live_activation_packet_receipts",
+    "live_activation_packet_verification",
+)
+
+_BROWSER_ACTIVATION_REQUIRED_GATES = (
+    "disabled_live_browser_denial",
+    "allowlisted_navigation",
+    "script_policy_enforcement",
+    "cookie_storage_isolation",
+    "approval_required_mutation",
+    "redacted_artifact_receipts",
+    "live_activation_packet_integrity",
+    "playwright_chromium_adapter_preflight",
+)
+
+
+def _browser_live_activation_packet(*, packet_id: str, actor: str, created_at: str) -> dict[str, Any]:
+    activation = _live_browser_activation_preflight()
+    chrome_path = _find_chrome_executable()
+    return {
+        "packet_schema": "aegis.browser.live_activation_packet.v1",
+        "packet_id": packet_id,
+        "created_at": created_at,
+        "actor": _redacted_string(actor, limit=80),
+        "taint": "BROWSER_ACTIVATION_METADATA",
+        "activation": activation,
+        "environment": {
+            "chrome_renderer_available": bool(chrome_path),
+            "chrome_renderer_name": Path(chrome_path).name if chrome_path else None,
+            "raw_executable_path_included": False,
+            "raw_environment_included": False,
+        },
+        "implemented_boundaries": _browser_automation_boundaries(rendered=False),
+        "review_instructions": [
+            "Treat this packet as local activation metadata, not proof that live browser automation is enabled.",
+            "Verify checksum, schema, blockers, and control flags before implementing a live adapter.",
+            "Do not use this packet to bypass approvals for real clicks, form fills, downloads, uploads, or page mutations.",
+        ],
+        "controls": {control: False for control in _BROWSER_ACTIVATION_FALSE_CONTROLS},
+    }
+
+
+def _browser_live_activation_controls_valid(controls: dict[str, Any]) -> bool:
+    expected_controls = set(_BROWSER_ACTIVATION_FALSE_CONTROLS)
+    if set(controls) != expected_controls:
+        return False
+    return all(controls.get(control) is False for control in _BROWSER_ACTIVATION_FALSE_CONTROLS)
+
+
+def _browser_live_activation_preflight_valid(activation: dict[str, Any]) -> bool:
+    if activation.get("status") != "live_browser_adapter_required" or activation.get("preflight_status") != "blocked":
+        return False
+    if activation.get("selected_adapter") is not None or activation.get("live_browser_adapter_enabled") is not False:
+        return False
+    if not _browser_live_adapter_candidates_valid(activation.get("adapter_candidates")):
+        return False
+    blockers = activation.get("blockers")
+    if not isinstance(blockers, list) or not blockers:
+        return False
+    blocker_controls = {str(blocker.get("control", "")) for blocker in blockers if isinstance(blocker, dict)}
+    required_controls = {str(control) for control in activation.get("required_controls") or []}
+    configured_controls = {str(control) for control in activation.get("configured_controls") or []}
+    verification_gates = {str(gate) for gate in activation.get("verification_gates") or []}
+    required_blockers = set(_BROWSER_ACTIVATION_REQUIRED_BLOCKERS)
+    return (
+        required_blockers.issubset(blocker_controls)
+        and required_blockers.issubset(required_controls)
+        and set(_BROWSER_ACTIVATION_REQUIRED_CONFIGURED_CONTROLS).issubset(configured_controls)
+        and set(_BROWSER_ACTIVATION_REQUIRED_GATES).issubset(verification_gates)
+    )
+
+
+def _browser_live_adapter_candidates_valid(candidates: Any) -> bool:
+    if not isinstance(candidates, list) or not candidates:
+        return False
+    playwright = next((candidate for candidate in candidates if isinstance(candidate, dict) and candidate.get("name") == "playwright-chromium"), None)
+    if not isinstance(playwright, dict):
+        return False
+    if playwright.get("enabled") is not False or playwright.get("preflight_status") != "blocked":
+        return False
+    if playwright.get("raw_executable_path_included") is not False:
+        return False
+    if playwright.get("runtime") != "python-playwright" or playwright.get("engine") != "chromium":
+        return False
+    blockers = playwright.get("blockers")
+    if not isinstance(blockers, list) or not blockers:
+        return False
+    blocker_controls = {str(blocker.get("control", "")) for blocker in blockers if isinstance(blocker, dict)}
+    return {"explicit_enablement", "adapter_execution_path", "approval_bound_mutation_receipts"}.issubset(blocker_controls)
+
+
+def _playwright_chromium_preflight_status(activation: dict[str, Any]) -> str:
+    candidates = activation.get("adapter_candidates") if isinstance(activation, dict) else None
+    if not isinstance(candidates, list):
+        return "missing"
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate.get("name") == "playwright-chromium":
+            return str(candidate.get("preflight_status") or candidate.get("status") or "unknown")
+    return "missing"
+
+
+def _browser_live_activation_boundaries_valid(boundaries: dict[str, Any]) -> bool:
+    if boundaries.get("boundary_schema") != "browser_automation_boundaries_v1":
+        return False
+    false_fields = (
+        "cookie_jar_persisted",
+        "cookies_persisted",
+        "local_storage_persisted",
+        "original_page_dom_executed",
+        "page_javascript_allowed",
+        "raw_secret_capture_allowed",
+        "real_page_mutation_allowed",
+        "real_selector_events_dispatched",
+        "remote_subresources_loaded",
+        "session_storage_persisted",
+    )
+    if any(boundaries.get(field) is not False for field in false_fields):
+        return False
+    if boundaries.get("virtual_interactions_only") is not True:
+        return False
+    required = {str(item) for item in boundaries.get("required_before_live_browser_adapter") or []}
+    return set(_BROWSER_ACTIVATION_REQUIRED_BLOCKERS).difference({"live_browser_adapter"}).issubset(required)
+
+
+def _browser_live_activation_packet_paths(artifact_dir: Path, packet: str) -> tuple[Path, Path]:
+    packet_dir = ensure_private_dir(artifact_dir / "live-activation-packets")
+    packet_ref = str(packet or "").strip()
+    if not packet_ref:
+        raise ValueError("browser activation packet id or path is required")
+    candidate = Path(packet_ref)
+    packet_path = candidate if candidate.is_absolute() or candidate.parent != Path(".") else packet_dir / (packet_ref if packet_ref.endswith(".json") else f"{packet_ref}.json")
+    resolved_dir = packet_dir.resolve()
+    resolved_packet = packet_path.resolve()
+    try:
+        resolved_packet.relative_to(resolved_dir)
+    except ValueError as exc:
+        raise ValueError("browser activation packet path must stay inside the private browser activation packet directory") from exc
+    if resolved_packet.suffix != ".json":
+        raise ValueError("browser activation packet artifact must be a .json file")
+    if not resolved_packet.exists():
+        raise FileNotFoundError(str(resolved_packet))
+    return resolved_packet, resolved_packet.with_suffix(".sha256")
+
+
+def _browser_live_activation_packet_summary(packet: dict[str, Any]) -> dict[str, Any]:
+    activation = packet.get("activation") if isinstance(packet.get("activation"), dict) else {}
+    environment = packet.get("environment") if isinstance(packet.get("environment"), dict) else {}
+    controls = packet.get("controls") if isinstance(packet.get("controls"), dict) else {}
+    adapter_candidates = activation.get("adapter_candidates") if isinstance(activation.get("adapter_candidates"), list) else []
+    return {
+        "packet_schema": packet.get("packet_schema"),
+        "packet_id": packet.get("packet_id"),
+        "created_at": packet.get("created_at"),
+        "activation_status": activation.get("status"),
+        "preflight_status": activation.get("preflight_status"),
+        "selected_adapter": activation.get("selected_adapter"),
+        "candidate_adapter_count": activation.get("candidate_adapter_count"),
+        "playwright_chromium_preflight_status": _playwright_chromium_preflight_status(activation),
+        "adapter_candidates": [
+            {
+                "name": candidate.get("name"),
+                "status": candidate.get("status"),
+                "preflight_status": candidate.get("preflight_status"),
+                "enabled": bool(candidate.get("enabled", False)),
+                "package_available": bool(candidate.get("package_available", False)),
+                "chromium_executable_available": bool(candidate.get("chromium_executable_available", False)),
+                "raw_executable_path_included": bool(candidate.get("raw_executable_path_included", True)),
+            }
+            for candidate in adapter_candidates
+            if isinstance(candidate, dict)
+        ],
+        "required_controls": list(activation.get("required_controls") or []),
+        "configured_controls": list(activation.get("configured_controls") or []),
+        "verification_gates": list(activation.get("verification_gates") or []),
+        "chrome_renderer_available": bool(environment.get("chrome_renderer_available", False)),
+        "chrome_renderer_name": environment.get("chrome_renderer_name"),
+        "live_browser_adapter_enabled": False,
+        "raw_browser_content_included": False,
+        "raw_secret_values_included": False,
+        "raw_cookie_values_included": False,
+        "raw_storage_values_included": False,
+        "model_invocation_performed": bool(controls.get("model_invocation_performed", False)),
+    }
+
+
+def _browser_activation_packet_forbidden_keys_present(value: Any) -> bool:
+    forbidden = {
+        "raw_browser_content",
+        "raw_content",
+        "raw_dom",
+        "raw_html",
+        "raw_page_html",
+        "raw_environment",
+        "raw_executable_path",
+        "raw_cookie",
+        "raw_cookies",
+        "raw_cookie_jar",
+        "raw_local_storage",
+        "raw_session_storage",
+        "raw_storage",
+        "raw_secret",
+        "raw_response_body",
+        "secret_value",
+        "access_token",
+        "refresh_token",
+        "browser_cookie",
+        "session_cookie",
+    }
+    allowed_raw_flags = {
+        "raw_executable_path_included",
+        "raw_environment_included",
+        "raw_browser_content_included",
+        "raw_secret_values_included",
+        "raw_cookie_values_included",
+        "raw_storage_values_included",
+        "raw_secret_capture_allowed",
+    }
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized_key = str(key)
+            if normalized_key in allowed_raw_flags and item is not False:
+                return True
+            if normalized_key not in allowed_raw_flags and (normalized_key in forbidden or normalized_key.startswith("raw_")):
+                return True
+            if _browser_activation_packet_forbidden_keys_present(item):
+                return True
+    if isinstance(value, list):
+        return any(_browser_activation_packet_forbidden_keys_present(item) for item in value)
+    return False
 
 
 def _title_from_text(content: str, *, fallback: str) -> str:
@@ -745,6 +1756,229 @@ def _state_text(session: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _matching_static_anchor_elements(session: dict[str, Any], selector: str) -> dict[str, Any]:
+    requested_selector = _redacted_string(selector, limit=500)
+    matches = []
+    for element in _normalize_interactive_elements(session.get("interactive_elements")):
+        if element.get("tag") != "a":
+            continue
+        element_selector = _redacted_string(element.get("selector_hint") or element.get("tag"), limit=500)
+        if element_selector == requested_selector:
+            matches.append(element)
+    if len(matches) > 1:
+        return {"status": "ambiguous"}
+    if matches:
+        return {"status": "matched", "element": matches[0]}
+    return {"status": "no_match"}
+
+
+def _static_anchor_navigation_target(session: dict[str, Any], element: dict[str, str]) -> dict[str, Any]:
+    href = str(element.get("href") or "").strip()
+    if not href:
+        return {"ok": False, "reason": "missing_href", "detail": "static anchor has no href"}
+    parsed_href = urlparse(href)
+    if parsed_href.scheme and parsed_href.scheme.lower() not in {"http", "https"}:
+        return {"ok": False, "reason": "unsupported_scheme", "detail": f"static anchor scheme {parsed_href.scheme!r} is not supported"}
+    if not parsed_href.scheme and not parsed_href.netloc and not parsed_href.path and not parsed_href.params and not parsed_href.query and parsed_href.fragment:
+        return {"ok": False, "reason": "fragment_only_href", "detail": "fragment-only anchors do not navigate through the governed HTTP connector"}
+    base_url = _session_url(session)
+    if not base_url:
+        return {"ok": False, "reason": "missing_base_url", "detail": "browser session has no current URL"}
+    target_url = urljoin(base_url, href)
+    parsed_target = urlparse(target_url)
+    if parsed_target.scheme.lower() not in {"http", "https"} or not parsed_target.netloc:
+        return {"ok": False, "reason": "unsupported_target_url", "detail": "resolved static anchor target is not an HTTP(S) URL"}
+    return {"ok": True, "url": target_url}
+
+
+def _matching_static_form(session: dict[str, Any], selector: str | None) -> dict[str, Any]:
+    forms = _extract_static_forms(str(session.get("last_content", "")))
+    requested_selector = _redacted_string(selector, limit=500) if selector is not None else ""
+    if selector:
+        matcher = _dom_selector_matcher(requested_selector)
+        if matcher is None:
+            return {"status": "unsupported_selector", "detail": "selector is outside the static form parser subset"}
+        matches = [form for form in forms if matcher({"type": "element", "tag": "form", "attrs": form["attrs"]})]
+    else:
+        matches = forms
+    if not matches:
+        return {"status": "no_match", "detail": "no matching static form was found"}
+    if len(matches) > 1:
+        return {"status": "ambiguous", "detail": "selector matched multiple static forms"}
+    return {"status": "matched", "form": matches[0]}
+
+
+def _extract_static_forms(content: str, *, limit: int = 25) -> list[dict[str, Any]]:
+    if "<" not in content:
+        return []
+    parser = _StaticFormParser(limit=limit)
+    try:
+        parser.feed(content[:_MAX_PERSISTED_CONTENT_CHARS])
+        parser.close()
+    except Exception:
+        return []
+    return parser.forms[:limit]
+
+
+class _StaticFormParser(HTMLParser):
+    def __init__(self, *, limit: int) -> None:
+        super().__init__(convert_charrefs=True)
+        self.limit = limit
+        self.forms: list[dict[str, Any]] = []
+        self._current_form: dict[str, Any] | None = None
+        self._textarea: dict[str, Any] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        attrs_dict = {key.lower(): value or "" for key, value in attrs}
+        if tag == "form" and len(self.forms) < self.limit:
+            self._current_form = {"attrs": _redacted_dom_attrs(attrs_dict), "fields": []}
+            return
+        if self._current_form is None:
+            return
+        if tag == "input":
+            field = _static_form_input_field(attrs_dict)
+            if field is not None:
+                self._current_form["fields"].append(field)
+            return
+        if tag == "textarea":
+            name = attrs_dict.get("name", "")
+            if name:
+                self._textarea = {"name": _redacted_string(name, limit=200), "value_parts": []}
+            return
+        if tag == "select":
+            name = attrs_dict.get("name", "")
+            if name:
+                self._current_form["fields"].append({"name": _redacted_string(name, limit=200), "value": _redacted_dom_value(attrs_dict.get("value", ""), limit=500)})
+
+    def handle_data(self, data: str) -> None:
+        if self._textarea is not None:
+            self._textarea["value_parts"].append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag == "textarea" and self._textarea is not None and self._current_form is not None:
+            self._current_form["fields"].append(
+                {
+                    "name": self._textarea["name"],
+                    "value": _redacted_dom_value("".join(self._textarea["value_parts"]), limit=500),
+                }
+            )
+            self._textarea = None
+            return
+        if tag == "form" and self._current_form is not None:
+            attrs = self._current_form["attrs"]
+            self._current_form["selector_hint"] = _redacted_string(_selector_hint("form", attrs), limit=500)
+            self.forms.append(self._current_form)
+            self._current_form = None
+            self._textarea = None
+
+
+def _static_form_input_field(attrs: dict[str, str]) -> dict[str, str] | None:
+    name = attrs.get("name", "")
+    if not name:
+        return None
+    input_type = attrs.get("type", "").lower()
+    if input_type in {"button", "submit", "reset", "image", "file"}:
+        return None
+    if input_type in {"checkbox", "radio"} and "checked" not in attrs:
+        return None
+    return {"name": _redacted_string(name, limit=200), "value": _redacted_dom_value(attrs.get("value", ""), limit=500)}
+
+
+def _static_form_submission_target(session: dict[str, Any], form: dict[str, Any]) -> dict[str, Any]:
+    attrs = form.get("attrs") if isinstance(form.get("attrs"), dict) else {}
+    method = str(attrs.get("method") or "get").strip().lower()
+    if method != "get":
+        return {"ok": False, "reason": "unsupported_method", "detail": "only static GET form submits are supported by the governed HTTP connector"}
+    base_url = _session_url(session)
+    if not base_url:
+        return {"ok": False, "reason": "missing_base_url", "detail": "browser session has no current URL"}
+    action = str(attrs.get("action") or base_url).strip() or base_url
+    parsed_action = urlparse(action)
+    if parsed_action.scheme and parsed_action.scheme.lower() not in {"http", "https"}:
+        return {"ok": False, "reason": "unsupported_scheme", "detail": f"static form action scheme {parsed_action.scheme!r} is not supported"}
+    target_url = urljoin(base_url, action)
+    parsed_target = urlparse(target_url)
+    if parsed_target.scheme.lower() not in {"http", "https"} or not parsed_target.netloc:
+        return {"ok": False, "reason": "unsupported_target_url", "detail": "resolved static form target is not an HTTP(S) URL"}
+    fields = [(str(field.get("name") or ""), str(field.get("value") or "")) for field in form.get("fields", []) if isinstance(field, dict) and field.get("name")]
+    query = urlencode(fields, doseq=True)
+    if query:
+        separator = "&" if parsed_target.query else "?"
+        target_url = f"{target_url}{separator}{query}"
+    return {
+        "ok": True,
+        "url": target_url,
+        "method": "GET",
+        "field_names": sorted({name for name, _value in fields}),
+        "field_count": len(fields),
+    }
+
+
+def _static_form_submit_blocked(
+    session: dict[str, Any],
+    *,
+    session_id: str,
+    selector: str | None,
+    reason: str,
+    detail: str,
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "status": "static_form_submit_blocked",
+        "session_id": session_id,
+        "selector": _redacted_string(selector, limit=500) if selector is not None else None,
+        "url": _session_url(session),
+        "reason": reason,
+        "detail": _redacted_string(detail, limit=500),
+        "effect": "blocked_static_form_submit",
+        "mode": "approved_static_form_submit_no_js",
+        "javascript_executed": False,
+        "dom_mutated": False,
+        "real_selector_events_dispatched": False,
+        "cookies_persisted": False,
+    }
+
+
+def _url_origin(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _url_path(url: str) -> str:
+    parsed = urlparse(url)
+    return parsed.path or "/"
+
+
+def _static_anchor_navigation_blocked(
+    session: dict[str, Any],
+    *,
+    session_id: str,
+    selector: str,
+    reason: str,
+    detail: str,
+    href: str = "",
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "status": "static_anchor_navigation_blocked",
+        "session_id": session_id,
+        "selector": _redacted_string(selector, limit=500),
+        "url": _session_url(session),
+        "href": _redacted_string(href, limit=500),
+        "reason": reason,
+        "detail": _redacted_string(detail, limit=500),
+        "effect": "blocked_static_anchor_navigation",
+        "mode": "approved_static_anchor_navigation_no_js",
+        "javascript_executed": False,
+        "dom_mutated": False,
+        "real_selector_events_dispatched": False,
+    }
+
+
 def _redacted_form_state(session: dict[str, Any]) -> str:
     form_state = _normalize_form_state(session.get("form_state"))
     return ", ".join(f"{selector}={value}" for selector, value in sorted(form_state.items()))
@@ -817,7 +2051,17 @@ def _browser_evidence(
         "content_sha256_after": content_hash_after,
         "content_changed": (content_hash_before or content_hash_after) != content_hash_after,
         "dom_mutated": False,
-        "mode": "virtual_state_no_dom" if action in {"click", "fill"} else "local_png_session_snapshot_no_dom_render",
+        "mode": (
+            "virtual_state_no_dom"
+            if action in {"click", "fill"}
+            else "approved_static_anchor_navigation_no_js"
+            if action == "static_anchor_navigation"
+            else "approved_static_form_submit_no_js"
+            if action == "static_form_submit"
+            else "http_content_static_dom_no_js"
+            if action == "dom_snapshot"
+            else "local_png_session_snapshot_no_dom_render"
+        ),
         "click_count": len(session.get("clicks", [])),
         "form_field_count": len(session.get("form_state", {})),
     }
@@ -984,7 +2228,7 @@ def _find_chrome_executable() -> str | None:
 
 def _renderable_sanitized_html(session: dict[str, Any]) -> str:
     content = str(session.get("last_content", ""))
-    text = " ".join(content.split())[:20_000]
+    text = _redacted_dom_value(" ".join(content.split()), limit=20_000)
     tables = _extract_html_tables(content).get("tables", [])[:5]
     rows = []
     for table in tables:
@@ -1024,7 +2268,7 @@ def _renderable_sanitized_html(session: dict[str, Any]) -> str:
     <div class="muted">{html.escape(_session_url(session) or "")}</div>
   </header>
   <main>
-    <section><h2>Sanitized Text</h2><p>{html.escape(str(redact(text)))}</p></section>
+    <section><h2>Sanitized Text</h2><p>{html.escape(text)}</p></section>
     <section><h2>Tables</h2>{''.join(rows) if rows else '<p>No tables detected.</p>'}</section>
     <section><h2>Approved Virtual State</h2>{state_html}</section>
   </main>

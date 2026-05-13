@@ -62,6 +62,7 @@ class BuiltinToolExecutor:
         *,
         mcp_registry: McpRegistry | None = None,
         allowed_executables: tuple[str, ...] = (),
+        network_allowlist: tuple[str, ...] = (),
         browser_controller: BrowserController | None = None,
         kanban_manager: KanbanManager | None = None,
         execution_backends: ExecutionBackendRegistry | None = None,
@@ -76,6 +77,7 @@ class BuiltinToolExecutor:
         self.catalog = ToolCatalog()
         self.mcp_registry = mcp_registry
         self.allowed_executables = allowed_executables
+        self.network_allowlist = network_allowlist
         self.browser = browser_controller
         self.kanban = kanban_manager
         self.execution_backends = execution_backends
@@ -84,6 +86,9 @@ class BuiltinToolExecutor:
         self.secrets_broker = secrets_broker or SecretsBroker()
 
     def execute(self, name: str, params: dict[str, Any], *, approved: bool = False, admin_approved: bool = False, task_id: str | None = None) -> dict[str, Any]:
+        virtual_mcp_tool = self.mcp_registry.resolve_virtual_tool(name) if self.mcp_registry is not None else None
+        if virtual_mcp_tool is not None:
+            return self._execute_virtual_mcp_tool(name, virtual_mcp_tool, params, approved=approved, task_id=task_id)
         spec = self.catalog.get(name)
         operation = _operation_for_tool(name, spec.permission)
         if spec.approval_required and not approved:
@@ -150,8 +155,8 @@ class BuiltinToolExecutor:
         elif name == "web_search":
             result = self._execute_web_search(params=params)
         elif name in {"vision_analyze", "voice_transcribe", "video_analyze"}:
-            result = self._execute_media_read(name=name, params=params)
-        elif name in {"image_generate", "image_edit", "tts", "voice_record"}:
+            result = self._execute_media_read(name=name, params=params, approved=approved)
+        elif name in {"image_generate", "image_edit", "tts", "voice_record", "video_generate"}:
             result = self._execute_media_artifact(name=name, params=params)
         elif name == "http_request":
             result = self._execute_http_request(params=params, approved=approved)
@@ -213,7 +218,9 @@ class BuiltinToolExecutor:
             result = self._execute_service_ticket_read(params=params)
         elif name == "service_ticket_write":
             result = self._execute_service_ticket_write(params=params, approved=approved)
-        elif name in {"browser", "browser_click", "browser_fill", "browser_screenshot", "browser_render_screenshot", "browser_extract_table", "browser_close"}:
+        elif name == "message_send":
+            result = self._execute_message_send(params=params, approved=approved)
+        elif name in {"browser", "browser_click", "browser_fill", "browser_submit", "browser_screenshot", "browser_render_screenshot", "browser_extract_table", "browser_dom_snapshot", "browser_close"}:
             if self.browser is None:
                 raise ToolExecutionError("browser controller is not configured")
             result = self._execute_browser(name, params, approved=approved)
@@ -228,6 +235,7 @@ class BuiltinToolExecutor:
                 task_id=task_id,
                 policy_engine=self.policy_engine,
                 allowed_executables=self.allowed_executables,
+                network_allowlist=self.network_allowlist,
             )
             result = call.to_dict()
         elif name == "subagent_delegate":
@@ -252,6 +260,45 @@ class BuiltinToolExecutor:
             result = self._execute_research_tool(name=name, params=params)
         else:
             result = {"status": "stubbed", "tool": name, "safe_mode": True, "params": sorted(params)}
+        self.audit_logger.append("tool.executed", {"tool": name, "result": result}, task_id=task_id)
+        return result
+
+    def _execute_virtual_mcp_tool(
+        self,
+        name: str,
+        virtual_tool: dict[str, Any],
+        params: dict[str, Any],
+        *,
+        approved: bool,
+        task_id: str | None,
+    ) -> dict[str, Any]:
+        if self.mcp_registry is None:
+            raise ToolExecutionError("MCP registry is not configured")
+        if bool(virtual_tool.get("approval_required", True)) and not approved:
+            result = {
+                "status": "approval_required",
+                "tool": name,
+                "server_name": virtual_tool.get("server_name"),
+                "mcp_tool": virtual_tool.get("tool"),
+                "reasons": ["MCP virtual tools require approval before execution"],
+            }
+            self.audit_logger.append("tool.approval_required", result, task_id=task_id)
+            return result
+        call = self.mcp_registry.call_tool(
+            server=str(virtual_tool["server_id"]),
+            tool=str(virtual_tool["tool"]),
+            arguments=params,
+            approved=approved,
+            task_id=task_id,
+            policy_engine=self.policy_engine,
+            allowed_executables=self.allowed_executables,
+            network_allowlist=self.network_allowlist,
+        )
+        result = {
+            "status": "completed",
+            "virtual_tool": name,
+            **call.to_dict(),
+        }
         self.audit_logger.append("tool.executed", {"tool": name, "result": result}, task_id=task_id)
         return result
 
@@ -299,9 +346,19 @@ class BuiltinToolExecutor:
             "training_use": "human_review_required",
         }
 
-    def _execute_media_read(self, *, name: str, params: dict[str, Any]) -> dict[str, Any]:
+    def _execute_media_read(self, *, name: str, params: dict[str, Any], approved: bool = False) -> dict[str, Any]:
         path_key = {"vision_analyze": "image_path", "voice_transcribe": "audio_path", "video_analyze": "video_path"}[name]
         root = _workspace_root(self.connectors)
+        if name == "voice_transcribe" and params.get("provider_url"):
+            if not approved:
+                return {
+                    "status": "approval_required",
+                    "tool": name,
+                    "mode": "live_media_provider",
+                    "reasons": ["provider-backed audio transcription sends workspace audio to an external allowlisted provider"],
+                    "required_controls": _live_media_required_controls(),
+                }
+            return self._execute_live_transcription_provider(params=params, root=root)
         path = _resolve_under_root(root, params[path_key])
         size = path.stat().st_size if path.exists() else 0
         if name == "voice_transcribe":
@@ -333,6 +390,8 @@ class BuiltinToolExecutor:
         artifact_dir = root / ".aegis" / "tool-artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         artifact_dir.chmod(0o700)
+        if name == "video_generate":
+            return self._execute_live_video_provider(params=params, artifact_dir=artifact_dir)
         if params.get("provider_url"):
             return self._execute_live_media_provider(name=name, params=params, artifact_dir=artifact_dir)
         if name == "tts":
@@ -455,6 +514,172 @@ class BuiltinToolExecutor:
         )
         return {"ok": True, key: str(path), "artifact_path": str(path), "metadata_path": str(metadata_path), **artifact_receipt, "sandbox_receipt": sandbox_receipt, "mode": "local_placeholder_artifact"}
 
+    def _execute_live_video_provider(self, *, params: dict[str, Any], artifact_dir: Path) -> dict[str, Any]:
+        rest = self.connectors.get("generic_rest")
+        if not bool(getattr(rest, "live_writes", False)):
+            return {
+                "ok": False,
+                "tool": "video_generate",
+                "mode": "live_video_provider",
+                "status": "not_configured",
+                "reason": "live_rest_writes must be enabled before provider-backed video generation",
+                "required_controls": _live_media_required_controls(),
+            }
+        if not params.get("provider_url"):
+            return {
+                "ok": False,
+                "tool": "video_generate",
+                "mode": "live_video_provider",
+                "status": "not_configured",
+                "reason": "provider_url is required for provider-backed video generation",
+                "required_controls": _live_media_required_controls(),
+            }
+        provider_url = str(params["provider_url"])
+        parsed = urlparse(provider_url)
+        domain = parsed.hostname or ""
+        validation_error = _validate_url(parsed) or (None if parsed.scheme == "https" else "video provider execution requires https")
+        if validation_error:
+            return {"ok": False, "tool": "video_generate", "mode": "live_video_provider", "status": "scope_rejected", "reason": validation_error, "required_controls": _live_media_required_controls()}
+        http = self.connectors.get("http")
+        allowlist = tuple(str(item) for item in getattr(http, "allowlist", ()))
+        if not _host_allowed(domain, allowlist):
+            return {"ok": False, "tool": "video_generate", "mode": "live_video_provider", "status": "scope_rejected", "reason": f"video provider host {domain!r} is not allowlisted", "required_controls": _live_media_required_controls()}
+        private_error = _private_network_error(domain)
+        if private_error:
+            return {"ok": False, "tool": "video_generate", "mode": "live_video_provider", "status": "scope_rejected", "reason": private_error, "required_controls": _live_media_required_controls()}
+        provider_adapter = _live_media_provider_adapter(name="video_generate", params=params)
+        if provider_adapter["error"]:
+            return {
+                "ok": False,
+                "tool": "video_generate",
+                "mode": "live_video_provider",
+                "status": "unsupported_provider_adapter",
+                "reason": provider_adapter["error"],
+                "required_controls": _live_media_required_controls(),
+            }
+        adapter_name = str(provider_adapter["name"] or "generic")
+        if adapter_name != "openai_video":
+            return {
+                "ok": False,
+                "tool": "video_generate",
+                "mode": "live_video_provider",
+                "status": "unsupported_provider_adapter",
+                "reason": f"{adapter_name} provider adapter does not support provider-backed video generation",
+                "required_controls": _live_media_required_controls(),
+            }
+        action = _live_video_action(params)
+        try:
+            video_id = _safe_live_video_id(params.get("video_id") or params.get("job_id") or params.get("id")) if action != "submit" else ""
+            variant = _live_video_variant(params.get("variant", "video"))
+            action_url = _live_video_action_url(provider_url=provider_url, action=action, video_id=video_id, variant=variant)
+        except ToolExecutionError as exc:
+            return {
+                "ok": False,
+                "tool": "video_generate",
+                "mode": "live_video_provider",
+                "status": "scope_rejected",
+                "reason": str(redact(str(exc))),
+                "required_controls": _live_media_required_controls(),
+            }
+        token_secret = str(params.get("token_secret") or "AEGIS_MEDIA_PROVIDER_TOKEN")
+        handle = self.secrets_broker.request_handle(name=token_secret, requester="media_provider", reason=f"video_generate {action} provider-backed video job", scopes=("media:execute",))
+        if not handle.present:
+            return {"ok": False, "tool": "video_generate", "mode": "live_video_provider", "status": "not_configured", "reason": f"secret {token_secret!r} is not configured", "required_controls": _live_media_required_controls()}
+        token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="media_provider")
+        request_payload = _live_video_request_payload(params=params, action=action, video_id=video_id, variant=variant)
+        live_result = _send_live_video_provider_request(url=action_url, token=token, action=action, payload=request_payload)
+        provider_receipt = _live_media_provider_receipt(domain=domain, http_status=live_result["http_status"], request_payload=request_payload, handle_present=handle.present, provider_adapter=adapter_name)
+        if not live_result["ok"]:
+            return {
+                "ok": False,
+                "tool": "video_generate",
+                "mode": "live_video_provider",
+                "status": "failed",
+                "action": action,
+                "domain": domain,
+                "http_status": live_result["http_status"],
+                "error": live_result.get("error"),
+                "provider_adapter": adapter_name,
+                "provider_receipt": provider_receipt,
+            }
+        if action == "download":
+            video_bytes = live_result["content"]
+            extension, mime_type = _live_video_extension_and_mime(declared_mime=str(live_result.get("mime_type", "")), content=video_bytes, variant=variant)
+            path = artifact_dir / f"video_generate-{uuid4()}.{extension}"
+            path.write_bytes(video_bytes)
+            path.chmod(0o600)
+            artifact_receipt = _artifact_receipt(path)
+            sandbox_receipt = _media_sandbox_receipt(
+                tool="video_generate",
+                mode=f"live_provider_{extension}",
+                worker_result={"provider_domain": domain, "provider_adapter": adapter_name},
+            )
+            details = {
+                "mime_type": mime_type,
+                "provider_adapter": adapter_name,
+                "provider_receipt": provider_receipt,
+                "provider_job_id_sha256": hashlib.sha256(video_id.encode("utf-8")).hexdigest(),
+                "variant": variant,
+            }
+            metadata_path = _write_tool_artifact_metadata(
+                artifact_dir=artifact_dir,
+                tool="video_generate",
+                artifact_path=path,
+                mode=f"live_provider_{extension}",
+                artifact_receipt=artifact_receipt,
+                sandbox_receipt=sandbox_receipt,
+                details=details,
+            )
+            return {
+                "ok": True,
+                "tool": "video_generate",
+                "action": action,
+                "asset_path": str(path),
+                "artifact_path": str(path),
+                "metadata_path": str(metadata_path),
+                **artifact_receipt,
+                "sandbox_receipt": sandbox_receipt,
+                "provider_receipt": provider_receipt,
+                "provider_adapter": adapter_name,
+                "mode": f"live_provider_{extension}",
+                "mime_type": mime_type,
+                "domain": domain,
+                "variant": variant,
+                "provider_job_id": video_id,
+                "provider_job_id_sha256": hashlib.sha256(video_id.encode("utf-8")).hexdigest(),
+                "raw_response_body_included": False,
+                "raw_secret_values_included": False,
+            }
+        job = _live_video_job_summary(live_result.get("json"), fallback_video_id=video_id)
+        result_status = {
+            "submit": "submitted",
+            "status": str(job.get("status") or "status"),
+            "delete": "deleted" if bool(job.get("deleted")) else str(job.get("status") or "delete_requested"),
+        }[action]
+        sandbox_receipt = _media_sandbox_receipt(
+            tool="video_generate",
+            mode="live_provider_video_job",
+            worker_result={"provider_domain": domain, "provider_adapter": adapter_name, "artifact_write": False},
+        )
+        return {
+            "ok": True,
+            "tool": "video_generate",
+            "action": action,
+            "status": result_status,
+            "mode": "live_provider_video_job",
+            "domain": domain,
+            "http_status": live_result["http_status"],
+            "provider_adapter": adapter_name,
+            "provider_receipt": provider_receipt,
+            "sandbox_receipt": sandbox_receipt,
+            "job": job,
+            "provider_job_id": job.get("id") or video_id,
+            "provider_job_id_sha256": hashlib.sha256(str(job.get("id") or video_id).encode("utf-8")).hexdigest() if (job.get("id") or video_id) else None,
+            "raw_prompt_or_text_included": False,
+            "raw_response_body_included": False,
+            "raw_secret_values_included": False,
+        }
+
     def _execute_live_media_provider(self, *, name: str, params: dict[str, Any], artifact_dir: Path) -> dict[str, Any]:
         if name not in {"image_generate", "image_edit", "tts"}:
             return {
@@ -488,16 +713,45 @@ class BuiltinToolExecutor:
         private_error = _private_network_error(domain)
         if private_error:
             return {"ok": False, "tool": name, "mode": "live_media_provider", "status": "scope_rejected", "reason": private_error, "required_controls": _live_media_required_controls()}
+        prompt = str(params.get("prompt", ""))
+        text = str(params.get("text", ""))
+        source_path = str(params.get("source_path") or params.get("image_path") or "")
+        provider_adapter = _live_media_provider_adapter(name=name, params=params)
+        if provider_adapter["error"]:
+            return {
+                "ok": False,
+                "tool": name,
+                "mode": "live_media_provider",
+                "status": "unsupported_provider_adapter",
+                "reason": provider_adapter["error"],
+                "required_controls": _live_media_required_controls(),
+            }
+        adapter_name = str(provider_adapter["name"] or "generic")
+        source_file: dict[str, Any] | None = None
+        mask_file: dict[str, Any] | None = None
+        if adapter_name == "openai_image_edit":
+            try:
+                root = _workspace_root(self.connectors)
+                source_file = _live_media_source_file(root=root, source_path=source_path, field="image")
+                mask_path = str(params.get("mask_path") or params.get("mask") or "").strip()
+                if mask_path:
+                    mask_file = _live_media_source_file(root=root, source_path=mask_path, field="mask")
+            except ToolExecutionError as exc:
+                return {
+                    "ok": False,
+                    "tool": name,
+                    "mode": "live_media_provider",
+                    "status": "invalid_source",
+                    "reason": str(redact(str(exc))),
+                    "required_controls": _live_media_required_controls(),
+                }
         token_secret = str(params.get("token_secret") or "AEGIS_MEDIA_PROVIDER_TOKEN")
         handle = self.secrets_broker.request_handle(name=token_secret, requester="media_provider", reason=f"{name} provider-backed artifact", scopes=("media:execute",))
         if not handle.present:
             return {"ok": False, "tool": name, "mode": "live_media_provider", "status": "not_configured", "reason": f"secret {token_secret!r} is not configured", "required_controls": _live_media_required_controls()}
         token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="media_provider")
-        prompt = str(params.get("prompt", ""))
-        text = str(params.get("text", ""))
-        source_path = str(params.get("source_path") or params.get("image_path") or "")
-        request_payload = _live_media_request_payload(name=name, prompt=prompt, text=text, source_path=source_path)
-        live_result = _send_live_media_provider_request(url=provider_url, token=token, tool=name, payload=request_payload)
+        request_payload = _live_media_request_payload(name=name, prompt=prompt, text=text, source_path=source_path, params=params, provider_adapter=adapter_name, source_file=source_file, mask_file=mask_file)
+        live_result = _send_live_media_provider_request(url=provider_url, token=token, tool=name, payload=request_payload, provider_adapter=adapter_name, source_file=source_file, mask_file=mask_file)
         if not live_result["ok"]:
             return {
                 "ok": False,
@@ -507,7 +761,8 @@ class BuiltinToolExecutor:
                 "domain": domain,
                 "http_status": live_result["http_status"],
                 "error": live_result.get("error"),
-                "provider_receipt": _live_media_provider_receipt(domain=domain, http_status=live_result["http_status"], request_payload=request_payload, handle_present=handle.present),
+                "provider_adapter": adapter_name,
+                "provider_receipt": _live_media_provider_receipt(domain=domain, http_status=live_result["http_status"], request_payload=request_payload, handle_present=handle.present, provider_adapter=adapter_name),
             }
         media_bytes = live_result["content"]
         extension, mime_type = _live_media_extension_and_mime(name=name, declared_mime=str(live_result.get("mime_type", "")), content=media_bytes)
@@ -515,13 +770,23 @@ class BuiltinToolExecutor:
         path.write_bytes(media_bytes)
         path.chmod(0o600)
         artifact_receipt = _artifact_receipt(path)
-        sandbox_receipt = _media_sandbox_receipt(tool=name, mode=f"live_provider_{extension}", worker_result={"provider_domain": domain})
-        provider_receipt = _live_media_provider_receipt(domain=domain, http_status=live_result["http_status"], request_payload=request_payload, handle_present=handle.present)
+        explicit_reads = []
+        if source_file is not None:
+            explicit_reads.append("source_image")
+        if mask_file is not None:
+            explicit_reads.append("mask_image")
+        sandbox_receipt = _media_sandbox_receipt(
+            tool=name,
+            mode=f"live_provider_{extension}",
+            worker_result={"provider_domain": domain, "provider_adapter": adapter_name, "explicit_workspace_reads": explicit_reads},
+        )
+        provider_receipt = _live_media_provider_receipt(domain=domain, http_status=live_result["http_status"], request_payload=request_payload, handle_present=handle.present, provider_adapter=adapter_name)
         details = {
             "mime_type": mime_type,
             "prompt_length": len(prompt),
             "text_length": len(text),
             "source_present": bool(source_path),
+            "provider_adapter": adapter_name,
             "provider_receipt": provider_receipt,
         }
         if name in {"image_generate", "image_edit"}:
@@ -546,6 +811,7 @@ class BuiltinToolExecutor:
             **artifact_receipt,
             "sandbox_receipt": sandbox_receipt,
             "provider_receipt": provider_receipt,
+            "provider_adapter": adapter_name,
             "mode": f"live_provider_{extension}",
             "mime_type": mime_type,
             "domain": domain,
@@ -556,38 +822,138 @@ class BuiltinToolExecutor:
             result["duration_seconds"] = live_result["duration_seconds"]
         return result
 
+    def _execute_live_transcription_provider(self, *, params: dict[str, Any], root: Path) -> dict[str, Any]:
+        rest = self.connectors.get("generic_rest")
+        if not bool(getattr(rest, "live_writes", False)):
+            return {
+                "ok": False,
+                "tool": "voice_transcribe",
+                "mode": "live_media_provider",
+                "status": "not_configured",
+                "reason": "live_rest_writes must be enabled before provider-backed audio transcription",
+                "required_controls": _live_media_required_controls(),
+            }
+        provider_url = str(params["provider_url"])
+        parsed = urlparse(provider_url)
+        domain = parsed.hostname or ""
+        validation_error = _validate_url(parsed) or (None if parsed.scheme == "https" else "media provider transcription requires https")
+        if validation_error:
+            return {"ok": False, "tool": "voice_transcribe", "mode": "live_media_provider", "status": "scope_rejected", "reason": validation_error, "required_controls": _live_media_required_controls()}
+        http = self.connectors.get("http")
+        allowlist = tuple(str(item) for item in getattr(http, "allowlist", ()))
+        if not _host_allowed(domain, allowlist):
+            return {"ok": False, "tool": "voice_transcribe", "mode": "live_media_provider", "status": "scope_rejected", "reason": f"media provider host {domain!r} is not allowlisted", "required_controls": _live_media_required_controls()}
+        private_error = _private_network_error(domain)
+        if private_error:
+            return {"ok": False, "tool": "voice_transcribe", "mode": "live_media_provider", "status": "scope_rejected", "reason": private_error, "required_controls": _live_media_required_controls()}
+        provider_adapter = _live_media_provider_adapter(name="voice_transcribe", params=params)
+        if provider_adapter["error"]:
+            return {
+                "ok": False,
+                "tool": "voice_transcribe",
+                "mode": "live_media_provider",
+                "status": "unsupported_provider_adapter",
+                "reason": provider_adapter["error"],
+                "required_controls": _live_media_required_controls(),
+            }
+        adapter_name = str(provider_adapter["name"] or "generic")
+        if adapter_name != "openai_transcription":
+            return {
+                "ok": False,
+                "tool": "voice_transcribe",
+                "mode": "live_media_provider",
+                "status": "unsupported_provider_adapter",
+                "reason": f"{adapter_name} provider adapter does not support provider-backed transcription",
+                "required_controls": _live_media_required_controls(),
+            }
+        try:
+            audio_file = _live_media_audio_file(root=root, audio_path=str(params.get("audio_path") or params.get("path") or ""))
+        except ToolExecutionError as exc:
+            return {
+                "ok": False,
+                "tool": "voice_transcribe",
+                "mode": "live_media_provider",
+                "status": "invalid_source",
+                "reason": str(redact(str(exc))),
+                "required_controls": _live_media_required_controls(),
+            }
+        token_secret = str(params.get("token_secret") or "AEGIS_MEDIA_PROVIDER_TOKEN")
+        handle = self.secrets_broker.request_handle(name=token_secret, requester="media_provider", reason="voice_transcribe provider-backed transcription", scopes=("media:execute",))
+        if not handle.present:
+            return {"ok": False, "tool": "voice_transcribe", "mode": "live_media_provider", "status": "not_configured", "reason": f"secret {token_secret!r} is not configured", "required_controls": _live_media_required_controls()}
+        token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="media_provider")
+        request_payload = _live_media_request_payload(
+            name="voice_transcribe",
+            prompt=str(params.get("prompt", "")),
+            text="",
+            source_path=str(params.get("audio_path") or ""),
+            params=params,
+            provider_adapter=adapter_name,
+        )
+        live_result = _send_live_transcription_provider_request(url=provider_url, token=token, payload=request_payload, provider_adapter=adapter_name, audio_file=audio_file)
+        provider_receipt = _live_media_provider_receipt(domain=domain, http_status=live_result["http_status"], request_payload=request_payload, handle_present=handle.present, provider_adapter=adapter_name)
+        if not live_result["ok"]:
+            return {
+                "ok": False,
+                "tool": "voice_transcribe",
+                "mode": "live_media_provider",
+                "status": "failed",
+                "domain": domain,
+                "http_status": live_result["http_status"],
+                "error": live_result.get("error"),
+                "provider_adapter": adapter_name,
+                "provider_receipt": provider_receipt,
+            }
+        audio_receipt = {
+            "source_audio_sha256": audio_file["sha256"],
+            "source_audio_bytes": audio_file["bytes"],
+            "source_audio_mime_type": audio_file["mime_type"],
+            "source_audio_path_included": False,
+            "raw_audio_included": False,
+        }
+        sandbox_receipt = _media_sandbox_receipt(
+            tool="voice_transcribe",
+            mode="live_provider_transcription",
+            worker_result={"provider_domain": domain, "provider_adapter": adapter_name, "explicit_workspace_reads": ["source_audio"], "artifact_write": False},
+        )
+        return {
+            "ok": True,
+            "tool": "voice_transcribe",
+            "text": str(live_result["text"])[:4000],
+            "path": str(audio_file["path"]),
+            "bytes": audio_file["bytes"],
+            "taint": "WEB_CONTENT",
+            "mode": "live_provider_transcription",
+            "domain": domain,
+            "http_status": live_result["http_status"],
+            "provider_adapter": adapter_name,
+            "provider_receipt": provider_receipt,
+            "audio_receipt": audio_receipt,
+            "sandbox_receipt": sandbox_receipt,
+            "raw_audio_included": False,
+            "raw_response_body_included": False,
+        }
+
     def _delegate_subagent(self, *, params: dict[str, Any], task_id: str | None) -> dict[str, Any]:
         assert self.kanban is not None
         role = str(params["role"]).strip()
         task = str(params["task"]).strip()
         if not role or not task:
             raise ToolExecutionError("subagent delegation requires non-empty role and task")
-        board = self._delegation_board()
-        card = self.kanban.add_card(
-            board["id"],
-            title=f"{role}: {task[:80]}",
-            description=task,
-            lane="ready",
-            owner=role,
-            risk_level=RiskLevel.HIGH,
-            task_id=task_id,
-            metadata={
-                "delegation_type": "subagent",
-                "role": role,
-                "source_tool": "subagent_delegate",
-                "isolation": "durable_card",
-                "instructions_tainted": True,
-                "parent_task_id": task_id,
-            },
-        )
-        return {"ok": True, "board_id": board["id"], "card_id": card["id"], "lane": card["lane"], "owner": role}
-
-    def _delegation_board(self) -> dict[str, Any]:
-        assert self.kanban is not None
-        for board in self.kanban.list_boards():
-            if board.get("metadata", {}).get("purpose") == "subagent_delegations":
-                return board
-        return self.kanban.create_board("Subagent Delegations", metadata={"purpose": "subagent_delegations", "isolation": "card_per_delegate"})
+        try:
+            card = self.kanban.add_subagent_delegation(role=role, task=task, task_id=task_id)
+        except ValueError as exc:
+            raise ToolExecutionError(str(exc)) from exc
+        return {
+            "ok": True,
+            "board_id": card["board_id"],
+            "card_id": card["id"],
+            "lane": card["lane"],
+            "owner": role,
+            "execution_mode": "durable_card_queue",
+            "instructions_tainted": True,
+            "raw_instruction_forwarded_to_model": False,
+        }
 
     def _execute_kanban_create(self, *, params: dict[str, Any], task_id: str | None) -> dict[str, Any]:
         assert self.kanban is not None
@@ -886,6 +1252,9 @@ class BuiltinToolExecutor:
         config = dict(backend.get("adapter_config", {}))
         backend_name = str(backend.get("name", params.get("backend", "")))
         activation = _backend_activation_requirements(name=name, backend=backend_name, backend_record=backend)
+        action = _hosted_sandbox_action(params)
+        if action is None:
+            return {"ok": False, "status": "scope_rejected", "tool": name, "backend": backend_name, "reason": "hosted sandbox action must be one of: submit, status, logs, cancel, artifact, rollback", "verification_gates": ["scope_escape_rejection"]}
         url = str(params.get("provider_url") or params.get("api_url") or config.get("api_url") or "")
         parsed = urlparse(url)
         domain = parsed.hostname or ""
@@ -898,16 +1267,67 @@ class BuiltinToolExecutor:
         private_error = _private_network_error(domain)
         if private_error:
             return {"ok": False, "status": "scope_rejected", "tool": name, "backend": backend_name, "reason": private_error, "verification_gates": ["scope_escape_rejection"]}
-        try:
-            command_args = _safe_remote_command_args(str(params.get("command", "")))
-        except ToolExecutionError as exc:
-            return {"ok": False, "status": "scope_rejected", "tool": name, "backend": backend_name, "reason": str(exc), "verification_gates": ["scope_escape_rejection"]}
+        command_args: list[str] = []
+        if action == "submit":
+            try:
+                command_args = _safe_remote_command_args(str(params.get("command", "")))
+            except ToolExecutionError as exc:
+                return {"ok": False, "status": "scope_rejected", "tool": name, "backend": backend_name, "reason": str(exc), "verification_gates": ["scope_escape_rejection"]}
         token_secret = str(params.get("token_secret") or config.get("token_secret") or "AEGIS_HOSTED_SANDBOX_TOKEN")
         handle = self.secrets_broker.request_handle(name=token_secret, requester="hosted_sandbox_backend", reason=f"{backend_name} sandbox execution", scopes=(f"{backend_name}:execute",))
         if not handle.present:
             return {"ok": False, "status": "not_configured", "tool": name, "backend": backend_name, "reason": f"secret {token_secret!r} is not configured", **activation}
         token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="hosted_sandbox_backend")
         timeout = int(config.get("timeout_seconds", 60))
+        if action != "submit":
+            job_id = str(params.get("job_id") or params.get("id") or "").strip()
+            if not _safe_hosted_sandbox_job_id(job_id):
+                return {"ok": False, "status": "scope_rejected", "tool": name, "backend": backend_name, "reason": "hosted sandbox lifecycle actions require a simple job_id", "verification_gates": ["scope_escape_rejection"]}
+            live_result = _send_hosted_sandbox_lifecycle_request(url=url, token=token, backend=backend_name, action=action, job_id=job_id, timeout=timeout)
+            lifecycle_receipt = _hosted_sandbox_lifecycle_receipt(
+                backend=backend_name,
+                action=action,
+                domain=domain,
+                job_id=job_id,
+                http_status=live_result["http_status"],
+                handle_present=handle.present,
+                response_summary=live_result.get("response_summary", {}),
+            )
+            result: dict[str, Any] = {
+                "ok": bool(live_result["ok"]),
+                "status": "lifecycle_completed" if live_result["ok"] else "failed",
+                "tool": name,
+                "backend": backend_name,
+                "domain": domain,
+                "http_status": live_result["http_status"],
+                "job_id": job_id,
+                "lifecycle_action": action,
+                "lifecycle_receipt": lifecycle_receipt,
+                "provider_status": live_result.get("provider_status"),
+                "taint": "TOOL_OUTPUT",
+                "error": live_result.get("error"),
+            }
+            if action == "logs":
+                result["log_tail"] = live_result.get("log_tail", [])
+                result["log_line_count"] = live_result.get("log_line_count", 0)
+            if action == "cancel":
+                result["cleanup_receipt"] = {"status": "cancel_requested" if live_result["ok"] else "cancel_failed", "raw_response_body_included": False}
+            if action == "rollback":
+                result["rollback_receipt"] = {"status": "rollback_requested" if live_result["ok"] else "rollback_failed", "raw_response_body_included": False, "raw_secret_values_included": False}
+            if action == "artifact":
+                content = live_result.get("artifact_content")
+                if not isinstance(content, bytes) or not content:
+                    result.update({"ok": False, "status": "failed", "error": live_result.get("error") or "hosted sandbox artifact response did not include downloadable content"})
+                    return result
+                artifact_dir = _workspace_root(self.connectors) / ".aegis" / "backend-artifacts"
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                artifact_dir.chmod(0o700)
+                extension = _hosted_sandbox_artifact_extension(str(live_result.get("artifact_name") or ""), str(live_result.get("artifact_mime") or ""))
+                artifact_path = artifact_dir / f"{backend_name}-{uuid4()}.{extension}"
+                artifact_path.write_bytes(content)
+                artifact_path.chmod(0o600)
+                result.update({"artifact_path": str(artifact_path), "artifact_receipt": _artifact_receipt(artifact_path), "mime_type": live_result.get("artifact_mime") or "application/octet-stream"})
+            return result
         command_hash = hashlib.sha256("\0".join([backend_name, *command_args]).encode("utf-8")).hexdigest()
         started = now_utc()
         live_result = _send_hosted_sandbox_request(url=url, token=token, backend=backend_name, command_args=command_args, command_hash=command_hash, timeout=timeout)
@@ -936,8 +1356,9 @@ class BuiltinToolExecutor:
                 "raw_response_body_included": False,
             },
             "cleanup_receipt": {
-                "status": "provider_managed",
-                "rollback": "cancel or delete the hosted sandbox job with the provider-specific console/API",
+                "status": "generic_lifecycle_available",
+                "supported_actions": ["status", "logs", "cancel", "artifact", "rollback"],
+                "rollback": "run hosted_sandbox_exec with action=cancel or action=rollback and the provider job_id",
             },
             "error": live_result.get("error"),
         }
@@ -1325,6 +1746,75 @@ class BuiltinToolExecutor:
         requested = str(params.get("operation", "read")).lower()
         connector = self.connectors.get("github")
         if name == "github_pr":
+            if requested in {"rollback_comment", "rollback_pull_request_comment", "delete_comment"}:
+                result = connector.rollback(ConnectorRequest(operation="rollback_pull_request_comment", params=params, scopes=("write",), approved=approved))
+                return {
+                    "ok": result.ok,
+                    "operation": "rollback_pull_request_comment",
+                    "connector": result.connector,
+                    "mode": result.data.get("mode"),
+                    "rate_limit": result.data.get("rate_limit"),
+                    "rollback_receipt": result.data.get("rollback_receipt"),
+                    **_connector_activation_fields(result),
+                    "rollback": result.rollback,
+                    "error": result.error,
+                }
+            if requested in {"autofix_apply", "autofix_patch", "apply_autofix", "apply_patch", "local_patch"}:
+                return self._execute_github_pr_autofix_patch(params=params)
+            if requested in {"autofix_response", "autofix_comment", "autofix_report", "post_autofix", "provider_autofix"}:
+                write_params = {key: value for key, value in params.items() if key != "operation"}
+                write_params["body"] = _github_pr_autofix_response_body(params)
+                result = connector.write(ConnectorRequest(operation="comment_on_pull_request", params=write_params, scopes=("write",), approved=approved))
+                mode = result.data.get("mode", "mock" if result.data.get("mock") else None)
+                return {
+                    "ok": result.ok,
+                    "operation": "pr_autofix_provider_response",
+                    "connector": result.connector,
+                    "mode": mode,
+                    "status": "autofix_response_recorded" if result.ok else "autofix_response_blocked",
+                    "auto_apply": False,
+                    "provider_writes_performed": bool(result.ok and mode == "live_write"),
+                    "mock_write_recorded": bool(result.ok and result.data.get("mock")),
+                    "raw_secret_values_included": False,
+                    "accepted": result.data.get("accepted", {}),
+                    **_connector_activation_fields(result),
+                    "rollback": result.rollback,
+                    "error": result.error,
+                }
+            if requested in {"autofix", "autofix_plan", "review_autofix", "fix_plan"}:
+                if params.get("provider_url") or params.get("api_url"):
+                    comments = self._execute_github_live_read(
+                        kind="pull_request_comments",
+                        operation="read_pull_request_comments",
+                        params=params,
+                    )
+                else:
+                    result = connector.read(ConnectorRequest(operation="read_pull_request_comments", params=params, scopes=("read",)))
+                    comments = {
+                        "ok": result.ok,
+                        "operation": "read_pull_request_comments",
+                        "connector": result.connector,
+                        "data": result.data.get("data", {}),
+                        "taint": "CONNECTOR_CONTENT",
+                        "error": result.error,
+                    }
+                return _github_pr_autofix_plan(comments)
+            if requested in {"comments", "review_comments", "pull_request_comments", "read_comments"}:
+                if params.get("provider_url") or params.get("api_url"):
+                    return self._execute_github_live_read(
+                        kind="pull_request_comments",
+                        operation="read_pull_request_comments",
+                        params=params,
+                    )
+                result = connector.read(ConnectorRequest(operation="read_pull_request_comments", params=params, scopes=("read",)))
+                return {
+                    "ok": result.ok,
+                    "operation": "read_pull_request_comments",
+                    "connector": result.connector,
+                    "data": result.data.get("data", {}),
+                    "taint": "CONNECTOR_CONTENT",
+                    "error": result.error,
+                }
             if requested in {"comment", "comment_on_pull_request", "write"}:
                 result = connector.write(ConnectorRequest(operation="comment_on_pull_request", params=params, scopes=("write",), approved=approved))
                 return {"ok": result.ok, "operation": "comment_on_pull_request", "connector": result.connector, "accepted": result.data.get("accepted", {}), **_connector_activation_fields(result), "rollback": result.rollback, "error": result.error}
@@ -1335,10 +1825,63 @@ class BuiltinToolExecutor:
         if requested in {"create", "create_issue", "write"}:
             result = connector.write(ConnectorRequest(operation="create_issue", params=params, scopes=("write",), approved=approved))
             return {"ok": result.ok, "operation": "create_issue", "connector": result.connector, "accepted": result.data.get("accepted", {}), **_connector_activation_fields(result), "rollback": result.rollback, "error": result.error}
+        if requested in {"rollback", "rollback_issue", "close_issue"}:
+            result = connector.rollback(ConnectorRequest(operation="rollback_issue", params=params, scopes=("write",), approved=approved))
+            return {
+                "ok": result.ok,
+                "operation": "rollback_issue",
+                "connector": result.connector,
+                "mode": result.data.get("mode"),
+                "rate_limit": result.data.get("rate_limit"),
+                "rollback_receipt": result.data.get("rollback_receipt"),
+                **_connector_activation_fields(result),
+                "rollback": result.rollback,
+                "error": result.error,
+            }
         if params.get("provider_url") or params.get("api_url"):
             return self._execute_github_live_read(kind="issue", operation="read_issue", params=params)
         result = connector.read(ConnectorRequest(operation="read_issue", params=params, scopes=("read",)))
         return {"ok": result.ok, "operation": "read_issue", "connector": result.connector, "data": result.data.get("data", {}), "taint": "CONNECTOR_CONTENT", "error": result.error}
+
+    def _execute_github_pr_autofix_patch(self, *, params: dict[str, Any]) -> dict[str, Any]:
+        patch = str(params.get("patch") or params.get("unified_diff") or "")
+        if not patch.strip():
+            raise ToolExecutionError("github_pr autofix patch requires patch or unified_diff")
+        action_items = _github_pr_action_items(params)
+        if not action_items:
+            raise ToolExecutionError("github_pr autofix patch requires autofix_plan.action_items or action_items")
+        changed_files = _changed_files_from_patch(patch)
+        referenced_files = _github_pr_referenced_files(action_items)
+        linked_comment_ids = [
+            item.get("comment_id")
+            for item in action_items
+            if isinstance(item, dict) and item.get("comment_id") is not None
+        ]
+        apply_result = self._execute_diff_apply(params={"patch": patch})
+        applied = bool(apply_result.get("ok"))
+        return {
+            "ok": applied,
+            "operation": "pr_autofix_local_patch_application",
+            "connector": "github",
+            "status": "autofix_patch_applied" if applied else "autofix_patch_check_failed",
+            "mode": "approved_review_comment_patch_application",
+            "changed_files": changed_files,
+            "referenced_files": sorted(referenced_files),
+            "unreferenced_changed_files": sorted(path for path in changed_files if path not in referenced_files),
+            "linked_comment_ids": linked_comment_ids[:50],
+            "comment_linked_action_count": len(action_items),
+            "patch_sha256": hashlib.sha256(patch.encode("utf-8")).hexdigest(),
+            "auto_generated_patch": False,
+            "approval_required_before_application": True,
+            "provider_writes_performed": False,
+            "raw_secret_values_included": False,
+            "post_apply_required_controls": [
+                "workspace_diff_review",
+                "targeted_tests_before_commit",
+                "approval_before_provider_response",
+            ],
+            "apply_result": apply_result,
+        }
 
     def _execute_github_live_read(self, *, kind: str, operation: str, params: dict[str, Any]) -> dict[str, Any]:
         url = str(params.get("provider_url") or params["api_url"])
@@ -1349,6 +1892,28 @@ class BuiltinToolExecutor:
             decoded = json.loads(str(read.data.get("content", "")))
         except json.JSONDecodeError:
             return {"ok": False, "operation": operation, "connector": "http", "mode": "allowlisted_live_read", "data": {}, "error": "GitHub provider response must be JSON"}
+        if kind == "pull_request_comments":
+            if not isinstance(decoded, list):
+                return {"ok": False, "operation": operation, "connector": "http", "mode": "allowlisted_live_read", "data": {}, "error": "GitHub PR comments response must be a JSON array"}
+            data = {
+                "kind": kind,
+                "count": len(decoded),
+                "comments": [
+                    _normalize_github_pr_comment(item)
+                    for item in decoded[:100]
+                    if isinstance(item, dict)
+                ],
+            }
+            return {
+                "ok": True,
+                "operation": operation,
+                "connector": "http",
+                "mode": "allowlisted_live_read",
+                "url": read.data.get("url", url),
+                "data": data,
+                "taint": "WEB_CONTENT",
+                "error": None,
+            }
         if not isinstance(decoded, dict):
             return {"ok": False, "operation": operation, "connector": "http", "mode": "allowlisted_live_read", "data": {}, "error": "GitHub provider response must be a JSON object"}
         return {
@@ -1366,6 +1931,19 @@ class BuiltinToolExecutor:
         requested = str(params.get("operation", "read")).lower()
         connector = self.connectors.get("gitlab")
         if name == "gitlab_merge_request":
+            if requested in {"rollback_note", "rollback_merge_request_note", "delete_note"}:
+                result = connector.rollback(ConnectorRequest(operation="rollback_merge_request_note", params=params, scopes=("write",), approved=approved))
+                return {
+                    "ok": result.ok,
+                    "operation": "rollback_merge_request_note",
+                    "connector": result.connector,
+                    "mode": result.data.get("mode"),
+                    "rate_limit": result.data.get("rate_limit"),
+                    "rollback_receipt": result.data.get("rollback_receipt"),
+                    **_connector_activation_fields(result),
+                    "rollback": result.rollback,
+                    "error": result.error,
+                }
             if requested in {"comment", "note", "comment_on_merge_request", "write"}:
                 result = connector.write(ConnectorRequest(operation="comment_on_merge_request", params=params, scopes=("write",), approved=approved))
                 return {"ok": result.ok, "operation": "comment_on_merge_request", "connector": result.connector, "accepted": result.data.get("accepted", {}), **_connector_activation_fields(result), "rollback": result.rollback, "error": result.error}
@@ -1376,6 +1954,19 @@ class BuiltinToolExecutor:
         if requested in {"create", "create_issue", "write"}:
             result = connector.write(ConnectorRequest(operation="create_issue", params=params, scopes=("write",), approved=approved))
             return {"ok": result.ok, "operation": "create_issue", "connector": result.connector, "accepted": result.data.get("accepted", {}), **_connector_activation_fields(result), "rollback": result.rollback, "error": result.error}
+        if requested in {"rollback", "rollback_issue", "close_issue"}:
+            result = connector.rollback(ConnectorRequest(operation="rollback_issue", params=params, scopes=("write",), approved=approved))
+            return {
+                "ok": result.ok,
+                "operation": "rollback_issue",
+                "connector": result.connector,
+                "mode": result.data.get("mode"),
+                "rate_limit": result.data.get("rate_limit"),
+                "rollback_receipt": result.data.get("rollback_receipt"),
+                **_connector_activation_fields(result),
+                "rollback": result.rollback,
+                "error": result.error,
+            }
         if params.get("provider_url") or params.get("api_url"):
             return self._execute_gitlab_live_read(kind="issue", operation="read_issue", params=params)
         result = connector.read(ConnectorRequest(operation="read_issue", params=params, scopes=("read",)))
@@ -1435,6 +2026,8 @@ class BuiltinToolExecutor:
             operation = "update_ticket"
         elif requested in {"close", "close_ticket", "resolve"}:
             operation = "close_ticket"
+        elif requested in {"rollback", "rollback_close", "rollback_close_ticket", "reopen"}:
+            operation = "rollback_close_ticket"
         else:
             operation = "create_ticket"
         payload = dict(params.get("ticket", {}))
@@ -1443,9 +2036,9 @@ class BuiltinToolExecutor:
                 payload[key] = value
         request_params = {key: value for key, value in params.items() if key != "operation"}
         request_params["ticket"] = payload
-        result = self.connectors.get("mock_servicenow").write(
-            ConnectorRequest(operation=operation, params=request_params, scopes=("write",), approved=approved)
-        )
+        connector = self.connectors.get("mock_servicenow")
+        request = ConnectorRequest(operation=operation, params=request_params, scopes=("write",), approved=approved)
+        result = connector.rollback(request) if operation == "rollback_close_ticket" else connector.write(request)
         return {
             "ok": result.ok,
             "operation": operation,
@@ -1454,6 +2047,41 @@ class BuiltinToolExecutor:
             "ticket_id": str(payload.get("id") or payload.get("number") or f"mock-{operation}"),
             "mode": result.data.get("mode", "mock"),
             "accepted": result.data.get("accepted", {}),
+            "rate_limit": result.data.get("rate_limit"),
+            "rollback_receipt": result.data.get("rollback_receipt"),
+            **_connector_activation_fields(result),
+            "rollback": result.rollback,
+            "error": result.error,
+        }
+
+    def _execute_message_send(self, *, params: dict[str, Any], approved: bool) -> dict[str, Any]:
+        requested = str(params.get("operation", "send")).lower()
+        operation = "rollback_message" if requested in {"rollback", "rollback_message", "delete", "delete_message", "retract"} else "send_message"
+        message = dict(params.get("message", {})) if isinstance(params.get("message"), dict) else {}
+        request_params = {key: value for key, value in params.items() if key != "operation"}
+        if message:
+            request_params["message"] = message
+        connector = self.connectors.get("mock_messaging")
+        request = ConnectorRequest(operation=operation, params=request_params, scopes=("write",), approved=approved)
+        result = connector.rollback(request) if operation == "rollback_message" else connector.write(request)
+        return {
+            "ok": result.ok,
+            "operation": operation,
+            "connector": result.connector,
+            "status": "rolled_back" if operation == "rollback_message" and result.ok else "sent" if result.ok else "failed",
+            "message_id": str(
+                params.get("message_id")
+                or params.get("message_ts")
+                or params.get("ts")
+                or message.get("message_id")
+                or message.get("message_ts")
+                or message.get("ts")
+                or f"mock-{operation}"
+            ),
+            "mode": result.data.get("mode", "mock"),
+            "accepted": result.data.get("accepted", {}),
+            "rate_limit": result.data.get("rate_limit"),
+            "rollback_receipt": result.data.get("rollback_receipt"),
             **_connector_activation_fields(result),
             "rollback": result.rollback,
             "error": result.error,
@@ -1464,14 +2092,16 @@ class BuiltinToolExecutor:
             "browser": "navigate",
             "browser_click": "click",
             "browser_fill": "fill",
+            "browser_submit": "submit",
             "browser_screenshot": "screenshot",
             "browser_render_screenshot": "render_screenshot",
             "browser_extract_table": "extract_table",
+            "browser_dom_snapshot": "dom_snapshot",
             "browser_close": "close",
         }[name]
         action = str(params.get("action", default_action))
         session_id = str(params["session_id"]) if params.get("session_id") else None
-        live_actions = {"live_navigate", "live_click", "live_fill", "live_screenshot", "live_render_screenshot", "live_evaluate"}
+        live_actions = {"live_navigate", "live_click", "live_fill", "live_submit", "live_screenshot", "live_render_screenshot", "live_evaluate"}
         if action in live_actions or bool(params.get("live")):
             selector = str(params["selector"]) if params.get("selector") else None
             return self.browser.deny_live_automation(action=action, session_id=session_id, selector=selector)
@@ -1495,6 +2125,10 @@ class BuiltinToolExecutor:
             if session_id is None:
                 raise ToolExecutionError("browser table extraction requires session_id")
             return self.browser.extract_table(session_id=session_id, selector=str(params["selector"]) if params.get("selector") else None)
+        if action == "dom_snapshot":
+            if session_id is None:
+                raise ToolExecutionError("browser DOM snapshot requires session_id")
+            return self.browser.dom_snapshot(session_id=session_id, selector=str(params["selector"]) if params.get("selector") else None)
         if action == "inspect":
             if session_id is None:
                 raise ToolExecutionError("browser inspect requires session_id")
@@ -1507,6 +2141,10 @@ class BuiltinToolExecutor:
             if session_id is None:
                 raise ToolExecutionError("browser fill requires session_id")
             return self.browser.fill(session_id=session_id, fields=dict(params.get("fields", {})), approved=approved)
+        if action == "submit":
+            if session_id is None:
+                raise ToolExecutionError("browser submit requires session_id")
+            return self.browser.submit(session_id=session_id, selector=str(params["selector"]) if params.get("selector") else None, approved=approved)
         if action == "close":
             if session_id is None:
                 raise ToolExecutionError("browser close requires session_id")
@@ -2051,6 +2689,162 @@ def _normalize_github_record(decoded: dict[str, Any], *, kind: str) -> dict[str,
     return normalized
 
 
+def _normalize_github_pr_comment(decoded: dict[str, Any]) -> dict[str, Any]:
+    user = decoded.get("user")
+    if not isinstance(user, dict):
+        user = {}
+    return {
+        "id": decoded.get("id"),
+        "path": str(decoded.get("path", ""))[:1000],
+        "line": decoded.get("line") or decoded.get("position"),
+        "side": str(decoded.get("side", ""))[:50],
+        "user": str(user.get("login", ""))[:200],
+        "created_at": str(decoded.get("created_at", ""))[:100],
+        "updated_at": str(decoded.get("updated_at", ""))[:100],
+        "html_url": str(decoded.get("html_url", ""))[:1000],
+        "body_preview": str(decoded.get("body", ""))[:1000],
+        "diff_hunk_preview": str(decoded.get("diff_hunk", ""))[:1000],
+    }
+
+
+def _github_pr_autofix_plan(comments_result: dict[str, Any]) -> dict[str, Any]:
+    data = comments_result.get("data", {})
+    if not isinstance(data, dict):
+        data = {}
+    comments = data.get("comments")
+    if not isinstance(comments, list):
+        comments = data.get("pull_request_comments")
+    if not isinstance(comments, list):
+        comments = []
+    action_items = []
+    for item in comments[:50]:
+        if not isinstance(item, dict):
+            continue
+        body = str(item.get("body_preview") or item.get("body") or "")
+        action_items.append(
+            {
+                "comment_id": item.get("id"),
+                "path": str(item.get("path") or "")[:1000],
+                "line": item.get("line") or item.get("position"),
+                "reviewer": str(item.get("user") or item.get("author") or "")[:200],
+                "summary": _first_sentence(body),
+                "recommended_action": _github_autofix_action(body),
+                "status": "needs_human_review",
+            }
+        )
+    return {
+        "ok": bool(comments_result.get("ok")),
+        "operation": "pr_autofix_plan",
+        "source_operation": comments_result.get("operation"),
+        "connector": comments_result.get("connector"),
+        "mode": "review_comments_to_local_patch_plan",
+        "taint": comments_result.get("taint", "CONNECTOR_CONTENT"),
+        "status": "autofix_plan_ready" if action_items else "no_review_comments",
+        "comment_count": len(comments),
+        "action_items": action_items,
+        "auto_apply": False,
+        "provider_writes_performed": False,
+        "raw_secret_values_included": False,
+        "required_controls": [
+            "human_review_before_patch",
+            "workspace_diff_review",
+            "tests_before_commit",
+            "approval_before_provider_write",
+        ],
+        "next_actions": [
+            "Inspect each referenced file and line locally.",
+            "Apply patches through the governed workspace workflow.",
+            "Run targeted tests before posting any PR response.",
+        ],
+        "error": comments_result.get("error"),
+    }
+
+
+def _first_sentence(text: str) -> str:
+    compact = " ".join(str(text or "").split())
+    if not compact:
+        return ""
+    match = re.search(r"(?<=[.!?])\s+", compact)
+    if match:
+        compact = compact[: match.start()]
+    return compact[:300]
+
+
+def _github_autofix_action(text: str) -> str:
+    lowered = str(text or "").lower()
+    if "test" in lowered or "coverage" in lowered:
+        return "add_or_update_test_coverage"
+    if "security" in lowered or "secret" in lowered or "token" in lowered:
+        return "review_security_boundary_and_redaction"
+    if "doc" in lowered or "readme" in lowered:
+        return "update_documentation"
+    if "revocation" in lowered or "expiry" in lowered or "expire" in lowered:
+        return "check_lifecycle_and_state_transition"
+    return "inspect_and_patch_referenced_code"
+
+
+def _github_pr_autofix_response_body(params: dict[str, Any]) -> str:
+    explicit_body = str(params.get("body") or params.get("comment") or "").strip()
+    if explicit_body:
+        return str(redact(explicit_body))[:4000]
+    action_items = _github_pr_action_items(params)
+    lines = [
+        "Aegis PR autofix response",
+        "",
+        "Status: local patch plan prepared; this approved response is the only provider write.",
+        "Auto-apply: false",
+        "Provider writes before this response: false",
+        "Required controls: human review, workspace diff review, tests before commit, approval before provider write.",
+        "",
+        "Action items:",
+    ]
+    rendered_items = 0
+    for item in action_items[:20]:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "unscoped")[:160]
+        line = item.get("line")
+        location = f"{path}:{line}" if line else path
+        recommended = str(item.get("recommended_action") or "inspect_and_patch_referenced_code")[:120]
+        summary = str(item.get("summary") or "")[:180]
+        comment_id = item.get("comment_id")
+        prefix = f"- comment {comment_id} at {location}" if comment_id is not None else f"- {location}"
+        lines.append(f"{prefix}: {recommended}" + (f" - {summary}" if summary else ""))
+        rendered_items += 1
+    if rendered_items == 0:
+        lines.append("- No review action items were supplied.")
+    return str(redact("\n".join(lines)))[:4000]
+
+
+def _github_pr_action_items(params: dict[str, Any]) -> list[dict[str, Any]]:
+    action_items = params.get("action_items")
+    plan = params.get("autofix_plan")
+    if not isinstance(action_items, list) and isinstance(plan, dict):
+        action_items = plan.get("action_items")
+    if not isinstance(action_items, list):
+        return []
+    return [item for item in action_items[:50] if isinstance(item, dict)]
+
+
+def _github_pr_referenced_files(action_items: list[dict[str, Any]]) -> set[str]:
+    referenced: set[str] = set()
+    for item in action_items:
+        candidates: list[Any] = [item.get("path")]
+        for key in ("planned_files", "changed_files"):
+            values = item.get(key)
+            if isinstance(values, list):
+                candidates.extend(values)
+        for value in candidates:
+            text = str(value or "").strip()
+            if not text:
+                continue
+            path = Path(text)
+            if path.is_absolute() or ".." in path.parts:
+                raise ToolExecutionError(f"review comment path {text!r} escapes workspace root")
+            referenced.add(text)
+    return referenced
+
+
 def _normalize_gitlab_record(decoded: dict[str, Any], *, kind: str) -> dict[str, Any]:
     author = decoded.get("author")
     if not isinstance(author, dict):
@@ -2312,8 +3106,27 @@ def _write_tool_artifact_metadata(
 def _media_sandbox_receipt(*, tool: str, mode: str, worker_result: dict[str, Any] | None = None) -> dict[str, Any]:
     worker_result = worker_result or {}
     live_provider_used = "provider_domain" in worker_result
+    artifact_write = bool(worker_result.get("artifact_write", True))
+    explicit_workspace_reads = [str(item) for item in worker_result.get("explicit_workspace_reads", []) if str(item)]
+    sandbox_profile = "live_provider_media_artifact" if live_provider_used else "local_artifact_worker_subprocess_no_provider"
+    network_boundary = "allowlisted_https_provider_only" if live_provider_used else "none"
+    if live_provider_used:
+        limitations = [
+            "Provider-backed media execution stores only the returned local artifact and redacted receipts."
+            if artifact_write
+            else "Provider-backed media lifecycle execution stores only redacted receipts.",
+            "No microphone, speaker, camera, browser capture device, raw prompt/text persistence, raw provider response body, or raw secret value is used.",
+        ]
+    else:
+        limitations = [
+            "Deterministic local artifact worker only.",
+            "No external media provider, microphone, speaker, camera, or browser capture device is invoked.",
+        ]
     return {
-        "sandbox_profile": "live_provider_media_artifact" if live_provider_used else "local_artifact_worker_subprocess_no_provider",
+        "receipt_schema": "media_sandbox_profile_v1",
+        "profile_version": 1,
+        "sandbox_profile": sandbox_profile,
+        "sandbox_profile_id": f"{sandbox_profile}_v1",
         "tool": tool,
         "mode": mode,
         "worker_process": worker_result.get("worker_process", "provider_https_request" if live_provider_used else "subprocess"),
@@ -2323,20 +3136,42 @@ def _media_sandbox_receipt(*, tool: str, mode: str, worker_result: dict[str, Any
         "os_resource_limits": bool(worker_result.get("os_resource_limits")),
         "process_session_isolated": bool(worker_result.get("process_session_isolated")),
         "ambient_workspace_read": False,
+        "explicit_workspace_reads": explicit_workspace_reads,
         "ambient_network": "allowlisted_https_provider_only" if live_provider_used else False,
         "raw_prompt_or_text_persisted": False,
-        "writes_confined_to": ".aegis/tool-artifacts",
+        "writes_confined_to": ".aegis/tool-artifacts" if artifact_write else None,
+        "artifact_write": artifact_write,
         "live_provider_used": live_provider_used,
         "provider_domain": worker_result.get("provider_domain"),
-        "limitations": [
-            "Provider-backed media execution stores only the returned local artifact and redacted receipts.",
-            "No microphone, speaker, camera, browser capture device, raw prompt/text persistence, raw provider response body, or raw secret value is used.",
-        ]
-        if live_provider_used
-        else [
-            "Deterministic local artifact worker only.",
-            "No external media provider, microphone, speaker, camera, or browser capture device is invoked.",
+        "provider_adapter": worker_result.get("provider_adapter"),
+        "profile_boundaries": {
+            "execution": "allowlisted_provider_https_request" if live_provider_used else "local_subprocess_worker",
+            "network": network_boundary,
+            "filesystem": "explicit_workspace_reads_plus_private_artifact_dir" if explicit_workspace_reads else "private_artifact_dir_only" if artifact_write else "no_artifact_write",
+            "devices": {"microphone": False, "speaker": False, "camera": False, "browser_capture": False},
+            "secrets": {"brokered_handle_only": live_provider_used, "raw_secret_values_included": False},
+            "content": {
+                "raw_prompt_or_text_persisted": False,
+                "raw_response_body_persisted": False,
+                "source_bytes_persisted_in_receipt": False,
+            },
+            "artifacts": {
+                "private_directory": artifact_write,
+                "private_file_permissions": artifact_write,
+                "sha256_receipt_required": artifact_write,
+            },
+        },
+        "profile_controls": [
+            "private_artifact_directory",
+            "artifact_sha256_receipts",
+            "prompt_text_receipt_redaction",
+            "raw_response_body_redaction",
+            "device_capture_disabled",
+            "explicit_workspace_source_reads_only",
+            "brokered_secret_handles" if live_provider_used else "minimal_worker_environment",
+            "allowlisted_https_provider" if live_provider_used else "network_disabled",
         ],
+        "limitations": limitations,
     }
 
 
@@ -2344,7 +3179,193 @@ def _live_media_required_controls() -> list[str]:
     return ["human_approval", "live_rest_writes_enabled", "network_allowlist", "secret_broker", "artifact_hashing", "redacted_receipts"]
 
 
-def _live_media_request_payload(*, name: str, prompt: str, text: str, source_path: str) -> dict[str, Any]:
+def _live_media_provider_adapter(*, name: str, params: dict[str, Any]) -> dict[str, str | None]:
+    raw = str(params.get("provider_adapter") or params.get("adapter") or "generic").strip().lower().replace("-", "_")
+    if raw in {"", "generic", "generic_json", "aegis_generic"}:
+        return {"name": "generic", "error": None}
+    if raw in {"openai_image", "openai_images", "openai_images_json", "openai_compatible_images"}:
+        if name != "image_generate":
+            return {"name": raw, "error": "openai_images provider adapter currently supports image_generate only"}
+        return {"name": "openai_images", "error": None}
+    if raw in {"openai_image_edit", "openai_images_edit", "openai_images_edits", "openai_compatible_image_edit"}:
+        if name != "image_edit":
+            return {"name": raw, "error": "openai_image_edit provider adapter currently supports image_edit only"}
+        return {"name": "openai_image_edit", "error": None}
+    if raw in {"openai_tts", "openai_speech", "openai_audio_speech", "openai_compatible_tts"}:
+        if name != "tts":
+            return {"name": raw, "error": "openai_tts provider adapter currently supports tts only"}
+        return {"name": "openai_tts", "error": None}
+    if raw in {"openai_transcription", "openai_transcriptions", "openai_audio_transcription", "openai_compatible_transcription"}:
+        if name != "voice_transcribe":
+            return {"name": raw, "error": "openai_transcription provider adapter currently supports voice_transcribe only"}
+        return {"name": "openai_transcription", "error": None}
+    if raw in {"openai_video", "openai_videos", "openai_sora", "sora", "openai_compatible_video"}:
+        if name != "video_generate":
+            return {"name": raw, "error": "openai_video provider adapter currently supports video_generate only"}
+        return {"name": "openai_video", "error": None}
+    return {"name": raw[:80], "error": f"unsupported media provider adapter: {raw[:80]}"}
+
+
+def _live_video_action(params: dict[str, Any]) -> str:
+    raw = str(params.get("action") or params.get("operation") or "submit").strip().lower().replace("-", "_")
+    if raw in {"", "create", "submit", "run", "start", "generate"}:
+        return "submit"
+    if raw in {"status", "poll", "retrieve", "get"}:
+        return "status"
+    if raw in {"download", "content", "artifact", "fetch"}:
+        return "download"
+    if raw in {"delete", "remove", "cleanup"}:
+        return "delete"
+    raise ToolExecutionError(f"unsupported video provider action: {raw[:80]}")
+
+
+def _safe_live_video_id(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ToolExecutionError("video provider action requires video_id")
+    if len(text) > 200 or not re.fullmatch(r"[A-Za-z0-9._:@+-]+", text):
+        raise ToolExecutionError("video_id contains unsupported characters")
+    return text
+
+
+def _live_video_variant(value: Any) -> str:
+    variant = str(value or "video").strip().lower().replace("-", "_")
+    if variant in {"", "video", "mp4"}:
+        return "video"
+    if variant in {"thumbnail", "thumb", "preview"}:
+        return "thumbnail"
+    if variant in {"spritesheet", "sprite_sheet", "scrubber"}:
+        return "spritesheet"
+    raise ToolExecutionError("video download variant must be video, thumbnail, or spritesheet")
+
+
+def _live_video_action_url(*, provider_url: str, action: str, video_id: str, variant: str) -> str:
+    if action == "submit":
+        return provider_url
+    base = provider_url.rstrip("/")
+    if not base:
+        raise ToolExecutionError("provider_url is required")
+    if not base.endswith(f"/{video_id}"):
+        base = f"{base}/{video_id}"
+    if action == "download":
+        suffix = "/content"
+        url = base if base.endswith(suffix) else f"{base}{suffix}"
+        if variant != "video":
+            separator = "&" if "?" in url else "?"
+            url = f"{url}{separator}variant={variant}"
+        return url
+    return base
+
+
+def _live_video_request_payload(*, params: dict[str, Any], action: str, video_id: str, variant: str) -> dict[str, Any]:
+    if action == "submit":
+        payload: dict[str, Any] = {
+            "model": str(params.get("model") or "sora-2")[:200],
+            "prompt": str(params.get("prompt") or "")[:8000],
+        }
+        seconds = str(params.get("seconds") or params.get("duration") or "").strip()
+        if seconds:
+            if seconds not in {"4", "8", "12"}:
+                raise ToolExecutionError("video seconds must be 4, 8, or 12")
+            payload["seconds"] = seconds
+        size = str(params.get("size") or "").strip()
+        if size:
+            if size not in {"720x1280", "1280x720", "1024x1792", "1792x1024"}:
+                raise ToolExecutionError("video size must be one of the supported OpenAI video sizes")
+            payload["size"] = size
+        return payload
+    payload = {
+        "action": action,
+        "provider_job_id_sha256": hashlib.sha256(video_id.encode("utf-8")).hexdigest(),
+    }
+    if action == "download":
+        payload["variant"] = variant
+    return payload
+
+
+def _live_media_request_payload(
+    *,
+    name: str,
+    prompt: str,
+    text: str,
+    source_path: str,
+    params: dict[str, Any],
+    provider_adapter: str,
+    source_file: dict[str, Any] | None = None,
+    mask_file: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if provider_adapter == "openai_images":
+        payload: dict[str, Any] = {
+            "model": str(params.get("model") or "gpt-image-1")[:200],
+            "prompt": prompt,
+            "n": 1,
+        }
+        size = str(params.get("size") or "").strip()
+        if size:
+            payload["size"] = size[:80]
+        quality = str(params.get("quality") or "").strip()
+        if quality:
+            payload["quality"] = quality[:80]
+        background = str(params.get("background") or "").strip()
+        if background:
+            payload["background"] = background[:80]
+        return payload
+    if provider_adapter == "openai_image_edit":
+        payload = {
+            "model": str(params.get("model") or "gpt-image-1.5")[:200],
+            "prompt": prompt,
+            "n": 1,
+            "image_present": bool(source_file),
+        }
+        if source_file:
+            payload.update(
+                {
+                    "image_sha256": str(source_file["sha256"]),
+                    "image_mime_type": str(source_file["mime_type"]),
+                    "image_bytes": int(source_file["bytes"]),
+                }
+            )
+        if mask_file:
+            payload.update(
+                {
+                    "mask_present": True,
+                    "mask_sha256": str(mask_file["sha256"]),
+                    "mask_mime_type": str(mask_file["mime_type"]),
+                    "mask_bytes": int(mask_file["bytes"]),
+                }
+            )
+        for key in ("size", "quality", "background", "input_fidelity", "output_format", "output_compression", "moderation", "response_format"):
+            value = str(params.get(key) or "").strip()
+            if value:
+                payload[key] = value[:80]
+        return payload
+    if provider_adapter == "openai_tts":
+        payload = {
+            "model": str(params.get("model") or "gpt-4o-mini-tts")[:200],
+            "input": text,
+            "voice": str(params.get("voice") or "alloy")[:80],
+        }
+        response_format = str(params.get("response_format") or params.get("format") or "").strip()
+        if response_format:
+            payload["response_format"] = response_format[:40]
+        return payload
+    if provider_adapter == "openai_transcription":
+        payload = {
+            "model": str(params.get("model") or "gpt-4o-mini-transcribe")[:200],
+        }
+        prompt_hint = str(params.get("prompt") or "").strip()
+        if prompt_hint:
+            payload["prompt"] = prompt_hint[:2000]
+        response_format = str(params.get("response_format") or params.get("format") or "json").strip()
+        if response_format:
+            payload["response_format"] = response_format[:40]
+        language = str(params.get("language") or "").strip()
+        if language:
+            payload["language"] = language[:40]
+        temperature = params.get("temperature")
+        if temperature is not None:
+            payload["temperature"] = _bounded_float(temperature, minimum=0.0, maximum=1.0, label="temperature")
+        return payload
     payload: dict[str, Any] = {"tool": name}
     if name in {"image_generate", "image_edit"}:
         payload["prompt"] = prompt
@@ -2356,10 +3377,17 @@ def _live_media_request_payload(*, name: str, prompt: str, text: str, source_pat
     return payload
 
 
-def _live_media_provider_receipt(*, domain: str, http_status: int, request_payload: dict[str, Any], handle_present: bool) -> dict[str, Any]:
+def _live_media_provider_receipt(*, domain: str, http_status: int, request_payload: dict[str, Any], handle_present: bool, provider_adapter: str = "generic") -> dict[str, Any]:
     encoded = json.dumps(request_payload, sort_keys=True, default=str).encode("utf-8")
+    request_format = "application/json"
+    if provider_adapter in {"openai_image_edit", "openai_transcription"}:
+        request_format = "multipart/form-data"
+    elif provider_adapter == "openai_video" and "action" in request_payload:
+        request_format = "path_operation"
     return {
         "receipt_schema": "redacted_media_provider_receipt_v1",
+        "provider_adapter": provider_adapter,
+        "request_format": request_format,
         "domain": domain,
         "http_status": http_status,
         "payload_sha256": hashlib.sha256(encoded).hexdigest(),
@@ -2372,15 +3400,30 @@ def _live_media_provider_receipt(*, domain: str, http_status: int, request_paylo
     }
 
 
-def _send_live_media_provider_request(*, url: str, token: str, tool: str, payload: dict[str, Any]) -> dict[str, Any]:
-    body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+def _send_live_media_provider_request(
+    *,
+    url: str,
+    token: str,
+    tool: str,
+    payload: dict[str, Any],
+    provider_adapter: str = "generic",
+    source_file: dict[str, Any] | None = None,
+    mask_file: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if provider_adapter == "openai_image_edit":
+        if source_file is None:
+            return {"ok": False, "http_status": 0, "error": "openai_image_edit requires a workspace-scoped source image"}
+        body, content_type = _encode_openai_image_edit_multipart(payload=payload, source_file=source_file, mask_file=mask_file)
+    else:
+        body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        content_type = "application/json"
     request = Request(
         url,
         data=body,
         method="POST",
         headers={
             "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
+            "Content-Type": content_type,
             "User-Agent": "Aegis-Agent/0.1",
         },
     )
@@ -2431,6 +3474,264 @@ def _send_live_media_provider_request(*, url: str, token: str, tool: str, payloa
     return result
 
 
+def _live_media_source_file(*, root: Path, source_path: str, field: str) -> dict[str, Any]:
+    if not str(source_path or "").strip():
+        raise ToolExecutionError(f"openai_image_edit requires a {field}_path inside the workspace")
+    path = _resolve_under_root(root, source_path)
+    if not path.is_file():
+        raise ToolExecutionError(f"openai_image_edit {field}_path does not exist or is not a file")
+    content = path.read_bytes()
+    if not content:
+        raise ToolExecutionError(f"openai_image_edit {field}_path is empty")
+    if len(content) > 10 * 1024 * 1024:
+        raise ToolExecutionError(f"openai_image_edit {field}_path exceeds the 10 MiB upload limit")
+    mime_type, extension = _source_image_upload_mime(content)
+    return {
+        "field": field,
+        "filename": f"{field}.{extension}",
+        "content": content,
+        "mime_type": mime_type,
+        "bytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
+
+
+def _source_image_upload_mime(content: bytes) -> tuple[str, str]:
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png", "png"
+    if content.startswith(b"\xff\xd8"):
+        return "image/jpeg", "jpg"
+    if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+        return "image/webp", "webp"
+    raise ToolExecutionError("openai_image_edit source images must be PNG, JPEG, or WEBP")
+
+
+def _live_media_audio_file(*, root: Path, audio_path: str) -> dict[str, Any]:
+    if not str(audio_path or "").strip():
+        raise ToolExecutionError("openai_transcription requires an audio_path inside the workspace")
+    path = _resolve_under_root(root, audio_path)
+    if not path.is_file():
+        raise ToolExecutionError("openai_transcription audio_path does not exist or is not a file")
+    content = path.read_bytes()
+    if not content:
+        raise ToolExecutionError("openai_transcription audio_path is empty")
+    if len(content) > 10 * 1024 * 1024:
+        raise ToolExecutionError("openai_transcription audio_path exceeds the 10 MiB upload limit")
+    mime_type, extension = _source_audio_upload_mime(path)
+    return {
+        "path": path,
+        "filename": f"audio.{extension}",
+        "content": content,
+        "mime_type": mime_type,
+        "bytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
+
+
+def _source_audio_upload_mime(path: Path) -> tuple[str, str]:
+    extension = path.suffix.lower().lstrip(".")
+    mime_by_extension = {
+        "flac": "audio/flac",
+        "mp3": "audio/mpeg",
+        "mp4": "audio/mp4",
+        "mpeg": "audio/mpeg",
+        "mpga": "audio/mpeg",
+        "m4a": "audio/mp4",
+        "ogg": "audio/ogg",
+        "wav": "audio/wav",
+        "webm": "audio/webm",
+    }
+    if extension in mime_by_extension:
+        return mime_by_extension[extension], extension
+    raise ToolExecutionError("openai_transcription audio files must be FLAC, MP3, MP4, MPEG, MPGA, M4A, OGG, WAV, or WEBM")
+
+
+def _encode_openai_image_edit_multipart(*, payload: dict[str, Any], source_file: dict[str, Any], mask_file: dict[str, Any] | None = None) -> tuple[bytes, str]:
+    boundary = f"aegis-{uuid4().hex}"
+    body = bytearray()
+    metadata_keys = {"image_present", "image_sha256", "image_mime_type", "image_bytes", "mask_present", "mask_sha256", "mask_mime_type", "mask_bytes"}
+    for key in sorted(payload):
+        if key in metadata_keys:
+            continue
+        value = payload[key]
+        body.extend(f"--{boundary}\r\n".encode("ascii"))
+        body.extend(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("ascii"))
+        body.extend(str(value).encode("utf-8"))
+        body.extend(b"\r\n")
+    for upload in (source_file, mask_file):
+        if not upload:
+            continue
+        field = str(upload["field"])
+        filename = str(upload["filename"])
+        mime_type = str(upload["mime_type"])
+        body.extend(f"--{boundary}\r\n".encode("ascii"))
+        body.extend(f'Content-Disposition: form-data; name="{field}"; filename="{filename}"\r\n'.encode("ascii"))
+        body.extend(f"Content-Type: {mime_type}\r\n\r\n".encode("ascii"))
+        body.extend(upload["content"])
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode("ascii"))
+    return bytes(body), f"multipart/form-data; boundary={boundary}"
+
+
+def _encode_openai_transcription_multipart(*, payload: dict[str, Any], audio_file: dict[str, Any]) -> tuple[bytes, str]:
+    boundary = f"aegis-{uuid4().hex}"
+    body = bytearray()
+    for key in sorted(payload):
+        value = payload[key]
+        body.extend(f"--{boundary}\r\n".encode("ascii"))
+        body.extend(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("ascii"))
+        body.extend(str(value).encode("utf-8"))
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}\r\n".encode("ascii"))
+    body.extend(f'Content-Disposition: form-data; name="file"; filename="{audio_file["filename"]}"\r\n'.encode("ascii"))
+    body.extend(f'Content-Type: {audio_file["mime_type"]}\r\n\r\n'.encode("ascii"))
+    body.extend(audio_file["content"])
+    body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode("ascii"))
+    return bytes(body), f"multipart/form-data; boundary={boundary}"
+
+
+def _send_live_transcription_provider_request(
+    *,
+    url: str,
+    token: str,
+    payload: dict[str, Any],
+    provider_adapter: str,
+    audio_file: dict[str, Any],
+) -> dict[str, Any]:
+    if provider_adapter != "openai_transcription":
+        return {"ok": False, "http_status": 0, "error": f"unsupported transcription provider adapter: {provider_adapter}"}
+    body, content_type = _encode_openai_transcription_multipart(payload=payload, audio_file=audio_file)
+    request = Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": content_type,
+            "User-Agent": "Aegis-Agent/0.1",
+        },
+    )
+    try:
+        response_context = _open_without_redirects(request, timeout=30)
+    except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            return {"ok": False, "http_status": exc.code, "error": "HTTP redirects are not followed by the governed transcription adapter"}
+        return {"ok": False, "http_status": exc.code, "error": f"transcription provider failed with status {exc.code}"}
+    except URLError as exc:
+        return {"ok": False, "http_status": 0, "error": f"transcription provider request failed: {exc.reason}"}
+    with response_context as response:
+        status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+        raw = response.read(2 * 1024 * 1024)
+        content_type = str(getattr(response, "headers", {}).get("Content-Type", ""))
+    if not 200 <= status < 300:
+        return {"ok": False, "http_status": status, "error": f"transcription provider failed with status {status}"}
+    if "json" in content_type.lower() or raw.strip().startswith(b"{"):
+        try:
+            decoded = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {"ok": False, "http_status": status, "error": "transcription provider JSON response could not be decoded"}
+        if not isinstance(decoded, dict):
+            return {"ok": False, "http_status": status, "error": "transcription provider JSON response must be an object"}
+        text = decoded.get("text") or decoded.get("transcript")
+        if not isinstance(text, str) or not text.strip():
+            return {"ok": False, "http_status": status, "error": "transcription provider response did not include text"}
+        return {"ok": True, "http_status": status, "text": text.strip()}
+    try:
+        text = raw.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return {"ok": False, "http_status": status, "error": "transcription provider text response could not be decoded"}
+    if not text:
+        return {"ok": False, "http_status": status, "error": "transcription provider returned an empty transcript"}
+    return {"ok": True, "http_status": status, "text": text}
+
+
+def _send_live_video_provider_request(*, url: str, token: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+    body: bytes | None = None
+    method = "GET"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "Aegis-Agent/0.1",
+    }
+    if action == "submit":
+        method = "POST"
+        body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    elif action == "delete":
+        method = "DELETE"
+    request = Request(url, data=body, method=method, headers=headers)
+    try:
+        response_context = _open_without_redirects(request, timeout=30)
+    except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            return {"ok": False, "http_status": exc.code, "error": "HTTP redirects are not followed by the governed video provider adapter"}
+        return {"ok": False, "http_status": exc.code, "error": f"video provider failed with status {exc.code}"}
+    except URLError as exc:
+        return {"ok": False, "http_status": 0, "error": f"video provider request failed: {exc.reason}"}
+    with response_context as response:
+        status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+        max_bytes = 25 * 1024 * 1024 if action == "download" else 2 * 1024 * 1024
+        raw = response.read(max_bytes + 1)
+        content_type = str(getattr(response, "headers", {}).get("Content-Type", ""))
+    if not 200 <= status < 300:
+        return {"ok": False, "http_status": status, "error": f"video provider failed with status {status}"}
+    if action == "download":
+        if not raw:
+            return {"ok": False, "http_status": status, "error": "video provider returned an empty artifact"}
+        if len(raw) > 25 * 1024 * 1024:
+            return {"ok": False, "http_status": status, "error": "video provider artifact exceeds the 25 MiB local artifact limit"}
+        return {"ok": True, "http_status": status, "content": raw, "mime_type": content_type}
+    try:
+        decoded = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {"ok": False, "http_status": status, "error": "video provider JSON response could not be decoded"}
+    if not isinstance(decoded, dict):
+        return {"ok": False, "http_status": status, "error": "video provider JSON response must be an object"}
+    return {"ok": True, "http_status": status, "json": decoded}
+
+
+def _live_video_job_summary(decoded: Any, *, fallback_video_id: str = "") -> dict[str, Any]:
+    source = decoded if isinstance(decoded, dict) else {}
+    video_id = str(source.get("id") or source.get("video_id") or fallback_video_id or "")[:200]
+    status = str(source.get("status") or source.get("state") or "")[:80]
+    summary: dict[str, Any] = {
+        "id": video_id,
+        "status": status,
+        "raw_response_body_included": False,
+    }
+    for key in ("object", "model", "seconds", "size"):
+        if source.get(key) is not None:
+            summary[key] = str(source.get(key))[:200]
+    for key in ("progress", "created_at"):
+        if source.get(key) is not None:
+            summary[key] = source.get(key)
+    if source.get("deleted") is not None:
+        summary["deleted"] = bool(source.get("deleted"))
+    error = source.get("error")
+    if isinstance(error, dict):
+        message = str(error.get("message") or error.get("code") or "")[:500]
+        if message:
+            summary["error"] = str(redact(message))
+    elif isinstance(error, str) and error:
+        summary["error"] = str(redact(error[:500]))
+    return summary
+
+
+def _live_video_extension_and_mime(*, declared_mime: str, content: bytes, variant: str) -> tuple[str, str]:
+    normalized = declared_mime.split(";", 1)[0].strip().lower()
+    if content[4:8] == b"ftyp" or normalized == "video/mp4":
+        return "mp4", "video/mp4"
+    if content.startswith(b"\xff\xd8") or normalized in {"image/jpeg", "image/jpg"}:
+        return "jpg", "image/jpeg"
+    if content.startswith(b"RIFF") and content[8:12] == b"WEBP" or normalized == "image/webp":
+        return "webp", "image/webp"
+    if variant == "thumbnail":
+        raise ToolExecutionError("video thumbnail response must be JPEG or WEBP")
+    if variant == "spritesheet":
+        raise ToolExecutionError("video spritesheet response must be JPEG or WEBP")
+    raise ToolExecutionError("video provider download response must be MP4, JPEG, or WEBP")
+
+
 def _media_base64_from_provider_json(decoded: dict[str, Any], *, tool: str) -> str:
     keys = ("audio_base64", "wav_base64", "data_base64", "data") if tool == "tts" else ("image_base64", "png_base64", "b64_json", "data_base64", "data")
     for key in keys:
@@ -2442,6 +3743,15 @@ def _media_base64_from_provider_json(decoded: dict[str, Any], *, tool: str) -> s
         first = images[0]
         if isinstance(first, dict):
             for key in ("b64_json", "image_base64", "data"):
+                value = first.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    data_items = decoded.get("data")
+    if isinstance(data_items, list) and data_items:
+        first = data_items[0]
+        if isinstance(first, dict):
+            keys = ("data", "audio_base64", "b64_json") if tool == "tts" else ("b64_json", "image_base64", "data")
+            for key in keys:
                 value = first.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
@@ -2587,6 +3897,164 @@ def _send_hosted_sandbox_request(
     return {"ok": 200 <= status < 300, "http_status": status, "job_id": job_id or None, "error": None if 200 <= status < 300 else f"hosted sandbox request failed with status {status}"}
 
 
+def _hosted_sandbox_action(params: dict[str, Any]) -> str | None:
+    raw = str(params.get("action") or params.get("operation") or "submit").strip().lower().replace("-", "_")
+    aliases = {
+        "": "submit",
+        "run": "submit",
+        "submit": "submit",
+        "execute": "submit",
+        "status": "status",
+        "poll": "status",
+        "logs": "logs",
+        "log": "logs",
+        "tail": "logs",
+        "cancel": "cancel",
+        "stop": "cancel",
+        "artifact": "artifact",
+        "download": "artifact",
+        "download_artifact": "artifact",
+        "rollback": "rollback",
+        "delete": "rollback",
+        "cleanup": "rollback",
+    }
+    return aliases.get(raw)
+
+
+def _safe_hosted_sandbox_job_id(job_id: str) -> bool:
+    return bool(job_id and len(job_id) <= 200 and re.fullmatch(r"[A-Za-z0-9._:@+-]+", job_id))
+
+
+def _send_hosted_sandbox_lifecycle_request(*, url: str, token: str, backend: str, action: str, job_id: str, timeout: int) -> dict[str, Any]:
+    payload = {
+        "backend": backend,
+        "action": action,
+        "job_id": job_id,
+        "job_id_sha256": hashlib.sha256(job_id.encode("utf-8")).hexdigest(),
+        "requested_at": now_utc(),
+    }
+    body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    request = Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "Aegis-Agent/0.1",
+        },
+    )
+    try:
+        response_context = _open_without_redirects(request, timeout=timeout)
+    except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            return {"ok": False, "http_status": exc.code, "error": "HTTP redirects are not followed by the governed hosted sandbox lifecycle adapter", "response_summary": {}}
+        return {"ok": False, "http_status": exc.code, "error": f"hosted sandbox lifecycle request failed with status {exc.code}", "response_summary": {}}
+    except URLError as exc:
+        return {"ok": False, "http_status": 0, "error": f"hosted sandbox lifecycle request failed: {exc.reason}", "response_summary": {}}
+    with response_context as response:
+        status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+        content_type = str(getattr(response, "headers", {}).get("Content-Type", ""))
+        raw_body = response.read(12 * 1024 * 1024 if action == "artifact" else 64 * 1024)
+    decoded: dict[str, Any] = {}
+    if "json" in content_type.lower() or raw_body.strip().startswith(b"{"):
+        try:
+            candidate = json.loads(raw_body.decode("utf-8"))
+            if isinstance(candidate, dict):
+                decoded = candidate
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            decoded = {}
+    response_summary = _hosted_sandbox_response_summary(decoded, action=action)
+    result: dict[str, Any] = {
+        "ok": 200 <= status < 300,
+        "http_status": status,
+        "provider_status": response_summary.get("state") or response_summary.get("status"),
+        "response_summary": response_summary,
+        "error": None if 200 <= status < 300 else f"hosted sandbox lifecycle request failed with status {status}",
+    }
+    if action == "logs":
+        log_tail = _hosted_sandbox_log_tail(decoded.get("logs") or decoded.get("log_tail") or decoded.get("stdout") or "")
+        result.update({"log_tail": log_tail, "log_line_count": len(log_tail)})
+    if action == "artifact":
+        artifact_content, artifact_name, artifact_mime = _hosted_sandbox_artifact_from_response(decoded, raw_body=raw_body, content_type=content_type)
+        if artifact_content:
+            result.update({"artifact_content": artifact_content, "artifact_name": artifact_name, "artifact_mime": artifact_mime})
+    return result
+
+
+def _hosted_sandbox_response_summary(decoded: dict[str, Any], *, action: str) -> dict[str, Any]:
+    summary: dict[str, Any] = {"action": action, "response_keys": sorted(str(key)[:80] for key in decoded)}
+    for key in ("status", "state", "message", "artifact_id", "artifact_name", "created_at", "started_at", "completed_at"):
+        value = decoded.get(key)
+        if value is not None:
+            summary[key] = str(redact(str(value)))[:500]
+    if action == "logs":
+        summary["log_line_count"] = len(_hosted_sandbox_log_tail(decoded.get("logs") or decoded.get("log_tail") or decoded.get("stdout") or ""))
+    return summary
+
+
+def _hosted_sandbox_log_tail(value: Any) -> list[str]:
+    if isinstance(value, list):
+        lines = [str(item) for item in value]
+    else:
+        lines = str(value or "").splitlines()
+    return [str(redact(line))[:500] for line in lines[-20:]]
+
+
+def _hosted_sandbox_artifact_from_response(decoded: dict[str, Any], *, raw_body: bytes, content_type: str) -> tuple[bytes | None, str, str]:
+    artifact_name = str(decoded.get("artifact_name") or decoded.get("filename") or "artifact.bin")[:120]
+    artifact_mime = str(decoded.get("mime_type") or decoded.get("content_type") or "application/octet-stream")[:120]
+    for key in ("artifact_base64", "data_base64", "content_base64"):
+        value = decoded.get(key)
+        if isinstance(value, str) and value.strip():
+            try:
+                content = base64.b64decode(value.strip(), validate=True)
+            except ValueError:
+                return None, artifact_name, artifact_mime
+            if len(content) <= 10 * 1024 * 1024:
+                return content, artifact_name, artifact_mime
+            return None, artifact_name, artifact_mime
+    if content_type and "json" not in content_type.lower() and raw_body:
+        if len(raw_body) > 10 * 1024 * 1024:
+            return None, artifact_name, artifact_mime
+        return raw_body, artifact_name, content_type.split(";", 1)[0].strip().lower() or artifact_mime
+    return None, artifact_name, artifact_mime
+
+
+def _hosted_sandbox_lifecycle_receipt(*, backend: str, action: str, domain: str, job_id: str, http_status: int, handle_present: bool, response_summary: dict[str, Any]) -> dict[str, Any]:
+    encoded = json.dumps(response_summary, sort_keys=True, default=str).encode("utf-8")
+    return {
+        "receipt_schema": "hosted_sandbox_lifecycle_receipt_v1",
+        "backend": backend,
+        "action": action,
+        "domain": domain,
+        "http_status": http_status,
+        "job_id_sha256": hashlib.sha256(job_id.encode("utf-8")).hexdigest(),
+        "response_summary_sha256": hashlib.sha256(encoded).hexdigest(),
+        "response_keys": response_summary.get("response_keys", []),
+        "secret_handle_present": handle_present,
+        "raw_job_id_logged": False,
+        "raw_command_logged": False,
+        "raw_secret_values_included": False,
+        "raw_response_body_included": False,
+    }
+
+
+def _hosted_sandbox_artifact_extension(artifact_name: str, mime_type: str) -> str:
+    suffix = Path(artifact_name).suffix.lower().lstrip(".")
+    if suffix and re.fullmatch(r"[a-z0-9]{1,12}", suffix):
+        return suffix
+    normalized = mime_type.split(";", 1)[0].strip().lower()
+    return {
+        "application/json": "json",
+        "text/plain": "txt",
+        "application/zip": "zip",
+        "application/gzip": "gz",
+        "image/png": "png",
+        "image/jpeg": "jpg",
+    }.get(normalized, "bin")
+
+
 def _docker_args_for_tool(*, name: str, params: dict[str, Any], config: dict[str, Any]) -> list[str]:
     if name == "container_run":
         image = str(params.get("image", "")).strip()
@@ -2680,6 +4148,8 @@ def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def _operation_for_tool(name: str, permission: str) -> str:
+    if name == "message_send":
+        return "send_message"
     if name in {"file_write", "memory_store", "image_generate", "tts", "subagent_delegate", "mcp_call"}:
         return "write"
     if name == "shell":

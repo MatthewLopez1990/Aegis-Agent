@@ -17,16 +17,24 @@ from aegis.channels.base import ChannelResponse
 from aegis.channels.registry import ChannelRegistry
 from aegis.config.loader import load_config, write_default_config
 from aegis.connectors.registry import build_default_registry
-from aegis.execution.backends import ExecutionBackendRegistry
-from aegis.kanban.manager import KanbanManager
+from aegis.hooks.manager import HOOK_EVENTS, HookManager
+from aegis.kanban.manager import KanbanManager, subagent_review_action_hints
 from aegis.memory.manager import MemoryManager
 from aegis.memory.models import MemoryType
 from aegis.memory.store import LocalStore
 from aegis.mcp.registry import McpRegistry
 from aegis.migration.openclaw import inspect_hermes_home, inspect_openclaw_home, preview_hermes_memory_import, preview_openclaw_memory_import
-from aegis.models.registry import ModelRegistry
+from aegis.models.registry import ModelRegistry, default_providers
 from aegis.personality.context import ContextFileLoader, PERSONALITY_NAMES
+from aegis.plugins.manager import PluginManager
 from aegis.product.capabilities import build_product_dashboard
+from aegis.remote_control import (
+    RemoteControlPairingRegistry,
+    build_remote_control_directory,
+    build_remote_control_notification,
+    build_remote_control_task_events,
+    build_remote_control_task_status,
+)
 from aegis.research.harness import ResearchHarness
 from aegis.scheduler.manager import ScheduleManager
 from aegis.security.policy_profile import activate_due_policy_rollouts, apply_policy_bundle, diff_policy_bundle, export_policy_bundle, import_policy_bundle, list_policy_bundles, list_policy_promotions, list_policy_rollouts, promote_policy_bundle, rollback_policy_bundle, schedule_policy_bundle
@@ -36,9 +44,9 @@ from aegis.sessions.manager import SessionManager
 from aegis.skills.manifest import SkillManifest
 from aegis.skills.hub import SkillHubCatalog
 from aegis.skills.registry import SkillRegistry
-from aegis.skills.signing import ensure_signing_key, sign_manifest, verify_manifest_signature
+from aegis.skills.signing import DEFAULT_SKILL_SIGNING_KEY, ensure_signing_key, sign_manifest, verify_manifest_signature
 from aegis.tools.catalog import ToolCatalog
-from aegis.tui.main import run_tui
+from aegis.tui.main import SHIELD_FRAMES, run_tui
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -54,6 +62,19 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+EXTERNAL_AUTH_LOGIN_ALIASES = ("nous-oauth", "qwen-oauth")
+
+
+def _model_auth_provider_choices() -> tuple[str, ...]:
+    providers = default_providers()
+    auth_provider_names = {
+        name
+        for name, provider in providers.items()
+        if provider.auth_secret is not None or provider.external_auth_method is not None
+    }
+    return tuple(sorted({*auth_provider_names, *EXTERNAL_AUTH_LOGIN_ALIASES}))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aegis", description="Aegis Agent local-first runtime")
     parser.add_argument("--data-dir", default=".aegis", help="Aegis data directory")
@@ -62,6 +83,12 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands.add_parser("init", help="Create default local configuration")
     subcommands.add_parser("health", help="Show local runtime health")
     subcommands.add_parser("dashboard", help="Show product capability and security posture")
+    subcommands.add_parser("capabilities", help="Show capability groups, readiness buckets, and live gaps")
+    enterprise = subcommands.add_parser("enterprise-readiness", help="Show concise enterprise readiness flags")
+    enterprise.add_argument("--memory", action="store_true", help="Only report governed memory readiness")
+    enterprise.add_argument("--self-improvement", action="store_true", help="Only report self-improvement readiness")
+    enterprise.add_argument("--tui", action="store_true", help="Only report TUI readiness")
+    enterprise.add_argument("--limit", type=int, default=20, help="Maximum readiness blockers to include")
     server = subcommands.add_parser("serve", help="Run the local development API server")
     server.add_argument("--workspace", default=".")
     server.add_argument("--host", default="127.0.0.1")
@@ -223,6 +250,10 @@ def build_parser() -> argparse.ArgumentParser:
     memory_create.add_argument("--ttl-days", type=int)
     memory_search = memory_sub.add_parser("search", help="Search memory")
     memory_search.add_argument("query")
+    memory_health = memory_sub.add_parser("health", help="Summarize memory quality, consolidation, and review posture")
+    memory_health.add_argument("--limit", type=int, default=50)
+    memory_health.add_argument("--scope", default="workspace")
+    memory_health.add_argument("--owner", default="local-user")
     memory_review = memory_sub.add_parser("review-queue", help="List memory items needing review")
     memory_review.add_argument("--limit", type=int, default=50)
     memory_review.add_argument("--scope", default="workspace")
@@ -316,10 +347,64 @@ def build_parser() -> argparse.ArgumentParser:
     skill_enable.add_argument("skill_id")
     skill_enable.add_argument("--approval-id", help="Approved high-risk skill enable request")
 
+    for plugin_name in ("plugin", "plugins"):
+        plugin = subcommands.add_parser(plugin_name, help="Manage governed local plugins")
+        plugin_sub = plugin.add_subparsers(dest="plugin_command", required=True)
+        plugin_sub.add_parser("list", help="List installed plugins")
+        plugin_install = plugin_sub.add_parser("install", help="Install a local plugin manifest")
+        plugin_install.add_argument("manifest_path")
+        plugin_install.add_argument("--enable", action="store_true")
+        plugin_install.add_argument("--unsigned-local", action="store_true", help="Allow unsigned local development skill manifests")
+        plugin_enable = plugin_sub.add_parser("enable", help="Enable plugin default-enabled resources")
+        plugin_enable.add_argument("plugin_id")
+        plugin_disable = plugin_sub.add_parser("disable", help="Disable plugin resources")
+        plugin_disable.add_argument("plugin_id")
+        plugin_remove = plugin_sub.add_parser("remove", help="Remove a plugin and its owned resources")
+        plugin_remove.add_argument("plugin_id")
+        plugin_sub.add_parser("reload", help="Reload plugin inventory from private local state")
+        plugin_marketplace = plugin_sub.add_parser("marketplace", help="Search the metadata-only plugin marketplace catalog")
+        plugin_marketplace.add_argument("--query", "-q", default="")
+        plugin_marketplace.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
+        plugin_updates = plugin_sub.add_parser("updates", help="Plan plugin updates from marketplace metadata without downloading code")
+        plugin_updates.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
+        plugin_fetch = plugin_sub.add_parser("fetch-manifest", help="Download and verify one marketplace plugin manifest for review")
+        plugin_fetch.add_argument("plugin_id")
+        plugin_fetch.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
+        plugin_bundle = plugin_sub.add_parser("fetch-bundle", help="Download and verify one signed marketplace plugin bundle for review")
+        plugin_bundle.add_argument("plugin_id")
+        plugin_bundle.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
+        plugin_bundle.add_argument("--key-name", default=DEFAULT_SKILL_SIGNING_KEY, help="Brokered HMAC signing key name")
+        plugin_bundle_install = plugin_sub.add_parser("install-bundle", help="Fetch, verify, and install one signed marketplace plugin bundle")
+        plugin_bundle_install.add_argument("plugin_id")
+        plugin_bundle_install.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
+        plugin_bundle_install.add_argument("--key-name", default=DEFAULT_SKILL_SIGNING_KEY, help="Brokered HMAC signing key name")
+        plugin_bundle_install.add_argument("--enable", action="store_true", help="Enable default-enabled resources after install")
+        plugin_marketplace_install = plugin_sub.add_parser("install-marketplace", help="Fetch, verify, and install one marketplace plugin manifest")
+        plugin_marketplace_install.add_argument("plugin_id")
+        plugin_marketplace_install.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
+        plugin_marketplace_install.add_argument("--enable", action="store_true", help="Enable default-enabled resources after install")
+        plugin_marketplace_update = plugin_sub.add_parser("update-marketplace", help="Fetch, verify, and apply one marketplace plugin update")
+        plugin_marketplace_update.add_argument("plugin_id")
+        plugin_marketplace_update.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
+        plugin_marketplace_update.add_argument("--enable", action="store_true", help="Enable default-enabled resources after update")
+        plugin_marketplace_update.add_argument("--disable", action="store_true", help="Keep updated resources disabled")
+        plugin_marketplace_update.add_argument("--force", action="store_true", help="Allow reinstalling the same or older catalog version")
+        plugin_marketplace_update.add_argument("--approved", action="store_true", help="Approve applying the marketplace update")
+        plugin_prepare_update = plugin_sub.add_parser("prepare-update", help="Fetch and verify one marketplace update as a private review candidate")
+        plugin_prepare_update.add_argument("plugin_id")
+        plugin_prepare_update.add_argument("--catalog-path", help="Optional local marketplace catalog JSON file")
+        plugin_prepare_update.add_argument("--force", action="store_true", help="Allow preparing the same or older catalog version")
+        plugin_apply_prepared = plugin_sub.add_parser("apply-prepared-update", help="Apply a prepared marketplace update candidate after explicit approval")
+        plugin_apply_prepared.add_argument("candidate_id")
+        plugin_apply_prepared.add_argument("--approved", action="store_true", help="Approve applying the prepared update candidate")
+        plugin_apply_prepared.add_argument("--enable", action="store_true", help="Enable default-enabled resources after applying")
+        plugin_apply_prepared.add_argument("--disable", action="store_true", help="Keep updated resources disabled")
+
     connector = subcommands.add_parser("connector", help="List connector status")
     connector_sub = connector.add_subparsers(dest="connector_command", required=True)
     connector_sub.add_parser("list", help="List connectors")
     connector_sub.add_parser("status", help="Show connector health")
+    connector_sub.add_parser("doctor", help="Show live connector activation preflight")
 
     channels = subcommands.add_parser("channel", help="Inspect and test channel adapters")
     channel_sub = channels.add_subparsers(dest="channel_command", required=True)
@@ -355,7 +440,113 @@ def build_parser() -> argparse.ArgumentParser:
     channel_send_chat_webhook.add_argument("--session-id")
     channel_send_chat_webhook.add_argument("--approved", action="store_true")
 
-    models = subcommands.add_parser("model", help="Manage model routes and usage")
+    remote_control = subcommands.add_parser(
+        "remote-control",
+        aliases=["rc"],
+        help="Inspect local remote-control and relay readiness",
+    )
+    remote_control.set_defaults(command="remote-control")
+    remote_control_sub = remote_control.add_subparsers(dest="remote_control_command", required=True)
+    remote_control_sub.add_parser("status", help="Show local remote-control pairing readiness")
+    remote_control_pair = remote_control_sub.add_parser("pair", help="Create a short-lived scoped remote-control pairing token")
+    remote_control_pair.add_argument("--label", default="", help="Pairing label shown in public status")
+    remote_control_pair.add_argument("--session-id", help="Optional session scope")
+    remote_control_pair.add_argument("--task-id", help="Optional task scope")
+    remote_control_pair.add_argument(
+        "--allowed-actions",
+        default="status,events,pause,cancel",
+        help="Comma-separated task actions",
+    )
+    remote_control_pair.add_argument(
+        "--expires-in-seconds",
+        type=int,
+        default=600,
+        help="Pairing TTL, clamped between 60 and 3600",
+    )
+    remote_control_pair.add_argument("--host", default="127.0.0.1", help="Local API host to render in endpoint hints")
+    remote_control_pair.add_argument("--port", type=int, default=8765, help="Local API port to render in endpoint hints")
+    remote_control_directory = remote_control_sub.add_parser("directory", help="Show the sanitized task directory for one active pairing")
+    remote_control_directory.add_argument("--pairing-id", required=True, help="Active pairing id")
+    remote_control_directory.add_argument("--limit", type=int, default=10, help="Maximum session-scoped tasks to show")
+    remote_control_revoke = remote_control_sub.add_parser("revoke", help="Revoke a local remote-control pairing")
+    remote_control_revoke.add_argument("pairing_id")
+    remote_control_revoke.add_argument("--relay-auth-secret", help="Brokered secret name used to propagate relay revocation")
+    remote_control_revoke.add_argument("--approved", action="store_true", help="Approve one outbound relay revocation notice")
+    remote_control_relay = remote_control_sub.add_parser("relay", help="Show outbound relay preflight blockers or register an approved pairing")
+    remote_control_relay.add_argument("--relay-url")
+    remote_control_relay.add_argument("--pairing-id", help="Active pairing id to register with the relay")
+    remote_control_relay.add_argument("--relay-auth-secret", help="Brokered secret name for relay bearer auth")
+    remote_control_relay.add_argument("--approved", action="store_true", help="Approve one outbound relay registration")
+    remote_control_relay_pull = remote_control_sub.add_parser("relay-pull", help="Pull queued scoped actions from a registered relay")
+    remote_control_relay_pull.add_argument("--pairing-id", required=True, help="Registered pairing id")
+    remote_control_relay_pull.add_argument("--relay-auth-secret", required=True, help="Brokered secret name for relay bearer auth")
+    remote_control_relay_pull.add_argument("--approved", action="store_true", help="Approve one outbound relay action pull")
+    remote_control_relay_pull.add_argument("--limit", type=int, default=10, help="Maximum action envelopes to pull")
+    remote_control_relay_pull.add_argument("--dry-run", action="store_true", help="Pull and validate queued actions without executing them")
+    remote_control_relay_directory = remote_control_sub.add_parser("relay-directory", help="Publish one sanitized scoped directory snapshot to a registered relay")
+    remote_control_relay_directory.add_argument("--pairing-id", required=True, help="Registered pairing id")
+    remote_control_relay_directory.add_argument("--relay-auth-secret", required=True, help="Brokered secret name for relay bearer auth")
+    remote_control_relay_directory.add_argument("--approved", action="store_true", help="Approve one outbound relay directory snapshot")
+    remote_control_relay_directory.add_argument("--limit", type=int, default=10, help="Maximum session-scoped tasks to publish")
+    remote_control_relay_notify = remote_control_sub.add_parser("relay-notify", help="Publish one sanitized relay notification for mobile or gateway clients")
+    remote_control_relay_notify.add_argument("--pairing-id", required=True, help="Registered pairing id")
+    remote_control_relay_notify.add_argument("--relay-auth-secret", required=True, help="Brokered secret name for relay bearer auth")
+    remote_control_relay_notify.add_argument("--event", default="directory-updated", help="Notification event, such as directory-updated or task-updated")
+    remote_control_relay_notify.add_argument("--task-id", help="Optional task id to include as sanitized metadata")
+    remote_control_relay_notify.add_argument("--approved", action="store_true", help="Approve one outbound relay notification")
+    remote_control_push_targets = remote_control_sub.add_parser("push-targets", help="List registered brokered native push targets")
+    remote_control_push_targets.add_argument("--target-id", help="Optional target id to show")
+    remote_control_push_register = remote_control_sub.add_parser("push-register", help="Register a brokered APNS/FCM push target")
+    remote_control_push_register.add_argument("--label", default="native push", help="Target label")
+    remote_control_push_register.add_argument("--provider", required=True, choices=["apns", "fcm"], help="Native push provider")
+    remote_control_push_register.add_argument("--push-auth-secret", required=True, help="Brokered provider auth token secret")
+    remote_control_push_register.add_argument("--device-token-secret", required=True, help="Brokered APNS/FCM device token secret")
+    remote_control_push_register.add_argument("--apns-topic", help="APNS topic/bundle id")
+    remote_control_push_register.add_argument("--fcm-project-id", help="Firebase project id for FCM HTTP v1")
+    remote_control_push_register.add_argument("--approved", action="store_true", help="Approve local push target registration")
+    remote_control_push_disable = remote_control_sub.add_parser("push-disable", help="Disable a registered native push target")
+    remote_control_push_disable.add_argument("--target-id", required=True, help="Registered native push target id")
+    remote_control_push_disable.add_argument("--approved", action="store_true", help="Approve native push target disable")
+    remote_control_push_rotate = remote_control_sub.add_parser("push-rotate", help="Rotate brokered APNS/FCM push target secret references")
+    remote_control_push_rotate.add_argument("--target-id", required=True, help="Registered native push target id")
+    remote_control_push_rotate.add_argument("--push-auth-secret", help="Replacement brokered provider auth token secret")
+    remote_control_push_rotate.add_argument("--device-token-secret", help="Replacement brokered APNS/FCM device token secret")
+    remote_control_push_rotate.add_argument("--apns-topic", help="Replacement APNS topic/bundle id")
+    remote_control_push_rotate.add_argument("--fcm-project-id", help="Replacement Firebase project id for FCM HTTP v1")
+    remote_control_push_rotate.add_argument("--approved", action="store_true", help="Approve native push target rotation")
+    remote_control_push = remote_control_sub.add_parser("push", help="Publish one approved native APNS/FCM notification")
+    remote_control_push.add_argument("--pairing-id", required=True, help="Active pairing id")
+    remote_control_push.add_argument("--target-id", help="Registered native push target id")
+    remote_control_push.add_argument("--provider", choices=["apns", "fcm"], help="Native push provider")
+    remote_control_push.add_argument("--push-auth-secret", help="Brokered provider auth token secret")
+    remote_control_push.add_argument("--device-token-secret", help="Brokered APNS/FCM device token secret")
+    remote_control_push.add_argument("--apns-topic", help="APNS topic/bundle id")
+    remote_control_push.add_argument("--fcm-project-id", help="Firebase project id for FCM HTTP v1")
+    remote_control_push.add_argument("--event", default="directory-updated", help="Notification event, such as directory-updated or task-updated")
+    remote_control_push.add_argument("--task-id", help="Optional task id to include as sanitized metadata")
+    remote_control_push.add_argument("--approved", action="store_true", help="Approve one outbound native push notification")
+    remote_control_relay_outbox = remote_control_sub.add_parser("relay-outbox", help="List durable metadata-only relay notification delivery state")
+    remote_control_relay_outbox.add_argument("--status", help="Optional outbox status filter")
+    remote_control_relay_outbox.add_argument("--limit", type=int, default=20, help="Maximum outbox rows to list")
+    remote_control_relay_retry = remote_control_sub.add_parser("relay-retry", help="Retry pending or failed relay notification outbox items")
+    remote_control_relay_retry.add_argument("--pairing-id", required=True, help="Registered pairing id")
+    remote_control_relay_retry.add_argument("--relay-auth-secret", required=True, help="Brokered secret name for relay bearer auth")
+    remote_control_relay_retry.add_argument("--approved", action="store_true", help="Approve outbound relay retry attempts")
+    remote_control_relay_retry.add_argument("--limit", type=int, default=10, help="Maximum outbox items to retry")
+    remote_control_relay_confirm = remote_control_sub.add_parser("relay-confirm", help="Confirm one relay notification delivery receipt")
+    remote_control_relay_confirm.add_argument("--pairing-id", required=True, help="Registered pairing id")
+    remote_control_relay_confirm.add_argument("--outbox-id", required=True, help="Relay notification outbox id to confirm")
+    remote_control_relay_confirm.add_argument("--relay-auth-secret", required=True, help="Brokered secret name for relay bearer auth")
+    remote_control_relay_confirm.add_argument("--approved", action="store_true", help="Approve one relay delivery confirmation check")
+    remote_control_relay_action = remote_control_sub.add_parser("relay-action", help="Execute a registered relay-authenticated task action")
+    remote_control_relay_action.add_argument("--pairing-id", required=True, help="Registered pairing id")
+    remote_control_relay_action.add_argument("--task-id", required=True, help="Task id to control through the relay proxy")
+    remote_control_relay_action.add_argument("--action", required=True, choices=["status", "events", "resume", "pause", "cancel"], help="Scoped remote-control action")
+    remote_control_relay_action.add_argument("--relay-auth-secret", required=True, help="Brokered secret name for relay bearer auth")
+    remote_control_relay_action.add_argument("--session-id", help="Optional session id for resume/pause/cancel")
+    remote_control_relay_action.add_argument("--reason", default="", help="Optional reason for pause/cancel")
+
+    models = subcommands.add_parser("model", aliases=["models"], help="Manage model routes and usage")
     model_sub = models.add_subparsers(dest="model_command", required=True)
     model_sub.add_parser("list", help="List supported models")
     model_sub.add_parser("providers", help="List model providers and auth status")
@@ -371,18 +562,38 @@ def build_parser() -> argparse.ArgumentParser:
     model_auth_sub = model_auth.add_subparsers(dest="auth_command", required=True)
     model_auth_status = model_auth_sub.add_parser("status", help="Show model provider auth status")
     model_auth_status.add_argument("provider", nargs="?")
-    model_auth_login = model_auth_sub.add_parser("login", help="Store a model provider API key in the local secret store")
-    model_auth_login.add_argument("provider", choices=("openai", "openrouter", "anthropic", "google", "mistral", "cohere", "custom"))
+    model_auth_methods = model_auth_sub.add_parser("methods", help="Show supported auth methods and subscription login status")
+    model_auth_methods.add_argument("provider", nargs="?")
+    model_auth_sub.add_parser("targets", help="Show Hermes/Claude provider auth parity targets")
+    model_auth_sub.add_parser("doctor", help="Show local provider-login readiness and next commands")
+    model_auth_readiness_packet = model_auth_sub.add_parser("readiness-packet", help="Create a private model auth readiness packet")
+    model_auth_readiness_packet.add_argument("--actor", default="operator")
+    model_auth_verify_readiness_packet = model_auth_sub.add_parser("verify-readiness-packet", help="Verify a private model auth readiness packet")
+    model_auth_verify_readiness_packet.add_argument("packet")
+    model_auth_verify_readiness_packet.add_argument("--actor", default="operator")
+    model_auth_provider_choices = _model_auth_provider_choices()
+    model_auth_login = model_auth_sub.add_parser("login", help="Store an API key or start a guarded provider-native login handoff")
+    model_auth_login.add_argument(
+        "provider",
+        choices=model_auth_provider_choices,
+    )
+    model_auth_login.add_argument("--method", choices=("api-key", "subscription", "oauth", "oauth-device", "cloud-identity"), default="api-key")
+    model_auth_login.add_argument("--subscription", action="store_true", help="Alias for --method subscription")
+    model_auth_login.add_argument("--run-external", action="store_true", help="Launch the provider's official interactive login command without capturing tokens")
+    model_auth_login.add_argument("--verify-external", action="store_true", help="Run the provider's official non-secret status command and remember a verified external login")
     model_auth_login.add_argument("--api-key", help="API key value. Prefer --api-key-stdin or interactive entry.")
     model_auth_login.add_argument("--api-key-stdin", action="store_true", help="Read API key from stdin")
-    model_auth_logout = model_auth_sub.add_parser("logout", help="Remove a model provider API key from the local secret store")
-    model_auth_logout.add_argument("provider", choices=("openai", "openrouter", "anthropic", "google", "mistral", "cohere", "custom"))
+    model_auth_logout = model_auth_sub.add_parser("logout", help="Remove a model provider API key or verified external auth link")
+    model_auth_logout.add_argument(
+        "provider",
+        choices=model_auth_provider_choices,
+    )
     model_sub.add_parser("usage", help="Show usage summary")
 
-    tools = subcommands.add_parser("tool", help="List or run built-in tools")
+    tools = subcommands.add_parser("tool", help="List or run governed tools")
     tool_sub = tools.add_subparsers(dest="tool_command", required=True)
     tool_sub.add_parser("list", help="List tools")
-    tool_run = tool_sub.add_parser("run", help="Run a governed built-in tool with JSON params")
+    tool_run = tool_sub.add_parser("run", help="Run a governed tool with JSON params")
     tool_run.add_argument("name")
     tool_run.add_argument("params", help="JSON object of tool params")
     tool_run.add_argument("--workspace", default=".")
@@ -391,6 +602,20 @@ def build_parser() -> argparse.ArgumentParser:
     backend = subcommands.add_parser("backend", help="List execution backends")
     backend_sub = backend.add_subparsers(dest="backend_command", required=True)
     backend_sub.add_parser("list", help="List execution backends")
+    backend_sub.add_parser("doctor", help="Show remote backend activation preflight")
+    backend_select = backend_sub.add_parser("select", help="Select an enabled execution backend")
+    backend_select.add_argument("name")
+    backend_select.add_argument("--approved", action="store_true", help="Approve the high-risk backend selection")
+    backend_select.add_argument("--workspace", default=".")
+
+    browser = subcommands.add_parser("browser", help="Manage governed browser activation packets")
+    browser.add_argument("--workspace", default=".")
+    browser_sub = browser.add_subparsers(dest="browser_command", required=True)
+    browser_activation_packet = browser_sub.add_parser("activation-packet", help="Create a live browser activation packet")
+    browser_activation_packet.add_argument("--actor", default="operator")
+    browser_verify_activation_packet = browser_sub.add_parser("verify-activation-packet", help="Verify a private live browser activation packet")
+    browser_verify_activation_packet.add_argument("packet")
+    browser_verify_activation_packet.add_argument("--actor", default="operator")
 
     evaluation = subcommands.add_parser("evaluation", help="Review local evaluation reports")
     evaluation_sub = evaluation.add_subparsers(dest="evaluation_command", required=True)
@@ -481,12 +706,76 @@ def build_parser() -> argparse.ArgumentParser:
     card_move.add_argument("card_id")
     card_move.add_argument("lane")
 
+    agents = subcommands.add_parser("agents", help="Inspect and queue governed subagent delegations")
+    agents.add_argument("--workspace", default=".")
+    agents_sub = agents.add_subparsers(dest="agents_command", required=True)
+    agents_status = agents_sub.add_parser("status", help="Show subagent delegation queue status")
+    agents_status.add_argument("--limit", type=int, default=20)
+    agents_autonomy_preflight = agents_sub.add_parser("autonomy-preflight", help="Show blockers before autonomous recursive subagent runtime can run")
+    agents_autonomy_preflight.add_argument("--actor", default="operator")
+    agents_autonomy_preflight.add_argument("--limit", type=int, default=20)
+    agents_delegate = agents_sub.add_parser("delegate", help="Queue a subagent delegation card through the governed tool path")
+    agents_delegate.add_argument("role")
+    agents_delegate.add_argument("task")
+    agents_delegate.add_argument("--approved", action="store_true")
+    agents_delegate.add_argument("--task-id")
+    agents_delegate.add_argument("--limit", type=int, default=20)
+    agents_handoff = agents_sub.add_parser("handoff", help="Record an operator handoff by moving a subagent delegation card")
+    agents_handoff.add_argument("card_id")
+    agents_handoff.add_argument("lane", choices=("backlog", "ready", "in_progress", "review", "blocked", "done"))
+    agents_handoff.add_argument("--actor", default="operator")
+    agents_handoff.add_argument("--reason", default="")
+    agents_handoff.add_argument("--limit", type=int, default=20)
+    agents_run = agents_sub.add_parser("run", help="Run an approved isolated subagent worker for a delegation card")
+    agents_run.add_argument("card_id")
+    agents_run.add_argument("--approved", action="store_true")
+    agents_run.add_argument("--actor", default="operator")
+    agents_run.add_argument("--limit", type=int, default=20)
+    agents_review_packet = agents_sub.add_parser("review-packet", help="Create a model-ready review packet for a subagent card")
+    agents_review_packet.add_argument("card_id")
+    agents_review_packet.add_argument("--actor", default="operator")
+    agents_review_packet.add_argument("--limit", type=int, default=20)
+    agents_verify_packet = agents_sub.add_parser("verify-packet", help="Verify a private subagent review packet artifact")
+    agents_verify_packet.add_argument("packet")
+    agents_verify_packet.add_argument("--actor", default="operator")
+    agents_verify_packet.add_argument("--limit", type=int, default=20)
+    agents_run_batch = agents_sub.add_parser("run-batch", help="Run approved isolated subagent workers for ready/in-progress cards")
+    agents_run_batch.add_argument("--card-id", action="append", default=[])
+    agents_run_batch.add_argument("--approved", action="store_true")
+    agents_run_batch.add_argument("--actor", default="operator")
+    agents_run_batch.add_argument("--run-limit", type=int, default=5)
+    agents_run_batch.add_argument("--limit", type=int, default=20)
+    agents_profiles = agents_sub.add_parser("profiles", help="List durable subagent profiles")
+    agents_profiles.add_argument("--limit", type=int, default=20)
+    agents_profile_create = agents_sub.add_parser("profile-create", help="Create or update a governed subagent profile")
+    agents_profile_create.add_argument("name")
+    agents_profile_create.add_argument("--role")
+    agents_profile_create.add_argument("--tool", action="append", default=[])
+    agents_profile_create.add_argument("--max-parallel-cards", type=int, default=1)
+    agents_profile_create.add_argument("--recursive-depth-limit", type=int, default=0)
+    agents_profile_create.add_argument("--max-tool-calls", type=int, default=0)
+    agents_profile_create.add_argument("--max-runtime-seconds", type=int, default=0)
+    agents_profile_create.add_argument("--network-policy", choices=("disabled", "allowlisted"), default="disabled")
+    agents_profile_create.add_argument("--workspace-scope", default="current_workspace")
+    agents_profile_create.add_argument("--actor", default="operator")
+    agents_profile_create.add_argument("--limit", type=int, default=20)
+    agents_profile_disable = agents_sub.add_parser("profile-disable", help="Disable a governed subagent profile")
+    agents_profile_disable.add_argument("profile_id")
+    agents_profile_disable.add_argument("--actor", default="operator")
+    agents_profile_disable.add_argument("--limit", type=int, default=20)
+
     mcp = subcommands.add_parser("mcp", help="Manage governed MCP server registrations")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
     mcp_register = mcp_sub.add_parser("register", help="Register an MCP server disabled by default")
     mcp_register.add_argument("name")
     mcp_register.add_argument("server_command")
     mcp_register.add_argument("--tool", action="append", default=[])
+    mcp_register.add_argument("--exclude-tool", action="append", default=[])
+    mcp_register.add_argument("--discover", action="store_true")
+    mcp_register.add_argument("--transport", default="stdio", choices=("stdio", "streamable-http", "streamable_http", "http"))
+    mcp_register.add_argument("--token-secret", help="Brokered bearer-token secret for Streamable HTTP MCP")
+    mcp_register.add_argument("--no-resources", action="store_true", help="Do not register MCP resource utility wrappers during discovery")
+    mcp_register.add_argument("--no-prompts", action="store_true", help="Do not register MCP prompt utility wrappers during discovery")
     mcp_register.add_argument("--enable", action="store_true")
     mcp_register.add_argument("--no-approval", action="store_true")
     mcp_call = mcp_sub.add_parser("call", help="Call an allowlisted MCP tool after approval")
@@ -494,7 +783,29 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_call.add_argument("tool")
     mcp_call.add_argument("--arguments", default="{}")
     mcp_call.add_argument("--approved", action="store_true")
+    mcp_auth = mcp_sub.add_parser("auth", help="Configure brokered MCP server auth")
+    mcp_auth_sub = mcp_auth.add_subparsers(dest="mcp_auth_command", required=True)
+    mcp_auth_token = mcp_auth_sub.add_parser("token", help="Attach a brokered bearer-token secret to a Streamable HTTP MCP server")
+    mcp_auth_token.add_argument("server")
+    mcp_auth_token.add_argument("token_secret")
     mcp_sub.add_parser("list", help="List MCP servers")
+
+    hooks = subcommands.add_parser("hooks", help="Manage governed local lifecycle hooks")
+    hooks.add_argument("--workspace", default=".")
+    hooks_sub = hooks.add_subparsers(dest="hooks_command", required=True)
+    hooks_sub.add_parser("list", help="List configured hooks")
+    hooks_add = hooks_sub.add_parser("add", help="Register a disabled hook unless --enabled is set")
+    hooks_add.add_argument("add_args", nargs=argparse.REMAINDER)
+    hooks_enable = hooks_sub.add_parser("enable", help="Enable a hook")
+    hooks_enable.add_argument("hook_id")
+    hooks_disable = hooks_sub.add_parser("disable", help="Disable a hook")
+    hooks_disable.add_argument("hook_id")
+    hooks_remove = hooks_sub.add_parser("remove", help="Remove a hook")
+    hooks_remove.add_argument("hook_id")
+    hooks_run = hooks_sub.add_parser("run", help="Run enabled hooks for one event")
+    hooks_run.add_argument("event", choices=HOOK_EVENTS)
+    hooks_run.add_argument("--approved", action="store_true")
+    hooks_run.add_argument("--context-json", default="{}")
 
     personality = subcommands.add_parser("personality", help="Inspect built-in personalities and context files")
     personality_sub = personality.add_subparsers(dest="personality_command", required=True)
@@ -596,6 +907,97 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _capabilities_view(dashboard: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "product": dashboard.get("product", {}),
+        "runtime": {
+            key: value
+            for key, value in dashboard.get("runtime", {}).items()
+            if key
+            in {
+                "tools",
+                "approval_gated_tools",
+                "limited_or_facade_tools",
+                "sessions",
+                "open_subagent_delegations",
+                "memory_health_score",
+            }
+        },
+        "capability_groups": dashboard.get("capability_groups", []),
+        "implementation_readiness": dashboard.get("implementation_readiness", []),
+        "live_gap_backlog": dashboard.get("live_gap_backlog", []),
+        "model_provider_auth_parity": dashboard.get("model_provider_auth_parity", {}),
+        "competitive_targets": dashboard.get("competitive_targets", []),
+    }
+
+
+def _live_gap_doctor(orchestrator: Any, area: str) -> dict[str, Any]:
+    dashboard = build_product_dashboard(orchestrator)
+    gap = next((item for item in dashboard.get("live_gap_backlog", []) if item.get("area") == area), None)
+    if gap is None:
+        raise KeyError(f"live gap area {area!r} is not available")
+    payload = {
+        "area": gap.get("area"),
+        "status": gap.get("status"),
+        "detail": gap.get("detail"),
+        "required_controls": gap.get("required_controls", []),
+        "verification_gates": gap.get("verification_gates", []),
+        "evaluation_scenarios": gap.get("evaluation_scenarios", []),
+        "operator_checklist": gap.get("operator_checklist", []),
+        "next_steps": gap.get("next_steps", []),
+        "raw_secret_values_included": False,
+    }
+    for key in (
+        "implemented_live_adapters",
+        "available_live_adapters",
+        "implemented_backend_adapters",
+        "available_backend_adapters",
+    ):
+        if key in gap:
+            payload[key] = gap[key]
+    if area == "provider_and_channel_live_connectors":
+        payload["live_write_flags"] = _live_connector_flag_status(orchestrator.config)
+    if area == "remote_backend_activation":
+        payload["enabled_backends"] = list(orchestrator.config.execution.enabled_backends)
+        payload["config_keys"] = [
+            "execution.enabled_backends",
+            "execution.docker_executable",
+            "execution.container_timeout_seconds",
+            "execution.container_memory",
+            "execution.container_cpus",
+            "execution.container_network",
+            "execution.ssh_allowed_hosts",
+            "execution.ssh_key_secret",
+            "execution.hosted_sandbox_api_url",
+            "execution.hosted_sandbox_allowed_hosts",
+            "execution.hosted_sandbox_token_secret",
+        ]
+    return payload
+
+
+def _live_connector_flag_status(config: Any) -> list[dict[str, Any]]:
+    flags = (
+        ("github", "live_github_writes"),
+        ("gitlab", "live_gitlab_writes"),
+        ("generic_rest", "live_rest_writes"),
+        ("mock_graph_calendar", "live_graph_calendar_writes"),
+        ("mock_graph_email", "live_graph_email_writes"),
+        ("mock_graph_contact", "live_graph_contact_writes"),
+        ("mock_servicenow", "live_service_desk_writes"),
+        ("mock_messaging", "live_messaging_writes"),
+    )
+    return [
+        {
+            "adapter": adapter,
+            "config_key": f"security.{flag}",
+            "enabled": bool(getattr(config, flag, False)),
+            "example": f"{flag} = true",
+            "raw_secret_values_included": False,
+        }
+        for adapter, flag in flags
+    ]
+
+
 def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
     config = load_config(args.data_dir)
     if args.command == "init":
@@ -614,6 +1016,13 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
     if args.command == "dashboard":
         orchestrator = build_orchestrator(data_dir=args.data_dir)
         return build_product_dashboard(orchestrator)
+
+    if args.command == "capabilities":
+        orchestrator = build_orchestrator(data_dir=args.data_dir)
+        return _capabilities_view(build_product_dashboard(orchestrator))
+
+    if args.command == "enterprise-readiness":
+        return _enterprise_readiness(args, config)
 
     if args.command == "serve":
         serve(data_dir=args.data_dir, workspace=args.workspace, host=args.host, port=args.port)
@@ -750,6 +1159,8 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return record.to_row()
         if args.memory_command == "search":
             return {"memories": manager.retrieve_relevant(args.query)}
+        if args.memory_command == "health":
+            return manager.health_report(limit=args.limit, owner=args.owner, scope=args.scope)
         if args.memory_command == "review-queue":
             return manager.review_queue(limit=args.limit, scope=args.scope)
         if args.memory_command == "session-preview":
@@ -842,13 +1253,91 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             orchestrator = build_orchestrator(data_dir=config.data_dir)
             return orchestrator.enable_skill(args.skill_id, approval_id=args.approval_id)
 
+    if args.command in {"plugin", "plugins"}:
+        manager = _plugin_manager(config)
+        if args.plugin_command == "list":
+            return {"status": "governed_local_ready", "plugins": manager.list_plugins()}
+        if args.plugin_command == "install":
+            return {"plugin": manager.install_plugin(args.manifest_path, enable=args.enable, unsigned_local=args.unsigned_local)}
+        if args.plugin_command == "enable":
+            return manager.enable_plugin(args.plugin_id)
+        if args.plugin_command == "disable":
+            return manager.disable_plugin(args.plugin_id)
+        if args.plugin_command == "remove":
+            return manager.remove_plugin(args.plugin_id)
+        if args.plugin_command == "reload":
+            return {"ok": True, "mode": "private_plugin_inventory", "plugins": manager.list_plugins()}
+        if args.plugin_command == "marketplace":
+            return manager.marketplace(query=args.query, catalog_path=args.catalog_path)
+        if args.plugin_command == "updates":
+            return manager.update_plan(catalog_path=args.catalog_path)
+        if args.plugin_command == "fetch-manifest":
+            return manager.fetch_marketplace_manifest(
+                args.plugin_id,
+                catalog_path=args.catalog_path,
+                allowlist=config.network_allowlist,
+            )
+        if args.plugin_command == "fetch-bundle":
+            return manager.fetch_marketplace_bundle(
+                args.plugin_id,
+                catalog_path=args.catalog_path,
+                allowlist=config.network_allowlist,
+                key_name=args.key_name,
+            )
+        if args.plugin_command == "install-bundle":
+            return manager.install_marketplace_bundle(
+                args.plugin_id,
+                catalog_path=args.catalog_path,
+                allowlist=config.network_allowlist,
+                key_name=args.key_name,
+                enable=args.enable,
+            )
+        if args.plugin_command == "install-marketplace":
+            return manager.install_marketplace_plugin(
+                args.plugin_id,
+                catalog_path=args.catalog_path,
+                allowlist=config.network_allowlist,
+                enable=args.enable,
+            )
+        if args.plugin_command == "update-marketplace":
+            if args.enable and args.disable:
+                raise ValueError("use either --enable or --disable, not both")
+            return manager.update_marketplace_plugin(
+                args.plugin_id,
+                approved=args.approved,
+                catalog_path=args.catalog_path,
+                allowlist=config.network_allowlist,
+                enable=True if args.enable else False if args.disable else None,
+                force=args.force,
+            )
+        if args.plugin_command == "prepare-update":
+            return manager.prepare_marketplace_update(
+                args.plugin_id,
+                catalog_path=args.catalog_path,
+                allowlist=config.network_allowlist,
+                force=args.force,
+            )
+        if args.plugin_command == "apply-prepared-update":
+            if args.enable and args.disable:
+                raise ValueError("use either --enable or --disable, not both")
+            return manager.apply_prepared_marketplace_update(
+                args.candidate_id,
+                approved=args.approved,
+                enable=True if args.enable else False if args.disable else None,
+            )
+
     if args.command == "connector":
-        audit = AuditLogger(config.audit_log_path)
-        connectors = build_default_registry(config, audit)
         if args.connector_command == "list":
+            audit = AuditLogger(config.audit_log_path)
+            connectors = build_default_registry(config, audit)
             return {"connectors": connectors.list()}
         if args.connector_command == "status":
+            audit = AuditLogger(config.audit_log_path)
+            connectors = build_default_registry(config, audit)
             return {"connectors": connectors.status()}
+        if args.connector_command == "doctor":
+            orchestrator = build_orchestrator(data_dir=args.data_dir)
+            return {"connector_doctor": _live_gap_doctor(orchestrator, "provider_and_channel_live_connectors")}
 
     if args.command == "channel":
         registry = _channel_registry(config)
@@ -889,7 +1378,518 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
         if args.channel_command == "send-chat-webhook":
             return build_orchestrator(data_dir=config.data_dir).send_chat_webhook(text=args.text, approved=args.approved, session_id=args.session_id, metadata={"source": "cli"})
 
-    if args.command == "model":
+    if args.command == "remote-control":
+        registry = RemoteControlPairingRegistry(config.data_dir / "remote_control_pairings.json")
+        if args.remote_control_command == "status":
+            return registry.status()
+        if args.remote_control_command == "pair":
+            result = registry.create_pairing(
+                label=args.label,
+                session_id=args.session_id,
+                task_id=args.task_id,
+                allowed_actions=_comma_separated(args.allowed_actions),
+                ttl_seconds=args.expires_in_seconds,
+                endpoint_host=args.host,
+                endpoint_port=args.port,
+            )
+            AuditLogger(config.audit_log_path).append(
+                "remote_control.pairing_created",
+                {
+                    "pairing_id": result["pairing"]["id"],
+                    "label": result["pairing"]["label"],
+                    "session_id": result["pairing"].get("session_id"),
+                    "task_id": result["pairing"].get("task_id"),
+                    "allowed_actions": result["pairing"].get("allowed_actions"),
+                    "expires_at": result["pairing"]["expires_at"],
+                    "token_header": result["token_header"],
+                    "token_captured": False,
+                    "source": "cli",
+                },
+            )
+            return result
+        if args.remote_control_command == "directory":
+            orchestrator = build_orchestrator(data_dir=config.data_dir)
+            pairing = registry.public_pairing(args.pairing_id)
+            result = build_remote_control_directory(
+                pairing,
+                store=orchestrator.store,
+                limit=args.limit,
+            )
+            orchestrator.audit_logger.append(
+                "remote_control.directory_viewed",
+                {
+                    "pairing_id": pairing["id"],
+                    "scope": result["scope"]["type"],
+                    "task_count": result["task_count"],
+                    "pairing_token_relayed": False,
+                    "raw_secret_values_included": False,
+                    "source": "cli",
+                },
+            )
+            return result
+        if args.remote_control_command == "revoke":
+            relay_auth_token = None
+            if args.relay_auth_secret or args.approved:
+                if not args.relay_auth_secret or not args.approved:
+                    raise ValueError("relay revocation propagation requires --relay-auth-secret and --approved")
+                broker = SecretsBroker(config.secrets_path)
+                handle = broker.request_handle(
+                    name=args.relay_auth_secret,
+                    requester="remote_control_relay",
+                    reason="propagate scoped remote-control relay revocation",
+                    scopes=("remote_control:relay",),
+                )
+                relay_auth_token = broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+            result = registry.revoke(args.pairing_id, relay_auth_token=relay_auth_token, notify_relay=bool(relay_auth_token))
+            AuditLogger(config.audit_log_path).append(
+                "remote_control.pairing_revoked",
+                {
+                    "pairing_id": result["pairing"]["id"],
+                    "label": result["pairing"]["label"],
+                    "session_id": result["pairing"].get("session_id"),
+                    "token_captured": False,
+                    "relay_revocation_propagated": result["relay_revocation_propagated"],
+                    "source": "cli",
+                },
+            )
+            return result
+        if args.remote_control_command == "relay":
+            if args.approved or args.pairing_id or args.relay_auth_secret:
+                if not args.relay_url or not args.pairing_id or not args.relay_auth_secret:
+                    raise ValueError("approved remote-control relay requires --relay-url, --pairing-id, and --relay-auth-secret")
+                broker = SecretsBroker(config.secrets_path)
+                handle = broker.request_handle(
+                    name=args.relay_auth_secret,
+                    requester="remote_control_relay",
+                    reason="register scoped remote-control pairing with relay",
+                    scopes=("remote_control:relay",),
+                )
+                relay_auth_token = broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                result = registry.relay_pairing(
+                    args.pairing_id,
+                    relay_url=args.relay_url,
+                    allowlist=config.network_allowlist,
+                    relay_auth_token=relay_auth_token,
+                    approved=args.approved,
+                )
+                AuditLogger(config.audit_log_path).append(
+                    "remote_control.relay_registered",
+                    {
+                        "pairing_id": result["pairing"]["id"],
+                        "relay_target": result["relay_target"],
+                        "relay_auth_secret": "[REDACTED]",
+                        "pairing_token_relayed": result["pairing_token_relayed"],
+                        "raw_secret_values_included": False,
+                        "source": "cli",
+                    },
+                )
+                return result
+            return registry.relay_preflight(relay_url=args.relay_url)
+        if args.remote_control_command == "relay-pull":
+            broker = SecretsBroker(config.secrets_path)
+            handle = broker.request_handle(
+                name=args.relay_auth_secret,
+                requester="remote_control_relay",
+                reason="pull queued scoped remote-control relay actions",
+                scopes=("remote_control:relay",),
+            )
+            relay_auth_token = broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+            pulled = registry.pull_relay_actions(
+                args.pairing_id,
+                relay_auth_token=relay_auth_token,
+                allowlist=config.network_allowlist,
+                approved=args.approved,
+                limit=args.limit,
+            )
+            orchestrator = build_orchestrator(data_dir=config.data_dir)
+            actor = f"remote-control-relay:{pulled['pairing'].get('label') or pulled['pairing']['id']}"
+            executed_actions = []
+            if not args.dry_run:
+                for action_row in pulled["actions"]:
+                    if not action_row["accepted"]:
+                        continue
+                    action_result = _execute_remote_control_action(orchestrator, action_row, actor=actor)
+                    orchestrator.audit_logger.append(
+                        "remote_control.relay_action",
+                        {
+                            "pairing_id": pulled["pairing"]["id"],
+                            "relay_target": pulled["relay_target"],
+                            "task_id": action_row["task_id"],
+                            "action": action_row["action"],
+                            "actor": actor,
+                            "request_id": action_row.get("request_id"),
+                            "pairing_token_relayed": False,
+                            "relay_auth_token_captured": False,
+                            "raw_secret_values_included": False,
+                            "source": "cli_pull",
+                        },
+                    )
+                    executed_actions.append(
+                        {
+                            "request_id": action_row.get("request_id"),
+                            "action": action_row["action"],
+                            "task_id": action_row["task_id"],
+                            "status": "executed",
+                            "result": action_result,
+                        }
+                    )
+            orchestrator.audit_logger.append(
+                "remote_control.relay_actions_pulled",
+                {
+                    "pairing_id": pulled["pairing"]["id"],
+                    "relay_target": pulled["relay_target"],
+                    "action_count": pulled["action_count"],
+                    "executable_action_count": pulled["executable_action_count"],
+                    "executed_action_count": len(executed_actions),
+                    "dry_run": args.dry_run,
+                    "pairing_token_relayed": False,
+                    "relay_auth_token_captured": False,
+                    "raw_secret_values_included": False,
+                    "source": "cli",
+                },
+            )
+            return {**pulled, "dry_run": args.dry_run, "executed_action_count": len(executed_actions), "executed_actions": executed_actions}
+        if args.remote_control_command == "relay-directory":
+            broker = SecretsBroker(config.secrets_path)
+            handle = broker.request_handle(
+                name=args.relay_auth_secret,
+                requester="remote_control_relay",
+                reason="publish scoped remote-control directory to relay",
+                scopes=("remote_control:relay",),
+            )
+            relay_auth_token = broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+            orchestrator = build_orchestrator(data_dir=config.data_dir)
+            pairing = registry.public_pairing(args.pairing_id)
+            directory = build_remote_control_directory(
+                pairing,
+                store=orchestrator.store,
+                limit=args.limit,
+            )
+            result = registry.publish_relay_directory(
+                args.pairing_id,
+                directory=directory,
+                relay_auth_token=relay_auth_token,
+                allowlist=config.network_allowlist,
+                approved=args.approved,
+            )
+            orchestrator.audit_logger.append(
+                "remote_control.relay_directory_published",
+                {
+                    "pairing_id": result["pairing"]["id"],
+                    "relay_target": result["relay_target"],
+                    "scope": result["directory_scope"].get("type"),
+                    "task_count": result["directory_task_count"],
+                    "pairing_token_relayed": False,
+                    "relay_auth_token_captured": False,
+                    "raw_secret_values_included": False,
+                    "source": "cli",
+                },
+            )
+            return result
+        if args.remote_control_command == "relay-notify":
+            broker = SecretsBroker(config.secrets_path)
+            handle = broker.request_handle(
+                name=args.relay_auth_secret,
+                requester="remote_control_relay",
+                reason="publish scoped remote-control notification to relay",
+                scopes=("remote_control:relay",),
+            )
+            relay_auth_token = broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+            orchestrator = build_orchestrator(data_dir=config.data_dir)
+            pairing = registry.public_pairing(args.pairing_id)
+            notification = build_remote_control_notification(
+                pairing,
+                store=orchestrator.store,
+                event=args.event,
+                task_id=args.task_id,
+            )
+            result = registry.publish_relay_notification(
+                args.pairing_id,
+                notification=notification,
+                relay_auth_token=relay_auth_token,
+                allowlist=config.network_allowlist,
+                approved=args.approved,
+            )
+            orchestrator.audit_logger.append(
+                "remote_control.relay_notification_published",
+                {
+                    "pairing_id": result["pairing"]["id"],
+                    "relay_target": result["relay_target"],
+                    "event": result["notification_event"],
+                    "task_id": result["notification"].get("task_id"),
+                    "pairing_token_relayed": False,
+                    "relay_auth_token_captured": False,
+                    "raw_secret_values_included": False,
+                    "source": "cli",
+                },
+            )
+            return result
+        if args.remote_control_command == "push-targets":
+            if args.target_id:
+                return {
+                    "status": "native_push_target",
+                    "target": registry.native_push_target(args.target_id),
+                    "raw_secret_values_included": False,
+                }
+            return registry.native_push_targets()
+        if args.remote_control_command == "push-register":
+            result = registry.register_native_push_target(
+                label=args.label,
+                provider=args.provider,
+                push_auth_secret=args.push_auth_secret,
+                device_token_secret=args.device_token_secret,
+                approved=args.approved,
+                apns_topic=args.apns_topic,
+                fcm_project_id=args.fcm_project_id,
+            )
+            AuditLogger(config.audit_log_path).append(
+                "remote_control.native_push_target_registered",
+                {
+                    "target_id": result["target"]["id"],
+                    "provider": result["target"]["provider"],
+                    "push_auth_secret_captured": False,
+                    "device_token_secret_captured": False,
+                    "raw_secret_values_included": False,
+                    "source": "cli",
+                },
+            )
+            return result
+        if args.remote_control_command == "push-disable":
+            result = registry.disable_native_push_target(args.target_id, approved=args.approved)
+            AuditLogger(config.audit_log_path).append(
+                "remote_control.native_push_target_disabled",
+                {
+                    "target_id": result["target"]["id"],
+                    "provider": result["target"]["provider"],
+                    "raw_secret_values_included": False,
+                    "source": "cli",
+                },
+            )
+            return result
+        if args.remote_control_command == "push-rotate":
+            result = registry.rotate_native_push_target(
+                args.target_id,
+                push_auth_secret=args.push_auth_secret,
+                device_token_secret=args.device_token_secret,
+                apns_topic=args.apns_topic,
+                fcm_project_id=args.fcm_project_id,
+                approved=args.approved,
+            )
+            AuditLogger(config.audit_log_path).append(
+                "remote_control.native_push_target_rotated",
+                {
+                    "target_id": result["target"]["id"],
+                    "provider": result["target"]["provider"],
+                    "rotated_fields": result["rotated_fields"],
+                    "push_auth_secret_captured": False,
+                    "device_token_secret_captured": False,
+                    "raw_secret_values_included": False,
+                    "source": "cli",
+                },
+            )
+            return result
+        if args.remote_control_command == "push":
+            broker = SecretsBroker(config.secrets_path)
+            if args.target_id:
+                target_refs = registry.native_push_target_secret_refs(args.target_id)
+                provider = str(target_refs["provider"])
+                push_auth_secret = str(target_refs["push_auth_secret"])
+                device_token_secret = str(target_refs["device_token_secret"])
+                apns_topic = args.apns_topic or target_refs.get("apns_topic")
+                fcm_project_id = args.fcm_project_id or target_refs.get("fcm_project_id")
+            else:
+                if not args.provider or not args.push_auth_secret or not args.device_token_secret:
+                    raise ValueError("remote-control push requires either --target-id or --provider with --push-auth-secret and --device-token-secret")
+                provider = args.provider
+                push_auth_secret = args.push_auth_secret
+                device_token_secret = args.device_token_secret
+                apns_topic = args.apns_topic
+                fcm_project_id = args.fcm_project_id
+            auth_handle = broker.request_handle(
+                name=push_auth_secret,
+                requester="remote_control_push",
+                reason=f"publish scoped remote-control {provider} notification",
+                scopes=("remote_control:push",),
+            )
+            device_handle = broker.request_handle(
+                name=device_token_secret,
+                requester="remote_control_push",
+                reason=f"resolve brokered remote-control {provider} device token",
+                scopes=("remote_control:push",),
+            )
+            push_auth_token = broker.resolve_for_authorized_tool(auth_handle, requester="remote_control_push")
+            device_token = broker.resolve_for_authorized_tool(device_handle, requester="remote_control_push")
+            orchestrator = build_orchestrator(data_dir=config.data_dir)
+            pairing = registry.public_pairing(args.pairing_id)
+            notification = build_remote_control_notification(
+                pairing,
+                store=orchestrator.store,
+                event=args.event,
+                task_id=args.task_id,
+            )
+            result = registry.publish_native_push_notification(
+                args.pairing_id,
+                notification=notification,
+                provider=provider,
+                push_auth_token=push_auth_token,
+                device_token=device_token,
+                allowlist=config.network_allowlist,
+                approved=args.approved,
+                apns_topic=apns_topic,
+                fcm_project_id=fcm_project_id,
+                target_id=args.target_id,
+            )
+            orchestrator.audit_logger.append(
+                "remote_control.native_push_published",
+                {
+                    "pairing_id": result["pairing"]["id"],
+                    "provider": result["provider"],
+                    "target_id": result.get("target_id"),
+                    "push_target": result["push_target"],
+                    "event": result["notification_event"],
+                    "task_id": result["notification"].get("task_id"),
+                    "pairing_token_relayed": False,
+                    "push_auth_token_captured": False,
+                    "raw_device_token_captured": False,
+                    "raw_secret_values_included": False,
+                    "source": "cli",
+                },
+            )
+            return result
+        if args.remote_control_command == "relay-outbox":
+            return registry.relay_outbox(status=args.status, limit=args.limit)
+        if args.remote_control_command == "relay-retry":
+            broker = SecretsBroker(config.secrets_path)
+            handle = broker.request_handle(
+                name=args.relay_auth_secret,
+                requester="remote_control_relay",
+                reason="retry scoped remote-control relay notification outbox",
+                scopes=("remote_control:relay",),
+            )
+            relay_auth_token = broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+            result = registry.retry_relay_notifications(
+                args.pairing_id,
+                relay_auth_token=relay_auth_token,
+                allowlist=config.network_allowlist,
+                approved=args.approved,
+                limit=args.limit,
+            )
+            AuditLogger(config.audit_log_path).append(
+                "remote_control.relay_notification_outbox_retried",
+                {
+                    "pairing_id": result["pairing"]["id"],
+                    "relay_target": result["relay_target"],
+                    "attempted_count": result["attempted_count"],
+                    "acknowledged_count": result["acknowledged_count"],
+                    "failed_count": result["failed_count"],
+                    "pairing_token_relayed": False,
+                    "relay_auth_token_captured": False,
+                    "raw_secret_values_included": False,
+                    "source": "cli",
+                },
+            )
+            return result
+        if args.remote_control_command == "relay-confirm":
+            broker = SecretsBroker(config.secrets_path)
+            handle = broker.request_handle(
+                name=args.relay_auth_secret,
+                requester="remote_control_relay",
+                reason="confirm scoped remote-control relay notification delivery",
+                scopes=("remote_control:relay",),
+            )
+            relay_auth_token = broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+            result = registry.confirm_relay_delivery(
+                args.pairing_id,
+                outbox_id=args.outbox_id,
+                relay_auth_token=relay_auth_token,
+                allowlist=config.network_allowlist,
+                approved=args.approved,
+            )
+            AuditLogger(config.audit_log_path).append(
+                "remote_control.relay_delivery_confirmed",
+                {
+                    "pairing_id": result["pairing"]["id"],
+                    "outbox_id": result["outbox_id"],
+                    "relay_target": result["relay_target"],
+                    "relay_acknowledged": result["relay_acknowledged"],
+                    "outbox_updated": result["outbox_updated"],
+                    "pairing_token_relayed": False,
+                    "relay_auth_token_captured": False,
+                    "raw_secret_values_included": False,
+                    "source": "cli",
+                },
+            )
+            return result
+        if args.remote_control_command == "relay-action":
+            broker = SecretsBroker(config.secrets_path)
+            handle = broker.request_handle(
+                name=args.relay_auth_secret,
+                requester="remote_control_relay",
+                reason="authorize registered remote-control relay action proxy",
+                scopes=("remote_control:relay",),
+            )
+            relay_auth_token = broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+            relay_auth = registry.authorize_relay_action(
+                args.pairing_id,
+                relay_auth_token,
+                action=args.action,
+                task_id=args.task_id,
+            )
+            if relay_auth is None:
+                raise PermissionError("missing or invalid remote-control relay authorization")
+            orchestrator = build_orchestrator(data_dir=config.data_dir)
+            actor = f"remote-control-relay:{relay_auth['pairing'].get('label') or relay_auth['pairing']['id']}"
+            if args.action == "status":
+                action_result = build_remote_control_task_status(orchestrator.status(args.task_id))
+            elif args.action == "events":
+                action_result = build_remote_control_task_events(orchestrator.evidence.run_events(args.task_id))
+            elif args.action == "resume":
+                orchestrator.resume_task(args.task_id, session_id=args.session_id, actor=actor)
+                action_result = build_remote_control_task_status(orchestrator.status(args.task_id))
+            elif args.action == "pause":
+                orchestrator.pause_task(
+                    args.task_id,
+                    session_id=args.session_id,
+                    actor=actor,
+                    reason=args.reason or "remote control relay pause",
+                )
+                action_result = build_remote_control_task_status(orchestrator.status(args.task_id))
+            else:
+                orchestrator.cancel_task(
+                    args.task_id,
+                    session_id=args.session_id,
+                    actor=actor,
+                    reason=args.reason or "remote control relay cancel",
+                )
+                action_result = build_remote_control_task_status(orchestrator.status(args.task_id))
+            orchestrator.audit_logger.append(
+                "remote_control.relay_action",
+                {
+                    "pairing_id": relay_auth["pairing"]["id"],
+                    "relay_target": relay_auth["relay_target"],
+                    "task_id": args.task_id,
+                    "action": args.action,
+                    "actor": actor,
+                    "pairing_token_relayed": False,
+                    "relay_auth_token_captured": False,
+                    "raw_secret_values_included": False,
+                    "source": "cli",
+                },
+            )
+            return {
+                "status": "relay_action_proxied",
+                "mode": "approved_relay_action_proxy",
+                "action": args.action,
+                "task_id": args.task_id,
+                "pairing": relay_auth["pairing"],
+                "relay_target": relay_auth["relay_target"],
+                "pairing_token_relayed": False,
+                "relay_auth_token_captured": False,
+                "raw_secret_values_included": False,
+                "result": action_result,
+            }
+
+    if args.command in {"model", "models"}:
         registry = _model_registry(config)
         if args.model_command == "list":
             return {"models": registry.list_models()}
@@ -897,7 +1897,14 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return {"providers": registry.list_providers()}
         if args.model_command == "route":
             route = registry.route(args.identifier)
-            return {"identifier": route.identifier, "provider": route.provider.provider, "model": route.model, "fallbacks": list(route.fallback_identifiers), "secret_handle_id": route.secret_handle_id}
+            return {
+                "identifier": route.identifier,
+                "provider": route.provider.provider,
+                "model": route.model,
+                "fallbacks": list(route.fallback_identifiers),
+                "secret_handle_id": route.secret_handle_id,
+                "auth_method": route.auth_method,
+            }
         if args.model_command == "alias":
             registry.set_alias(args.alias, args.identifier)
             return {"ok": True, "alias": args.alias, "identifier": args.identifier}
@@ -907,8 +1914,31 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
         if args.model_command == "auth":
             if args.auth_command == "status":
                 return {"auth": registry.auth_status(args.provider)}
+            if args.auth_command == "methods":
+                return {"auth": registry.auth_status(args.provider)}
+            if args.auth_command == "targets":
+                return {"auth_targets": registry.auth_targets()}
+            if args.auth_command == "doctor":
+                return {"auth_doctor": registry.auth_doctor()}
+            if args.auth_command == "readiness-packet":
+                return registry.create_auth_readiness_packet(actor=args.actor)
+            if args.auth_command == "verify-readiness-packet":
+                return registry.verify_auth_readiness_packet(args.packet, actor=args.actor)
             if args.auth_command == "login":
-                status = registry.login_provider(args.provider, _read_api_key(args))
+                method = "subscription" if getattr(args, "subscription", False) else str(args.method)
+                if method in {"subscription", "oauth", "oauth-device", "cloud-identity"}:
+                    if getattr(args, "api_key", None) or getattr(args, "api_key_stdin", False):
+                        raise ValueError(f"{method} login does not accept API key input")
+                    status = registry.login_provider_external(
+                        args.provider,
+                        method=method,
+                        run_external=bool(getattr(args, "run_external", False)),
+                        verify_external=bool(getattr(args, "verify_external", False)),
+                    )
+                else:
+                    if getattr(args, "run_external", False) or getattr(args, "verify_external", False):
+                        raise ValueError("--run-external and --verify-external are only valid with subscription, OAuth, or cloud-identity login")
+                    status = registry.login_provider(args.provider, _read_api_key(args))
                 return {"ok": True, "auth": status}
             if args.auth_command == "logout":
                 status = registry.logout_provider(args.provider)
@@ -918,7 +1948,8 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
 
     if args.command == "tool":
         if args.tool_command == "list":
-            return {"tools": ToolCatalog().list()}
+            registry = _mcp_registry(config)
+            return {"tools": [*ToolCatalog().list(), *registry.virtual_tool_specs()]}
         if args.tool_command == "run":
             params = json.loads(args.params)
             if not isinstance(params, dict):
@@ -927,8 +1958,20 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return orchestrator.tools.execute(args.name, params, approved=args.approved)
 
     if args.command == "backend":
+        orchestrator = build_orchestrator(data_dir=args.data_dir, workspace=getattr(args, "workspace", "."))
         if args.backend_command == "list":
-            return {"backends": ExecutionBackendRegistry().list()}
+            return {"backends": orchestrator.execution_backends.list()}
+        if args.backend_command == "doctor":
+            return {"backend_doctor": _live_gap_doctor(orchestrator, "remote_backend_activation")}
+        if args.backend_command == "select":
+            return orchestrator.tools.execute("terminal_backend", {"backend": args.name}, approved=args.approved)
+
+    if args.command == "browser":
+        orchestrator = build_orchestrator(data_dir=args.data_dir, workspace=args.workspace)
+        if args.browser_command == "activation-packet":
+            return orchestrator.browser.create_live_activation_packet(actor=args.actor)
+        if args.browser_command == "verify-activation-packet":
+            return orchestrator.browser.verify_live_activation_packet(args.packet, actor=args.actor)
 
     if args.command == "evaluation":
         harness = ResearchHarness(data_dir=config.data_dir)
@@ -1034,16 +2077,93 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             manager.move_card(args.card_id, args.lane)
             return {"ok": True, "card_id": args.card_id, "lane": args.lane}
 
+    if args.command == "agents":
+        orchestrator = build_orchestrator(data_dir=args.data_dir, workspace=args.workspace)
+        if args.agents_command == "status":
+            return orchestrator.kanban.subagent_status(limit=args.limit)
+        if args.agents_command == "autonomy-preflight":
+            return orchestrator.kanban.subagent_autonomy_preflight(actor=args.actor, limit=args.limit)
+        if args.agents_command == "delegate":
+            result = orchestrator.tools.execute(
+                "subagent_delegate",
+                {"role": args.role, "task": args.task},
+                approved=args.approved,
+                task_id=args.task_id,
+            )
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
+        if args.agents_command == "handoff":
+            result = orchestrator.kanban.move_subagent_delegation(args.card_id, args.lane, actor=args.actor, reason=args.reason)
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
+        if args.agents_command == "run":
+            result = orchestrator.kanban.run_subagent_delegation(args.card_id, actor=args.actor, approved=args.approved)
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
+        if args.agents_command == "review-packet":
+            result = orchestrator.kanban.create_subagent_review_packet(args.card_id, actor=args.actor)
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit, include_previews=False)}
+        if args.agents_command == "verify-packet":
+            result = orchestrator.kanban.verify_subagent_review_packet(args.packet, actor=args.actor)
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit, include_previews=False)}
+        if args.agents_command == "run-batch":
+            result = orchestrator.kanban.run_subagent_batch(
+                card_ids=args.card_id,
+                actor=args.actor,
+                approved=args.approved,
+                limit=args.run_limit,
+            )
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
+        if args.agents_command == "profiles":
+            return {"profiles": orchestrator.kanban.list_subagent_profiles(), "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
+        if args.agents_command == "profile-create":
+            result = orchestrator.kanban.create_subagent_profile(
+                args.name,
+                role=args.role,
+                tool_allowlist=args.tool,
+                max_parallel_cards=args.max_parallel_cards,
+                recursive_depth_limit=args.recursive_depth_limit,
+                max_tool_calls=args.max_tool_calls,
+                max_runtime_seconds=args.max_runtime_seconds,
+                network_policy=args.network_policy,
+                workspace_scope=args.workspace_scope,
+                actor=args.actor,
+            )
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
+        if args.agents_command == "profile-disable":
+            result = orchestrator.kanban.disable_subagent_profile(args.profile_id, actor=args.actor)
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
+
     if args.command == "mcp":
         registry = _mcp_registry(config)
         if args.mcp_command == "register":
+            if args.discover:
+                return registry.register_discovered_server(
+                    name=args.name,
+                    command=args.server_command,
+                    allowed_executables=config.allowed_shell_commands,
+                    transport=args.transport,
+                    network_allowlist=config.network_allowlist,
+                    auth_token_secret=args.token_secret,
+                    include_tools=tuple(args.tool),
+                    exclude_tools=tuple(args.exclude_tool),
+                    include_resources=not args.no_resources,
+                    include_prompts=not args.no_prompts,
+                    enabled=args.enable,
+                    approval_required=not args.no_approval,
+                    metadata={"source": "cli"},
+                )
             return registry.register_server(
                 name=args.name,
                 command=args.server_command,
                 allowed_tools=tuple(args.tool),
+                transport=args.transport,
                 enabled=args.enable,
                 approval_required=not args.no_approval,
+                metadata={"source": "cli"},
+                network_allowlist=config.network_allowlist,
+                auth_token_secret=args.token_secret,
             )
+        if args.mcp_command == "auth":
+            if args.mcp_auth_command == "token":
+                return registry.configure_auth_token(args.server, token_secret=args.token_secret)
         if args.mcp_command == "call":
             orchestrator = build_orchestrator(data_dir=args.data_dir)
             return orchestrator.tools.execute(
@@ -1052,7 +2172,25 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 approved=args.approved,
             )
         if args.mcp_command == "list":
-            return {"servers": registry.list_servers()}
+            return {"servers": registry.list_servers(), "virtual_tools": registry.virtual_tools()}
+
+    if args.command == "hooks":
+        manager = _hook_manager(config, workspace=args.workspace)
+        if args.hooks_command == "list":
+            return _hooks_inventory(manager, config)
+        if args.hooks_command == "add":
+            return {"hook": manager.register_hook(**_hook_add_spec(args.add_args))}
+        if args.hooks_command == "enable":
+            return {"hook": manager.set_enabled(args.hook_id, True)}
+        if args.hooks_command == "disable":
+            return {"hook": manager.set_enabled(args.hook_id, False)}
+        if args.hooks_command == "remove":
+            return {"hook": manager.remove_hook(args.hook_id), "removed": True}
+        if args.hooks_command == "run":
+            context = json.loads(args.context_json)
+            if not isinstance(context, dict):
+                raise ValueError("--context-json must decode to a JSON object")
+            return manager.run_event(args.event, context=context, approved=args.approved)
 
     if args.command == "personality":
         if args.personality_command == "list":
@@ -1161,6 +2299,105 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
     raise ValueError("unhandled command")
 
 
+def _enterprise_readiness(args: argparse.Namespace, config: Any) -> dict[str, Any]:
+    selected = _selected_enterprise_surfaces(args)
+    surfaces: list[dict[str, Any]] = []
+    if "memory" in selected:
+        surfaces.append(_memory_enterprise_readiness(config))
+    if "self_improvement" in selected:
+        orchestrator = build_orchestrator(data_dir=args.data_dir, workspace=".")
+        surfaces.append(_self_improvement_enterprise_readiness(orchestrator, limit=args.limit))
+    if "tui" in selected:
+        surfaces.append(_tui_enterprise_readiness())
+
+    flags = {str(surface["surface"]): bool(surface["ready"]) for surface in surfaces}
+    blocked = [surface for surface in surfaces if not surface["ready"]]
+    return {
+        "ok": True,
+        "status": "blocked" if blocked else "ready_with_operator_gates",
+        "flags": flags,
+        "surface_count": len(surfaces),
+        "surfaces": surfaces,
+    }
+
+
+def _selected_enterprise_surfaces(args: argparse.Namespace) -> list[str]:
+    selected = []
+    if args.memory:
+        selected.append("memory")
+    if args.self_improvement:
+        selected.append("self_improvement")
+    if args.tui:
+        selected.append("tui")
+    return selected or ["memory", "self_improvement", "tui"]
+
+
+def _memory_enterprise_readiness(config: Any) -> dict[str, Any]:
+    retention = config.memory_retention
+    health = _memory_manager(config).health_report(limit=20, log=False)
+    return {
+        "surface": "memory",
+        "ready": True,
+        "status": health["status"],
+        "command": "memory",
+        "capabilities": [
+            "create_search_update_export",
+            "session_preview_and_commit",
+            "health_report",
+            "review_queue_digest_escalation",
+            "recertification_and_expiry",
+            "merge_and_conflict_resolution",
+        ],
+        "health_score": health["health_score"],
+        "memory_count": health["memory_count"],
+        "recommendation_count": health["recommendation_count"],
+        "issue_counts": health["issue_counts"],
+        "policy": {
+            "ttl_policy_configured": retention.default_ttl_days is not None or bool(retention.ttl_days_by_type),
+            "recertification_policy_configured": retention.default_recertification_days is not None or bool(retention.recertification_days_by_type),
+            "escalation_routes_configured": bool(retention.escalation_routes),
+        },
+        "operator_gates": ["review-required memory candidates", "recertification", "sensitivity labels"],
+    }
+
+
+def _self_improvement_enterprise_readiness(orchestrator: Any, *, limit: int) -> dict[str, Any]:
+    readiness = orchestrator.repair_readiness_summary(limit=limit)
+    return {
+        "surface": "self_improvement",
+        "ready": bool(readiness["ready"]),
+        "status": readiness["status"],
+        "command": "improvement",
+        "capabilities": [
+            "proposal_review",
+            "repair_readiness_gate",
+            "candidate_generation_and_synthesis",
+            "candidate_review",
+            "apply_rollback_and_verification_receipts",
+        ],
+        "proposal_count": readiness["proposal_count"],
+        "blocker_count": readiness["blocker_count"],
+        "blockers": readiness["blockers"],
+        "next_actions": readiness["next_actions"][:3],
+    }
+
+
+def _tui_enterprise_readiness() -> dict[str, Any]:
+    return {
+        "surface": "tui",
+        "ready": True,
+        "status": "ready",
+        "command": "tui",
+        "cli_flags": ["--workspace", "--session-id", "--model", "--personality"],
+        "active_flags": ["audit", "approvals", "session", "mode", "tools", "providers", "model", "workspace"],
+        "shield_frames": len(SHIELD_FRAMES),
+        "slash_aliases": True,
+        "slash_palette": True,
+        "nested_menus": True,
+        "operator_gates": ["interactive local session", "existing approval and policy gates"],
+    }
+
+
 def _memory_manager(config: Any) -> MemoryManager:
     store = LocalStore(config.database_path)
     audit = AuditLogger(config.audit_log_path)
@@ -1189,7 +2426,8 @@ def _session_manager(config: Any) -> SessionManager:
 
 def _task_list_payload(orchestrator: Any, row: dict[str, Any]) -> dict[str, Any]:
     payload = dict(row)
-    payload["action_hints"] = _task_action_hints(payload.get("id"), payload.get("session_id"), status=payload.get("status"))
+    checkpoint = _decode_checkpoint_json(payload.get("checkpoint_json"))
+    payload["action_hints"] = _task_action_hints(payload.get("id"), payload.get("session_id"), status=payload.get("status"), checkpoint=checkpoint)
     if payload.get("session_id"):
         payload["session"] = orchestrator.status(str(payload["id"])).get("session")
     else:
@@ -1197,7 +2435,7 @@ def _task_list_payload(orchestrator: Any, row: dict[str, Any]) -> dict[str, Any]
     return payload
 
 
-def _task_action_hints(task_id: Any, session_id: Any, *, status: Any) -> list[dict[str, str]]:
+def _task_action_hints(task_id: Any, session_id: Any, *, status: Any, checkpoint: dict[str, Any] | None = None) -> list[dict[str, str]]:
     hints: list[dict[str, str]] = []
     task_id_text = str(task_id) if task_id else ""
     if session_id:
@@ -1210,7 +2448,21 @@ def _task_action_hints(task_id: Any, session_id: Any, *, status: Any) -> list[di
         )
     if task_id_text and status in {"waiting_approval", "paused"}:
         hints.append({"label": "Resume", "command": f"task resume {task_id_text}", "action": "task_resume", "task_id": task_id_text})
+    if isinstance(checkpoint, dict):
+        hints.extend(subagent_review_action_hints(checkpoint))
     return hints
+
+
+def _decode_checkpoint_json(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value:
+        return {}
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
 
 
 def _approval_payload(orchestrator: Any, row: dict[str, Any]) -> dict[str, Any]:
@@ -1239,6 +2491,27 @@ def _approval_payload(orchestrator: Any, row: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _execute_remote_control_action(orchestrator: Any, action_row: dict[str, Any], *, actor: str) -> dict[str, Any]:
+    task_id = str(action_row["task_id"])
+    action = str(action_row["action"])
+    session_id = action_row.get("session_id")
+    reason = str(action_row.get("reason") or "")
+    if action == "status":
+        return build_remote_control_task_status(orchestrator.status(task_id))
+    if action == "events":
+        return build_remote_control_task_events(orchestrator.evidence.run_events(task_id))
+    if action == "resume":
+        orchestrator.resume_task(task_id, session_id=session_id, actor=actor)
+        return build_remote_control_task_status(orchestrator.status(task_id))
+    if action == "pause":
+        orchestrator.pause_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay pause")
+        return build_remote_control_task_status(orchestrator.status(task_id))
+    if action == "cancel":
+        orchestrator.cancel_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay cancel")
+        return build_remote_control_task_status(orchestrator.status(task_id))
+    raise PermissionError("remote-control relay action is not allowed")
+
+
 def _channel_registry(config: Any) -> ChannelRegistry:
     store = LocalStore(config.database_path)
     audit = AuditLogger(config.audit_log_path)
@@ -1248,7 +2521,15 @@ def _channel_registry(config: Any) -> ChannelRegistry:
 def _model_registry(config: Any) -> ModelRegistry:
     store = LocalStore(config.database_path)
     audit = AuditLogger(config.audit_log_path)
-    return ModelRegistry(store, audit, SecretsBroker(config.secrets_path), custom_base_url=config.custom_model_base_url)
+    return ModelRegistry(
+        store,
+        audit,
+        SecretsBroker(config.secrets_path),
+        custom_base_url=config.custom_model_base_url,
+        azure_foundry_base_url=config.azure_foundry_base_url,
+        google_vertex_project=config.google_vertex_project,
+        google_vertex_location=config.google_vertex_location,
+    )
 
 
 def _read_api_key(args: argparse.Namespace) -> str:
@@ -1276,7 +2557,102 @@ def _kanban_manager(config: Any) -> KanbanManager:
 def _mcp_registry(config: Any) -> McpRegistry:
     store = LocalStore(config.database_path)
     audit = AuditLogger(config.audit_log_path)
-    return McpRegistry(store, audit)
+    return McpRegistry(store, audit, SecretsBroker(config.secrets_path))
+
+
+def _plugin_manager(config: Any) -> PluginManager:
+    store = LocalStore(config.database_path)
+    audit = AuditLogger(config.audit_log_path)
+    skills = SkillRegistry(store, audit, SecretsBroker(config.secrets_path))
+    mcp = McpRegistry(store, audit, SecretsBroker(config.secrets_path))
+    hooks = HookManager(config.data_dir / "hooks.json", audit, allowed_executables=config.allowed_shell_commands, workspace=Path.cwd())
+    return PluginManager(config.data_dir / "plugins.json", audit, skills=skills, mcp=mcp, hooks=hooks, secrets_broker=SecretsBroker(config.secrets_path))
+
+
+def _hook_manager(config: Any, *, workspace: str | Path) -> HookManager:
+    audit = AuditLogger(config.audit_log_path)
+    return HookManager(config.data_dir / "hooks.json", audit, allowed_executables=config.allowed_shell_commands, workspace=workspace)
+
+
+def _hooks_inventory(manager: HookManager, config: Any) -> dict[str, Any]:
+    return {
+        "status": "governed_local_ready",
+        "hooks": manager.list_hooks(),
+        "supported_events": list(HOOK_EVENTS),
+        "allowed_executables": list(config.allowed_shell_commands),
+        "raw_secret_values_included": False,
+    }
+
+
+def _hook_add_spec(parts: list[str]) -> dict[str, Any]:
+    if not parts:
+        raise ValueError("hook event required")
+    event = parts[0]
+    if event not in HOOK_EVENTS:
+        raise ValueError(f"unsupported hook event: {event}")
+    hook_id: str | None = None
+    enabled = False
+    approval_required = True
+    timeout_seconds = 10
+    max_output_bytes = 4096
+    command: list[str] = []
+    index = 1
+    while index < len(parts):
+        part = parts[index]
+        if part == "--":
+            command = parts[index + 1 :]
+            break
+        if part == "--id":
+            hook_id = _required_next_arg(parts, index, "--id")
+            index += 2
+            continue
+        if part == "--enabled":
+            enabled = True
+            index += 1
+            continue
+        if part == "--disabled":
+            enabled = False
+            index += 1
+            continue
+        if part == "--approval-required":
+            approval_required = True
+            index += 1
+            continue
+        if part == "--no-approval-required":
+            approval_required = False
+            index += 1
+            continue
+        if part == "--timeout":
+            timeout_seconds = int(_required_next_arg(parts, index, "--timeout"))
+            index += 2
+            continue
+        if part == "--max-output-bytes":
+            max_output_bytes = int(_required_next_arg(parts, index, "--max-output-bytes"))
+            index += 2
+            continue
+        command = parts[index:]
+        break
+    if not command:
+        raise ValueError("hook command required; use -- before command arguments when needed")
+    return {
+        "event": event,
+        "command": command,
+        "hook_id": hook_id,
+        "enabled": enabled,
+        "approval_required": approval_required,
+        "timeout_seconds": timeout_seconds,
+        "max_output_bytes": max_output_bytes,
+    }
+
+
+def _required_next_arg(parts: list[str], index: int, flag: str) -> str:
+    if index + 1 >= len(parts):
+        raise ValueError(f"{flag} requires a value")
+    return parts[index + 1]
+
+
+def _comma_separated(value: str) -> list[str]:
+    return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
 
 def create_skill_template(skill_id: str, *, name: str, description: str) -> dict[str, Any]:

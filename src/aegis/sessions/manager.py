@@ -103,6 +103,40 @@ class SessionManager:
         self.audit_logger.append("session.updated", {"session_id": session_id, "changes": sorted(changes)})
         return updated
 
+    def update_metadata(
+        self,
+        session_id: str,
+        patch: dict[str, Any],
+        *,
+        namespace: str | None = None,
+    ) -> dict[str, Any]:
+        session = self.get_session(session_id)
+        metadata = dict(session.get("metadata") or {})
+        if namespace:
+            scoped = metadata.get(namespace)
+            if not isinstance(scoped, dict):
+                scoped = {}
+            scoped.update(patch)
+            metadata[namespace] = scoped
+        else:
+            metadata.update(patch)
+        updated = _decode_session(
+            self.store.update_session(
+                session_id,
+                {"metadata_json": json.dumps(metadata, sort_keys=True)},
+            )
+        )
+        self.audit_logger.append(
+            "session.metadata_updated",
+            {
+                "session_id": session_id,
+                "metadata_namespace": namespace,
+                "metadata_keys": sorted(patch),
+                "raw_metadata_values_included": False,
+            },
+        )
+        return updated
+
     def history(self, session_id: str, limit: int = 100) -> list[dict[str, Any]]:
         return [self._decode_message(row) for row in self.store.list_messages(session_id, limit=limit)]
 
@@ -128,6 +162,47 @@ class SessionManager:
             summary_message_id = summary_message["id"]
         result = {"session_id": session_id, "compacted_messages": len(older), "summary": summary, "summary_message_id": summary_message_id, "keep_last": keep_last}
         self.audit_logger.append("session.compacted", result)
+        return result
+
+    def undo_last_exchange(self, session_id: str) -> dict[str, Any]:
+        if self.store.get_session(session_id) is None:
+            raise KeyError(session_id)
+        messages = self.history(session_id, limit=1000)
+        if not messages:
+            result = {"status": "no_messages", "session_id": session_id, "removed_count": 0, "raw_message_content_included": False}
+            self.audit_logger.append("session.undo", result)
+            return result
+
+        to_remove: list[dict[str, Any]] = []
+        found_user = False
+        for message in reversed(messages):
+            to_remove.append(message)
+            if message.get("role") == "user":
+                found_user = True
+                break
+        if not found_user:
+            result = {"status": "no_user_message", "session_id": session_id, "removed_count": 0, "raw_message_content_included": False}
+            self.audit_logger.append("session.undo", result)
+            return result
+
+        ordered = list(reversed(to_remove))
+        deleted = self.store.delete_messages(session_id, [str(message["id"]) for message in ordered])
+        removed_task_ids = sorted(
+            {
+                str(metadata.get("task_id"))
+                for metadata in (_safe_json_dict(row.get("metadata_json")) for row in deleted)
+                if metadata.get("task_id")
+            }
+        )
+        result = {
+            "status": "undone",
+            "session_id": session_id,
+            "removed_count": len(deleted),
+            "removed_roles": [str(row.get("role")) for row in deleted],
+            "removed_task_ids": removed_task_ids,
+            "raw_message_content_included": False,
+        }
+        self.audit_logger.append("session.undo", result)
         return result
 
     def _default_trust_class(self, session_id: str, *, role: str) -> TrustClass:
@@ -207,6 +282,14 @@ def _decode_session(row: dict[str, Any]) -> dict[str, Any]:
     decoded = dict(row)
     decoded["metadata"] = json.loads(decoded.pop("metadata_json", "{}"))
     return decoded
+
+
+def _safe_json_dict(value: Any) -> dict[str, Any]:
+    try:
+        decoded = json.loads(str(value or "{}"))
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
 
 
 def _session_task_summary(row: dict[str, Any]) -> dict[str, Any]:

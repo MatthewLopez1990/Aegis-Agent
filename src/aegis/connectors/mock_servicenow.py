@@ -13,6 +13,7 @@ from aegis.audit.logger import redact
 from aegis.connectors.base import ConnectorRequest, ConnectorResult, ConnectorSpec, live_connector_activation, require_scope
 from aegis.connectors.http import _open_without_redirects, _private_network_error, _validate_url
 from aegis.connectors.mock_service import MockServiceConnector
+from aegis.connectors.rate_limit import InMemoryRateLimiter
 from aegis.security.secrets_broker import SecretsBroker
 from aegis.security.taint import RiskLevel, Sensitivity
 
@@ -24,19 +25,23 @@ class MockServiceNowConnector(MockServiceConnector):
         allowlist: tuple[str, ...] = ("api.service-now.com",),
         live_writes: bool = False,
         secrets_broker: SecretsBroker | None = None,
+        rate_limits: dict[str, Any] | None = None,
+        rate_limiter: InMemoryRateLimiter | None = None,
     ) -> None:
         super().__init__(
             name="mock_servicenow",
             operations=("read_ticket", "search_tickets"),
-            write_operations=("create_ticket", "update_ticket", "close_ticket"),
+            write_operations=("create_ticket", "update_ticket", "close_ticket", "rollback_close_ticket"),
             sample_data={"tickets": [{"id": "INC000001", "state": "new", "summary": "Mock incident"}]},
         )
         self.allowlist = allowlist
         self.live_writes = live_writes
         self.secrets_broker = secrets_broker or SecretsBroker()
+        self._rate_limiter = rate_limiter or InMemoryRateLimiter()
+        configured_rate_limits = rate_limits or self.spec.rate_limits
         self.spec = ConnectorSpec(
             name="mock_servicenow",
-            version="0.2.0",
+            version="0.3.0",
             auth_type="brokered_token",
             required_scopes=("read",),
             optional_scopes=("write",),
@@ -47,12 +52,13 @@ class MockServiceNowConnector(MockServiceConnector):
                 "create_ticket": RiskLevel.HIGH,
                 "update_ticket": RiskLevel.HIGH,
                 "close_ticket": RiskLevel.HIGH,
+                "rollback_close_ticket": RiskLevel.HIGH,
                 "dry_run": RiskLevel.MEDIUM,
             },
-            rate_limits=self.spec.rate_limits,
+            rate_limits=configured_rate_limits,
             data_sensitivity=Sensitivity.INTERNAL,
             default_mode="mock_read_only",
-            approval_required=("create_ticket", "update_ticket", "close_ticket"),
+            approval_required=("create_ticket", "update_ticket", "close_ticket", "rollback_close_ticket"),
             operation_scopes=self.spec.operation_scopes,
         )
 
@@ -111,8 +117,19 @@ class MockServiceNowConnector(MockServiceConnector):
             payload = _ticket_payload(request.operation, request.params)
         except (KeyError, ValueError) as exc:
             return ConnectorResult(self.spec.name, request.operation, False, {}, error=str(exc))
+        rate_limit = self._check_live_rate_limit(domain=domain, operation=request.operation)
+        if not rate_limit["allowed"]:
+            return ConnectorResult(
+                self.spec.name,
+                request.operation,
+                False,
+                {"mode": "live_write", "domain": domain, "rate_limit": rate_limit},
+                rollback="no action performed",
+                error="service-desk live write rate limit exceeded",
+            )
         live_result = _send_service_desk_write(operation=request.operation, url=url, token=token, payload=payload)
         accepted = _summarize_params({"url": url, "payload": payload, "token_secret": token_secret})
+        rollback_receipt = _rollback_receipt(request.operation, payload)
         return ConnectorResult(
             self.spec.name,
             request.operation,
@@ -123,8 +140,105 @@ class MockServiceNowConnector(MockServiceConnector):
                 "status": live_result["http_status"],
                 "mode": "live_write",
                 "accepted": accepted,
+                "rate_limit": rate_limit,
+                "rollback_receipt": rollback_receipt,
             },
-            rollback="provider-specific service-desk rollback required",
+            rollback="rollback_close_ticket available with approval" if rollback_receipt["rollback_available"] else "provider-specific service-desk rollback required",
+            error=live_result.get("error"),
+        )
+
+    def rollback(self, request: ConnectorRequest) -> ConnectorResult:
+        if not self._is_live_write_request(request):
+            return super().rollback(request)
+        require_scope(request, "write", connector=self.spec.name)
+        url = str(request.params.get("api_url") or request.params.get("provider_url") or "")
+        parsed = urlparse(url)
+        domain = parsed.hostname or ""
+        operation = "rollback_close_ticket"
+        if not request.approved:
+            return ConnectorResult(
+                self.spec.name,
+                operation,
+                False,
+                {"activation": live_connector_activation(connector=self.spec.name, operation=operation, enabled=self.live_writes, approved=False, allowlist=self.allowlist, domain=domain)},
+                rollback="no action performed",
+                error="service-desk rollback requires approval",
+            )
+        if not self.live_writes:
+            return ConnectorResult(
+                self.spec.name,
+                operation,
+                False,
+                {"activation": live_connector_activation(connector=self.spec.name, operation=operation, enabled=False, approved=True, allowlist=self.allowlist, domain=domain)},
+                rollback="no action performed",
+                error="service-desk live writes are disabled",
+            )
+        validation_error = _validate_url(parsed)
+        if validation_error:
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error=validation_error)
+        if parsed.scheme != "https":
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error="service-desk rollback requires https")
+        if not self._allowed(domain):
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error=f"domain {domain!r} is not allowlisted")
+        private_error = _private_network_error(domain)
+        if private_error:
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error=private_error)
+        token_secret = str(request.params.get("token_secret") or "SERVICE_DESK_TOKEN")
+        handle = self.secrets_broker.request_handle(
+            name=token_secret,
+            requester="service_desk_connector",
+            reason="service-desk rollback_close_ticket",
+            scopes=("service_desk:write",),
+        )
+        if not handle.present:
+            return ConnectorResult(
+                self.spec.name,
+                operation,
+                False,
+                {"activation": live_connector_activation(connector=self.spec.name, operation=operation, enabled=True, approved=True, allowlist=self.allowlist, domain=domain, token_present=False)},
+                rollback="no action performed",
+                error=f"secret {token_secret!r} is not configured",
+            )
+        try:
+            token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="service_desk_connector")
+            payload = _rollback_ticket_payload(request.params)
+        except (KeyError, ValueError) as exc:
+            return ConnectorResult(self.spec.name, operation, False, {}, rollback="no action performed", error=str(exc))
+        rate_limit = self._check_live_rate_limit(domain=domain, operation=operation)
+        if not rate_limit["allowed"]:
+            return ConnectorResult(
+                self.spec.name,
+                operation,
+                False,
+                {"mode": "live_rollback", "domain": domain, "rate_limit": rate_limit},
+                rollback="no action performed",
+                error="service-desk rollback rate limit exceeded",
+            )
+        live_result = _send_service_desk_write(operation="update_ticket", url=url, token=token, payload=payload)
+        receipt = {
+            "receipt_schema": "service_desk_rollback_receipt_v1",
+            "rollback_operation": operation,
+            "ticket_ref_hash": _ticket_ref_hash(payload),
+            "target_state": str(payload.get("state") or "")[:80],
+            "http_status": live_result["http_status"],
+            "rate_limit": rate_limit,
+            "raw_secret_values_included": False,
+            "raw_response_body_included": False,
+        }
+        return ConnectorResult(
+            self.spec.name,
+            operation,
+            live_result["ok"],
+            {
+                "url": url,
+                "domain": domain,
+                "status": live_result["http_status"],
+                "mode": "live_rollback",
+                "accepted": _summarize_params({"url": url, "payload": payload, "token_secret": token_secret}),
+                "rollback_receipt": receipt,
+                "rate_limit": rate_limit,
+            },
+            rollback="rollback executed" if live_result["ok"] else "rollback attempted but provider rejected it",
             error=live_result.get("error"),
         )
 
@@ -133,6 +247,13 @@ class MockServiceNowConnector(MockServiceConnector):
 
     def _allowed(self, domain: str) -> bool:
         return any(domain == allowed or domain.endswith(f".{allowed}") for allowed in self.allowlist)
+
+    def _check_live_rate_limit(self, *, domain: str, operation: str) -> dict[str, int | bool]:
+        per_minute = _positive_int(self.spec.rate_limits.get("per_minute"))
+        if per_minute is None:
+            return {"allowed": True, "limit": 0, "window_seconds": 60, "remaining": 0, "retry_after_seconds": 0}
+        decision = self._rate_limiter.check(f"{self.spec.name}:{domain}:{operation}", limit=per_minute, window_seconds=60)
+        return decision.to_dict()
 
     @staticmethod
     def _is_live_write_request(request: ConnectorRequest) -> bool:
@@ -154,6 +275,42 @@ def _ticket_payload(operation: str, params: dict[str, Any]) -> dict[str, Any]:
     if operation == "close_ticket" and not any(payload.get(key) for key in ("state", "status", "resolution_code")):
         payload["state"] = "closed"
     return payload
+
+
+def _rollback_ticket_payload(params: dict[str, Any]) -> dict[str, Any]:
+    ticket = params.get("ticket", {})
+    if not isinstance(ticket, dict):
+        raise ValueError("service-desk rollback ticket payload must be an object")
+    payload = {key: ticket[key] for key in ("id", "number", "key", "sys_id") if key in ticket}
+    if not payload:
+        raise ValueError("service-desk rollback requires id, number, key, or sys_id")
+    target_state = str(params.get("target_state") or params.get("previous_state") or ticket.get("target_state") or ticket.get("previous_state") or "open").strip()
+    if not target_state:
+        raise ValueError("service-desk rollback target_state is required")
+    payload["state"] = target_state[:80]
+    payload["work_notes"] = "Aegis rollback_close_ticket approved by local operator"
+    return payload
+
+
+def _rollback_receipt(operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+    available = operation == "close_ticket" and bool(_ticket_ref_hash(payload))
+    return {
+        "receipt_schema": "service_desk_rollback_offer_v1",
+        "rollback_available": available,
+        "rollback_operation": "rollback_close_ticket" if available else None,
+        "ticket_ref_hash": _ticket_ref_hash(payload) if available else None,
+        "requires_approval": True,
+        "raw_secret_values_included": False,
+        "raw_response_body_included": False,
+    }
+
+
+def _ticket_ref_hash(payload: dict[str, Any]) -> str:
+    for key in ("sys_id", "id", "number", "key"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return ""
 
 
 def _send_service_desk_write(*, operation: str, url: str, token: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -187,6 +344,14 @@ def _method_for_operation(operation: str) -> str:
     if operation == "create_ticket":
         return "POST"
     return "PATCH"
+
+
+def _positive_int(value: Any) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _summarize_params(params: dict[str, Any]) -> dict[str, Any]:
