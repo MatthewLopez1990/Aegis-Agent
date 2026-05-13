@@ -37,7 +37,7 @@ from aegis.security.policy_profile import activate_due_policy_rollouts, apply_po
 from aegis.security.taint import RiskLevel, Sensitivity, TrustClass
 from aegis.skills.signing import DEFAULT_SKILL_SIGNING_KEY
 from aegis.tools.executor import ToolExecutionError
-from aegis.tui.main import COMMAND_MENU_GROUPS, TOP_LEVEL_COMMANDS
+from aegis.tui.main import COMMAND_MENU_GROUPS, SLASH_FLAG_HINTS, SLASH_SUBCOMMANDS, TOP_LEVEL_COMMANDS
 
 
 _TERMINAL_TASK_STATUSES = {"completed", "failed", "blocked", "cancelled"}
@@ -122,6 +122,22 @@ def _web_command_catalog(orchestrator: Any) -> dict[str, Any]:
                 "web_actions": [],
             },
         )
+    for command, row in command_rows.items():
+        command_keys = (command, command.replace("-", "_"))
+        args = list(row.get("args") or [])
+        flags = list(row.get("flags") or [])
+        for key in command_keys:
+            for subcommand in SLASH_SUBCOMMANDS.get(key, ()):
+                if subcommand not in args:
+                    args.append(str(subcommand))
+            for (root, _subcommand), flag_hints in SLASH_FLAG_HINTS.items():
+                if root != key:
+                    continue
+                for flag in flag_hints:
+                    if flag not in flags:
+                        flags.append(str(flag))
+        row["args"] = args
+        row["flags"] = flags
     if "remote-control" in command_rows:
         command_rows["remote-control"].update(
             {

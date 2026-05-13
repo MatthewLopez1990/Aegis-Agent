@@ -240,7 +240,7 @@ if (frames.length !== 2 || frames[1].event !== "task" || frames[1].data.status !
         self.assertIn("const selectedTaskId = () =>", script)
         self.assertIn("const slashTaskId = (parsed)", script)
         self.assertIn('parsed.kind === "task-inspection"', script)
-        self.assertIn("slashCommandMatches(prefix).slice(0, 8)", script)
+        self.assertIn("slashPaletteMatches(value).slice(0, 8)", script)
         self.assertIn('document.getElementById("slash-palette").addEventListener("click"', script)
         self.assertIn('document.getElementById("task-form").requestSubmit()', script)
         self.assertIn('const request = (parsed.kind === "submit" ? parsed.request : input.value).trim()', script)
@@ -260,7 +260,7 @@ if (catalogStart < 0 || catalogEnd < 0 || helperStart < 0 || helperEnd < 0) {
   throw new Error("slash palette helpers not found");
 }
 const api = {};
-eval(`${source.slice(catalogStart, catalogEnd)}\n${source.slice(helperStart, helperEnd)}\napi.matches = slashCommandMatches;\napi.parse = parseTaskSlashCommand;\napi.merge = mergeWebSlashCommands;\napi.commands = () => webSlashCommands;`);
+eval(`${source.slice(catalogStart, catalogEnd)}\n${source.slice(helperStart, helperEnd)}\napi.matches = slashCommandMatches;\napi.context = slashPaletteMatches;\napi.parse = parseTaskSlashCommand;\napi.merge = mergeWebSlashCommands;\napi.commands = () => webSlashCommands;`);
 const su = api.matches("su").map((entry) => entry.command);
 if (su[0] !== "submit" || !su.includes("resume") || su.includes("settings")) {
   throw new Error(`/su fuzzy matches are wrong: ${JSON.stringify(su)}`);
@@ -353,6 +353,22 @@ if (remote.kind !== "remote-control" || remote.request !== "status" || !remote.w
 const queue = api.parse("/q submit review the next slice");
 if (queue.kind !== "queue-control" || queue.command !== "queue" || !queue.webActions.length || !queue.args.includes("submit") || !queue.flags.includes("--status")) {
   throw new Error(`/queue metadata did not merge: ${JSON.stringify(queue)}`);
+}
+const remoteArgs = api.context("/remote-control sta").map((entry) => entry.completionValue);
+if (!remoteArgs.includes("status")) {
+  throw new Error(`/remote-control subcommand completion missing: ${JSON.stringify(remoteArgs)}`);
+}
+const remoteBlankArgs = api.context("/remote-control ").map((entry) => entry.completionValue);
+if (!remoteBlankArgs.includes("status") || !remoteBlankArgs.includes("directory")) {
+  throw new Error(`/remote-control blank subcommand completion missing: ${JSON.stringify(remoteBlankArgs)}`);
+}
+const remoteFlags = api.context("/remote-control directory --pa").map((entry) => entry.completionValue);
+if (!remoteFlags.includes("--pairing-id")) {
+  throw new Error(`/remote-control flag completion missing: ${JSON.stringify(remoteFlags)}`);
+}
+const queueArgs = api.context("/queue sub").map((entry) => entry.completionValue);
+if (!queueArgs.includes("submit")) {
+  throw new Error(`/queue subcommand completion missing: ${JSON.stringify(queueArgs)}`);
 }
 const mergedPause = api.parse("/pause task-101");
 if (!mergedPause.webActions.length || mergedPause.mutates !== true || !mergedPause.args.includes("task_id")) {

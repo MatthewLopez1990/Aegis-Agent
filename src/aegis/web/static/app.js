@@ -27,6 +27,7 @@ const state = {
   pendingSubagentDelegation: null,
   pendingSkillEnable: {},
   slashSelectionIndex: 0,
+  slashPaletteEntries: [],
 };
 
 const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "blocked", "cancelled"]);
@@ -194,6 +195,62 @@ const slashCommandForToken = (token) => {
   return webSlashCommands.find((entry) => slashCommandTerms(entry).includes(normalized)) || null;
 };
 
+const slashConcreteOptions = (options = []) =>
+  options.map(String).filter((option) => option && !option.endsWith("_id") && option !== "request");
+
+const slashInputContext = (rawValue) => {
+  const raw = String(rawValue || "");
+  const trimmedStart = raw.trimStart();
+  if (!trimmedStart.startsWith("/")) return { kind: "task" };
+  const match = trimmedStart.match(/^\/([a-zA-Z0-9_.:-]*)([\s\S]*)$/);
+  if (!match) return { kind: "unknown", prefix: "" };
+  const commandToken = match[1] || "";
+  const remainder = match[2] || "";
+  if (!commandToken || !remainder) {
+    return { kind: "command", prefix: commandToken };
+  }
+  const entry = slashCommandForToken(commandToken);
+  if (!entry) return { kind: "command", prefix: commandToken };
+  const endsWithSpace = /\s$/.test(remainder);
+  const current = endsWithSpace ? "" : (remainder.match(/(\S+)$/)?.[1] || "");
+  const replaceStart = raw.length - current.length;
+  const parts = remainder.trim().split(/\s+/).filter(Boolean);
+  const wantsFlag = current.startsWith("--") || parts.some((part) => part.startsWith("--"));
+  return {
+    kind: wantsFlag ? "flag" : "arg",
+    command: entry.command,
+    entry,
+    prefix: current,
+    replaceStart,
+    replaceEnd: raw.length,
+  };
+};
+
+const slashOptionMatches = (context) => {
+  const options = slashConcreteOptions(context.kind === "flag" ? context.entry?.flags : context.entry?.args);
+  const prefix = String(context.prefix || "").toLowerCase();
+  return options
+    .filter((option) => !prefix || option.toLowerCase().startsWith(prefix) || option.toLowerCase().includes(prefix))
+    .map((option) => ({
+      command: context.command,
+      label: option,
+      detail: `${context.kind === "flag" ? "Flag" : "Option"} for /${context.command}`,
+      kind: "completion",
+      completionKind: context.kind,
+      completionValue: option,
+      replaceStart: context.replaceStart,
+      replaceEnd: context.replaceEnd,
+    }));
+};
+
+const slashPaletteMatches = (rawValue) => {
+  const context = slashInputContext(rawValue);
+  if (context.kind === "arg" || context.kind === "flag") {
+    return slashOptionMatches(context);
+  }
+  return slashCommandMatches(context.prefix || "");
+};
+
 const parseTaskSlashCommand = (rawValue) => {
   const raw = String(rawValue || "");
   const trimmedStart = raw.trimStart();
@@ -219,10 +276,12 @@ const renderSlashPalette = () => {
     palette.hidden = true;
     palette.replaceChildren();
     state.slashSelectionIndex = 0;
+    state.slashPaletteEntries = [];
     return;
   }
   const prefix = value.slice(1).split(/\s+/, 1)[0];
-  const matches = slashCommandMatches(prefix).slice(0, 8);
+  const matches = slashPaletteMatches(value).slice(0, 8);
+  state.slashPaletteEntries = matches;
   if (!matches.length) {
     palette.hidden = false;
     palette.innerHTML = `<div class="slash-palette-header"><span>No slash matches</span><span>/${text(prefix)}</span></div>`;
@@ -233,7 +292,7 @@ const renderSlashPalette = () => {
   palette.innerHTML = `
     <div class="slash-palette-header"><span>Slash Commands</span><span>Tab completes · Ctrl+Enter sends</span></div>
     ${matches.map((entry, index) => `
-      <button type="button" class="slash-palette-row ${index === state.slashSelectionIndex ? "active" : ""}" data-slash-command="${text(entry.command)}">
+      <button type="button" class="slash-palette-row ${index === state.slashSelectionIndex ? "active" : ""}" data-slash-index="${index}">
         <strong>${text(entry.label)}</strong>
         <span>${text(entry.detail)}</span>
       </button>
@@ -243,6 +302,12 @@ const renderSlashPalette = () => {
 
 const applySlashCompletion = (entry) => {
   const input = document.getElementById("task-request");
+  if (entry.completionKind) {
+    input.value = `${input.value.slice(0, entry.replaceStart)}${entry.completionValue} ${input.value.slice(entry.replaceEnd)}`;
+    input.focus();
+    renderSlashPalette();
+    return;
+  }
   const parsed = parseTaskSlashCommand(input.value);
   const suffix = parsed.request ? ` ${parsed.request}` : entry.acceptsRequest ? " " : "";
   input.value = `/${entry.command}${suffix}`;
@@ -2297,8 +2362,7 @@ taskRequestInput.addEventListener("keydown", (event) => {
     return;
   }
   if (!value.startsWith("/")) return;
-  const prefix = value.slice(1).split(/\s+/, 1)[0];
-  const matches = slashCommandMatches(prefix).slice(0, 8);
+  const matches = slashPaletteMatches(value).slice(0, 8);
   if (!matches.length) return;
   if (event.key === "ArrowDown") {
     event.preventDefault();
@@ -2317,9 +2381,8 @@ taskRequestInput.addEventListener("keydown", (event) => {
 });
 
 document.getElementById("slash-palette").addEventListener("click", (event) => {
-  const command = event.target.closest("[data-slash-command]")?.dataset.slashCommand;
-  if (!command) return;
-  const entry = slashCommandForToken(command);
+  const index = Number(event.target.closest("[data-slash-index]")?.dataset.slashIndex);
+  const entry = Number.isInteger(index) ? state.slashPaletteEntries[index] : null;
   if (entry) {
     applySlashCompletion(entry);
   }

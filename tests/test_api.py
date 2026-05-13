@@ -1175,6 +1175,9 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(queue_actions["submit"]["path"], "/tasks")
                 self.assertFalse(queue_actions["status"]["mutates"])
                 self.assertTrue(queue_actions["submit"]["mutates"])
+                self.assertIn("fetch-manifest", command_rows["plugins"]["args"])
+                self.assertIn("--catalog-path", command_rows["plugins"]["flags"])
+                self.assertIn("auth", command_rows["models"]["args"])
                 for task_action in ("resume", "pause", "cancel"):
                     self.assertEqual(command_rows[task_action]["kind"], "task-control")
                     self.assertIn("task_id", command_rows[task_action]["args"])
