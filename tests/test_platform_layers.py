@@ -1316,6 +1316,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("activation_packet_verification", backlog["browser_and_media_depth"]["required_controls"])
             self.assertIn("live_browser_activation_packet_schema", backlog["browser_and_media_depth"]["verification_gates"])
             self.assertIn("live_browser_activation_packet_verification", backlog["browser_and_media_depth"]["verification_gates"])
+            self.assertIn("playwright_chromium_adapter_preflight", backlog["browser_and_media_depth"]["verification_gates"])
             self.assertIn("disabled_live_browser_denial", backlog["browser_and_media_depth"]["verification_gates"])
             browser_hardening_controls = {control["control"] for control in backlog["browser_and_media_depth"]["implemented_hardening_controls"]}
             self.assertIn("unsupported_selector_truthfulness", browser_hardening_controls)
@@ -1333,6 +1334,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("openai_style_video_provider_adapter", browser_hardening_controls)
             self.assertIn("browser_automation_boundary_receipts", browser_hardening_controls)
             self.assertIn("live_browser_activation_packets", browser_hardening_controls)
+            self.assertIn("playwright_chromium_adapter_preflight", browser_hardening_controls)
             self.assertIn("live_browser_activation_packet_verification", browser_hardening_controls)
             self.assertIn("static_dom_snapshot_no_js", browser_hardening_controls)
             self.assertIn("approved_static_form_fill", browser_hardening_controls)
@@ -1353,6 +1355,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(browser_checklist["human_approval"]["state"], "enforced")
             self.assertEqual(browser_checklist["secret_capture_boundary"]["state"], "enforced")
             self.assertEqual(browser_checklist["live_browser_activation_packets"]["state"], "available_adapter_blocked")
+            self.assertEqual(browser_checklist["playwright_chromium_adapter_preflight"]["state"], "blocked_adapter_candidate")
             self.assertEqual(browser_checklist["live_browser_activation_packet_verification"]["state"], "verified_adapter_blocked")
             self.assertEqual(browser_checklist["media_worker_sandbox"]["state"], "available")
             self.assertEqual(browser_checklist["live_browser_automation"]["state"], "blocked_with_preflight")
@@ -1475,6 +1478,15 @@ class PlatformLayerTests(unittest.TestCase):
 
             status = orchestrator.browser.live_activation_status()
             self.assertEqual(status["activation"]["preflight_status"], "blocked")
+            self.assertEqual(status["activation"]["candidate_adapter_count"], 1)
+            self.assertIn("playwright_chromium_adapter_preflight", status["activation"]["verification_gates"])
+            adapter = status["activation"]["adapter_candidates"][0]
+            self.assertEqual(adapter["name"], "playwright-chromium")
+            self.assertEqual(adapter["runtime"], "python-playwright")
+            self.assertEqual(adapter["engine"], "chromium")
+            self.assertEqual(adapter["preflight_status"], "blocked")
+            self.assertFalse(adapter["enabled"])
+            self.assertFalse(adapter["raw_executable_path_included"])
             self.assertFalse(status["live_browser_adapter_enabled"])
             self.assertFalse(status["model_invocation_performed"])
 
@@ -1484,6 +1496,8 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(created["receipt"]["receipt_schema"], "aegis.browser.live_activation_packet.v1")
             self.assertEqual(created["receipt"]["activation_status"], "live_browser_adapter_required")
             self.assertEqual(created["receipt"]["preflight_status"], "blocked")
+            self.assertEqual(created["receipt"]["candidate_adapter_count"], 1)
+            self.assertEqual(created["receipt"]["playwright_chromium_preflight_status"], "blocked")
             self.assertFalse(created["receipt"]["live_browser_adapter_enabled"])
             self.assertFalse(created["receipt"]["raw_browser_content_included"])
             self.assertFalse(created["receipt"]["raw_secret_values_included"])
@@ -1499,6 +1513,8 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(created["receipt"]["artifact_sha256"], checksum_path.read_text(encoding="utf-8").strip())
 
             packet_payload = json.loads(packet_path.read_text(encoding="utf-8"))
+            self.assertEqual(packet_payload["activation"]["adapter_candidates"][0]["name"], "playwright-chromium")
+            self.assertFalse(packet_payload["activation"]["adapter_candidates"][0]["raw_executable_path_included"])
             self.assertFalse(packet_payload["controls"]["page_javascript_allowed"])
             self.assertFalse(packet_payload["controls"]["cookies_persisted"])
             self.assertFalse(packet_payload["controls"]["local_storage_persisted"])
@@ -1512,10 +1528,13 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertTrue(verified["receipt"]["checksum_matches"])
             self.assertTrue(verified["receipt"]["packet_schema_valid"])
             self.assertTrue(verified["receipt"]["activation_preflight_valid"])
+            self.assertEqual(verified["receipt"]["playwright_chromium_preflight_status"], "blocked")
             self.assertTrue(verified["receipt"]["controls_valid"])
             self.assertTrue(verified["receipt"]["boundaries_valid"])
             self.assertTrue(verified["receipt"]["packet_integrity_ok"])
             self.assertFalse(verified["receipt"]["raw_packet_payload_included"])
+            self.assertEqual(verified["packet"]["adapter_candidates"][0]["name"], "playwright-chromium")
+            self.assertFalse(verified["packet"]["adapter_candidates"][0]["raw_executable_path_included"])
 
             with self.assertRaises(ValueError):
                 orchestrator.browser.verify_live_activation_packet("../outside.json")

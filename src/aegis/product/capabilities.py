@@ -509,7 +509,7 @@ def _live_gap_backlog(
             "area": "browser_and_media_depth",
             "platforms": ["OpenClaw"],
             "status": "facade_hardening_required",
-            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, approved static-anchor navigation, and private live-browser activation packet review artifacts are available for stored HTTP-content sessions; provider-backed media artifacts, transcription, and video jobs can run through allowlisted HTTPS adapters with media_sandbox_profile_v1 receipts, including OpenAI-style image JSON, multipart image edit, TTS, audio transcription, and video generation adapters, while real page automation and broader provider-specific media depth still require expansion.",
+            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, approved static-anchor navigation, and private Playwright/Chromium live-browser activation packet review artifacts are available for stored HTTP-content sessions; provider-backed media artifacts, transcription, and video jobs can run through allowlisted HTTPS adapters with media_sandbox_profile_v1 receipts, including OpenAI-style image JSON, multipart image edit, TTS, audio transcription, and video generation adapters, while real page automation and broader provider-specific media depth still require expansion.",
             "sample_tools": facade_tools[:8],
             "next_steps": [
                 "Use live-browser activation packets only as readiness evidence until the live browser adapter itself is implemented and approved.",
@@ -525,6 +525,7 @@ def _live_gap_backlog(
                 "no_raw_secret_capture",
                 "live_browser_activation_packet_schema",
                 "live_browser_activation_packet_verification",
+                "playwright_chromium_adapter_preflight",
                 "disabled_live_browser_denial",
             ],
             "implemented_hardening_controls": [
@@ -563,6 +564,10 @@ def _live_gap_backlog(
                 {
                     "control": "live_browser_activation_packets",
                     "evidence": "live browser preflight returns structured activation packets with configured controls, blockers, verification gates, and next steps while the adapter remains disabled",
+                },
+                {
+                    "control": "playwright_chromium_adapter_preflight",
+                    "evidence": "activation packets name the denied-by-default Playwright/Chromium adapter candidate, package/runtime availability, blockers, and no raw executable path",
                 },
                 {
                     "control": "live_browser_activation_packet_verification",
@@ -635,6 +640,7 @@ def _live_gap_backlog(
                     "platform_media_sandbox_profiles_v1",
                     "browser_automation_boundary_receipts",
                     "live_browser_activation_packets",
+                    "playwright_chromium_adapter_preflight",
                     "live_browser_activation_packet_verification",
                     "openai_style_image_provider_adapter",
                     "openai_style_image_edit_provider_adapter",
@@ -930,6 +936,11 @@ def _browser_media_operator_checklist(implemented_controls: list[str], remaining
             "control": "live_browser_activation_packets",
             "state": "available_adapter_blocked" if "live_browser_activation_packets" in implemented else "pending",
             "detail": "Activation packets expose live-browser preflight controls, blockers, verification gates, and next steps while real page automation remains disabled.",
+        },
+        {
+            "control": "playwright_chromium_adapter_preflight",
+            "state": "blocked_adapter_candidate" if "playwright_chromium_adapter_preflight" in implemented else "pending",
+            "detail": "Playwright/Chromium is reported as a denied-by-default candidate with runtime availability and blockers, without exposing raw executable paths.",
         },
         {
             "control": "live_browser_activation_packet_verification",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import importlib.util
 import json
 import hashlib
 from html.parser import HTMLParser
@@ -370,6 +371,8 @@ class BrowserController:
             "checksum_sha256": hashlib.sha256(checksum_path.read_bytes()).hexdigest(),
             "activation_status": packet["activation"]["status"],
             "preflight_status": packet["activation"]["preflight_status"],
+            "candidate_adapter_count": packet["activation"]["candidate_adapter_count"],
+            "playwright_chromium_preflight_status": _playwright_chromium_preflight_status(packet["activation"]),
             "live_browser_adapter_enabled": False,
             "raw_browser_content_included": False,
             "raw_secret_values_included": False,
@@ -417,6 +420,7 @@ class BrowserController:
             "checksum_matches": checksum_matches,
             "packet_schema_valid": packet_schema_valid,
             "activation_preflight_valid": activation_valid,
+            "playwright_chromium_preflight_status": _playwright_chromium_preflight_status(activation),
             "controls_valid": controls_valid,
             "boundaries_valid": boundaries_valid,
             "forbidden_raw_keys_present": forbidden_keys_present,
@@ -1260,8 +1264,9 @@ def _unsupported_live_browser_actions() -> list[str]:
 
 
 def _live_browser_activation_preflight() -> dict[str, Any]:
+    adapter_candidates = _live_browser_adapter_candidates()
     blockers = [
-        {"control": "live_browser_adapter", "detail": "no real browser automation adapter is enabled"},
+        {"control": "live_browser_adapter", "detail": "no Playwright/Chromium real browser automation adapter is enabled"},
         {"control": "ephemeral_profile", "detail": "live automation must use a per-run browser profile with no persistent cookies or storage"},
         {"control": "network_allowlist", "detail": "navigation and subresource requests must pass configured provider/domain allowlists"},
         {"control": "script_policy", "detail": "page JavaScript execution policy must be explicit before live DOM automation"},
@@ -1272,6 +1277,10 @@ def _live_browser_activation_preflight() -> dict[str, Any]:
     return {
         "status": "live_browser_adapter_required",
         "preflight_status": "blocked",
+        "selected_adapter": None,
+        "candidate_adapter_count": len(adapter_candidates),
+        "adapter_candidates": adapter_candidates,
+        "live_browser_adapter_enabled": False,
         "configured_controls": [
             "http_connector_navigation_allowlist",
             "virtual_interaction_approval_gate",
@@ -1292,14 +1301,64 @@ def _live_browser_activation_preflight() -> dict[str, Any]:
             "approval_required_mutation",
             "redacted_artifact_receipts",
             "live_activation_packet_integrity",
+            "playwright_chromium_adapter_preflight",
         ],
         "next_steps": [
-            "Create and verify a private live activation packet before implementing or enabling a real browser automation adapter.",
-            "Add a browser automation adapter only after navigation, subresource, script, cookie, and storage boundaries are enforceable.",
+            "Create and verify a private live activation packet before implementing or enabling the Playwright/Chromium adapter.",
+            "Keep the Playwright/Chromium adapter disabled until navigation, subresource, script, cookie, and storage boundaries are enforceable.",
             "Keep every real page mutation approval-gated and bind approvals to the exact selector/action payload.",
             "Record redacted hash receipts for screenshots, DOM snapshots, downloads, uploads, console logs, and network traces.",
         ],
     }
+
+
+def _live_browser_adapter_candidates() -> list[dict[str, Any]]:
+    chrome_path = _find_chrome_executable()
+    playwright_available = importlib.util.find_spec("playwright") is not None
+    blockers = [
+        {"control": "explicit_enablement", "detail": "browser live adapter execution is disabled by default"},
+        {"control": "adapter_execution_path", "detail": "the Playwright/Chromium adapter has no approved execution path yet"},
+        {"control": "approval_bound_mutation_receipts", "detail": "real selector events and page mutations still need exact approval binding and redacted receipts"},
+    ]
+    if not playwright_available:
+        blockers.append({"control": "playwright_runtime", "detail": "python package playwright is not installed in this runtime"})
+    if not chrome_path:
+        blockers.append({"control": "chromium_runtime", "detail": "google-chrome, chromium, or chromium-browser is not available on PATH"})
+    return [
+        {
+            "name": "playwright-chromium",
+            "engine": "chromium",
+            "runtime": "python-playwright",
+            "status": "adapter_disabled",
+            "preflight_status": "blocked",
+            "enabled": False,
+            "package_available": playwright_available,
+            "chromium_executable_available": bool(chrome_path),
+            "raw_executable_path_included": False,
+            "required_controls": [
+                "ephemeral_profile",
+                "network_allowlist",
+                "script_policy",
+                "cookie_and_storage_isolation",
+                "approval_gated_mutation",
+                "redacted_artifact_receipts",
+            ],
+            "configured_controls": [
+                "http_connector_navigation_allowlist",
+                "virtual_interaction_approval_gate",
+                "browser_automation_boundary_receipts",
+                "private_artifact_storage",
+                "artifact_hash_receipts",
+                "secret_redaction",
+            ],
+            "blockers": blockers,
+            "next_steps": [
+                "Install and review Playwright/Chromium locally only after the adapter execution path is implemented.",
+                "Enable only through an explicit policy/config switch after activation-packet verification passes.",
+                "Keep cookies, storage, JavaScript, downloads, uploads, and selector mutations disabled until receipt controls are enforced.",
+            ],
+        }
+    ]
 
 
 _BROWSER_ACTIVATION_FALSE_CONTROLS = (
@@ -1347,6 +1406,7 @@ _BROWSER_ACTIVATION_REQUIRED_GATES = (
     "approval_required_mutation",
     "redacted_artifact_receipts",
     "live_activation_packet_integrity",
+    "playwright_chromium_adapter_preflight",
 )
 
 
@@ -1386,6 +1446,10 @@ def _browser_live_activation_controls_valid(controls: dict[str, Any]) -> bool:
 def _browser_live_activation_preflight_valid(activation: dict[str, Any]) -> bool:
     if activation.get("status") != "live_browser_adapter_required" or activation.get("preflight_status") != "blocked":
         return False
+    if activation.get("selected_adapter") is not None or activation.get("live_browser_adapter_enabled") is not False:
+        return False
+    if not _browser_live_adapter_candidates_valid(activation.get("adapter_candidates")):
+        return False
     blockers = activation.get("blockers")
     if not isinstance(blockers, list) or not blockers:
         return False
@@ -1400,6 +1464,35 @@ def _browser_live_activation_preflight_valid(activation: dict[str, Any]) -> bool
         and set(_BROWSER_ACTIVATION_REQUIRED_CONFIGURED_CONTROLS).issubset(configured_controls)
         and set(_BROWSER_ACTIVATION_REQUIRED_GATES).issubset(verification_gates)
     )
+
+
+def _browser_live_adapter_candidates_valid(candidates: Any) -> bool:
+    if not isinstance(candidates, list) or not candidates:
+        return False
+    playwright = next((candidate for candidate in candidates if isinstance(candidate, dict) and candidate.get("name") == "playwright-chromium"), None)
+    if not isinstance(playwright, dict):
+        return False
+    if playwright.get("enabled") is not False or playwright.get("preflight_status") != "blocked":
+        return False
+    if playwright.get("raw_executable_path_included") is not False:
+        return False
+    if playwright.get("runtime") != "python-playwright" or playwright.get("engine") != "chromium":
+        return False
+    blockers = playwright.get("blockers")
+    if not isinstance(blockers, list) or not blockers:
+        return False
+    blocker_controls = {str(blocker.get("control", "")) for blocker in blockers if isinstance(blocker, dict)}
+    return {"explicit_enablement", "adapter_execution_path", "approval_bound_mutation_receipts"}.issubset(blocker_controls)
+
+
+def _playwright_chromium_preflight_status(activation: dict[str, Any]) -> str:
+    candidates = activation.get("adapter_candidates") if isinstance(activation, dict) else None
+    if not isinstance(candidates, list):
+        return "missing"
+    for candidate in candidates:
+        if isinstance(candidate, dict) and candidate.get("name") == "playwright-chromium":
+            return str(candidate.get("preflight_status") or candidate.get("status") or "unknown")
+    return "missing"
 
 
 def _browser_live_activation_boundaries_valid(boundaries: dict[str, Any]) -> bool:
@@ -1449,12 +1542,29 @@ def _browser_live_activation_packet_summary(packet: dict[str, Any]) -> dict[str,
     activation = packet.get("activation") if isinstance(packet.get("activation"), dict) else {}
     environment = packet.get("environment") if isinstance(packet.get("environment"), dict) else {}
     controls = packet.get("controls") if isinstance(packet.get("controls"), dict) else {}
+    adapter_candidates = activation.get("adapter_candidates") if isinstance(activation.get("adapter_candidates"), list) else []
     return {
         "packet_schema": packet.get("packet_schema"),
         "packet_id": packet.get("packet_id"),
         "created_at": packet.get("created_at"),
         "activation_status": activation.get("status"),
         "preflight_status": activation.get("preflight_status"),
+        "selected_adapter": activation.get("selected_adapter"),
+        "candidate_adapter_count": activation.get("candidate_adapter_count"),
+        "playwright_chromium_preflight_status": _playwright_chromium_preflight_status(activation),
+        "adapter_candidates": [
+            {
+                "name": candidate.get("name"),
+                "status": candidate.get("status"),
+                "preflight_status": candidate.get("preflight_status"),
+                "enabled": bool(candidate.get("enabled", False)),
+                "package_available": bool(candidate.get("package_available", False)),
+                "chromium_executable_available": bool(candidate.get("chromium_executable_available", False)),
+                "raw_executable_path_included": bool(candidate.get("raw_executable_path_included", True)),
+            }
+            for candidate in adapter_candidates
+            if isinstance(candidate, dict)
+        ],
         "required_controls": list(activation.get("required_controls") or []),
         "configured_controls": list(activation.get("configured_controls") or []),
         "verification_gates": list(activation.get("verification_gates") or []),
