@@ -2740,6 +2740,10 @@ def _live_media_provider_adapter(*, name: str, params: dict[str, Any]) -> dict[s
         if name != "image_generate":
             return {"name": raw, "error": "openai_images provider adapter currently supports image_generate only"}
         return {"name": "openai_images", "error": None}
+    if raw in {"openai_tts", "openai_speech", "openai_audio_speech", "openai_compatible_tts"}:
+        if name != "tts":
+            return {"name": raw, "error": "openai_tts provider adapter currently supports tts only"}
+        return {"name": "openai_tts", "error": None}
     return {"name": raw[:80], "error": f"unsupported media provider adapter: {raw[:80]}"}
 
 
@@ -2759,6 +2763,16 @@ def _live_media_request_payload(*, name: str, prompt: str, text: str, source_pat
         background = str(params.get("background") or "").strip()
         if background:
             payload["background"] = background[:80]
+        return payload
+    if provider_adapter == "openai_tts":
+        payload = {
+            "model": str(params.get("model") or "gpt-4o-mini-tts")[:200],
+            "input": text,
+            "voice": str(params.get("voice") or "alloy")[:80],
+        }
+        response_format = str(params.get("response_format") or params.get("format") or "").strip()
+        if response_format:
+            payload["response_format"] = response_format[:40]
         return payload
     payload: dict[str, Any] = {"tool": name}
     if name in {"image_generate", "image_edit"}:
