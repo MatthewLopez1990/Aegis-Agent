@@ -306,6 +306,8 @@ renderBrowserOutput({
   approval_id: "approval-123",
   artifact_url: "/browser-artifacts/snapshot.png",
   metadata_url: "/browser-artifacts/snapshot.json",
+  packet: { packet_schema: "aegis.browser.live_activation_packet.v1", packet_id: "packet-123" },
+  receipt: { receipt_schema: "aegis.browser.live_activation_packet.v1", packet_id: "packet-123" },
   session: {
     interactive_elements: [
       { tag: "a", label: "Docs", selector_hint: "#docs", supported_virtual_actions: ["navigate"] },
@@ -317,7 +319,7 @@ renderBrowserOutput({
 if (state.pendingBrowserAction.approval_id !== "approval-123") {
   throw new Error("approval id was not stored for replay");
 }
-for (const expected of ["Open Snapshot", "Open Metadata", 'data-browser-selector="#docs"', '"navigate"', 'data-browser-selector="#save"', 'data-browser-label="Save"', 'data-browser-run-approved="approval-123"']) {
+for (const expected of ["Open Snapshot", "Open Metadata", "Create Live Activation Packet", "Verify Activation Packet", 'data-browser-live-activation-packet="1"', 'data-browser-verify-activation-packet="packet-123"', 'data-browser-selector="#docs"', '"navigate"', 'data-browser-selector="#save"', 'data-browser-label="Save"', 'data-browser-run-approved="approval-123"']) {
   if (!node.innerHTML.includes(expected)) {
     throw new Error(`missing browser renderer output ${expected}: ${node.innerHTML}`);
   }
@@ -670,6 +672,14 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn("browser-inspect", markup)
         self.assertIn("/browser/render-screenshot", script)
         self.assertIn("browser-render-screenshot", markup)
+        self.assertIn('data-browser-live-activation-packet="1"', script)
+        self.assertIn("Create Live Activation Packet", script)
+        self.assertIn("data-browser-verify-activation-packet", script)
+        self.assertIn("Verify Activation Packet", script)
+        self.assertIn('api("/browser/live-activation-packet"', script)
+        self.assertIn('api("/browser/verify-activation-packet"', script)
+        self.assertIn('body: JSON.stringify({ actor: "web-operator" })', script)
+        self.assertIn('body: JSON.stringify({ packet: activationPacket, actor: "web-operator" })', script)
         self.assertIn("data-browser-selector", script)
         self.assertIn('document.getElementById("browser-selector").value = selector', script)
         self.assertIn('document.getElementById("browser-fill-fields").value = JSON.stringify({ [selector]: "" }, null, 2)', script)

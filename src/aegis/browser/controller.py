@@ -336,6 +336,106 @@ class BrowserController:
         self.audit_logger.append("browser.live_automation_denied", response)
         return response
 
+    def live_activation_status(self) -> dict[str, Any]:
+        activation = _live_browser_activation_preflight()
+        return {
+            "status": "live_browser_activation_ready_for_review",
+            "activation": activation,
+            "live_browser_adapter_enabled": False,
+            "raw_browser_content_included": False,
+            "raw_secret_values_included": False,
+            "model_invocation_performed": False,
+        }
+
+    def create_live_activation_packet(self, *, actor: str = "operator") -> dict[str, Any]:
+        packet_id = str(uuid4())
+        created_at = now_utc()
+        packet_dir = ensure_private_dir(self.artifact_dir / "live-activation-packets")
+        packet_path = ensure_private_file(packet_dir / f"{packet_id}.json")
+        checksum_path = ensure_private_file(packet_dir / f"{packet_id}.sha256")
+        packet = _browser_live_activation_packet(packet_id=packet_id, actor=actor, created_at=created_at)
+        packet_path.write_text(json.dumps(packet, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        packet_path.chmod(0o600)
+        artifact_sha256 = hashlib.sha256(packet_path.read_bytes()).hexdigest()
+        checksum_path.write_text(f"{artifact_sha256}\n", encoding="utf-8")
+        checksum_path.chmod(0o600)
+        receipt = {
+            "receipt_schema": "aegis.browser.live_activation_packet.v1",
+            "event_type": "browser.live_activation_packet_created",
+            "packet_id": packet_id,
+            "actor": _redacted_string(actor, limit=80),
+            "artifact": str(packet_path),
+            "artifact_sha256": artifact_sha256,
+            "checksum": str(checksum_path),
+            "checksum_sha256": hashlib.sha256(checksum_path.read_bytes()).hexdigest(),
+            "activation_status": packet["activation"]["status"],
+            "preflight_status": packet["activation"]["preflight_status"],
+            "live_browser_adapter_enabled": False,
+            "raw_browser_content_included": False,
+            "raw_secret_values_included": False,
+            "raw_cookie_values_included": False,
+            "raw_storage_values_included": False,
+            "model_invocation_performed": False,
+            "created_at": created_at,
+        }
+        audit_entry = self.audit_logger.append("browser.live_activation_packet_created", receipt)
+        return {
+            "ok": True,
+            "packet": packet,
+            "receipt": receipt,
+            "audit_event_hash": audit_entry["event_hash"],
+        }
+
+    def verify_live_activation_packet(self, packet: str, *, actor: str = "operator") -> dict[str, Any]:
+        packet_path, checksum_path = _browser_live_activation_packet_paths(self.artifact_dir, packet)
+        packet_bytes = packet_path.read_bytes()
+        artifact_sha256 = hashlib.sha256(packet_bytes).hexdigest()
+        checksum_value = checksum_path.read_text(encoding="utf-8").strip() if checksum_path.exists() else ""
+        try:
+            decoded = json.loads(packet_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            decoded = {}
+        packet_payload = decoded if isinstance(decoded, dict) else {}
+        controls = packet_payload.get("controls") if isinstance(packet_payload.get("controls"), dict) else {}
+        activation = packet_payload.get("activation") if isinstance(packet_payload.get("activation"), dict) else {}
+        boundaries = packet_payload.get("implemented_boundaries") if isinstance(packet_payload.get("implemented_boundaries"), dict) else {}
+        checksum_matches = bool(checksum_value) and checksum_value == artifact_sha256
+        packet_schema_valid = packet_payload.get("packet_schema") == "aegis.browser.live_activation_packet.v1"
+        controls_valid = _browser_live_activation_controls_valid(controls)
+        activation_valid = _browser_live_activation_preflight_valid(activation)
+        boundaries_valid = _browser_live_activation_boundaries_valid(boundaries)
+        forbidden_keys_present = _browser_activation_packet_forbidden_keys_present(packet_payload)
+        receipt = {
+            "receipt_schema": "aegis.browser.live_activation_packet_verification.v1",
+            "event_type": "browser.live_activation_packet_verified",
+            "packet_id": str(packet_payload.get("packet_id") or packet_path.stem),
+            "actor": _redacted_string(actor, limit=80),
+            "artifact": str(packet_path),
+            "artifact_sha256": artifact_sha256,
+            "checksum": str(checksum_path),
+            "checksum_present": bool(checksum_value),
+            "checksum_matches": checksum_matches,
+            "packet_schema_valid": packet_schema_valid,
+            "activation_preflight_valid": activation_valid,
+            "controls_valid": controls_valid,
+            "boundaries_valid": boundaries_valid,
+            "forbidden_raw_keys_present": forbidden_keys_present,
+            "packet_integrity_ok": bool(packet_schema_valid and checksum_matches and activation_valid and controls_valid and boundaries_valid and not forbidden_keys_present),
+            "live_browser_adapter_enabled": False,
+            "raw_browser_content_included": False,
+            "raw_secret_values_included": False,
+            "raw_packet_payload_included": False,
+            "model_invocation_performed": False,
+            "verified_at": now_utc(),
+        }
+        audit_entry = self.audit_logger.append("browser.live_activation_packet_verified", receipt)
+        return {
+            "ok": bool(receipt["packet_integrity_ok"]),
+            "packet": _browser_live_activation_packet_summary(packet_payload),
+            "receipt": receipt,
+            "audit_event_hash": audit_entry["event_hash"],
+        }
+
     def screenshot(self, *, session_id: str) -> dict[str, Any]:
         session = self._require_session(session_id)
         evidence = _browser_evidence(session, action="screenshot")
@@ -1179,6 +1279,8 @@ def _live_browser_activation_preflight() -> dict[str, Any]:
             "private_artifact_storage",
             "artifact_hash_receipts",
             "secret_redaction",
+            "live_activation_packet_receipts",
+            "live_activation_packet_verification",
         ],
         "required_controls": [blocker["control"] for blocker in blockers],
         "blockers": blockers,
@@ -1189,13 +1291,228 @@ def _live_browser_activation_preflight() -> dict[str, Any]:
             "cookie_storage_isolation",
             "approval_required_mutation",
             "redacted_artifact_receipts",
+            "live_activation_packet_integrity",
         ],
         "next_steps": [
+            "Create and verify a private live activation packet before implementing or enabling a real browser automation adapter.",
             "Add a browser automation adapter only after navigation, subresource, script, cookie, and storage boundaries are enforceable.",
             "Keep every real page mutation approval-gated and bind approvals to the exact selector/action payload.",
             "Record redacted hash receipts for screenshots, DOM snapshots, downloads, uploads, console logs, and network traces.",
         ],
     }
+
+
+_BROWSER_ACTIVATION_FALSE_CONTROLS = (
+    "live_browser_adapter_enabled",
+    "real_page_mutation_allowed",
+    "real_selector_events_dispatched",
+    "page_javascript_allowed",
+    "cookies_persisted",
+    "cookie_jar_persisted",
+    "local_storage_persisted",
+    "session_storage_persisted",
+    "raw_browser_content_included",
+    "raw_secret_values_included",
+    "raw_cookie_values_included",
+    "raw_storage_values_included",
+    "model_invocation_performed",
+)
+
+_BROWSER_ACTIVATION_REQUIRED_BLOCKERS = (
+    "live_browser_adapter",
+    "ephemeral_profile",
+    "network_allowlist",
+    "script_policy",
+    "cookie_and_storage_isolation",
+    "approval_gated_mutation",
+    "redacted_artifact_receipts",
+)
+
+_BROWSER_ACTIVATION_REQUIRED_CONFIGURED_CONTROLS = (
+    "http_connector_navigation_allowlist",
+    "virtual_interaction_approval_gate",
+    "browser_automation_boundary_receipts",
+    "private_artifact_storage",
+    "artifact_hash_receipts",
+    "secret_redaction",
+    "live_activation_packet_receipts",
+    "live_activation_packet_verification",
+)
+
+_BROWSER_ACTIVATION_REQUIRED_GATES = (
+    "disabled_live_browser_denial",
+    "allowlisted_navigation",
+    "script_policy_enforcement",
+    "cookie_storage_isolation",
+    "approval_required_mutation",
+    "redacted_artifact_receipts",
+    "live_activation_packet_integrity",
+)
+
+
+def _browser_live_activation_packet(*, packet_id: str, actor: str, created_at: str) -> dict[str, Any]:
+    activation = _live_browser_activation_preflight()
+    chrome_path = _find_chrome_executable()
+    return {
+        "packet_schema": "aegis.browser.live_activation_packet.v1",
+        "packet_id": packet_id,
+        "created_at": created_at,
+        "actor": _redacted_string(actor, limit=80),
+        "taint": "BROWSER_ACTIVATION_METADATA",
+        "activation": activation,
+        "environment": {
+            "chrome_renderer_available": bool(chrome_path),
+            "chrome_renderer_name": Path(chrome_path).name if chrome_path else None,
+            "raw_executable_path_included": False,
+            "raw_environment_included": False,
+        },
+        "implemented_boundaries": _browser_automation_boundaries(rendered=False),
+        "review_instructions": [
+            "Treat this packet as local activation metadata, not proof that live browser automation is enabled.",
+            "Verify checksum, schema, blockers, and control flags before implementing a live adapter.",
+            "Do not use this packet to bypass approvals for real clicks, form fills, downloads, uploads, or page mutations.",
+        ],
+        "controls": {control: False for control in _BROWSER_ACTIVATION_FALSE_CONTROLS},
+    }
+
+
+def _browser_live_activation_controls_valid(controls: dict[str, Any]) -> bool:
+    expected_controls = set(_BROWSER_ACTIVATION_FALSE_CONTROLS)
+    if set(controls) != expected_controls:
+        return False
+    return all(controls.get(control) is False for control in _BROWSER_ACTIVATION_FALSE_CONTROLS)
+
+
+def _browser_live_activation_preflight_valid(activation: dict[str, Any]) -> bool:
+    if activation.get("status") != "live_browser_adapter_required" or activation.get("preflight_status") != "blocked":
+        return False
+    blockers = activation.get("blockers")
+    if not isinstance(blockers, list) or not blockers:
+        return False
+    blocker_controls = {str(blocker.get("control", "")) for blocker in blockers if isinstance(blocker, dict)}
+    required_controls = {str(control) for control in activation.get("required_controls") or []}
+    configured_controls = {str(control) for control in activation.get("configured_controls") or []}
+    verification_gates = {str(gate) for gate in activation.get("verification_gates") or []}
+    required_blockers = set(_BROWSER_ACTIVATION_REQUIRED_BLOCKERS)
+    return (
+        required_blockers.issubset(blocker_controls)
+        and required_blockers.issubset(required_controls)
+        and set(_BROWSER_ACTIVATION_REQUIRED_CONFIGURED_CONTROLS).issubset(configured_controls)
+        and set(_BROWSER_ACTIVATION_REQUIRED_GATES).issubset(verification_gates)
+    )
+
+
+def _browser_live_activation_boundaries_valid(boundaries: dict[str, Any]) -> bool:
+    if boundaries.get("boundary_schema") != "browser_automation_boundaries_v1":
+        return False
+    false_fields = (
+        "cookie_jar_persisted",
+        "cookies_persisted",
+        "local_storage_persisted",
+        "original_page_dom_executed",
+        "page_javascript_allowed",
+        "raw_secret_capture_allowed",
+        "real_page_mutation_allowed",
+        "real_selector_events_dispatched",
+        "remote_subresources_loaded",
+        "session_storage_persisted",
+    )
+    if any(boundaries.get(field) is not False for field in false_fields):
+        return False
+    if boundaries.get("virtual_interactions_only") is not True:
+        return False
+    required = {str(item) for item in boundaries.get("required_before_live_browser_adapter") or []}
+    return set(_BROWSER_ACTIVATION_REQUIRED_BLOCKERS).difference({"live_browser_adapter"}).issubset(required)
+
+
+def _browser_live_activation_packet_paths(artifact_dir: Path, packet: str) -> tuple[Path, Path]:
+    packet_dir = ensure_private_dir(artifact_dir / "live-activation-packets")
+    packet_ref = str(packet or "").strip()
+    if not packet_ref:
+        raise ValueError("browser activation packet id or path is required")
+    candidate = Path(packet_ref)
+    packet_path = candidate if candidate.is_absolute() or candidate.parent != Path(".") else packet_dir / (packet_ref if packet_ref.endswith(".json") else f"{packet_ref}.json")
+    resolved_dir = packet_dir.resolve()
+    resolved_packet = packet_path.resolve()
+    try:
+        resolved_packet.relative_to(resolved_dir)
+    except ValueError as exc:
+        raise ValueError("browser activation packet path must stay inside the private browser activation packet directory") from exc
+    if resolved_packet.suffix != ".json":
+        raise ValueError("browser activation packet artifact must be a .json file")
+    if not resolved_packet.exists():
+        raise FileNotFoundError(str(resolved_packet))
+    return resolved_packet, resolved_packet.with_suffix(".sha256")
+
+
+def _browser_live_activation_packet_summary(packet: dict[str, Any]) -> dict[str, Any]:
+    activation = packet.get("activation") if isinstance(packet.get("activation"), dict) else {}
+    environment = packet.get("environment") if isinstance(packet.get("environment"), dict) else {}
+    controls = packet.get("controls") if isinstance(packet.get("controls"), dict) else {}
+    return {
+        "packet_schema": packet.get("packet_schema"),
+        "packet_id": packet.get("packet_id"),
+        "created_at": packet.get("created_at"),
+        "activation_status": activation.get("status"),
+        "preflight_status": activation.get("preflight_status"),
+        "required_controls": list(activation.get("required_controls") or []),
+        "configured_controls": list(activation.get("configured_controls") or []),
+        "verification_gates": list(activation.get("verification_gates") or []),
+        "chrome_renderer_available": bool(environment.get("chrome_renderer_available", False)),
+        "chrome_renderer_name": environment.get("chrome_renderer_name"),
+        "live_browser_adapter_enabled": False,
+        "raw_browser_content_included": False,
+        "raw_secret_values_included": False,
+        "raw_cookie_values_included": False,
+        "raw_storage_values_included": False,
+        "model_invocation_performed": bool(controls.get("model_invocation_performed", False)),
+    }
+
+
+def _browser_activation_packet_forbidden_keys_present(value: Any) -> bool:
+    forbidden = {
+        "raw_browser_content",
+        "raw_content",
+        "raw_dom",
+        "raw_html",
+        "raw_page_html",
+        "raw_environment",
+        "raw_executable_path",
+        "raw_cookie",
+        "raw_cookies",
+        "raw_cookie_jar",
+        "raw_local_storage",
+        "raw_session_storage",
+        "raw_storage",
+        "raw_secret",
+        "raw_response_body",
+        "secret_value",
+        "access_token",
+        "refresh_token",
+        "browser_cookie",
+        "session_cookie",
+    }
+    allowed_raw_flags = {
+        "raw_executable_path_included",
+        "raw_environment_included",
+        "raw_browser_content_included",
+        "raw_secret_values_included",
+        "raw_cookie_values_included",
+        "raw_storage_values_included",
+        "raw_secret_capture_allowed",
+    }
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized_key = str(key)
+            if normalized_key in allowed_raw_flags and item is not False:
+                return True
+            if normalized_key not in allowed_raw_flags and (normalized_key in forbidden or normalized_key.startswith("raw_")):
+                return True
+            if _browser_activation_packet_forbidden_keys_present(item):
+                return True
+    if isinstance(value, list):
+        return any(_browser_activation_packet_forbidden_keys_present(item) for item in value)
+    return False
 
 
 def _title_from_text(content: str, *, fallback: str) -> str:

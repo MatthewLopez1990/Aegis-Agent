@@ -956,6 +956,13 @@ class ApiServerSecurityTests(unittest.TestCase):
                 due_schedules = _json_get(port, "/schedules/due", token=token)
                 run_due_schedules = _json_post(port, "/schedules/run-due", {}, token=token)
                 browser_session = _json_post(port, "/browser/sessions", {"label": "API browser"}, token=token)
+                browser_activation_packet = _json_post(port, "/browser/live-activation-packet", {"actor": "api-browser"}, token=token)
+                browser_activation_verified = _json_post(
+                    port,
+                    "/browser/verify-activation-packet",
+                    {"packet": browser_activation_packet["receipt"]["packet_id"], "actor": "api-verifier"},
+                    token=token,
+                )
                 browser_nav = _json_post(port, "/browser/navigate", {"session_id": browser_session["id"], "url": "https://example.com"}, token=token)
                 browser_extract = _json_post(port, "/browser/extract", {"session_id": browser_session["id"]}, token=token)
                 browser_dom = _json_post(port, "/browser/dom-snapshot", {"session_id": browser_session["id"]}, token=token)
@@ -1453,6 +1460,16 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(json.loads(browser_evidence_bytes.decode("utf-8"))["rendering_status"], "not_rendered")
                 self.assertRegex(browser_screenshot["artifact_hashes"]["snapshot_png_sha256"], r"^[0-9a-f]{64}$")
                 self.assertRegex(browser_screenshot["artifact_hashes"]["evidence_json_sha256"], r"^[0-9a-f]{64}$")
+                self.assertTrue(browser_activation_packet["ok"])
+                self.assertEqual(browser_activation_packet["receipt"]["receipt_schema"], "aegis.browser.live_activation_packet.v1")
+                self.assertEqual(browser_activation_packet["receipt"]["actor"], "api-browser")
+                self.assertEqual(browser_activation_packet["receipt"]["preflight_status"], "blocked")
+                self.assertFalse(browser_activation_packet["receipt"]["raw_browser_content_included"])
+                self.assertTrue(browser_activation_verified["ok"])
+                self.assertEqual(browser_activation_verified["receipt"]["receipt_schema"], "aegis.browser.live_activation_packet_verification.v1")
+                self.assertEqual(browser_activation_verified["receipt"]["actor"], "api-verifier")
+                self.assertTrue(browser_activation_verified["receipt"]["packet_integrity_ok"])
+                self.assertFalse(browser_activation_verified["receipt"]["raw_packet_payload_included"])
                 self.assertEqual(mismatched_click.exception.code, 403)
                 self.assertEqual(browser_click["status"], "approval_required")
                 self.assertEqual(browser_fill["status"], "approval_required")

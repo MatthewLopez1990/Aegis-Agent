@@ -325,6 +325,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn("disconnect", tui.complete_browser("dis", "browser dis", len("browser "), len("browser dis")))
             self.assertIn("inspect", tui.complete_browser("in", "browser in", len("browser "), len("browser in")))
             self.assertIn("screenshot", tui.complete_browser("sc", "browser sc", len("browser "), len("browser sc")))
+            self.assertIn("activation-packet", tui.complete_browser("activation", "browser activation", len("browser "), len("browser activation")))
+            self.assertIn("verify-activation-packet", tui.completedefault("verify", "/browser verify", len("/browser "), len("/browser verify")))
             self.assertIn("relay", tui.complete_remote_control("re", "remote_control re", len("remote_control "), len("remote_control re")))
             self.assertIn("directory", tui.complete_remote_control("di", "remote_control di", len("remote_control "), len("remote_control di")))
             self.assertIn("relay-directory", tui.complete_remote_control("relay-d", "remote_control relay-d", len("remote_control "), len("remote_control relay-d")))
@@ -1981,6 +1983,14 @@ class TuiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             tui = AegisTui(data_dir=root / ".aegis", workspace=root)
+            packet_output = io.StringIO()
+            with redirect_stdout(packet_output):
+                tui.onecmd("browser activation-packet")
+            created_packet = json.loads(packet_output.getvalue())
+            verify_packet_output = io.StringIO()
+            with redirect_stdout(verify_packet_output):
+                tui.onecmd(f"browser verify-activation-packet {created_packet['receipt']['packet_id']}")
+            verified_packet = json.loads(verify_packet_output.getvalue())
             output = io.StringIO()
 
             with redirect_stdout(output):
@@ -2020,8 +2030,16 @@ class TuiTests(unittest.TestCase):
                 tui.onecmd("browser disconnect")
                 tui.onecmd("browser extract")
 
+            self.assertEqual(created_packet["receipt"]["receipt_schema"], "aegis.browser.live_activation_packet.v1")
+            self.assertEqual(created_packet["receipt"]["actor"], "tui-operator")
+            self.assertEqual(created_packet["receipt"]["preflight_status"], "blocked")
+            self.assertFalse(created_packet["receipt"]["raw_browser_content_included"])
+            self.assertEqual(verified_packet["receipt"]["receipt_schema"], "aegis.browser.live_activation_packet_verification.v1")
+            self.assertTrue(verified_packet["receipt"]["packet_integrity_ok"])
+            self.assertFalse(verified_packet["receipt"]["raw_packet_payload_included"])
             rendered = output.getvalue()
             self.assertIn("local_browser_sandbox_ready", rendered)
+            self.assertIn("live_browser_adapter_required", rendered)
             self.assertIn("local_browser_session_connected", rendered)
             self.assertIn("approval_required", rendered)
             self.assertIn(click_approval["payload"]["session_id"][:8], rendered)

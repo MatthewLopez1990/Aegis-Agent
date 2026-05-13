@@ -597,6 +597,15 @@ def build_parser() -> argparse.ArgumentParser:
     backend_select.add_argument("--approved", action="store_true", help="Approve the high-risk backend selection")
     backend_select.add_argument("--workspace", default=".")
 
+    browser = subcommands.add_parser("browser", help="Manage governed browser activation packets")
+    browser.add_argument("--workspace", default=".")
+    browser_sub = browser.add_subparsers(dest="browser_command", required=True)
+    browser_activation_packet = browser_sub.add_parser("activation-packet", help="Create a live browser activation packet")
+    browser_activation_packet.add_argument("--actor", default="operator")
+    browser_verify_activation_packet = browser_sub.add_parser("verify-activation-packet", help="Verify a private live browser activation packet")
+    browser_verify_activation_packet.add_argument("packet")
+    browser_verify_activation_packet.add_argument("--actor", default="operator")
+
     evaluation = subcommands.add_parser("evaluation", help="Review local evaluation reports")
     evaluation_sub = evaluation.add_subparsers(dest="evaluation_command", required=True)
     evaluation_queue = evaluation_sub.add_parser("queue", help="List evaluation reports waiting for review")
@@ -1935,6 +1944,13 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return {"backend_doctor": _live_gap_doctor(orchestrator, "remote_backend_activation")}
         if args.backend_command == "select":
             return orchestrator.tools.execute("terminal_backend", {"backend": args.name}, approved=args.approved)
+
+    if args.command == "browser":
+        orchestrator = build_orchestrator(data_dir=args.data_dir, workspace=args.workspace)
+        if args.browser_command == "activation-packet":
+            return orchestrator.browser.create_live_activation_packet(actor=args.actor)
+        if args.browser_command == "verify-activation-packet":
+            return orchestrator.browser.verify_live_activation_packet(args.packet, actor=args.actor)
 
     if args.command == "evaluation":
         harness = ResearchHarness(data_dir=config.data_dir)

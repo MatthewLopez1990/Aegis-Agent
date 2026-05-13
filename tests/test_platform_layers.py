@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import stat
 import tempfile
@@ -1299,6 +1300,9 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("messaging.rollback_message_receipt", backlog["provider_and_channel_live_connectors"]["evaluation_scenarios"])
             self.assertIn("live_connector_receipts.redacted_write_summary", backlog["provider_and_channel_live_connectors"]["evaluation_scenarios"])
             self.assertIn("approval_required_mutation", backlog["browser_and_media_depth"]["verification_gates"])
+            self.assertIn("activation_packet_verification", backlog["browser_and_media_depth"]["required_controls"])
+            self.assertIn("live_browser_activation_packet_schema", backlog["browser_and_media_depth"]["verification_gates"])
+            self.assertIn("live_browser_activation_packet_verification", backlog["browser_and_media_depth"]["verification_gates"])
             self.assertIn("disabled_live_browser_denial", backlog["browser_and_media_depth"]["verification_gates"])
             browser_hardening_controls = {control["control"] for control in backlog["browser_and_media_depth"]["implemented_hardening_controls"]}
             self.assertIn("unsupported_selector_truthfulness", browser_hardening_controls)
@@ -1315,6 +1319,8 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("openai_style_transcription_provider_adapter", browser_hardening_controls)
             self.assertIn("openai_style_video_provider_adapter", browser_hardening_controls)
             self.assertIn("browser_automation_boundary_receipts", browser_hardening_controls)
+            self.assertIn("live_browser_activation_packets", browser_hardening_controls)
+            self.assertIn("live_browser_activation_packet_verification", browser_hardening_controls)
             self.assertIn("static_dom_snapshot_no_js", browser_hardening_controls)
             self.assertIn("approved_static_form_fill", browser_hardening_controls)
             self.assertIn("approved_static_form_submit", browser_hardening_controls)
@@ -1324,12 +1330,17 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertNotIn("stricter_platform_media_sandbox_profiles", backlog["browser_and_media_depth"]["remaining_depth_work"])
             self.assertIn("provider_specific_media_adapter_expansion", backlog["browser_and_media_depth"]["remaining_depth_work"])
             self.assertIn("artifact_integrity.browser_media_receipts", backlog["browser_and_media_depth"]["evaluation_scenarios"])
+            self.assertIn("browser.live_activation_packet_preflight", backlog["browser_and_media_depth"]["evaluation_scenarios"])
+            self.assertIn("browser.live_activation_packet_verification", backlog["browser_and_media_depth"]["evaluation_scenarios"])
+            self.assertIn("browser.live_automation_denied_until_adapter_ready", backlog["browser_and_media_depth"]["evaluation_scenarios"])
             browser_checklist = {item["control"]: item for item in backlog["browser_and_media_depth"]["operator_checklist"]}
             self.assertEqual(browser_checklist["browser_boundary_receipts"]["state"], "available")
             self.assertEqual(browser_checklist["taint_preservation"]["state"], "enforced")
             self.assertEqual(browser_checklist["artifact_hashing"]["state"], "available")
             self.assertEqual(browser_checklist["human_approval"]["state"], "enforced")
             self.assertEqual(browser_checklist["secret_capture_boundary"]["state"], "enforced")
+            self.assertEqual(browser_checklist["live_browser_activation_packets"]["state"], "available_adapter_blocked")
+            self.assertEqual(browser_checklist["live_browser_activation_packet_verification"]["state"], "verified_adapter_blocked")
             self.assertEqual(browser_checklist["media_worker_sandbox"]["state"], "available")
             self.assertEqual(browser_checklist["live_browser_automation"]["state"], "blocked_with_preflight")
             self.assertEqual(browser_checklist["provider_media_depth"]["state"], "partial")
@@ -1441,6 +1452,104 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(browser_docs["evidence"]["url_after"], "https://example.com/docs")
             self.assertTrue(browser_docs["evidence"]["content_changed"])
             self.assertEqual(read_urls, ["https://example.com", "https://evil.test/path", "https://example.com/docs"])
+
+    def test_browser_live_activation_packets_are_private_and_strictly_verified(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+
+            status = orchestrator.browser.live_activation_status()
+            self.assertEqual(status["activation"]["preflight_status"], "blocked")
+            self.assertFalse(status["live_browser_adapter_enabled"])
+            self.assertFalse(status["model_invocation_performed"])
+
+            created = orchestrator.browser.create_live_activation_packet(actor="browser-operator")
+            self.assertTrue(created["ok"])
+            self.assertEqual(created["packet"]["packet_schema"], "aegis.browser.live_activation_packet.v1")
+            self.assertEqual(created["receipt"]["receipt_schema"], "aegis.browser.live_activation_packet.v1")
+            self.assertEqual(created["receipt"]["activation_status"], "live_browser_adapter_required")
+            self.assertEqual(created["receipt"]["preflight_status"], "blocked")
+            self.assertFalse(created["receipt"]["live_browser_adapter_enabled"])
+            self.assertFalse(created["receipt"]["raw_browser_content_included"])
+            self.assertFalse(created["receipt"]["raw_secret_values_included"])
+            self.assertFalse(created["receipt"]["model_invocation_performed"])
+
+            packet_path = Path(created["receipt"]["artifact"])
+            checksum_path = Path(created["receipt"]["checksum"])
+            self.assertTrue(packet_path.exists())
+            self.assertTrue(checksum_path.exists())
+            self.assertEqual(stat.S_IMODE(packet_path.parent.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(packet_path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(checksum_path.stat().st_mode), 0o600)
+            self.assertEqual(created["receipt"]["artifact_sha256"], checksum_path.read_text(encoding="utf-8").strip())
+
+            packet_payload = json.loads(packet_path.read_text(encoding="utf-8"))
+            self.assertFalse(packet_payload["controls"]["page_javascript_allowed"])
+            self.assertFalse(packet_payload["controls"]["cookies_persisted"])
+            self.assertFalse(packet_payload["controls"]["local_storage_persisted"])
+            self.assertFalse(packet_payload["controls"]["real_selector_events_dispatched"])
+            self.assertNotIn("raw_dom", json.dumps(created, sort_keys=True))
+
+            verified = orchestrator.browser.verify_live_activation_packet(created["receipt"]["packet_id"], actor="browser-reviewer")
+            self.assertTrue(verified["ok"])
+            self.assertEqual(verified["receipt"]["receipt_schema"], "aegis.browser.live_activation_packet_verification.v1")
+            self.assertEqual(verified["receipt"]["actor"], "browser-reviewer")
+            self.assertTrue(verified["receipt"]["checksum_matches"])
+            self.assertTrue(verified["receipt"]["packet_schema_valid"])
+            self.assertTrue(verified["receipt"]["activation_preflight_valid"])
+            self.assertTrue(verified["receipt"]["controls_valid"])
+            self.assertTrue(verified["receipt"]["boundaries_valid"])
+            self.assertTrue(verified["receipt"]["packet_integrity_ok"])
+            self.assertFalse(verified["receipt"]["raw_packet_payload_included"])
+
+            with self.assertRaises(ValueError):
+                orchestrator.browser.verify_live_activation_packet("../outside.json")
+
+            def write_packet(name: str, payload: dict, *, checksum: str | None = None) -> str:
+                artifact = packet_path.parent / f"{name}.json"
+                artifact.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                artifact.chmod(0o600)
+                artifact_sha256 = hashlib.sha256(artifact.read_bytes()).hexdigest()
+                checksum_file = packet_path.parent / f"{name}.sha256"
+                checksum_file.write_text(f"{checksum if checksum is not None else artifact_sha256}\n", encoding="utf-8")
+                checksum_file.chmod(0o600)
+                return name
+
+            unsafe_controls = json.loads(json.dumps(packet_payload))
+            unsafe_controls["controls"]["page_javascript_allowed"] = True
+            unsafe_controls["controls"]["cookies_persisted"] = True
+            unsafe_controls["controls"]["real_selector_events_dispatched"] = True
+            unsafe_result = orchestrator.browser.verify_live_activation_packet(write_packet("unsafe-controls", unsafe_controls))
+            self.assertFalse(unsafe_result["ok"])
+            self.assertTrue(unsafe_result["receipt"]["checksum_matches"])
+            self.assertFalse(unsafe_result["receipt"]["controls_valid"])
+            self.assertFalse(unsafe_result["receipt"]["packet_integrity_ok"])
+
+            missing_blockers = json.loads(json.dumps(packet_payload))
+            missing_blockers["activation"]["blockers"] = []
+            missing_result = orchestrator.browser.verify_live_activation_packet(write_packet("missing-blockers", missing_blockers))
+            self.assertFalse(missing_result["ok"])
+            self.assertFalse(missing_result["receipt"]["activation_preflight_valid"])
+
+            unsafe_boundaries = json.loads(json.dumps(packet_payload))
+            unsafe_boundaries["implemented_boundaries"]["raw_secret_capture_allowed"] = True
+            boundary_result = orchestrator.browser.verify_live_activation_packet(write_packet("unsafe-boundaries", unsafe_boundaries))
+            self.assertFalse(boundary_result["ok"])
+            self.assertFalse(boundary_result["receipt"]["boundaries_valid"])
+
+            raw_payload = json.loads(json.dumps(packet_payload))
+            raw_payload["raw_page_html"] = "<html>secret</html>"
+            raw_result = orchestrator.browser.verify_live_activation_packet(write_packet("raw-content", raw_payload))
+            self.assertFalse(raw_result["ok"])
+            self.assertTrue(raw_result["receipt"]["forbidden_raw_keys_present"])
+            self.assertFalse(raw_result["receipt"]["raw_packet_payload_included"])
+            self.assertNotIn("<html>secret</html>", json.dumps(raw_result, sort_keys=True))
+
+            checksum_result = orchestrator.browser.verify_live_activation_packet(write_packet("checksum-mismatch", packet_payload, checksum="0" * 64))
+            self.assertFalse(checksum_result["ok"])
+            self.assertFalse(checksum_result["receipt"]["checksum_matches"])
 
     def test_browser_static_form_submit_uses_http_connector_without_js(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

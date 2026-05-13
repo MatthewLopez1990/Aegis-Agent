@@ -214,7 +214,24 @@ PLUGIN_COMMANDS = ("list", "install", "enable", "disable", "remove", "reload", "
 CURATOR_COMMANDS = ("status", "run", "pin", "unpin", "archive", "restore", "pause", "resume")
 REPAIR_COMMANDS = ("readiness", "review", "approve", "reject", "candidate", "generate-candidate", "synthesis-prompt", "synthesize-candidate", "review-candidate", "apply-candidate", "rollback-candidate", "attempt")
 SCHEDULE_COMMANDS = ("create", "memory-review-digest", "memory-review-escalation", "evaluation-run", "evaluation-suite", "due", "approve", "activate", "pause", "run-due")
-BROWSER_COMMANDS = ("status", "connect", "disconnect", "session", "sessions", "close", "navigate", "extract", "inspect", "table", "screenshot", "render", "click", "fill")
+BROWSER_COMMANDS = (
+    "status",
+    "connect",
+    "disconnect",
+    "session",
+    "sessions",
+    "close",
+    "navigate",
+    "extract",
+    "inspect",
+    "table",
+    "screenshot",
+    "render",
+    "click",
+    "fill",
+    "activation-packet",
+    "verify-activation-packet",
+)
 MCP_COMMANDS = ("list", "register", "auth", "call")
 HOOK_COMMANDS = ("list", "add", "enable", "disable", "remove", "run")
 AGENTS_COMMANDS = ("status", "profiles", "profile-create", "profile-disable", "delegate", "handoff", "review-packet", "verify-packet", "run", "run-batch")
@@ -2003,7 +2020,7 @@ class AegisTui(cmd.Cmd):
             print(f"evaluation review failed: {exc}")
 
     def do_browser(self, arg: str) -> None:
-        """browser status|connect|disconnect|session|sessions|close|navigate|extract|inspect|dom|table|screenshot|render|click|fill|submit -- operate the governed browser sandbox."""
+        """browser status|connect|disconnect|session|sessions|close|navigate|extract|inspect|activation-packet|verify-activation-packet|dom|table|screenshot|render|click|fill|submit -- operate the governed browser sandbox."""
         raw_parts = arg.strip().split(maxsplit=1)
         raw_command = raw_parts[0] if raw_parts else "session"
         parts = [raw_command, raw_parts[1]] if raw_command == "fill" and len(raw_parts) > 1 else shlex.split(arg)
@@ -2016,9 +2033,19 @@ class AegisTui(cmd.Cmd):
                         "active_session_id": self.browser_session_id,
                         "sessions": self.orchestrator.browser.list_sessions(),
                         "live_browser_automation": "blocked_until_explicit_adapter",
+                        "activation": self.orchestrator.browser.live_activation_status()["activation"],
                         "raw_secret_values_included": False,
                     }
                 )
+                return
+            if command == "activation-packet":
+                _print_json(self.orchestrator.browser.create_live_activation_packet(actor="tui-operator"))
+                return
+            if command == "verify-activation-packet":
+                if len(parts) < 2:
+                    print("usage: browser verify-activation-packet <packet-id-or-path>")
+                    return
+                _print_json(self.orchestrator.browser.verify_live_activation_packet(parts[1], actor="tui-operator"))
                 return
             if command == "connect":
                 session = self.orchestrator.browser.create_session(label="TUI browser")
@@ -6240,6 +6267,7 @@ def _command_reference() -> str:
             "voice|radio            Guarded voice and external media readiness",
             "stickers               Non-runtime merchandise boundary",
             "browser status|connect|disconnect|session|sessions|close|navigate <url>",
+            "browser activation-packet|verify-activation-packet <packet>  Live adapter activation receipts",
             "browser extract|inspect|dom [selector]|screenshot|render|click <selector>|fill <json>|submit [selector]",
             "boards                 Work boards and cards",
             "backends|sandbox       Execution backend sandbox posture",
@@ -6357,7 +6385,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("web-setup", "local web control-plane setup"),
             ("connectors|channels|platforms", "integration surfaces"),
             ("pr_comments|autofix-pr", "pull request comment and autofix readiness"),
-            ("browser status|connect|disconnect|render|chrome", "sandboxed browser work"),
+            ("browser status|connect|disconnect|render|activation-packet|verify-activation-packet|chrome", "sandboxed browser work"),
             ("boards|backends|sandbox", "work and execution planes"),
             ("voice|radio|terminal-setup|vim|mouse|tui|scroll-speed", "optional interaction and terminal readiness"),
             ("footer|busy|indicator|details|redraw", "runtime UI indicators and safe details"),

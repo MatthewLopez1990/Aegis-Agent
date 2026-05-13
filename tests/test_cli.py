@@ -35,6 +35,58 @@ class CliTests(unittest.TestCase):
         self.assertTrue(manifest["approval_required"])
         self.assertEqual(manifest["sandbox_profile"], "no_tools")
 
+    def test_browser_activation_packet_commands_create_and_verify_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            data_dir = Path(temp) / ".aegis"
+            workspace = Path(temp)
+            created = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "browser",
+                        "--workspace",
+                        str(workspace),
+                        "activation-packet",
+                        "--actor",
+                        "cli-browser",
+                    ]
+                )
+            )
+
+            self.assertTrue(created["ok"])
+            self.assertEqual(created["receipt"]["receipt_schema"], "aegis.browser.live_activation_packet.v1")
+            self.assertEqual(created["receipt"]["actor"], "cli-browser")
+            self.assertEqual(created["receipt"]["preflight_status"], "blocked")
+            self.assertFalse(created["receipt"]["raw_browser_content_included"])
+            packet_path = Path(created["receipt"]["artifact"])
+            self.assertTrue(packet_path.exists())
+            self.assertEqual(stat.S_IMODE(packet_path.stat().st_mode), 0o600)
+
+            verified = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "browser",
+                        "--workspace",
+                        str(workspace),
+                        "verify-activation-packet",
+                        created["receipt"]["packet_id"],
+                        "--actor",
+                        "cli-verifier",
+                    ]
+                )
+            )
+
+            self.assertTrue(verified["ok"])
+            self.assertEqual(verified["receipt"]["receipt_schema"], "aegis.browser.live_activation_packet_verification.v1")
+            self.assertEqual(verified["receipt"]["actor"], "cli-verifier")
+            self.assertTrue(verified["receipt"]["packet_integrity_ok"])
+            self.assertTrue(verified["receipt"]["checksum_matches"])
+            self.assertFalse(verified["receipt"]["raw_packet_payload_included"])
+
     def test_dashboard_command_reports_product_posture(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             parser = build_parser()
@@ -131,8 +183,20 @@ class CliTests(unittest.TestCase):
             self.assertEqual(checklist["rollback_receipts"]["state"], "partial")
             self.assertEqual(checklist["promotion_scope"]["state"], "not_started")
             browser_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "browser_and_media_depth")
+            self.assertIn("activation_packet_verification", browser_gap["required_controls"])
+            self.assertIn("live_browser_activation_packet_schema", browser_gap["verification_gates"])
+            self.assertIn("live_browser_activation_packet_verification", browser_gap["verification_gates"])
             self.assertIn("disabled_live_browser_denial", browser_gap["verification_gates"])
+            self.assertIn("browser.live_activation_packet_preflight", browser_gap["evaluation_scenarios"])
+            self.assertIn("browser.live_activation_packet_verification", browser_gap["evaluation_scenarios"])
+            self.assertIn("browser.live_automation_denied_until_adapter_ready", browser_gap["evaluation_scenarios"])
+            browser_controls = {control["control"] for control in browser_gap["implemented_hardening_controls"]}
+            self.assertIn("live_browser_activation_packets", browser_controls)
+            self.assertIn("live_browser_activation_packet_verification", browser_controls)
+            self.assertIn("live_browser_automation_adapter", browser_gap["remaining_depth_work"])
             browser_checklist = {item["control"]: item for item in browser_gap["operator_checklist"]}
+            self.assertEqual(browser_checklist["live_browser_activation_packets"]["state"], "available_adapter_blocked")
+            self.assertEqual(browser_checklist["live_browser_activation_packet_verification"]["state"], "verified_adapter_blocked")
             self.assertEqual(browser_checklist["live_browser_automation"]["state"], "blocked_with_preflight")
             subagent_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "subagent_runtime_depth")
             self.assertIn("operator_batch_receipts", subagent_gap["required_controls"])

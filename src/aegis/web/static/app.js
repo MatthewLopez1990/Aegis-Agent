@@ -1728,6 +1728,14 @@ const renderBrowserOutput = (payload) => {
   if (payload.status === "approval_required" && payload.approval_id && state.pendingBrowserAction) {
     state.pendingBrowserAction.approval_id = payload.approval_id;
   }
+  const packet = payload.packet && typeof payload.packet === "object" ? payload.packet : {};
+  const receipt = payload.receipt && typeof payload.receipt === "object" ? payload.receipt : {};
+  const browserActivationPacketRef =
+    (typeof payload.packet === "string" ? payload.packet : "") ||
+    packet.packet_id ||
+    receipt.packet_id ||
+    payload.packet_id ||
+    "";
   const interactiveElements = Array.isArray(payload.interactive_elements)
     ? payload.interactive_elements
     : Array.isArray(payload.session?.interactive_elements)
@@ -1751,10 +1759,17 @@ const renderBrowserOutput = (payload) => {
     payload.evidence_url ? `<a class="button secondary" href="${escapeHtml(payload.evidence_url)}" target="_blank" rel="noopener">Open Evidence</a>` : "",
   ].filter(Boolean).join("");
   const artifactActions = artifactLinks ? `<div class="item-actions">${artifactLinks}</div>` : "";
+  const activationPacketActions = `
+    <div class="item-actions">
+      <button type="button" class="secondary" data-browser-live-activation-packet="1">Create Live Activation Packet</button>
+      ${browserActivationPacketRef ? `<button type="button" class="secondary" data-browser-verify-activation-packet="${escapeHtml(browserActivationPacketRef)}">Verify Activation Packet</button>` : ""}
+    </div>
+  `;
   node.innerHTML = `
     <strong>${text(payload.ok ? "Browser Result" : payload.status || "Browser Notice")}</strong>
     <div class="muted">${text(payload.mode || "HTTP-content browser control; no rendered JavaScript DOM is available.")}</div>
     ${artifactActions}
+    ${activationPacketActions}
     ${interactiveRows}
     <code>${text(JSON.stringify(payload, null, 2))}</code>
     ${approvalAction}
@@ -3266,6 +3281,24 @@ document.getElementById("browser-submit").addEventListener("click", async () => 
 });
 
 document.getElementById("browser-output").addEventListener("click", async (event) => {
+  const createActivationPacket = event.target.closest("[data-browser-live-activation-packet]");
+  if (createActivationPacket) {
+    renderBrowserOutput(await api("/browser/live-activation-packet", { method: "POST", body: JSON.stringify({ actor: "web-operator" }) }));
+    await refresh();
+    return;
+  }
+  const verifyActivationPacket = event.target.closest("[data-browser-verify-activation-packet]");
+  if (verifyActivationPacket) {
+    const activationPacket = verifyActivationPacket.dataset.browserVerifyActivationPacket;
+    renderBrowserOutput(
+      await api("/browser/verify-activation-packet", {
+        method: "POST",
+        body: JSON.stringify({ packet: activationPacket, actor: "web-operator" }),
+      })
+    );
+    await refresh();
+    return;
+  }
   const elementButton = event.target.closest("[data-browser-selector]");
   if (elementButton) {
     const selector = elementButton.dataset.browserSelector || "";

@@ -509,19 +509,22 @@ def _live_gap_backlog(
             "area": "browser_and_media_depth",
             "platforms": ["OpenClaw"],
             "status": "facade_hardening_required",
-            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, and approved static-anchor navigation are available for stored HTTP-content sessions; provider-backed media artifacts, transcription, and video jobs can run through allowlisted HTTPS adapters with media_sandbox_profile_v1 receipts, including OpenAI-style image JSON, multipart image edit, TTS, audio transcription, and video generation adapters, while real page automation and broader provider-specific media depth still require expansion.",
+            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, approved static-anchor navigation, and private live-browser activation packet review artifacts are available for stored HTTP-content sessions; provider-backed media artifacts, transcription, and video jobs can run through allowlisted HTTPS adapters with media_sandbox_profile_v1 receipts, including OpenAI-style image JSON, multipart image edit, TTS, audio transcription, and video generation adapters, while real page automation and broader provider-specific media depth still require expansion.",
             "sample_tools": facade_tools[:8],
             "next_steps": [
+                "Use live-browser activation packets only as readiness evidence until the live browser adapter itself is implemented and approved.",
                 "Extend rendering toward real browser automation only after network, cookie, and JavaScript boundaries are enforceable.",
                 "Extend provider-backed media execution toward provider-specific image, audio, and video adapters after redacted receipt coverage is proven.",
                 "Gate any page mutation, recording, or generated media write behind approval.",
             ],
-            "required_controls": ["sandbox_isolation", "taint_preservation", "artifact_hashing", "human_approval"],
+            "required_controls": ["sandbox_isolation", "taint_preservation", "artifact_hashing", "human_approval", "activation_packet_verification"],
             "verification_gates": [
                 "unsupported_selector_truthfulness",
                 "artifact_hash_stability",
                 "approval_required_mutation",
                 "no_raw_secret_capture",
+                "live_browser_activation_packet_schema",
+                "live_browser_activation_packet_verification",
                 "disabled_live_browser_denial",
             ],
             "implemented_hardening_controls": [
@@ -556,6 +559,14 @@ def _live_gap_backlog(
                 {
                     "control": "browser_automation_boundary_receipts",
                     "evidence": "browser snapshot and render evidence records cookie, storage, script, subresource, network, and mutation boundaries before live automation is enabled",
+                },
+                {
+                    "control": "live_browser_activation_packets",
+                    "evidence": "live browser preflight returns structured activation packets with configured controls, blockers, verification gates, and next steps while the adapter remains disabled",
+                },
+                {
+                    "control": "live_browser_activation_packet_verification",
+                    "evidence": "operators can verify private activation packet checksum, schema, blockers, cookie/storage isolation flags, redacted artifact controls, and approval gates while selector-event dispatch remains disabled",
                 },
                 {
                     "control": "platform_media_sandbox_profiles_v1",
@@ -606,7 +617,12 @@ def _live_gap_backlog(
                 "live_browser_automation_adapter",
                 "provider_specific_media_adapter_expansion",
             ],
-            "evaluation_scenarios": ["artifact_integrity.browser_media_receipts"],
+            "evaluation_scenarios": [
+                "artifact_integrity.browser_media_receipts",
+                "browser.live_activation_packet_preflight",
+                "browser.live_activation_packet_verification",
+                "browser.live_automation_denied_until_adapter_ready",
+            ],
             "operator_checklist": _browser_media_operator_checklist(
                 implemented_controls=[
                     "unsupported_selector_truthfulness",
@@ -618,6 +634,8 @@ def _live_gap_backlog(
                     "provider_backed_media_artifacts",
                     "platform_media_sandbox_profiles_v1",
                     "browser_automation_boundary_receipts",
+                    "live_browser_activation_packets",
+                    "live_browser_activation_packet_verification",
                     "openai_style_image_provider_adapter",
                     "openai_style_image_edit_provider_adapter",
                     "openai_style_tts_provider_adapter",
@@ -902,6 +920,16 @@ def _browser_media_operator_checklist(implemented_controls: list[str], remaining
             "control": "secret_capture_boundary",
             "state": "enforced" if "no_raw_secret_capture" in implemented else "pending",
             "detail": "Browser/media metadata redacts secret-shaped fields and avoids raw prompt persistence.",
+        },
+        {
+            "control": "live_browser_activation_packets",
+            "state": "available_adapter_blocked" if "live_browser_activation_packets" in implemented else "pending",
+            "detail": "Activation packets expose live-browser preflight controls, blockers, verification gates, and next steps while real page automation remains disabled.",
+        },
+        {
+            "control": "live_browser_activation_packet_verification",
+            "state": "verified_adapter_blocked" if "live_browser_activation_packet_verification" in implemented else "pending",
+            "detail": "Packet verification checks adapter, isolation, redaction, and approval blockers as review evidence while denied live automation requests remain blocked separately.",
         },
         {
             "control": "media_worker_sandbox",
