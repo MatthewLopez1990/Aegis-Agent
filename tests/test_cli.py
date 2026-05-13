@@ -3333,6 +3333,11 @@ class CliTests(unittest.TestCase):
         self.assertNotIn("ollama", choices)
         self.assertNotIn("lmstudio", choices)
 
+        tui_web_docs = (Path(__file__).resolve().parents[1] / "docs" / "tui-web.md").read_text(encoding="utf-8")
+        self.assertIn("models auth login qwen subscription --run-external", tui_web_docs)
+        self.assertIn("models auth login qwen subscription --verify-external", tui_web_docs)
+        self.assertNotIn("models auth login qwen oauth --run-external", tui_web_docs)
+
     def test_hooks_cli_registers_lists_and_runs_governed_hook(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             data_dir = Path(temp) / ".aegis"

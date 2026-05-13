@@ -63,7 +63,8 @@ Commands:
 - `models auth login github-copilot oauth-device --run-external`
 - `models auth login google cloud-identity --run-external`
 - `models auth login google cloud-identity --verify-external`
-- `models auth login qwen oauth --run-external`
+- `models auth login qwen subscription --run-external`
+- `models auth login qwen subscription --verify-external`
 - `models auth login google subscription --run-external`
 - `models auth login aws-bedrock cloud-identity --run-external`
 - `models auth login aws-bedrock cloud-identity --verify-external`
