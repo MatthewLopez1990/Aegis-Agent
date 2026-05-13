@@ -16,7 +16,7 @@ from aegis.memory.models import MemoryType
 from aegis.research.harness import ResearchHarness
 from aegis.security.taint import RiskLevel, TrustClass
 from aegis.skills.manifest import SkillManifest
-from aegis.tui.main import AegisTui, _live_input_block
+from aegis.tui.main import AegisTui, _apply_live_completion, _complete_slash, _live_completion_context, _live_input_block
 
 from tests.test_mcp import FAKE_MCP_SERVER
 from tests.test_plugins import _write_plugin_catalog, _write_plugin_fixture
@@ -225,6 +225,16 @@ class TuiTests(unittest.TestCase):
             self.assertIn("/terminal-setup", tui.completedefault("term", "/term", 1, 5))
             self.assertIn("/topic", tui.completedefault("top", "/top", 1, 4))
             self.assertIn("auth", tui.completedefault("au", "/model au", len("/model "), len("/model au")))
+            live_text, live_begidx, live_endidx = _live_completion_context("/model au")
+            self.assertEqual((live_text, live_begidx, live_endidx), ("au", len("/model "), len("/model au")))
+            self.assertIn("auth", _complete_slash(live_text, "/model au", live_begidx, live_endidx))
+            self.assertEqual(_apply_live_completion("/model au", "auth", live_begidx, live_endidx), "/model auth")
+            flag_text, flag_begidx, flag_endidx = _live_completion_context("/plugins fetch-manifest remote.plugin --")
+            self.assertEqual(flag_text, "--")
+            self.assertIn("--catalog-path", _complete_slash(flag_text, "/plugins fetch-manifest remote.plugin --", flag_begidx, flag_endidx))
+            self.assertEqual(_apply_live_completion("/plugins fetch-manifest remote.plugin --", "--catalog-path", flag_begidx, flag_endidx), "/plugins fetch-manifest remote.plugin --catalog-path")
+            root_text, root_begidx, root_endidx = _live_completion_context("/su")
+            self.assertEqual(_apply_live_completion("/su", "/submit", root_begidx, root_endidx), "/submit")
             slash_su = tui.completedefault("su", "/su", 1, 3)
             self.assertIn("/submit", slash_su)
             self.assertIn("/resume", slash_su)

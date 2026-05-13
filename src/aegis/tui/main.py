@@ -5611,9 +5611,14 @@ class AegisTui(cmd.Cmd):
                         redraw()
                     continue
                 if char == "\t":
-                    completions = _complete_slash(buffer.lstrip("/"), buffer, 1, len(buffer)) if buffer.startswith("/") else self.completenames(buffer)
+                    if buffer.startswith("/"):
+                        completion_text, begidx, endidx = _live_completion_context(buffer)
+                        completions = _complete_slash(completion_text, buffer, begidx, endidx)
+                    else:
+                        completion_text, begidx, endidx = buffer, 0, len(buffer)
+                        completions = self.completenames(buffer)
                     if len(completions) == 1:
-                        buffer = completions[0]
+                        buffer = _apply_live_completion(buffer, completions[0], begidx, endidx)
                     elif completions:
                         sys.stdout.write("\n" + _inline_completion_line(completions, width=shutil.get_terminal_size((100, 24)).columns) + "\n")
                         rendered_height = 0
@@ -7036,6 +7041,23 @@ def _complete_slash(text: str, line: str, begidx: int, endidx: int) -> list[str]
         return _complete_options(SLASH_FLAG_HINTS.get((root, subcommand), ()), current)
     subcommands = SLASH_SUBCOMMANDS.get(root, ())
     return _complete_options(subcommands, current)
+
+
+def _live_completion_context(buffer: str) -> tuple[str, int, int]:
+    endidx = len(buffer)
+    if not buffer.startswith("/"):
+        return buffer, 0, endidx
+    if not buffer or buffer[-1].isspace():
+        return "", endidx, endidx
+    last_break = max(buffer.rfind(" "), buffer.rfind("\t"), buffer.rfind("\n"))
+    begidx = last_break + 1 if last_break >= 0 else 1
+    return buffer[begidx:endidx], begidx, endidx
+
+
+def _apply_live_completion(buffer: str, completion: str, begidx: int, endidx: int) -> str:
+    if buffer.startswith("/") and completion.startswith("/"):
+        return completion
+    return f"{buffer[:begidx]}{completion}{buffer[endidx:]}"
 
 
 def _complete_options(options: tuple[str, ...], text: str) -> list[str]:
