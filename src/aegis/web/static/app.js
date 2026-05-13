@@ -48,7 +48,8 @@ const TOOL_RUN_PRESETS = [
 
 const WEB_SLASH_COMMANDS = [
   { command: "submit", label: "/submit <request>", detail: "Submit a governed task", kind: "submit", acceptsRequest: true },
-  { command: "background", aliases: ["bg", "btw", "queue", "q"], label: "/background|/bg|/btw <request>", detail: "Queue governed work from the active session", kind: "submit", acceptsRequest: true },
+  { command: "background", aliases: ["bg", "btw"], label: "/background|/bg|/btw <request>", detail: "Queue governed work from the active session", kind: "submit", acceptsRequest: true },
+  { command: "queue", aliases: ["q"], label: "/queue|/q [status|all|session|submit]", detail: "Open the active queue or submit governed work", kind: "queue-control", section: "activity" },
   { command: "resume", aliases: ["continue"], label: "/resume [task_id]", detail: "Resume the selected waiting or paused task", kind: "task-control", taskAction: "resume" },
   { command: "pause", label: "/pause [task_id]", detail: "Pause the selected non-terminal task", kind: "task-control", taskAction: "pause" },
   { command: "cancel", aliases: ["stop"], label: "/cancel|/stop [task_id]", detail: "Cancel the selected non-terminal task", kind: "task-control", taskAction: "cancel" },
@@ -1824,6 +1825,36 @@ const slashTaskId = (parsed) => String(parsed.request || "").trim().split(/\s+/,
 
 const slashApprovalId = (parsed) => String(parsed.request || "").trim().split(/\s+/, 1)[0];
 
+const queueStatusTokens = new Set(["status", "show", "list", "active", "pending", "all", "session"]);
+
+const executeQueueSlashCommand = async (parsed) => {
+  const parts = String(parsed.request || "").trim().split(/\s+/).filter(Boolean);
+  const action = parts[0] && !parts[0].startsWith("--") ? parts.shift().toLowerCase() : "status";
+  if (action === "submit" || !queueStatusTokens.has(action)) {
+    const request = action === "submit" ? parts.join(" ").trim() : String(parsed.request || "").trim();
+    if (!request) {
+      renderTaskNotice(parsed.label || "/queue", "Add a request after the queue command before sending.");
+      return;
+    }
+    const path = document.getElementById("task-path").value || undefined;
+    const result = await api("/tasks", { method: "POST", body: JSON.stringify({ request, path, session_id: state.activeSessionId }) });
+    renderTaskResult(result);
+    await refresh();
+    renderTaskNotice(parsed.label || "/queue", `Queued task ${shortId(result.id)}.`);
+    return;
+  }
+  state.activeSection = parsed.section || "activity";
+  state.taskScope = action === "all" ? "all" : "session";
+  if (action === "all") {
+    state.inspectedTaskSessionId = null;
+  } else if (action === "session" && parts[0]) {
+    state.inspectedTaskSessionId = parts[0];
+  }
+  applySectionVisibility();
+  await refresh();
+  renderTaskNotice(parsed.label || "/queue", action === "all" ? "All-session task queue loaded." : "Active-session task queue loaded.");
+};
+
 const remoteControlSlashRequest = (request) => {
   const parts = String(request || "").trim().split(/\s+/).filter(Boolean);
   const action = (parts.shift() || "").toLowerCase();
@@ -1863,6 +1894,10 @@ const executeRemoteControlSlashCommand = async (parsed) => {
 };
 
 const executeLocalSlashCommand = async (parsed) => {
+  if (parsed.kind === "queue-control") {
+    await executeQueueSlashCommand(parsed);
+    return;
+  }
   if (parsed.kind === "approval-control") {
     const approvalId = slashApprovalId(parsed);
     const action = parsed.approvalAction || parsed.command;

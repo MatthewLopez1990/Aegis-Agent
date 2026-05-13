@@ -1165,6 +1165,16 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(remote_actions["status"]["path"], "/remote-control/status")
                 self.assertEqual(remote_actions["directory"]["path"], "/remote-control/directory")
                 self.assertFalse(remote_actions["status"]["mutates"])
+                self.assertEqual(command_rows["queue"]["kind"], "queue-control")
+                self.assertEqual(command_rows["q"]["kind"], "queue-control")
+                self.assertIn("submit", command_rows["queue"]["args"])
+                self.assertIn("--status", command_rows["queue"]["flags"])
+                queue_actions = {action["input"]: action for action in command_rows["queue"]["web_actions"]}
+                self.assertEqual(queue_actions["status"]["path"], "/tasks")
+                self.assertEqual(queue_actions["session"]["path_template"], "/sessions/{session_id}/tasks")
+                self.assertEqual(queue_actions["submit"]["path"], "/tasks")
+                self.assertFalse(queue_actions["status"]["mutates"])
+                self.assertTrue(queue_actions["submit"]["mutates"])
                 for task_action in ("resume", "pause", "cancel"):
                     self.assertEqual(command_rows[task_action]["kind"], "task-control")
                     self.assertIn("task_id", command_rows[task_action]["args"])

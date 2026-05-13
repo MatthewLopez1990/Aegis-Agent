@@ -266,7 +266,7 @@ if (su[0] !== "submit" || !su.includes("resume") || su.includes("settings")) {
   throw new Error(`/su fuzzy matches are wrong: ${JSON.stringify(su)}`);
 }
 const parsed = api.parse("/q inspect the failing test");
-if (parsed.kind !== "submit" || parsed.command !== "background" || parsed.request !== "inspect the failing test") {
+if (parsed.kind !== "queue-control" || parsed.command !== "queue" || parsed.request !== "inspect the failing test") {
   throw new Error(`queue alias parsed incorrectly: ${JSON.stringify(parsed)}`);
 }
 const nav = api.parse("/models");
@@ -333,6 +333,7 @@ api.merge([
   { command: "debug", label: "/debug", detail: "TUI diagnostics", kind: "palette", source: "tui" },
   { command: "submit", label: "/submit duplicate", detail: "duplicate should be ignored", kind: "palette" },
   { command: "remote-control", label: "/remote-control", detail: "Remote action metadata", kind: "remote-control", section: "automation", source: "tui", surfaces: ["tui", "web_palette"], args: ["status", "directory"], flags: ["--pairing-id", "--limit"], requires_local_token: true, requires_remote_token: false, mutates: false, web_actions: [{ input: "status", method: "GET", path: "/remote-control/status", mutates: false }] },
+  { command: "q", label: "/queue|/q [status|all|session|submit]", detail: "Queue control metadata", kind: "queue-control", section: "activity", source: "tui", surfaces: ["tui", "web_palette", "web_action"], args: ["status", "all", "session", "submit", "request"], flags: ["--limit", "--status"], requires_local_token: true, mutates: true, web_actions: [{ input: "status", method: "GET", path: "/tasks", mutates: false }, { input: "submit", method: "POST", path: "/tasks", mutates: true }] },
   { command: "pause", label: "/pause [task_id]", detail: "Pause task metadata", kind: "task-control", section: "activity", source: "tui", args: ["task_id"], requires_local_token: true, mutates: true, web_actions: [{ input: "pause", method: "POST", path_template: "/tasks/{task_id}/pause", mutates: true }] },
   { command: "approve", label: "/approve <approval_id>", detail: "Approve metadata", kind: "approval-control", section: "security", source: "tui", args: ["approval_id"], flags: ["--actor", "--reason", "--admin"], requires_local_token: true, mutates: true, web_actions: [{ input: "approve", method: "POST", path_template: "/approvals/{approval_id}/approve", mutates: true }] },
   { command: "aegis-project-summary", label: "/aegis-project-summary", detail: "Skill command", kind: "palette", source: "skill" },
@@ -348,6 +349,10 @@ if (!skill.includes("aegis-project-summary")) {
 const remote = api.parse("/remote-control status");
 if (remote.kind !== "remote-control" || remote.request !== "status" || !remote.webActions.length || !remote.args.includes("directory")) {
   throw new Error(`/remote-control metadata did not merge: ${JSON.stringify(remote)}`);
+}
+const queue = api.parse("/q submit review the next slice");
+if (queue.kind !== "queue-control" || queue.command !== "queue" || !queue.webActions.length || !queue.args.includes("submit") || !queue.flags.includes("--status")) {
+  throw new Error(`/queue metadata did not merge: ${JSON.stringify(queue)}`);
 }
 const mergedPause = api.parse("/pause task-101");
 if (!mergedPause.webActions.length || mergedPause.mutates !== true || !mergedPause.args.includes("task_id")) {
@@ -380,7 +385,7 @@ if (start < 0 || end < 0) {
   throw new Error("task inspection slash dispatcher not found");
 }
 const calls = [];
-const state = { lastTask: { id: "latest-task" }, activeSection: "security" };
+const state = { lastTask: { id: "latest-task" }, activeSection: "security", activeSessionId: "session-active", taskScope: "session", inspectedTaskSessionId: null };
 const applySectionVisibility = () => calls.push(["section", state.activeSection]);
 const loadTaskStatus = async (taskId) => calls.push(["status", taskId, state.activeSection]);
 const loadTaskEvents = async (taskId) => calls.push(["events", taskId, state.activeSection]);
@@ -394,10 +399,18 @@ const cancelTask = async (taskId) => calls.push(["cancel", taskId]);
 const loadApprovalDetail = async (approvalId) => calls.push(["approval-detail", approvalId, state.activeSection]);
 const approvalDecisionPayload = () => ({ actor: "web-test", reason: "reviewed", admin: true });
 const refresh = async () => calls.push(["refresh"]);
-const document = { getElementById(id) { return { replaceChildren() { calls.push(["replace-children", id]); } }; } };
+const renderTaskResult = (task) => calls.push(["task-result", task.id]);
+const shortId = (value) => String(value || "").slice(0, 8);
+const document = {
+  getElementById(id) {
+    if (id === "task-path") return { value: "/workspace" };
+    return { replaceChildren() { calls.push(["replace-children", id]); } };
+  },
+};
 const renderRemoteControlOutput = (payload) => calls.push(["remote-output", payload.status || payload.pairing?.id || "payload"]);
 const api = async (path, options = {}) => {
   calls.push(["api", path, options.method || "GET", options.body || ""]);
+  if (path === "/tasks" && options.method === "POST") return { id: "task-new-123", status: "planned" };
   return { status: path.includes("/directory") ? "scoped_directory" : "remote_control_status" };
 };
 eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = executeLocalSlashCommand;`);
@@ -415,6 +428,8 @@ eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = execute
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "status" });
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "directory --pairing-id pair-1 --limit 3" });
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", detail: "Open remote control", request: "" });
+  await executeLocalSlashCommand({ kind: "queue-control", command: "queue", label: "/queue", section: "activity", request: "all" });
+  await executeLocalSlashCommand({ kind: "queue-control", command: "queue", label: "/queue", section: "activity", request: "submit inspect queue" });
   state.lastTask = null;
   state.lastEvents = null;
   state.lastEvidence = null;
@@ -451,6 +466,13 @@ eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = execute
     ["notice", "/remote-control", "Remote control directory loaded.", "automation"],
     ["section", "automation"],
     ["notice", "/remote-control", "Open remote control", "automation"],
+    ["section", "activity"],
+    ["refresh"],
+    ["notice", "/queue", "All-session task queue loaded.", "activity"],
+    ["api", "/tasks", "POST", JSON.stringify({ request: "inspect queue", path: "/workspace", session_id: "session-active" })],
+    ["task-result", "task-new-123"],
+    ["refresh"],
+    ["notice", "/queue", "Queued task task-new.", "activity"],
     ["section", "activity"],
     ["notice", "/status [task_id]", "Open a task or include a task id, then run this command again.", "activity"],
   ];

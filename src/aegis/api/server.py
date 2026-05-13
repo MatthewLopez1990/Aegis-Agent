@@ -139,6 +139,26 @@ def _web_command_catalog(orchestrator: Any) -> dict[str, Any]:
                 ],
             }
         )
+    for command in ("queue", "q"):
+        if command in command_rows:
+            command_rows[command].update(
+                {
+                    "kind": "queue-control",
+                    "label": "/queue|/q [status|all|session|submit]",
+                    "detail": "Open the active task queue or submit governed work from the web console",
+                    "section": "activity",
+                    "args": ["status", "show", "list", "active", "pending", "all", "session", "submit", "request"],
+                    "flags": ["--limit", "--status"],
+                    "requires_local_token": True,
+                    "requires_remote_token": False,
+                    "mutates": True,
+                    "web_actions": [
+                        {"input": "status", "method": "GET", "path": "/tasks", "mutates": False},
+                        {"input": "session", "method": "GET", "path_template": "/sessions/{session_id}/tasks", "mutates": False},
+                        {"input": "submit", "method": "POST", "path": "/tasks", "mutates": True},
+                    ],
+                }
+            )
     for command, detail, action, mutates in (
         ("approval", "Review an approval payload by id from the web console", "review", False),
         ("approve", "Approve a pending approval by id with the web decision form metadata", "approve", True),
