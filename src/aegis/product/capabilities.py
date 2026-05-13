@@ -347,7 +347,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "session-bound run visibility",
             ],
             "security_delta": "Aegis defaults to mock or dry-run mode for broad-access capabilities until credentials, scopes, rollback, and approvals are explicit.",
-            "live_gap": "Mobile nodes, native desktop wrappers, and live third-party channel implementations remain staged; generic/OpenAI-style media plus Stability AI v1 image generation are implemented, while additional provider-specific image, audio, and video adapters remain staged behind secure adapter work.",
+            "live_gap": "Mobile nodes, native desktop wrappers, and live third-party channel implementations remain staged; generic/OpenAI-style media plus Stability AI v1 image generation and Google Vertex Imagen image generation are implemented, while additional provider-specific image, audio, and video adapters remain staged behind secure adapter work.",
             "target_requirements": [
                 "native_shell_depth",
                 "live_browser_automation",
@@ -522,7 +522,7 @@ def _live_gap_backlog(
             "area": "browser_and_media_depth",
             "platforms": ["OpenClaw"],
             "status": "live_javascript_available_media_depth_remaining",
-            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, approved static-anchor navigation, private Playwright/Chromium live-browser activation packet review artifacts, opt-in approved headless Chromium read-only snapshots, opt-in approved Chromium CDP selector mutation, opt-in approved private live downloads, opt-in approved workspace-scoped live uploads, and opt-in approved bounded live JavaScript evaluation are available; provider-backed media artifacts, transcription, and video jobs can run through allowlisted HTTPS adapters with media_sandbox_profile_v1 receipts, including OpenAI-style image JSON, Stability AI v1 text-to-image JSON, multipart image edit, TTS, audio transcription, and video generation adapters, while persistent browser state, raw DOM capture, and raw network body capture remain blocked by design; broader provider-specific media depth still requires expansion.",
+            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, approved static-anchor navigation, private Playwright/Chromium live-browser activation packet review artifacts, opt-in approved headless Chromium read-only snapshots, opt-in approved Chromium CDP selector mutation, opt-in approved private live downloads, opt-in approved workspace-scoped live uploads, and opt-in approved bounded live JavaScript evaluation are available; provider-backed media artifacts, transcription, and video jobs can run through allowlisted HTTPS adapters with media_sandbox_profile_v1 receipts, including OpenAI-style image JSON, Stability AI v1 text-to-image JSON, Google Vertex Imagen predict JSON, multipart image edit, TTS, audio transcription, and video generation adapters, while persistent browser state, raw DOM capture, and raw network body capture remain blocked by design; broader provider-specific media depth still requires expansion.",
             "sample_tools": facade_tools[:8],
             "next_steps": [
                 "Use the live-browser read-only adapter only for approved allowlisted screenshot evidence with ephemeral state.",
@@ -627,6 +627,10 @@ def _live_gap_backlog(
                     "evidence": "approved provider-backed image generation can send a Stability AI v1 text-to-image JSON request and persist returned artifacts[].base64 image data without storing raw prompt, response body, or secret values",
                 },
                 {
+                    "control": "google_imagen_provider_adapter",
+                    "evidence": "approved provider-backed image generation can send a Google Vertex Imagen predict-style JSON request and persist returned predictions[].bytesBase64Encoded image data without storing raw prompt, response body, or secret values",
+                },
+                {
                     "control": "openai_style_image_edit_provider_adapter",
                     "evidence": "approved provider-backed image edits can upload one workspace-scoped source image through an OpenAI-style multipart request and persist returned data[].b64_json artifacts without storing raw prompt, source bytes, response body, or secret values",
                 },
@@ -667,13 +671,14 @@ def _live_gap_backlog(
                 "implemented": [
                     {"adapter": "openai_images", "tool": "image_generate", "response_shape": "data[].b64_json"},
                     {"adapter": "stability_v1_text_to_image", "tool": "image_generate", "response_shape": "artifacts[].base64"},
+                    {"adapter": "google_imagen", "tool": "image_generate", "response_shape": "predictions[].bytesBase64Encoded"},
                     {"adapter": "openai_image_edit", "tool": "image_edit", "response_shape": "data[].b64_json"},
                     {"adapter": "openai_tts", "tool": "tts", "response_shape": "binary_audio"},
                     {"adapter": "openai_transcription", "tool": "voice_transcribe", "response_shape": "transcript_text"},
                     {"adapter": "openai_video", "tool": "video_generate", "response_shape": "job_lifecycle_and_bounded_artifacts"},
                 ],
                 "remaining_by_modality": {
-                    "image": ["additional provider-native text-to-image and edit adapters"],
+                    "image": ["additional provider-native image edit, upscale, and product-image adapters"],
                     "audio": ["additional provider-native TTS and transcription adapters"],
                     "video": ["additional provider-native video lifecycle adapters"],
                 },
@@ -715,6 +720,7 @@ def _live_gap_backlog(
                     "approved_live_browser_javascript_adapter",
                     "openai_style_image_provider_adapter",
                     "stability_v1_image_provider_adapter",
+                    "google_imagen_provider_adapter",
                     "openai_style_image_edit_provider_adapter",
                     "openai_style_tts_provider_adapter",
                     "openai_style_transcription_provider_adapter",
@@ -1091,7 +1097,7 @@ def _browser_media_operator_checklist(implemented_controls: list[str], remaining
         {
             "control": "provider_media_depth",
             "state": "partial" if "provider_backed_media_artifacts" in implemented else "not_started",
-            "detail": "Provider-backed image, TTS, transcription, and video job paths exist, including OpenAI-style image JSON, Stability AI v1 text-to-image JSON, multipart image edit, TTS, audio transcription, and video generation adapters; additional provider-specific image/audio/video adapters still need expansion.",
+            "detail": "Provider-backed image, TTS, transcription, and video job paths exist, including OpenAI-style image JSON, Stability AI v1 text-to-image JSON, Google Vertex Imagen predict JSON, multipart image edit, TTS, audio transcription, and video generation adapters; additional provider-specific image/audio/video adapters still need expansion.",
         },
         {
             "control": "platform_media_sandbox_profiles",

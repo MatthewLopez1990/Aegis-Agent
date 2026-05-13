@@ -2247,6 +2247,21 @@ def _bounded_float(value: Any, *, minimum: float, maximum: float, label: str) ->
     return parsed
 
 
+def _as_bool(value: Any, *, label: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise ToolExecutionError(f"{label} must be boolean")
+
+
+def _camel_to_snake(value: str) -> str:
+    return re.sub(r"(?<!^)([A-Z])", r"_\1", value).lower()
+
+
 def _weather_period(period: dict[str, Any]) -> dict[str, Any]:
     return {
         "name": str(period.get("name", "")),
@@ -3229,6 +3244,10 @@ def _live_media_provider_adapter(*, name: str, params: dict[str, Any]) -> dict[s
         if name != "image_generate":
             return {"name": raw, "error": "stability_v1_text_to_image provider adapter currently supports image_generate only"}
         return {"name": "stability_v1_text_to_image", "error": None}
+    if raw in {"google_imagen", "vertex_imagen", "vertex_ai_imagen", "imagen", "imagen_predict", "google_vertex_imagen"}:
+        if name != "image_generate":
+            return {"name": raw, "error": "google_imagen provider adapter currently supports image_generate only"}
+        return {"name": "google_imagen", "error": None}
     if raw in {"openai_image_edit", "openai_images_edit", "openai_images_edits", "openai_compatible_image_edit"}:
         if name != "image_edit":
             return {"name": raw, "error": "openai_image_edit provider adapter currently supports image_edit only"}
@@ -3389,6 +3408,57 @@ def _live_media_request_payload(
             if value:
                 payload[key] = value[:80]
         return payload
+    if provider_adapter == "google_imagen":
+        instance: dict[str, Any] = {"prompt": prompt}
+        parameters: dict[str, Any] = {"sampleCount": 1}
+        sample_count = params.get("sample_count", params.get("sampleCount"))
+        if sample_count is not None:
+            try:
+                parsed_count = int(sample_count)
+            except (TypeError, ValueError) as exc:
+                raise ToolExecutionError("sampleCount must be an integer") from exc
+            if parsed_count < 1 or parsed_count > 4:
+                raise ToolExecutionError("sampleCount must be between 1 and 4")
+            parameters["sampleCount"] = parsed_count
+        negative_prompt = str(params.get("negative_prompt") or params.get("negativePrompt") or "").strip()
+        if negative_prompt:
+            parameters["negativePrompt"] = negative_prompt[:2000]
+        aspect_ratio = str(params.get("aspect_ratio") or params.get("aspectRatio") or "").strip()
+        if aspect_ratio:
+            parameters["aspectRatio"] = aspect_ratio[:40]
+        for key in ("safetyFilterLevel", "personGeneration"):
+            value = str(params.get(key) or params.get(_camel_to_snake(key)) or "").strip()
+            if value:
+                parameters[key] = value[:80]
+        for key in ("addWatermark", "enhancePrompt", "includeRaiReason"):
+            value = params.get(key, params.get(_camel_to_snake(key)))
+            if value is not None:
+                parameters[key] = _as_bool(value, label=key)
+        seed = params.get("seed")
+        if seed is not None:
+            try:
+                parsed_seed = int(seed)
+            except (TypeError, ValueError) as exc:
+                raise ToolExecutionError("seed must be an integer") from exc
+            if parsed_seed < 0 or parsed_seed > 4294967295:
+                raise ToolExecutionError("seed must be between 0 and 4294967295")
+            parameters["seed"] = parsed_seed
+        output_mime = str(params.get("output_mime_type") or params.get("mime_type") or params.get("mimeType") or "").strip()
+        compression_quality = params.get("compression_quality", params.get("compressionQuality"))
+        if output_mime or compression_quality is not None:
+            output_options: dict[str, Any] = {}
+            if output_mime:
+                output_options["mimeType"] = output_mime[:80]
+            if compression_quality is not None:
+                try:
+                    parsed_quality = int(compression_quality)
+                except (TypeError, ValueError) as exc:
+                    raise ToolExecutionError("compressionQuality must be an integer") from exc
+                if parsed_quality < 0 or parsed_quality > 100:
+                    raise ToolExecutionError("compressionQuality must be between 0 and 100")
+                output_options["compressionQuality"] = parsed_quality
+            parameters["outputOptions"] = output_options
+        return {"instances": [instance], "parameters": parameters}
     if provider_adapter == "openai_image_edit":
         payload = {
             "model": str(params.get("model") or "gpt-image-1.5")[:200],
@@ -3501,7 +3571,7 @@ def _send_live_media_provider_request(
         "Content-Type": content_type,
         "User-Agent": "Aegis-Agent/0.1",
     }
-    if provider_adapter == "stability_v1_text_to_image":
+    if provider_adapter in {"stability_v1_text_to_image", "google_imagen"}:
         headers["Accept"] = "application/json"
     request = Request(
         url,
@@ -3539,7 +3609,7 @@ def _send_live_media_provider_request(
             content = base64.b64decode(encoded_media, validate=True)
         except ValueError:
             return {"ok": False, "http_status": status, "error": "media provider returned invalid base64 media"}
-        mime_type = str(candidate.get("mime_type") or candidate.get("mime") or candidate.get("content_type") or "")
+        mime_type = str(candidate.get("mime_type") or candidate.get("mime") or candidate.get("content_type") or _media_mime_from_provider_json(candidate, tool=tool) or "")
     else:
         content = raw
         mime_type = content_type
@@ -3837,6 +3907,14 @@ def _media_base64_from_provider_json(decoded: dict[str, Any], *, tool: str) -> s
                     value = candidate.get("base64")
                     if isinstance(value, str) and value.strip():
                         return value.strip()
+    predictions = decoded.get("predictions")
+    if isinstance(predictions, list):
+        for prediction in predictions:
+            if isinstance(prediction, dict):
+                for key in ("bytesBase64Encoded", "bytes_base64_encoded", "imageBytes", "image_bytes", "base64"):
+                    value = prediction.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
     data_items = decoded.get("data")
     if isinstance(data_items, list) and data_items:
         first = data_items[0]
@@ -3850,6 +3928,46 @@ def _media_base64_from_provider_json(decoded: dict[str, Any], *, tool: str) -> s
     if isinstance(audio, dict):
         for key in ("data", "audio_base64", "b64_json"):
             value = audio.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _media_mime_from_provider_json(decoded: dict[str, Any], *, tool: str) -> str:
+    predictions = decoded.get("predictions")
+    if isinstance(predictions, list):
+        for prediction in predictions:
+            if isinstance(prediction, dict):
+                value = prediction.get("mimeType") or prediction.get("mime_type") or prediction.get("contentType") or prediction.get("content_type")
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    data_items = decoded.get("data")
+    if isinstance(data_items, list):
+        for item in data_items:
+            if isinstance(item, dict):
+                value = item.get("mime_type") or item.get("mimeType") or item.get("content_type") or item.get("contentType")
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    images = decoded.get("images")
+    if isinstance(images, list):
+        for item in images:
+            if isinstance(item, dict):
+                value = item.get("mime_type") or item.get("mimeType") or item.get("content_type") or item.get("contentType")
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    artifacts = decoded.get("artifacts")
+    if isinstance(artifacts, list):
+        for artifact in artifacts:
+            candidates = artifact if isinstance(artifact, list) else [artifact]
+            for candidate in candidates:
+                if isinstance(candidate, dict):
+                    value = candidate.get("mime_type") or candidate.get("mimeType") or candidate.get("content_type") or candidate.get("contentType")
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+    if tool == "tts":
+        audio = decoded.get("audio")
+        if isinstance(audio, dict):
+            value = audio.get("mime_type") or audio.get("mimeType") or audio.get("content_type") or audio.get("contentType")
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return ""
