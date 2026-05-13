@@ -157,6 +157,17 @@ class TaskStateTests(unittest.TestCase):
             self.assertNotIn("Compare provider auth gaps", packet_response)
             self.assertNotIn("token=abc123", packet_response)
             self.assertNotIn("stderr token", packet_response)
+            verified_packet = orchestrator.kanban.verify_subagent_review_packet(packet["receipt"]["packet_id"], actor="operator")
+            verified_payload = json.dumps(verified_packet, sort_keys=True)
+            self.assertTrue(verified_packet["ok"])
+            self.assertEqual(verified_packet["receipt"]["receipt_schema"], "aegis.subagent.model_review_packet_verification.v1")
+            self.assertTrue(verified_packet["receipt"]["checksum_matches"])
+            self.assertTrue(verified_packet["receipt"]["packet_integrity_ok"])
+            self.assertFalse(verified_packet["receipt"]["raw_packet_payload_included"])
+            self.assertNotIn("Compare provider auth gaps", verified_payload)
+            self.assertNotIn("token=abc123", verified_payload)
+            with self.assertRaises(ValueError):
+                orchestrator.kanban.verify_subagent_review_packet("../outside.json")
 
             completed = orchestrator.kanban.move_subagent_delegation(delegated["card_id"], "done", actor="operator", reason="reviewed token=abc123")
             self.assertEqual(completed["review_completion_receipt"]["review_status"], "operator_review_completed")

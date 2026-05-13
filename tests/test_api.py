@@ -817,6 +817,19 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertIn("model_ready_review_packets", subagent_review_packet["subagents"]["implemented_controls"])
                 subagent_review_packet_payload = json.dumps(subagent_review_packet, sort_keys=True)
                 self.assertNotIn("Compare provider auth gaps", subagent_review_packet_payload)
+                subagent_verified_packet = _json_post(
+                    port,
+                    "/subagents/verify-packet",
+                    {"packet": subagent_review_packet["receipt"]["packet_id"], "actor": "api-verifier"},
+                    token=token,
+                )
+                self.assertTrue(subagent_verified_packet["ok"])
+                self.assertEqual(subagent_verified_packet["receipt"]["receipt_schema"], "aegis.subagent.model_review_packet_verification.v1")
+                self.assertEqual(subagent_verified_packet["receipt"]["actor"], "api-verifier")
+                self.assertTrue(subagent_verified_packet["receipt"]["checksum_matches"])
+                self.assertTrue(subagent_verified_packet["receipt"]["packet_integrity_ok"])
+                self.assertFalse(subagent_verified_packet["receipt"]["raw_packet_payload_included"])
+                self.assertNotIn("Compare provider auth gaps", json.dumps(subagent_verified_packet, sort_keys=True))
                 subagent_parent_task = _json_get(port, f"/tasks/{task['id']}", token=token)
                 self.assertTrue(subagent_parent_task["checkpoint"]["subagent_review_required"])
                 self.assertIn("subagent_review_complete", {hint["action"] for hint in subagent_parent_task["action_hints"]})

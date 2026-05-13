@@ -712,6 +712,10 @@ def build_parser() -> argparse.ArgumentParser:
     agents_review_packet.add_argument("card_id")
     agents_review_packet.add_argument("--actor", default="operator")
     agents_review_packet.add_argument("--limit", type=int, default=20)
+    agents_verify_packet = agents_sub.add_parser("verify-packet", help="Verify a private subagent review packet artifact")
+    agents_verify_packet.add_argument("packet")
+    agents_verify_packet.add_argument("--actor", default="operator")
+    agents_verify_packet.add_argument("--limit", type=int, default=20)
     agents_run_batch = agents_sub.add_parser("run-batch", help="Run approved isolated subagent workers for ready/in-progress cards")
     agents_run_batch.add_argument("--card-id", action="append", default=[])
     agents_run_batch.add_argument("--approved", action="store_true")
@@ -2056,6 +2060,9 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
         if args.agents_command == "review-packet":
             result = orchestrator.kanban.create_subagent_review_packet(args.card_id, actor=args.actor)
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit, include_previews=False)}
+        if args.agents_command == "verify-packet":
+            result = orchestrator.kanban.verify_subagent_review_packet(args.packet, actor=args.actor)
             return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit, include_previews=False)}
         if args.agents_command == "run-batch":
             result = orchestrator.kanban.run_subagent_batch(

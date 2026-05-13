@@ -494,6 +494,63 @@ class KanbanManager:
             "subagents": self.subagent_status(limit=20, include_previews=False),
         }
 
+    def verify_subagent_review_packet(self, packet: str, *, actor: str = "operator") -> dict[str, Any]:
+        packet_path, checksum_path = _subagent_review_packet_paths(Path(self.store.database_path).parent, packet)
+        packet_bytes = packet_path.read_bytes()
+        artifact_sha256 = hashlib.sha256(packet_bytes).hexdigest()
+        checksum_value = checksum_path.read_text(encoding="utf-8").strip() if checksum_path.exists() else ""
+        try:
+            decoded = json.loads(packet_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            decoded = {}
+        packet_payload = decoded if isinstance(decoded, dict) else {}
+        controls = packet_payload.get("controls") if isinstance(packet_payload.get("controls"), dict) else {}
+        packet_schema_valid = packet_payload.get("packet_schema") == "aegis.subagent.model_review_packet.v1"
+        checksum_matches = bool(checksum_value) and checksum_value == artifact_sha256
+        controls_valid = (
+            controls.get("model_ready") is True
+            and controls.get("autonomous_runtime") is False
+            and controls.get("model_invocation_performed") is False
+            and controls.get("raw_secret_values_included") is False
+            and controls.get("raw_worker_output_included") is False
+            and controls.get("raw_worker_result_included") is False
+            and controls.get("raw_instruction_included") is False
+            and controls.get("raw_instruction_forwarded_to_model") is False
+        )
+        forbidden_keys_present = _subagent_packet_forbidden_keys_present(packet_payload)
+        verified_at = now_utc()
+        receipt = {
+            "receipt_schema": "aegis.subagent.model_review_packet_verification.v1",
+            "event_type": "subagent.model_review_packet_verified",
+            "packet_id": str(packet_payload.get("packet_id") or packet_path.stem),
+            "actor": _safe_actor(actor),
+            "artifact": str(packet_path),
+            "artifact_sha256": artifact_sha256,
+            "checksum": str(checksum_path),
+            "checksum_present": bool(checksum_value),
+            "checksum_matches": checksum_matches,
+            "packet_schema_valid": packet_schema_valid,
+            "controls_valid": controls_valid,
+            "forbidden_raw_keys_present": forbidden_keys_present,
+            "packet_integrity_ok": bool(packet_schema_valid and checksum_matches and controls_valid and not forbidden_keys_present),
+            "raw_instruction_included": False,
+            "raw_worker_output_included": False,
+            "raw_worker_result_included": False,
+            "raw_secret_values_included": False,
+            "raw_packet_payload_included": False,
+            "model_invocation_performed": False,
+            "autonomous_runtime": False,
+            "verified_at": verified_at,
+        }
+        audit_entry = self.audit_logger.append("subagent.model_review_packet_verified", receipt)
+        return {
+            "ok": bool(receipt["packet_integrity_ok"]),
+            "packet": _subagent_review_packet_summary(packet_payload),
+            "receipt": receipt,
+            "audit_event_hash": audit_entry["event_hash"],
+            "subagents": self.subagent_status(limit=20, include_previews=False),
+        }
+
     def _record_parent_task_review_binding(self, parent_task_id: str | None, review_receipt: dict[str, Any]) -> bool:
         if not parent_task_id:
             return False
@@ -977,6 +1034,75 @@ def _model_review_budget_snapshot(budget: dict[str, Any]) -> dict[str, Any]:
         "autonomous_runtime": False,
         "enforcement": budget.get("enforcement"),
     }
+
+
+def _subagent_review_packet_paths(data_dir: Path, packet: str) -> tuple[Path, Path]:
+    packet_dir = ensure_private_dir(data_dir / "subagent-review-packets")
+    packet_ref = str(packet or "").strip()
+    if not packet_ref:
+        raise ValueError("review packet id or path is required")
+    candidate = Path(packet_ref)
+    packet_path = candidate if candidate.is_absolute() or candidate.parent != Path(".") else packet_dir / (packet_ref if packet_ref.endswith(".json") else f"{packet_ref}.json")
+    resolved_dir = packet_dir.resolve()
+    resolved_packet = packet_path.resolve()
+    try:
+        resolved_packet.relative_to(resolved_dir)
+    except ValueError as exc:
+        raise ValueError("review packet path must stay inside the private subagent packet directory") from exc
+    if resolved_packet.suffix != ".json":
+        raise ValueError("review packet artifact must be a .json file")
+    if not resolved_packet.exists():
+        raise FileNotFoundError(str(resolved_packet))
+    return resolved_packet, resolved_packet.with_suffix(".sha256")
+
+
+def _subagent_review_packet_summary(packet: dict[str, Any]) -> dict[str, Any]:
+    card = packet.get("card") if isinstance(packet.get("card"), dict) else {}
+    review = packet.get("review") if isinstance(packet.get("review"), dict) else {}
+    controls = packet.get("controls") if isinstance(packet.get("controls"), dict) else {}
+    return {
+        "packet_schema": packet.get("packet_schema"),
+        "packet_id": packet.get("packet_id"),
+        "created_at": packet.get("created_at"),
+        "card_id": card.get("card_id"),
+        "board_id": card.get("board_id"),
+        "parent_task_id": card.get("parent_task_id"),
+        "profile_id": card.get("profile_id"),
+        "instruction_sha256": card.get("instruction_sha256"),
+        "instruction_character_count": card.get("instruction_character_count"),
+        "instruction_word_count": card.get("instruction_word_count"),
+        "review_status": review.get("review_status"),
+        "review_artifact_sha256": review.get("review_artifact_sha256"),
+        "last_run_receipt_sha256": review.get("last_run_receipt_sha256"),
+        "last_worker_result_sha256": review.get("last_worker_result_sha256"),
+        "result_summary_sha256": review.get("result_summary_sha256"),
+        "model_ready": controls.get("model_ready") is True,
+        "raw_instruction_included": False,
+        "raw_worker_output_included": False,
+        "raw_worker_result_included": False,
+    }
+
+
+def _subagent_packet_forbidden_keys_present(value: Any) -> bool:
+    forbidden = {
+        "raw_instruction",
+        "raw_delegation_instruction",
+        "raw_worker_output",
+        "raw_worker_stdout",
+        "raw_worker_stderr",
+        "raw_worker_result_payload",
+        "raw_prompt",
+        "secret_value",
+        "access_token",
+        "refresh_token",
+    }
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key) in forbidden or _subagent_packet_forbidden_keys_present(item):
+                return True
+    if isinstance(value, list):
+        return any(_subagent_packet_forbidden_keys_present(item) for item in value)
+    return False
 
 
 def _subagent_review_binding_receipt(

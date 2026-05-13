@@ -810,6 +810,26 @@ class CliTests(unittest.TestCase):
             self.assertIn("model_ready_review_packets", review_packet["subagents"]["implemented_controls"])
             review_packet_payload = json.dumps(review_packet, sort_keys=True)
             self.assertNotIn("Compare provider auth gaps", review_packet_payload)
+            verified_packet = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "verify-packet",
+                        review_packet["receipt"]["packet_id"],
+                        "--actor",
+                        "cli-verifier",
+                    ]
+                )
+            )
+            self.assertTrue(verified_packet["ok"])
+            self.assertEqual(verified_packet["receipt"]["receipt_schema"], "aegis.subagent.model_review_packet_verification.v1")
+            self.assertEqual(verified_packet["receipt"]["actor"], "cli-verifier")
+            self.assertTrue(verified_packet["receipt"]["checksum_matches"])
+            self.assertTrue(verified_packet["receipt"]["packet_integrity_ok"])
+            self.assertFalse(verified_packet["receipt"]["raw_packet_payload_included"])
+            self.assertNotIn("Compare provider auth gaps", json.dumps(verified_packet, sort_keys=True))
             task_status = dispatch(parser.parse_args(["--data-dir", str(data_dir), "task", "status", parent_task["id"]]))
             self.assertTrue(task_status["checkpoint"]["subagent_review_required"])
             self.assertIn("subagent_review_complete", {hint["action"] for hint in task_status["action_hints"]})
@@ -818,6 +838,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("subagent.worker_completed", audit_text)
             self.assertIn("subagent.review_binding_recorded", audit_text)
             self.assertIn("subagent.model_review_packet_created", audit_text)
+            self.assertIn("subagent.model_review_packet_verified", audit_text)
             self.assertNotIn("reviewed raw private handoff reason", audit_text)
             disabled_profile = dispatch(parser.parse_args(["--data-dir", str(data_dir), "agents", "profile-disable", "researcher"]))
             self.assertTrue(disabled_profile["ok"])

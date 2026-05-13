@@ -803,6 +803,10 @@ const subagentLaneActions = (card) => {
     const label = subagentHasReviewPacket(card) ? "Refresh Review Packet" : "Create Review Packet";
     actions.push(`<button type="button" class="secondary" data-subagent-review-packet="${escapeHtml(card.id)}">${text(label)}</button>`);
   }
+  const reviewPacket = card.review_packet || card.model_review_packet || {};
+  if (reviewPacket.packet_id) {
+    actions.push(`<button type="button" class="secondary" data-subagent-verify-packet="${escapeHtml(reviewPacket.packet_id)}">Verify Packet</button>`);
+  }
   if (nextLane) {
     actions.push(`<button type="button" class="secondary" data-subagent-card="${escapeHtml(card.id)}" data-subagent-lane="${escapeHtml(nextLane)}">${text(nextLane.replaceAll("_", " "))}</button>`);
   }
@@ -3893,6 +3897,17 @@ document.getElementById("subagent-output").addEventListener("click", async (even
 });
 
 document.getElementById("subagent-cards").addEventListener("click", async (event) => {
+  const verifyPacket = event.target.dataset.subagentVerifyPacket;
+  if (verifyPacket) {
+    const result = await api("/subagents/verify-packet", {
+      method: "POST",
+      body: JSON.stringify({ packet: verifyPacket, actor: "web-operator" }),
+    });
+    renderSubagentOutput(result);
+    renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
+    await refresh();
+    return;
+  }
   const reviewPacketCard = event.target.dataset.subagentReviewPacket;
   if (reviewPacketCard) {
     const result = await api("/subagents/review-packet", {
