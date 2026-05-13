@@ -667,17 +667,21 @@ class CliTests(unittest.TestCase):
             self.assertIn("operator_batch_receipts", subagent_gap["required_controls"])
             self.assertIn("parent_bound_review_receipts", subagent_gap["required_controls"])
             self.assertIn("model_ready_review_packets", subagent_gap["required_controls"])
+            self.assertIn("sanitized_model_review_invocations", subagent_gap["required_controls"])
             self.assertIn("autonomy_preflight_receipts", subagent_gap["required_controls"])
             self.assertIn("subagent.parent_bound_review_receipt", subagent_gap["evaluation_scenarios"])
             self.assertIn("subagent.model_ready_review_packet", subagent_gap["evaluation_scenarios"])
+            self.assertIn("subagent.sanitized_model_review", subagent_gap["evaluation_scenarios"])
             self.assertIn("subagent.autonomy_preflight", subagent_gap["evaluation_scenarios"])
             self.assertIn("model_ready_review_packet_sanitization", subagent_gap["verification_gates"])
+            self.assertIn("sanitized_model_review_context", subagent_gap["verification_gates"])
             self.assertIn("autonomy_preflight_receipt", subagent_gap["verification_gates"])
             self.assertIn("subagent.operator_batch_receipts", subagent_gap["evaluation_scenarios"])
             subagent_checklist = {item["control"]: item for item in subagent_gap["operator_checklist"]}
             self.assertEqual(subagent_checklist["operator_approved_batch_runtime"]["state"], "enforced")
             self.assertEqual(subagent_checklist["parent_bound_review_receipts"]["state"], "enforced")
             self.assertEqual(subagent_checklist["model_ready_review_packets"]["state"], "enforced")
+            self.assertEqual(subagent_checklist["sanitized_model_review_invocations"]["state"], "enforced")
             self.assertEqual(subagent_checklist["autonomy_preflight_receipts"]["state"], "enforced")
             backend_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "remote_backend_activation")
             self.assertEqual(backend_gap["status"], "backend_adapters_available_unconfigured")
@@ -1418,6 +1422,24 @@ class CliTests(unittest.TestCase):
             self.assertTrue(verified_packet["receipt"]["packet_integrity_ok"])
             self.assertFalse(verified_packet["receipt"]["raw_packet_payload_included"])
             self.assertNotIn("Compare provider auth gaps", json.dumps(verified_packet, sort_keys=True))
+            model_review_gated = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "model-review",
+                        delegated["card_id"],
+                        "--actor",
+                        "cli-verifier",
+                    ]
+                )
+            )
+            self.assertEqual(model_review_gated["status"], "approval_required")
+            self.assertFalse(model_review_gated["model_invocation_performed"])
+            self.assertFalse(model_review_gated["raw_instruction_forwarded_to_model"])
+            self.assertIn("sanitized_model_review_invocations", model_review_gated["subagents"]["implemented_controls"])
+            self.assertNotIn("Compare provider auth gaps", json.dumps(model_review_gated, sort_keys=True))
             task_status = dispatch(parser.parse_args(["--data-dir", str(data_dir), "task", "status", parent_task["id"]]))
             self.assertTrue(task_status["checkpoint"]["subagent_review_required"])
             self.assertIn("subagent_review_complete", {hint["action"] for hint in task_status["action_hints"]})

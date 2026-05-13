@@ -551,6 +551,22 @@ class KanbanManager:
             "subagents": self.subagent_status(limit=20, include_previews=False),
         }
 
+    def record_subagent_model_review(self, card_id: str, receipt: dict[str, Any]) -> dict[str, Any]:
+        card, _board, metadata = self._require_subagent_card(card_id)
+        self.store.update_kanban_card_metadata(
+            card_id,
+            {
+                "model_review": receipt,
+                "last_model_review_receipt": receipt,
+                "model_reviews_recorded": _subagent_model_review_count(metadata) + 1,
+                "model_review_status": receipt.get("status"),
+                "model_review_performed": bool(receipt.get("model_invocation_performed", False)),
+                "raw_instruction_forwarded_to_model": False,
+                "raw_worker_output_included": False,
+            },
+        )
+        return _subagent_card_summary(self._require_card(str(card["id"])), include_preview=False)
+
     def _record_parent_task_review_binding(self, parent_task_id: str | None, review_receipt: dict[str, Any]) -> bool:
         if not parent_task_id:
             return False
@@ -829,6 +845,7 @@ class KanbanManager:
                 "operator_approved_batch_runtime",
                 "parent_bound_review_receipts",
                 "model_ready_review_packets",
+                "sanitized_model_review_invocations",
                 "autonomy_preflight_receipts",
             ],
             "remaining_depth_work": [],
@@ -859,7 +876,7 @@ class KanbanManager:
             {
                 "control": "scoped_model_context_builder",
                 "state": "missing",
-                "detail": "Subagent model prompts must be built from sanitized review packets instead of raw delegation instructions.",
+                "detail": "Autonomous subagent model prompts still need scoped per-step context builders; approved review prompts use sanitized review packets only.",
             },
             {
                 "control": "tool_call_sandbox",
@@ -980,6 +997,13 @@ def _subagent_run_count(metadata: dict[str, Any]) -> int:
 def _subagent_review_packet_count(metadata: dict[str, Any]) -> int:
     try:
         return int(metadata.get("review_packets_recorded", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _subagent_model_review_count(metadata: dict[str, Any]) -> int:
+    try:
+        return int(metadata.get("model_reviews_recorded", 0))
     except (TypeError, ValueError):
         return 0
 
@@ -1645,6 +1669,10 @@ def _subagent_card_summary(card: dict[str, Any], *, include_preview: bool = True
         "model_review_packet": metadata.get("model_review_packet") or metadata.get("review_packet"),
         "review_packets_recorded": _subagent_review_packet_count(metadata),
         "model_ready_review_packet_available": bool(metadata.get("model_ready_review_packet_available", False)),
+        "model_review": metadata.get("model_review") or metadata.get("last_model_review_receipt"),
+        "model_reviews_recorded": _subagent_model_review_count(metadata),
+        "model_review_status": metadata.get("model_review_status"),
+        "model_review_performed": bool(metadata.get("model_review_performed", False)),
         "review_completion_receipt": metadata.get("review_completion_receipt"),
         "parent_task_review_linked": bool(metadata.get("parent_task_review_linked", False)),
         "raw_worker_output_included": bool(metadata.get("raw_worker_output_included", False)),

@@ -2416,6 +2416,17 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 )
                 self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)), include_previews=False)})
                 return
+            if path == "/subagents/model-review":
+                payload = self._read_json()
+                session_id = str(payload["session_id"]) if payload.get("session_id") else None
+                result = orchestrator.model_review_subagent(
+                    str(_required(payload, "card_id")),
+                    actor=str(payload.get("actor", "api-operator")),
+                    approved=payload.get("approved") is True,
+                    session_id=session_id,
+                )
+                self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)), include_previews=False)})
+                return
             if path == "/subagents/run-batch":
                 payload = self._read_json()
                 result = orchestrator.kanban.run_subagent_batch(

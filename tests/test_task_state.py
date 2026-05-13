@@ -169,6 +169,47 @@ class TaskStateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 orchestrator.kanban.verify_subagent_review_packet("../outside.json")
 
+            gated_model_review = orchestrator.model_review_subagent(delegated["card_id"], actor="operator")
+            self.assertEqual(gated_model_review["status"], "approval_required")
+            self.assertFalse(gated_model_review["model_invocation_performed"])
+            captured: dict[str, object] = {}
+
+            class FakeModelClient:
+                def chat(self, route, messages, *, temperature=0.2):
+                    captured["messages"] = messages
+                    return ModelInvocationResult(
+                        provider=route.provider.provider,
+                        model=route.model,
+                        content="Sanitized review packet is internally consistent; token=abc123",
+                        input_tokens=9,
+                        output_tokens=7,
+                        raw_usage={"prompt_tokens": 9, "completion_tokens": 7},
+                    )
+
+            orchestrator.models.set_alias("smart", "ollama/llama3")
+            orchestrator.model_client = FakeModelClient()
+            model_review = orchestrator.model_review_subagent(delegated["card_id"], actor="operator", approved=True)
+            model_review_payload = json.dumps(model_review, sort_keys=True)
+            prompt_text = "\n".join(message["content"] for message in captured["messages"])  # type: ignore[index]
+            self.assertTrue(model_review["ok"])
+            self.assertEqual(model_review["receipt"]["receipt_schema"], "aegis.subagent.model_review.v1")
+            self.assertEqual(model_review["receipt"]["status"], "completed")
+            self.assertTrue(model_review["receipt"]["model_invocation_performed"])
+            self.assertFalse(model_review["receipt"]["autonomous_runtime"])
+            self.assertFalse(model_review["receipt"]["raw_instruction_forwarded_to_model"])
+            self.assertFalse(model_review["receipt"]["raw_worker_output_included"])
+            self.assertNotIn("Compare provider auth gaps", prompt_text)
+            self.assertNotIn("token=abc123", prompt_text)
+            self.assertNotIn("Compare provider auth gaps", model_review_payload)
+            self.assertNotIn("token=abc123", model_review_payload)
+            self.assertIn("[REDACTED_VALUE]", model_review["model_review"]["content"])
+            subagent_status = orchestrator.kanban.subagent_status(include_previews=False)
+            self.assertIn("sanitized_model_review_invocations", subagent_status["implemented_controls"])
+            self.assertEqual(subagent_status["cards"][0]["model_reviews_recorded"], 1)
+            self.assertEqual(subagent_status["cards"][0]["model_review_status"], "completed")
+            model_review_events = [event for event in orchestrator.audit_logger.tail(20) if str(event.get("event_type", "")).startswith("subagent.model_review")]
+            self.assertNotIn("token=abc123", json.dumps(model_review_events, sort_keys=True))
+
             completed = orchestrator.kanban.move_subagent_delegation(delegated["card_id"], "done", actor="operator", reason="reviewed token=abc123")
             self.assertEqual(completed["review_completion_receipt"]["review_status"], "operator_review_completed")
             parent_after_review = orchestrator.status(parent["id"])

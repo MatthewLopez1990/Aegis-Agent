@@ -795,6 +795,12 @@ def build_parser() -> argparse.ArgumentParser:
     agents_verify_packet.add_argument("packet")
     agents_verify_packet.add_argument("--actor", default="operator")
     agents_verify_packet.add_argument("--limit", type=int, default=20)
+    agents_model_review = agents_sub.add_parser("model-review", help="Run an approved model review over a sanitized subagent review packet")
+    agents_model_review.add_argument("card_id")
+    agents_model_review.add_argument("--approved", action="store_true")
+    agents_model_review.add_argument("--actor", default="operator")
+    agents_model_review.add_argument("--session-id")
+    agents_model_review.add_argument("--limit", type=int, default=20)
     agents_run_batch = agents_sub.add_parser("run-batch", help="Run approved isolated subagent workers for ready/in-progress cards")
     agents_run_batch.add_argument("--card-id", action="append", default=[])
     agents_run_batch.add_argument("--approved", action="store_true")
@@ -2391,6 +2397,14 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit, include_previews=False)}
         if args.agents_command == "verify-packet":
             result = orchestrator.kanban.verify_subagent_review_packet(args.packet, actor=args.actor)
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit, include_previews=False)}
+        if args.agents_command == "model-review":
+            result = orchestrator.model_review_subagent(
+                args.card_id,
+                actor=args.actor,
+                approved=args.approved,
+                session_id=args.session_id,
+            )
             return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit, include_previews=False)}
         if args.agents_command == "run-batch":
             result = orchestrator.kanban.run_subagent_batch(

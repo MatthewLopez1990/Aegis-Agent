@@ -934,6 +934,9 @@ const subagentCardMeta = (card) => {
   if (reviewPacketCount || hasReviewPacket) {
     parts.push(`packets ${reviewPacketCount || 1}`);
   }
+  if (card.model_reviews_recorded) {
+    parts.push(`model reviews ${card.model_reviews_recorded}`);
+  }
   if (hasReviewPacket) {
     parts.push("model-ready");
   }
@@ -962,6 +965,7 @@ const subagentLaneActions = (card) => {
   const reviewPacket = card.review_packet || card.model_review_packet || {};
   if (reviewPacket.packet_id) {
     actions.push(`<button type="button" class="secondary" data-subagent-verify-packet="${escapeHtml(reviewPacket.packet_id)}">Verify Packet</button>`);
+    actions.push(`<button type="button" class="secondary" data-subagent-model-review="${escapeHtml(card.id)}">Model Review</button>`);
   }
   if (nextLane) {
     actions.push(`<button type="button" class="secondary" data-subagent-card="${escapeHtml(card.id)}" data-subagent-lane="${escapeHtml(nextLane)}">${text(nextLane.replaceAll("_", " "))}</button>`);
@@ -4680,6 +4684,17 @@ document.getElementById("subagent-cards").addEventListener("click", async (event
     const result = await api("/subagents/review-packet", {
       method: "POST",
       body: JSON.stringify({ card_id: reviewPacketCard, actor: "web-operator" }),
+    });
+    renderSubagentOutput(result);
+    renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
+    await refresh();
+    return;
+  }
+  const modelReviewCard = event.target.dataset.subagentModelReview;
+  if (modelReviewCard) {
+    const result = await api("/subagents/model-review", {
+      method: "POST",
+      body: JSON.stringify({ card_id: modelReviewCard, actor: "web-operator", approved: true, limit: 12 }),
     });
     renderSubagentOutput(result);
     renderSubagents(result.subagents || await api("/subagents/status?limit=12"));

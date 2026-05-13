@@ -882,6 +882,17 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertTrue(subagent_verified_packet["receipt"]["packet_integrity_ok"])
                 self.assertFalse(subagent_verified_packet["receipt"]["raw_packet_payload_included"])
                 self.assertNotIn("Compare provider auth gaps", json.dumps(subagent_verified_packet, sort_keys=True))
+                subagent_model_review_gated = _json_post(
+                    port,
+                    "/subagents/model-review",
+                    {"card_id": subagent_replayed["card_id"], "actor": "api-verifier"},
+                    token=token,
+                )
+                self.assertEqual(subagent_model_review_gated["status"], "approval_required")
+                self.assertFalse(subagent_model_review_gated["model_invocation_performed"])
+                self.assertFalse(subagent_model_review_gated["raw_instruction_forwarded_to_model"])
+                self.assertIn("sanitized_model_review_invocations", subagent_model_review_gated["subagents"]["implemented_controls"])
+                self.assertNotIn("Compare provider auth gaps", json.dumps(subagent_model_review_gated, sort_keys=True))
                 subagent_parent_task = _json_get(port, f"/tasks/{task['id']}", token=token)
                 self.assertTrue(subagent_parent_task["checkpoint"]["subagent_review_required"])
                 self.assertIn("subagent_review_complete", {hint["action"] for hint in subagent_parent_task["action_hints"]})

@@ -724,17 +724,17 @@ def _live_gap_backlog(
             "status": "isolated_worker_ready_autonomous_recursion_blocked",
             "detail": (
                 f"Approved subagent work is tracked through a durable, auditable delegation queue with "
-                f"{subagent_delegations['open_cards']} open card(s), {subagent_delegations.get('enabled_profile_count', 0)} enabled profile(s), enforced queue budgets, sanitized handoff receipts, approved isolated worker-run receipts, parent-bound review receipts, model-ready review packets, operator-approved batch-run receipts, and explicit autonomy preflight receipts; recursive autonomous model-loop execution remains blocked."
+                f"{subagent_delegations['open_cards']} open card(s), {subagent_delegations.get('enabled_profile_count', 0)} enabled profile(s), enforced queue budgets, sanitized handoff receipts, approved isolated worker-run receipts, parent-bound review receipts, model-ready review packets, approved sanitized model-review invocations, operator-approved batch-run receipts, and explicit autonomy preflight receipts; recursive autonomous model-loop execution remains blocked."
             ),
             "sample_tools": ["subagent_delegate"],
             "operator_checklist": _subagent_operator_checklist(subagent_delegations),
             "next_steps": [
-                "Promote model-ready review packets into any future reviewer/model handoff without raw instruction or worker output forwarding.",
+                "Use approved model-review invocations to review packet integrity without raw instruction or worker output forwarding.",
                 "Only consider recursive autonomous model loops after deeper isolation, budget, and review controls land.",
             ],
-            "required_controls": ["human_approval", "tainted_instruction_metadata", "durable_queue", "recursive_budget_limits", "handoff_receipts", "isolated_worker_receipts", "parent_bound_review_receipts", "model_ready_review_packets", "operator_batch_receipts", "autonomy_preflight_receipts"],
-            "verification_gates": ["approval_required_delegation", "status_queue_visibility", "raw_instruction_redaction", "isolated_worker_receipts", "parent_bound_review_receipt", "parent_task_review_binding", "model_ready_review_packet_sanitization", "operator_batch_receipts", "autonomy_preflight_receipt", "blocked_autonomous_runtime"],
-            "evaluation_scenarios": ["subagent.delegation_queue_visibility", "subagent.isolated_worker_receipts", "subagent.parent_bound_review_receipt", "subagent.model_ready_review_packet", "subagent.operator_batch_receipts", "subagent.autonomy_preflight", "subagent.autonomous_runtime_blocked"],
+            "required_controls": ["human_approval", "tainted_instruction_metadata", "durable_queue", "recursive_budget_limits", "handoff_receipts", "isolated_worker_receipts", "parent_bound_review_receipts", "model_ready_review_packets", "sanitized_model_review_invocations", "operator_batch_receipts", "autonomy_preflight_receipts"],
+            "verification_gates": ["approval_required_delegation", "status_queue_visibility", "raw_instruction_redaction", "isolated_worker_receipts", "parent_bound_review_receipt", "parent_task_review_binding", "model_ready_review_packet_sanitization", "sanitized_model_review_context", "operator_batch_receipts", "autonomy_preflight_receipt", "blocked_autonomous_runtime"],
+            "evaluation_scenarios": ["subagent.delegation_queue_visibility", "subagent.isolated_worker_receipts", "subagent.parent_bound_review_receipt", "subagent.model_ready_review_packet", "subagent.sanitized_model_review", "subagent.operator_batch_receipts", "subagent.autonomy_preflight", "subagent.autonomous_runtime_blocked"],
             "configured_provider_count": len(configured_providers),
         },
         {
@@ -822,6 +822,11 @@ def _subagent_operator_checklist(subagent_delegations: dict[str, Any]) -> list[d
             "control": "model_ready_review_packets",
             "state": "enforced" if "model_ready_review_packets" in subagent_delegations.get("implemented_controls", []) else "pending",
             "detail": "Operators can create private JSON/checksum review packets for model or reviewer handoff with only hashes, counts, statuses, and receipts, excluding raw instructions and worker output.",
+        },
+        {
+            "control": "sanitized_model_review_invocations",
+            "state": "enforced" if "sanitized_model_review_invocations" in subagent_delegations.get("implemented_controls", []) else "pending",
+            "detail": "Approved model reviews invoke the configured model with only verified packet metadata and store redacted receipt metadata on the card.",
         },
         {
             "control": "autonomy_preflight_receipts",
