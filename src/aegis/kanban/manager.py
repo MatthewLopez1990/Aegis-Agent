@@ -48,6 +48,82 @@ result = {
 }
 print(json.dumps(result, sort_keys=True))
 """
+SUBAGENT_AUTONOMY_LOOP_WORKER_CODE = r"""
+import hashlib
+import json
+import sys
+
+FORBIDDEN_KEYS = {
+    "raw_instruction",
+    "raw_delegation_instruction",
+    "raw_worker_output",
+    "raw_worker_stdout",
+    "raw_worker_stderr",
+    "raw_worker_result_payload",
+    "raw_prompt",
+    "secret_value",
+    "access_token",
+    "refresh_token",
+}
+
+def forbidden_keys_present(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key) in FORBIDDEN_KEYS or forbidden_keys_present(item):
+                return True
+    if isinstance(value, list):
+        return any(forbidden_keys_present(item) for item in value)
+    return False
+
+payload = json.loads(sys.stdin.read() or "{}")
+plan = payload.get("plan", {}) if isinstance(payload.get("plan"), dict) else {}
+context = plan.get("scoped_model_context", {}) if isinstance(plan.get("scoped_model_context"), dict) else {}
+controls = plan.get("controls", {}) if isinstance(plan.get("controls"), dict) else {}
+step_plan = plan.get("step_plan", {}) if isinstance(plan.get("step_plan"), dict) else {}
+review = context.get("review", {}) if isinstance(context.get("review"), dict) else {}
+budget = context.get("budget", {}) if isinstance(context.get("budget"), dict) else {}
+valid = (
+    plan.get("plan_schema") == "aegis.subagent.autonomy_step_plan.v1"
+    and controls.get("operator_review_required") is True
+    and controls.get("model_invocation_performed") is False
+    and controls.get("tool_execution_performed") is False
+    and controls.get("raw_instruction_included") is False
+    and controls.get("raw_instruction_forwarded_to_model") is False
+    and controls.get("raw_worker_output_included") is False
+    and controls.get("raw_secret_values_included") is False
+    and not forbidden_keys_present(plan)
+)
+plan_bytes = json.dumps(plan, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+context_bytes = json.dumps(context, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+result = {
+    "worker_schema": "aegis.subagent.autonomy_loop_worker.v1",
+    "status": "review_required" if valid else "blocked",
+    "plan_id": plan.get("plan_id"),
+    "packet_id": review.get("packet_id"),
+    "plan_sha256": hashlib.sha256(plan_bytes).hexdigest(),
+    "scoped_context_sha256": hashlib.sha256(context_bytes).hexdigest(),
+    "step_index": step_plan.get("step_index"),
+    "max_steps": step_plan.get("max_steps"),
+    "recursive_depth_remaining": budget.get("recursive_depth_remaining"),
+    "tool_calls_used": 0,
+    "model_invocation": False,
+    "tool_execution": False,
+    "network_access": "disabled",
+    "operator_review_required": True,
+    "required_next_gate": "operator_review",
+    "autonomous_loop_isolation": True,
+    "isolated_loop_process": True,
+    "recursive_model_loop_enabled": False,
+    "raw_instruction_included": False,
+    "raw_instruction_forwarded_to_model": False,
+    "raw_worker_output_included": False,
+    "raw_worker_result_included": False,
+    "raw_prompt_for_model_included": False,
+    "raw_secret_values_included": False,
+    "forbidden_raw_keys_present": forbidden_keys_present(plan),
+}
+print(json.dumps(result, sort_keys=True))
+"""
 ALLOWED_SUBAGENT_WORKER_RESULT_KEYS = {
     "worker_schema",
     "status",
@@ -62,6 +138,36 @@ ALLOWED_SUBAGENT_WORKER_RESULT_KEYS = {
     "model_invocation",
     "raw_instruction_included",
     "raw_instruction_forwarded_to_model",
+    "returncode",
+    "stderr_sha256",
+    "stdout_sha256",
+}
+ALLOWED_SUBAGENT_AUTONOMY_LOOP_RESULT_KEYS = {
+    "worker_schema",
+    "status",
+    "plan_id",
+    "packet_id",
+    "plan_sha256",
+    "scoped_context_sha256",
+    "step_index",
+    "max_steps",
+    "recursive_depth_remaining",
+    "tool_calls_used",
+    "model_invocation",
+    "tool_execution",
+    "network_access",
+    "operator_review_required",
+    "required_next_gate",
+    "autonomous_loop_isolation",
+    "isolated_loop_process",
+    "recursive_model_loop_enabled",
+    "raw_instruction_included",
+    "raw_instruction_forwarded_to_model",
+    "raw_worker_output_included",
+    "raw_worker_result_included",
+    "raw_prompt_for_model_included",
+    "raw_secret_values_included",
+    "forbidden_raw_keys_present",
     "returncode",
     "stderr_sha256",
     "stdout_sha256",
@@ -428,6 +534,318 @@ class KanbanManager:
             "raw_instruction_forwarded_to_model": False,
         }
 
+    def plan_subagent_autonomy_step(
+        self,
+        card_id: str,
+        *,
+        actor: str = "operator",
+        approved: bool = False,
+        max_steps: int = 1,
+    ) -> dict[str, Any]:
+        card, board, metadata = self._require_subagent_card(card_id)
+        if not approved:
+            return {
+                "status": "approval_required",
+                "card_id": card_id,
+                "reason": "autonomous subagent step planning requires explicit approval",
+                "approval_required": True,
+                "autonomous_runtime": False,
+                "model_invocation_performed": False,
+                "tool_execution_performed": False,
+            }
+        if card.get("lane") == "done":
+            raise ValueError("done subagent cards cannot be planned")
+        try:
+            step_limit = max(1, min(int(max_steps), 20))
+        except (TypeError, ValueError):
+            step_limit = 1
+        packet_result = self.create_subagent_review_packet(card_id, actor=actor)
+        packet_receipt = packet_result["receipt"]
+        verification = self.verify_subagent_review_packet(str(packet_receipt["packet_id"]), actor=actor)
+        if not verification.get("ok"):
+            raise ValueError("subagent review packet verification failed")
+        refreshed_card, refreshed_board, refreshed_metadata = self._require_subagent_card(card_id)
+        plan_id = str(uuid4())
+        created_at = now_utc()
+        data_dir = Path(self.store.database_path).parent
+        plan_dir = ensure_private_dir(data_dir / "subagent-autonomy-steps")
+        plan_path = ensure_private_file(plan_dir / f"{plan_id}.json")
+        checksum_path = ensure_private_file(plan_dir / f"{plan_id}.sha256")
+        plan_count = _subagent_autonomy_step_plan_count(refreshed_metadata) + 1
+        scoped_context = _subagent_autonomy_scoped_context(
+            card=refreshed_card,
+            board=refreshed_board,
+            metadata=refreshed_metadata,
+            packet_summary=verification["packet"],
+            packet_receipt=packet_receipt,
+            verification_receipt=verification["receipt"],
+            step_index=plan_count,
+            max_steps=step_limit,
+        )
+        scoped_context_sha256 = _stable_json_sha256(scoped_context)
+        plan = {
+            "plan_schema": "aegis.subagent.autonomy_step_plan.v1",
+            "plan_id": plan_id,
+            "created_at": created_at,
+            "actor": _safe_actor(actor),
+            "taint": "TOOL_OUTPUT_METADATA",
+            "scoped_model_context": scoped_context,
+            "step_plan": {
+                "status": "operator_review_required",
+                "step_index": plan_count,
+                "max_steps": step_limit,
+                "planned_step_count": 1,
+                "required_next_gate": "operator_review",
+                "recursive_model_loop_enabled": False,
+                "autonomous_runtime": False,
+                "model_invocation_performed": False,
+                "tool_execution_performed": False,
+                "tool_call_sandbox": "deny_all_until_operator_approved",
+                "operator_interrupt_supported": True,
+                "review_gate_after_each_step": True,
+            },
+            "controls": {
+                "operator_review_required": True,
+                "scoped_model_context_builder": True,
+                "recursive_budget_enforced": True,
+                "tool_call_sandbox": "deny_all_until_operator_approved",
+                "tool_calls_allowed": 0,
+                "per_step_operator_interrupt": True,
+                "review_gate_after_each_step": True,
+                "autonomous_runtime": False,
+                "recursive_model_loop_enabled": False,
+                "model_invocation_performed": False,
+                "tool_execution_performed": False,
+                "raw_instruction_included": False,
+                "raw_instruction_forwarded_to_model": False,
+                "raw_worker_output_included": False,
+                "raw_worker_result_included": False,
+                "raw_prompt_for_model_included": False,
+                "raw_secret_values_included": False,
+            },
+        }
+        plan_path.write_text(json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        plan_path.chmod(0o600)
+        artifact_sha256 = hashlib.sha256(plan_path.read_bytes()).hexdigest()
+        checksum_path.write_text(f"{artifact_sha256}\n", encoding="utf-8")
+        checksum_path.chmod(0o600)
+        receipt = {
+            "receipt_schema": "aegis.subagent.autonomy_step_plan.v1",
+            "event_type": "subagent.autonomy_step_plan_created",
+            "plan_id": plan_id,
+            "card_id": card_id,
+            "board_id": board["id"],
+            "actor": _safe_actor(actor),
+            "artifact": str(plan_path),
+            "artifact_sha256": artifact_sha256,
+            "checksum": str(checksum_path),
+            "checksum_sha256": hashlib.sha256(checksum_path.read_bytes()).hexdigest(),
+            "packet_id": packet_receipt["packet_id"],
+            "packet_integrity_ok": bool(verification["receipt"].get("packet_integrity_ok")),
+            "scoped_model_context_sha256": scoped_context_sha256,
+            "step_index": plan_count,
+            "max_steps": step_limit,
+            "planned_step_count": 1,
+            "operator_review_required": True,
+            "required_next_gate": "operator_review",
+            "scoped_model_context_builder": True,
+            "recursive_budget_enforced": True,
+            "tool_call_sandbox": "deny_all_until_operator_approved",
+            "tool_calls_allowed": 0,
+            "per_step_operator_interrupt": True,
+            "review_gate_after_each_step": True,
+            "autonomous_runtime": False,
+            "recursive_model_loop_enabled": False,
+            "model_invocation_performed": False,
+            "tool_execution_performed": False,
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+            "raw_worker_output_included": False,
+            "raw_worker_result_included": False,
+            "raw_prompt_for_model_included": False,
+            "raw_secret_values_included": False,
+            "created_at": created_at,
+        }
+        self.store.update_kanban_card_metadata(
+            card_id,
+            {
+                "autonomy_step_plan": receipt,
+                "last_autonomy_step_plan": receipt,
+                "autonomy_step_plans_recorded": plan_count,
+                "autonomy_status": "step_plan_review_required",
+                "scoped_model_context_available": True,
+                "tool_call_sandbox": "deny_all_until_operator_approved",
+                "per_step_operator_interrupt": True,
+                "review_gate_after_each_step": True,
+                "raw_instruction_forwarded_to_model": False,
+                "raw_worker_output_included": False,
+            },
+        )
+        audit_entry = self.audit_logger.append("subagent.autonomy_step_plan_created", receipt, task_id=str(card.get("task_id")) if card.get("task_id") else None)
+        updated_card = self._require_card(card_id)
+        return {
+            "ok": True,
+            "status": "step_plan_created",
+            "card_id": card_id,
+            "plan": _subagent_autonomy_step_plan_summary(plan),
+            "receipt": receipt,
+            "packet": verification["packet"],
+            "packet_receipt": packet_receipt,
+            "verification_receipt": verification["receipt"],
+            "audit_event_hash": audit_entry["event_hash"],
+            "card": _subagent_card_summary(updated_card, include_preview=False),
+            "autonomous_runtime": False,
+            "model_invocation_performed": False,
+            "tool_execution_performed": False,
+        }
+
+    def run_subagent_autonomy_loop(
+        self,
+        card_id: str,
+        *,
+        actor: str = "operator",
+        approved: bool = False,
+        max_steps: int = 1,
+    ) -> dict[str, Any]:
+        card, board, metadata = self._require_subagent_card(card_id)
+        if not approved:
+            return {
+                "status": "approval_required",
+                "card_id": card_id,
+                "reason": "isolated subagent autonomy loop rehearsals require explicit approval",
+                "approval_required": True,
+                "autonomous_runtime": False,
+                "model_invocation_performed": False,
+                "tool_execution_performed": False,
+            }
+        if card.get("lane") == "done":
+            raise ValueError("done subagent cards cannot run autonomy loops")
+        plan_result = self.plan_subagent_autonomy_step(
+            card_id,
+            actor=actor,
+            approved=True,
+            max_steps=max_steps,
+        )
+        plan_receipt = plan_result["receipt"]
+        plan_path = Path(str(plan_receipt["artifact"]))
+        plan_bytes = plan_path.read_bytes()
+        artifact_sha256 = hashlib.sha256(plan_bytes).hexdigest()
+        checksum_path = Path(str(plan_receipt["checksum"]))
+        checksum_value = checksum_path.read_text(encoding="utf-8").strip() if checksum_path.exists() else ""
+        try:
+            plan = json.loads(plan_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("autonomy step plan artifact is not valid JSON") from exc
+        if not isinstance(plan, dict):
+            raise ValueError("autonomy step plan artifact must be a JSON object")
+        controls = plan.get("controls") if isinstance(plan.get("controls"), dict) else {}
+        if (
+            plan.get("plan_schema") != "aegis.subagent.autonomy_step_plan.v1"
+            or checksum_value != artifact_sha256
+            or controls.get("operator_review_required") is not True
+            or controls.get("model_invocation_performed") is not False
+            or controls.get("tool_execution_performed") is not False
+            or controls.get("raw_instruction_included") is not False
+            or controls.get("raw_instruction_forwarded_to_model") is not False
+            or controls.get("raw_worker_output_included") is not False
+            or controls.get("raw_secret_values_included") is not False
+            or _subagent_packet_forbidden_keys_present(plan)
+        ):
+            raise ValueError("autonomy step plan failed isolation verification")
+        run_id = str(uuid4())
+        started_at = now_utc()
+        start_receipt = {
+            "receipt_schema": "aegis.subagent.autonomy_loop.v1",
+            "event_type": "subagent.autonomy_loop_started",
+            "run_id": run_id,
+            "plan_id": plan_receipt["plan_id"],
+            "card_id": card_id,
+            "board_id": board["id"],
+            "actor": _safe_actor(actor),
+            "worker_process": "python_isolated_subprocess",
+            "python_isolated_mode": True,
+            "minimal_environment": True,
+            "network_access": "disabled",
+            "autonomous_loop_isolation": True,
+            "isolated_loop_process": True,
+            "recursive_model_loop_enabled": False,
+            "model_invocation_performed": False,
+            "tool_execution_performed": False,
+            "tool_calls_allowed": 0,
+            "tool_calls_used": 0,
+            "operator_review_required": True,
+            "required_next_gate": "operator_review",
+            "autonomous_runtime": False,
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+            "raw_worker_output_included": False,
+            "raw_worker_result_included": False,
+            "raw_prompt_for_model_included": False,
+            "raw_secret_values_included": False,
+            "started_at": started_at,
+        }
+        self.audit_logger.append("subagent.autonomy_loop_started", start_receipt, task_id=str(card.get("task_id")) if card.get("task_id") else None)
+        timeout_seconds = _worker_timeout_seconds(metadata.get("budget_snapshot") if isinstance(metadata.get("budget_snapshot"), dict) else {})
+        completed = _run_subagent_autonomy_loop_worker({"plan": plan}, timeout_seconds=timeout_seconds)
+        completed_at = now_utc()
+        worker_result = _decode_autonomy_loop_result(completed.stdout)
+        if completed.returncode != 0:
+            worker_result = {
+                "worker_schema": "aegis.subagent.autonomy_loop_worker.v1",
+                "status": "failed",
+                "returncode": completed.returncode,
+                "stderr_sha256": hashlib.sha256((completed.stderr or "").encode("utf-8")).hexdigest(),
+                "raw_instruction_included": False,
+                "raw_instruction_forwarded_to_model": False,
+                "raw_worker_output_included": False,
+                "raw_secret_values_included": False,
+            }
+        result_status = "review_required" if worker_result.get("status") == "review_required" and completed.returncode == 0 else "blocked"
+        loop_count = _subagent_autonomy_loop_count(metadata) + 1
+        result_receipt = {
+            **start_receipt,
+            "event_type": "subagent.autonomy_loop_completed",
+            "status": result_status,
+            "returncode": completed.returncode,
+            "timeout_seconds": timeout_seconds,
+            "completed_at": completed_at,
+            "stdout_bytes": len(completed.stdout.encode("utf-8")) if completed.stdout else 0,
+            "stderr_bytes": len(completed.stderr.encode("utf-8")) if completed.stderr else 0,
+            "raw_stdout_included": False,
+            "raw_stderr_included": False,
+            "plan_artifact_sha256": artifact_sha256,
+            "plan_checksum_matches": checksum_value == artifact_sha256,
+            "worker_result": worker_result,
+        }
+        self.store.update_kanban_card_metadata(
+            card_id,
+            {
+                "isolated_autonomy_loop": True,
+                "autonomy_loop_runs_recorded": loop_count,
+                "last_autonomy_loop_receipt": result_receipt,
+                "last_autonomy_loop_result": worker_result,
+                "autonomy_status": "loop_review_required" if result_status == "review_required" else "loop_blocked",
+                "raw_instruction_forwarded_to_model": False,
+                "raw_worker_output_included": False,
+            },
+        )
+        audit_entry = self.audit_logger.append("subagent.autonomy_loop_completed", result_receipt, task_id=str(card.get("task_id")) if card.get("task_id") else None)
+        updated_card = self._require_card(card_id)
+        return {
+            "ok": result_status == "review_required",
+            "status": result_status,
+            "card_id": card_id,
+            "run_id": run_id,
+            "plan": plan_result["plan"],
+            "plan_receipt": plan_receipt,
+            "receipt": result_receipt,
+            "audit_event_hash": audit_entry["event_hash"],
+            "card": _subagent_card_summary(updated_card, include_preview=False),
+            "autonomous_runtime": False,
+            "model_invocation_performed": False,
+            "tool_execution_performed": False,
+        }
+
     def create_subagent_review_packet(self, card_id: str, *, actor: str = "operator") -> dict[str, Any]:
         card, board, metadata = self._require_subagent_card(card_id)
         packet_id = str(uuid4())
@@ -550,6 +968,22 @@ class KanbanManager:
             "audit_event_hash": audit_entry["event_hash"],
             "subagents": self.subagent_status(limit=20, include_previews=False),
         }
+
+    def record_subagent_model_review(self, card_id: str, receipt: dict[str, Any]) -> dict[str, Any]:
+        card, _board, metadata = self._require_subagent_card(card_id)
+        self.store.update_kanban_card_metadata(
+            card_id,
+            {
+                "model_review": receipt,
+                "last_model_review_receipt": receipt,
+                "model_reviews_recorded": _subagent_model_review_count(metadata) + 1,
+                "model_review_status": receipt.get("status"),
+                "model_review_performed": bool(receipt.get("model_invocation_performed", False)),
+                "raw_instruction_forwarded_to_model": False,
+                "raw_worker_output_included": False,
+            },
+        )
+        return _subagent_card_summary(self._require_card(str(card["id"])), include_preview=False)
 
     def _record_parent_task_review_binding(self, parent_task_id: str | None, review_receipt: dict[str, Any]) -> bool:
         if not parent_task_id:
@@ -763,6 +1197,180 @@ class KanbanManager:
             },
         )
 
+    def delegate_subagent_child(
+        self,
+        parent_card_id: str,
+        *,
+        role: str,
+        task: str,
+        actor: str = "operator",
+        approved: bool = False,
+    ) -> dict[str, Any]:
+        parent_card, board, parent_metadata = self._require_subagent_card(parent_card_id)
+        if not approved:
+            return {
+                "status": "approval_required",
+                "card_id": parent_card_id,
+                "reason": "recursive child subagent delegations require explicit approval",
+                "approval_required": True,
+                "autonomous_runtime": False,
+                "recursive_model_loop_enabled": False,
+            }
+        if parent_card.get("lane") == "done":
+            raise ValueError("done subagent cards cannot create child delegations")
+        role = role.strip()
+        task = task.strip()
+        if not role or not task:
+            raise ValueError("child subagent delegation requires non-empty role and task")
+        parent_remaining = _card_recursive_depth_remaining(parent_metadata)
+        if parent_remaining <= 0:
+            self.audit_logger.append(
+                "subagent.recursive_budget_denied",
+                {
+                    "parent_card_id": parent_card_id,
+                    "profile_id": parent_metadata.get("profile_id"),
+                    "recursive_depth_remaining": parent_remaining,
+                    "actor": _safe_actor(actor),
+                    "raw_instruction_included": False,
+                    "raw_instruction_forwarded_to_model": False,
+                    "autonomous_runtime": False,
+                    "recursive_model_loop_enabled": False,
+                },
+                task_id=str(parent_card.get("task_id")) if parent_card.get("task_id") else None,
+            )
+            raise ValueError("subagent recursive depth budget is exhausted")
+        profiles = _profiles_from_board(board)
+        profile = _select_profile_for_role(profiles, role)
+        existing_cards = self.list_cards(board["id"])
+        open_profile_cards = _open_profile_card_count(existing_cards, str(profile["id"]))
+        max_parallel_cards = _profile_int(profile, "max_parallel_cards", 1)
+        if open_profile_cards >= max_parallel_cards:
+            self.audit_logger.append(
+                "subagent.budget_denied",
+                {
+                    "profile_id": profile["id"],
+                    "parent_card_id": parent_card_id,
+                    "open_profile_cards": open_profile_cards,
+                    "max_parallel_cards": max_parallel_cards,
+                    "raw_instruction_included": False,
+                    "autonomous_runtime": False,
+                    "recursive_model_loop_enabled": False,
+                },
+                task_id=str(parent_card.get("task_id")) if parent_card.get("task_id") else None,
+            )
+            raise ValueError(f"subagent profile {profile['id']!r} has no available parallel card budget")
+        child_remaining = max(0, min(parent_remaining - 1, _profile_int(profile, "recursive_depth_limit", 0)))
+        child_depth = _card_recursive_child_depth(parent_metadata) + 1
+        budget_snapshot = _profile_budget_snapshot(
+            profile,
+            open_profile_cards=open_profile_cards,
+            recursive_depth_remaining=child_remaining,
+            parent_card_id=parent_card_id,
+        )
+        root_card_id = str(parent_metadata.get("root_subagent_card_id") or parent_card_id)
+        created_at = now_utc()
+        child = self.add_card(
+            board["id"],
+            title=f"{role}: {task[:80]}",
+            description=task,
+            lane="ready",
+            owner=role,
+            risk_level=RiskLevel.HIGH,
+            task_id=str(parent_card.get("task_id")) if parent_card.get("task_id") else None,
+            metadata={
+                "delegation_type": "subagent",
+                "role": role,
+                "profile_id": profile["id"],
+                "profile_status": "matched" if _profile_id(role) == profile["id"] and profile.get("enabled", True) else "default_profile",
+                "profile_snapshot": _profile_summary(profile),
+                "budget_snapshot": budget_snapshot,
+                "budget_enforced": True,
+                "source_tool": "subagent_delegate_child",
+                "isolation": "durable_child_card",
+                "instructions_tainted": True,
+                "parent_task_id": str(parent_card.get("task_id")) if parent_card.get("task_id") else None,
+                "parent_subagent_card_id": parent_card_id,
+                "root_subagent_card_id": root_card_id,
+                "recursive_child_depth": child_depth,
+                "recursive_depth_remaining": child_remaining,
+                "approval_gate": "explicit_child_delegation_approval",
+                "handoff_receipt": "kanban.card_created",
+                "handoff_receipts_recorded": 1,
+                "last_handoff_receipt": {
+                    "receipt_schema": "aegis.subagent.handoff.v1",
+                    "event_type": "kanban.card_created",
+                    "from_lane": None,
+                    "to_lane": "ready",
+                    "raw_reason_included": False,
+                    "raw_instruction_included": False,
+                    "raw_instruction_forwarded_to_model": False,
+                    "autonomous_runtime": False,
+                    "recursive_model_loop_enabled": False,
+                },
+                "raw_instruction_forwarded_to_model": False,
+            },
+        )
+        receipt = {
+            "receipt_schema": "aegis.subagent.child_delegation.v1",
+            "event_type": "subagent.child_delegated",
+            "parent_card_id": parent_card_id,
+            "child_card_id": child["id"],
+            "root_card_id": root_card_id,
+            "board_id": board["id"],
+            "actor": _safe_actor(actor),
+            "parent_profile_id": parent_metadata.get("profile_id"),
+            "child_profile_id": profile["id"],
+            "child_depth": child_depth,
+            "parent_recursive_depth_remaining": parent_remaining,
+            "child_recursive_depth_remaining": child_remaining,
+            "review_gate_required": True,
+            "approved": True,
+            "autonomous_runtime": False,
+            "recursive_model_loop_enabled": False,
+            "model_invocation_performed": False,
+            "tool_execution_performed": False,
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+            "raw_secret_values_included": False,
+            "created_at": created_at,
+        }
+        child_count = _subagent_child_count(parent_metadata) + 1
+        self.store.update_kanban_card_metadata(
+            str(child["id"]),
+            {
+                "recursive_delegation_receipt": receipt,
+                "review_gated_recursive_child_delegation": True,
+                "raw_instruction_forwarded_to_model": False,
+            },
+        )
+        self.store.update_kanban_card_metadata(
+            parent_card_id,
+            {
+                "recursive_child_count": child_count,
+                "last_child_delegation_receipt": receipt,
+                "review_gated_recursive_child_delegations": True,
+                "raw_instruction_forwarded_to_model": False,
+            },
+        )
+        audit_entry = self.audit_logger.append(
+            "subagent.child_delegated",
+            receipt,
+            task_id=str(parent_card.get("task_id")) if parent_card.get("task_id") else None,
+        )
+        updated_child = self._require_card(str(child["id"]))
+        return {
+            "ok": True,
+            "status": "child_delegated",
+            "card_id": str(child["id"]),
+            "parent_card_id": parent_card_id,
+            "root_card_id": root_card_id,
+            "receipt": receipt,
+            "audit_event_hash": audit_entry["event_hash"],
+            "card": _subagent_card_summary(updated_child),
+            "autonomous_runtime": False,
+            "recursive_model_loop_enabled": False,
+        }
+
     def _require_subagent_card(self, card_id: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
         card = self._require_card(card_id)
         board = self.subagent_delegation_board(create=False)
@@ -791,6 +1399,9 @@ class KanbanManager:
         parent_task_review_links = [
             card for card in parent_bound_review_cards if bool(card.get("metadata", {}).get("parent_task_review_linked", False))
         ]
+        recursive_child_cards = [
+            card for card in cards if bool(card.get("metadata", {}).get("parent_subagent_card_id"))
+        ]
         safe_cards = [
             _subagent_card_summary(card, include_preview=include_previews)
             for card in sorted(cards, key=lambda row: str(row.get("updated_at", "")), reverse=True)[: max(0, limit)]
@@ -811,6 +1422,7 @@ class KanbanManager:
             "done_cards": lanes["done"],
             "parent_bound_review_cards": len(parent_bound_review_cards),
             "parent_task_review_links": len(parent_task_review_links),
+            "recursive_child_cards": len(recursive_child_cards),
             "active_roles": active_roles,
             "profiles": profiles,
             "profile_count": len(profiles),
@@ -825,11 +1437,24 @@ class KanbanManager:
                 "handoff_receipts",
                 "agent_profile_lifecycle",
                 "recursive_budget_limits",
+                "recursive_budget_remaining",
+                "review_gated_recursive_child_delegations",
                 "isolated_parallel_runtime",
                 "operator_approved_batch_runtime",
                 "parent_bound_review_receipts",
                 "model_ready_review_packets",
+                "sanitized_model_review_invocations",
                 "autonomy_preflight_receipts",
+                "scoped_autonomy_step_plans",
+                "autonomous_loop_isolation",
+                "isolated_autonomy_loop_rehearsals",
+                "scoped_model_context_builder",
+                "recursive_budget_enforcer",
+                "tool_call_sandbox",
+                "per_step_operator_interrupt",
+                "review_gate_after_each_step",
+                "raw_instruction_redaction",
+                "worker_output_redaction",
             ],
             "remaining_depth_work": [],
             "raw_instruction_included": False,
@@ -840,6 +1465,8 @@ class KanbanManager:
         status = self.subagent_status(limit=limit, include_previews=False)
         required_controls = [
             "autonomous_loop_isolation",
+            "review_gated_recursive_child_delegations",
+            "recursive_model_loop_executor",
             "scoped_model_context_builder",
             "recursive_budget_enforcer",
             "tool_call_sandbox",
@@ -850,28 +1477,29 @@ class KanbanManager:
         ]
         implemented_controls = list(status.get("implemented_controls") or [])
         missing_controls = [control for control in required_controls if control not in implemented_controls]
-        blockers = [
+        candidate_blockers = [
             {
-                "control": "autonomous_loop_isolation",
+                "control": "recursive_model_loop_executor",
                 "state": "missing",
-                "detail": "Recursive autonomous model-loop workers are not implemented or enabled.",
+                "detail": "An isolated loop rehearsal worker exists, but recursive autonomous model-loop execution is not implemented or enabled.",
             },
             {
                 "control": "scoped_model_context_builder",
                 "state": "missing",
-                "detail": "Subagent model prompts must be built from sanitized review packets instead of raw delegation instructions.",
+                "detail": "Scoped per-step context builders are available for approved step plans, but recursive autonomous model-loop workers are still disabled.",
             },
             {
                 "control": "tool_call_sandbox",
                 "state": "missing",
-                "detail": "Autonomous subagent tool calls need per-step approval, allowlists, and receipts before execution.",
+                "detail": "Autonomous step plans deny tool execution until a future isolated loop can enforce per-step allowlists and receipts.",
             },
             {
                 "control": "review_gate_after_each_step",
                 "state": "missing",
-                "detail": "Every autonomous step must return to operator review before deeper recursion is allowed.",
+                "detail": "Approved step plans require operator review after each planned step; recursive execution remains disabled.",
             },
         ]
+        blockers = [blocker for blocker in candidate_blockers if blocker["control"] in missing_controls]
         if int(status.get("enabled_profile_count") or 0) <= 0:
             blockers.insert(
                 0,
@@ -911,8 +1539,9 @@ class KanbanManager:
             ],
             "next_steps": [
                 "Use agents delegate/run/review-packet for operator-approved isolated subagent work today.",
-                "Implement sanitized model-context construction from verified review packets before enabling autonomous model loops.",
-                "Add per-step review, budget, tool-call, and interrupt receipts before recursive subagents can execute.",
+                "Use agents autonomy-step <card-id> --approved to create a sanitized per-step plan from verified review metadata.",
+                "Use agents autonomy-run <card-id> --approved to exercise the isolated loop boundary without model or tool execution.",
+                "Add the recursive model-loop executor before recursive subagents can execute.",
             ],
             "checked_at": now_utc(),
         }
@@ -980,6 +1609,55 @@ def _subagent_run_count(metadata: dict[str, Any]) -> int:
 def _subagent_review_packet_count(metadata: dict[str, Any]) -> int:
     try:
         return int(metadata.get("review_packets_recorded", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _subagent_model_review_count(metadata: dict[str, Any]) -> int:
+    try:
+        return int(metadata.get("model_reviews_recorded", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _subagent_autonomy_step_plan_count(metadata: dict[str, Any]) -> int:
+    try:
+        return int(metadata.get("autonomy_step_plans_recorded", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _subagent_autonomy_loop_count(metadata: dict[str, Any]) -> int:
+    try:
+        return int(metadata.get("autonomy_loop_runs_recorded", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _subagent_child_count(metadata: dict[str, Any]) -> int:
+    try:
+        return int(metadata.get("recursive_child_count", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _card_recursive_depth_remaining(metadata: dict[str, Any]) -> int:
+    direct = metadata.get("recursive_depth_remaining")
+    if direct is not None:
+        try:
+            return max(0, int(direct))
+        except (TypeError, ValueError):
+            return 0
+    budget = metadata.get("budget_snapshot") if isinstance(metadata.get("budget_snapshot"), dict) else {}
+    try:
+        return max(0, int(budget.get("recursive_depth_remaining", budget.get("recursive_depth_limit", 0))))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _card_recursive_child_depth(metadata: dict[str, Any]) -> int:
+    try:
+        return max(0, int(metadata.get("recursive_child_depth", 0)))
     except (TypeError, ValueError):
         return 0
 
@@ -1118,6 +1796,8 @@ def _model_review_budget_snapshot(budget: dict[str, Any]) -> dict[str, Any]:
         "profile_id": budget.get("profile_id"),
         "max_parallel_cards": budget.get("max_parallel_cards"),
         "recursive_depth_limit": budget.get("recursive_depth_limit"),
+        "recursive_depth_remaining": budget.get("recursive_depth_remaining"),
+        "parent_subagent_card_id": budget.get("parent_subagent_card_id"),
         "max_tool_calls": budget.get("max_tool_calls"),
         "max_runtime_seconds": budget.get("max_runtime_seconds"),
         "network_policy": budget.get("network_policy"),
@@ -1168,6 +1848,134 @@ def _subagent_review_packet_summary(packet: dict[str, Any]) -> dict[str, Any]:
         "last_worker_result_sha256": review.get("last_worker_result_sha256"),
         "result_summary_sha256": review.get("result_summary_sha256"),
         "model_ready": controls.get("model_ready") is True,
+        "raw_instruction_included": False,
+        "raw_worker_output_included": False,
+        "raw_worker_result_included": False,
+    }
+
+
+def _subagent_autonomy_scoped_context(
+    *,
+    card: dict[str, Any],
+    board: dict[str, Any],
+    metadata: dict[str, Any],
+    packet_summary: dict[str, Any],
+    packet_receipt: dict[str, Any],
+    verification_receipt: dict[str, Any],
+    step_index: int,
+    max_steps: int,
+) -> dict[str, Any]:
+    budget = metadata.get("budget_snapshot") if isinstance(metadata.get("budget_snapshot"), dict) else {}
+    profile = metadata.get("profile_snapshot") if isinstance(metadata.get("profile_snapshot"), dict) else {}
+    recursive_depth_limit = _profile_int(budget, "recursive_depth_limit", 0)
+    recursive_depth_remaining = _card_recursive_depth_remaining(metadata)
+    tool_budget = _profile_int(budget, "max_tool_calls", 0)
+    return {
+        "context_schema": "aegis.subagent.scoped_autonomy_context.v1",
+        "taint": "TOOL_OUTPUT_METADATA",
+        "card": {
+            "card_id": str(card["id"]),
+            "board_id": str(board["id"]),
+            "lane": str(card.get("lane", "")),
+            "owner": str(card.get("owner") or ""),
+            "risk_level": str(card.get("risk_level") or ""),
+            "parent_task_id": _parent_task_id(card, metadata),
+            "profile_id": metadata.get("profile_id"),
+            "instruction_sha256": packet_summary.get("instruction_sha256"),
+            "instruction_character_count": packet_summary.get("instruction_character_count"),
+            "instruction_word_count": packet_summary.get("instruction_word_count"),
+            "instructions_tainted": bool(metadata.get("instructions_tainted", True)),
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+        },
+        "profile": {
+            "profile_id": profile.get("id") or metadata.get("profile_id"),
+            "enabled": bool(profile.get("enabled", True)),
+            "workspace_scope": profile.get("workspace_scope") or budget.get("workspace_scope"),
+            "network_policy": profile.get("network_policy") or budget.get("network_policy", "disabled"),
+            "tool_allowlist_count": len(profile.get("tool_allowlist") or []),
+            "tool_allowlist_sha256": _stable_json_sha256(sorted(profile.get("tool_allowlist") or [])),
+            "raw_tool_arguments_included": False,
+        },
+        "review": {
+            "review_status": packet_summary.get("review_status"),
+            "packet_id": packet_receipt.get("packet_id"),
+            "packet_sha256": packet_receipt.get("artifact_sha256"),
+            "packet_integrity_ok": bool(verification_receipt.get("packet_integrity_ok")),
+            "review_artifact_sha256": packet_summary.get("review_artifact_sha256"),
+            "last_run_receipt_sha256": packet_summary.get("last_run_receipt_sha256"),
+            "last_worker_result_sha256": packet_summary.get("last_worker_result_sha256"),
+            "result_summary_sha256": packet_summary.get("result_summary_sha256"),
+            "raw_worker_output_included": False,
+            "raw_worker_result_included": False,
+        },
+        "budget": {
+            "budget_schema": budget.get("budget_schema"),
+            "profile_id": budget.get("profile_id"),
+            "recursive_depth_limit": recursive_depth_limit,
+            "recursive_depth_remaining": recursive_depth_remaining,
+            "parent_subagent_card_id": budget.get("parent_subagent_card_id") or metadata.get("parent_subagent_card_id"),
+            "max_tool_calls": tool_budget,
+            "tool_calls_allowed_for_plan": 0,
+            "max_runtime_seconds": budget.get("max_runtime_seconds"),
+            "network_policy": budget.get("network_policy", "disabled"),
+            "workspace_scope": budget.get("workspace_scope", "current_workspace"),
+            "enforcement": "approved_autonomy_step_plan",
+            "recursive_budget_enforced": True,
+        },
+        "step": {
+            "step_index": step_index,
+            "max_steps": max_steps,
+            "planned_step_count": 1,
+            "required_next_gate": "operator_review",
+            "operator_interrupt_supported": True,
+            "review_gate_after_each_step": True,
+        },
+        "controls": {
+            "scoped_model_context_builder": True,
+            "operator_review_required": True,
+            "tool_call_sandbox": "deny_all_until_operator_approved",
+            "tool_execution_performed": False,
+            "model_invocation_performed": False,
+            "autonomous_runtime": False,
+            "recursive_model_loop_enabled": False,
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+            "raw_worker_output_included": False,
+            "raw_worker_result_included": False,
+            "raw_prompt_for_model_included": False,
+            "raw_secret_values_included": False,
+        },
+    }
+
+
+def _subagent_autonomy_step_plan_summary(plan: dict[str, Any]) -> dict[str, Any]:
+    context = plan.get("scoped_model_context") if isinstance(plan.get("scoped_model_context"), dict) else {}
+    controls = plan.get("controls") if isinstance(plan.get("controls"), dict) else {}
+    step_plan = plan.get("step_plan") if isinstance(plan.get("step_plan"), dict) else {}
+    review = context.get("review") if isinstance(context.get("review"), dict) else {}
+    card = context.get("card") if isinstance(context.get("card"), dict) else {}
+    return {
+        "plan_schema": plan.get("plan_schema"),
+        "plan_id": plan.get("plan_id"),
+        "created_at": plan.get("created_at"),
+        "card_id": card.get("card_id"),
+        "packet_id": review.get("packet_id"),
+        "packet_integrity_ok": bool(review.get("packet_integrity_ok", False)),
+        "review_status": review.get("review_status"),
+        "status": step_plan.get("status"),
+        "step_index": step_plan.get("step_index"),
+        "max_steps": step_plan.get("max_steps"),
+        "required_next_gate": step_plan.get("required_next_gate"),
+        "tool_call_sandbox": controls.get("tool_call_sandbox"),
+        "operator_review_required": controls.get("operator_review_required") is True,
+        "scoped_model_context_builder": controls.get("scoped_model_context_builder") is True,
+        "recursive_budget_enforced": controls.get("recursive_budget_enforced") is True,
+        "per_step_operator_interrupt": controls.get("per_step_operator_interrupt") is True,
+        "review_gate_after_each_step": controls.get("review_gate_after_each_step") is True,
+        "autonomous_runtime": False,
+        "model_invocation_performed": False,
+        "tool_execution_performed": False,
         "raw_instruction_included": False,
         "raw_worker_output_included": False,
         "raw_worker_result_included": False,
@@ -1404,6 +2212,24 @@ def _run_subagent_worker(payload: dict[str, Any], *, timeout_seconds: float) -> 
         return subprocess.CompletedProcess(args=args, returncode=124, stdout=stdout, stderr=stderr or "timeout")
 
 
+def _run_subagent_autonomy_loop_worker(payload: dict[str, Any], *, timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+    args = (sys.executable, "-I", "-c", SUBAGENT_AUTONOMY_LOOP_WORKER_CODE)
+    try:
+        return subprocess.run(  # noqa: S603 - argv is fixed to the current Python in isolated mode.
+            args,
+            input=json.dumps(payload, sort_keys=True),
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+            env={"PYTHONIOENCODING": "utf-8"},
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else str(exc.stdout or "")
+        stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr or "")
+        return subprocess.CompletedProcess(args=args, returncode=124, stdout=stdout, stderr=stderr or "timeout")
+
+
 def _decode_worker_result(stdout: str) -> dict[str, Any]:
     try:
         decoded = json.loads(stdout or "{}")
@@ -1427,6 +2253,38 @@ def _decode_worker_result(stdout: str) -> dict[str, Any]:
     sanitized["raw_instruction_included"] = False
     sanitized["raw_instruction_forwarded_to_model"] = False
     sanitized["raw_worker_output_included"] = False
+    return sanitized
+
+
+def _decode_autonomy_loop_result(stdout: str) -> dict[str, Any]:
+    try:
+        decoded = json.loads(stdout or "{}")
+    except json.JSONDecodeError:
+        return {
+            "worker_schema": "aegis.subagent.autonomy_loop_worker.v1",
+            "status": "failed",
+            "stdout_sha256": hashlib.sha256((stdout or "").encode("utf-8")).hexdigest(),
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+            "raw_worker_output_included": False,
+            "raw_secret_values_included": False,
+        }
+    if not isinstance(decoded, dict):
+        return {
+            "worker_schema": "aegis.subagent.autonomy_loop_worker.v1",
+            "status": "failed",
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+            "raw_worker_output_included": False,
+            "raw_secret_values_included": False,
+        }
+    sanitized = {key: decoded[key] for key in ALLOWED_SUBAGENT_AUTONOMY_LOOP_RESULT_KEYS if key in decoded}
+    sanitized["worker_schema"] = str(sanitized.get("worker_schema") or "aegis.subagent.autonomy_loop_worker.v1")
+    sanitized["raw_instruction_included"] = False
+    sanitized["raw_instruction_forwarded_to_model"] = False
+    sanitized["raw_worker_output_included"] = False
+    sanitized["raw_worker_result_included"] = False
+    sanitized["raw_secret_values_included"] = False
     return sanitized
 
 
@@ -1483,8 +2341,8 @@ def _build_subagent_profile(
     workspace_scope: str,
 ) -> dict[str, Any]:
     timestamp = now_utc()
-    if recursive_depth_limit != 0:
-        raise ValueError("subagent recursive depth must remain 0 until autonomous isolation is enabled")
+    if recursive_depth_limit < 0 or recursive_depth_limit > 5:
+        raise ValueError("subagent recursive_depth_limit must be between 0 and 5")
     if max_parallel_cards < 1 or max_parallel_cards > 20:
         raise ValueError("subagent max_parallel_cards must be between 1 and 20")
     if max_tool_calls < 0 or max_tool_calls > 1000:
@@ -1554,13 +2412,23 @@ def _open_profile_card_count(cards: list[dict[str, Any]], profile_id: str) -> in
     return count
 
 
-def _profile_budget_snapshot(profile: dict[str, Any], *, open_profile_cards: int) -> dict[str, Any]:
+def _profile_budget_snapshot(
+    profile: dict[str, Any],
+    *,
+    open_profile_cards: int,
+    recursive_depth_remaining: int | None = None,
+    parent_card_id: str | None = None,
+) -> dict[str, Any]:
+    recursive_depth_limit = _profile_int(profile, "recursive_depth_limit", 0)
+    remaining = recursive_depth_limit if recursive_depth_remaining is None else max(0, min(int(recursive_depth_remaining), recursive_depth_limit))
     return {
         "budget_schema": "aegis.subagent.budget.v1",
         "profile_id": profile.get("id"),
         "open_profile_cards_at_create": open_profile_cards,
         "max_parallel_cards": _profile_int(profile, "max_parallel_cards", 1),
-        "recursive_depth_limit": _profile_int(profile, "recursive_depth_limit", 0),
+        "recursive_depth_limit": recursive_depth_limit,
+        "recursive_depth_remaining": remaining,
+        "parent_subagent_card_id": parent_card_id,
         "max_tool_calls": _profile_int(profile, "max_tool_calls", 0),
         "max_runtime_seconds": _profile_int(profile, "max_runtime_seconds", 0),
         "network_policy": profile.get("network_policy", "disabled"),
@@ -1625,6 +2493,15 @@ def _subagent_card_summary(card: dict[str, Any], *, include_preview: bool = True
         "profile_snapshot": metadata.get("profile_snapshot"),
         "budget_snapshot": metadata.get("budget_snapshot"),
         "budget_enforced": bool(metadata.get("budget_enforced", False)),
+        "parent_subagent_card_id": metadata.get("parent_subagent_card_id"),
+        "root_subagent_card_id": metadata.get("root_subagent_card_id"),
+        "recursive_child_depth": _card_recursive_child_depth(metadata),
+        "recursive_depth_remaining": _card_recursive_depth_remaining(metadata),
+        "recursive_child_count": _subagent_child_count(metadata),
+        "recursive_delegation_receipt": metadata.get("recursive_delegation_receipt"),
+        "last_child_delegation_receipt": metadata.get("last_child_delegation_receipt"),
+        "review_gated_recursive_child_delegation": bool(metadata.get("review_gated_recursive_child_delegation", False)),
+        "review_gated_recursive_child_delegations": bool(metadata.get("review_gated_recursive_child_delegations", False)),
         "created_at": card.get("created_at"),
         "updated_at": card.get("updated_at"),
         "description_preview": _preview(description) if include_preview else None,
@@ -1645,6 +2522,21 @@ def _subagent_card_summary(card: dict[str, Any], *, include_preview: bool = True
         "model_review_packet": metadata.get("model_review_packet") or metadata.get("review_packet"),
         "review_packets_recorded": _subagent_review_packet_count(metadata),
         "model_ready_review_packet_available": bool(metadata.get("model_ready_review_packet_available", False)),
+        "model_review": metadata.get("model_review") or metadata.get("last_model_review_receipt"),
+        "model_reviews_recorded": _subagent_model_review_count(metadata),
+        "model_review_status": metadata.get("model_review_status"),
+        "model_review_performed": bool(metadata.get("model_review_performed", False)),
+        "autonomy_step_plan": metadata.get("autonomy_step_plan") or metadata.get("last_autonomy_step_plan"),
+        "autonomy_step_plans_recorded": _subagent_autonomy_step_plan_count(metadata),
+        "isolated_autonomy_loop": bool(metadata.get("isolated_autonomy_loop", False)),
+        "autonomy_loop_runs_recorded": _subagent_autonomy_loop_count(metadata),
+        "last_autonomy_loop_receipt": metadata.get("last_autonomy_loop_receipt"),
+        "last_autonomy_loop_result": metadata.get("last_autonomy_loop_result"),
+        "autonomy_status": metadata.get("autonomy_status"),
+        "scoped_model_context_available": bool(metadata.get("scoped_model_context_available", False)),
+        "tool_call_sandbox": metadata.get("tool_call_sandbox"),
+        "per_step_operator_interrupt": bool(metadata.get("per_step_operator_interrupt", False)),
+        "review_gate_after_each_step": bool(metadata.get("review_gate_after_each_step", False)),
         "review_completion_receipt": metadata.get("review_completion_receipt"),
         "parent_task_review_linked": bool(metadata.get("parent_task_review_linked", False)),
         "raw_worker_output_included": bool(metadata.get("raw_worker_output_included", False)),

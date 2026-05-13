@@ -37,7 +37,7 @@ from aegis.security.policy_profile import activate_due_policy_rollouts, apply_po
 from aegis.security.taint import RiskLevel, Sensitivity, TrustClass
 from aegis.skills.signing import DEFAULT_SKILL_SIGNING_KEY
 from aegis.tools.executor import ToolExecutionError
-from aegis.tui.main import COMMAND_MENU_GROUPS, TOP_LEVEL_COMMANDS
+from aegis.tui.main import COMMAND_MENU_GROUPS, SLASH_FLAG_HINTS, SLASH_SUBCOMMANDS, TOP_LEVEL_COMMANDS
 
 
 _TERMINAL_TASK_STATUSES = {"completed", "failed", "blocked", "cancelled"}
@@ -93,6 +93,13 @@ def _web_command_catalog(orchestrator: Any) -> dict[str, Any]:
                         "section": _command_group_section(group),
                         "group": group.lower(),
                         "source": "tui",
+                        "surfaces": ["tui", "web_palette"],
+                        "args": [],
+                        "flags": [],
+                        "requires_local_token": True,
+                        "requires_remote_token": False,
+                        "mutates": False,
+                        "web_actions": [],
                     },
                 )
     for command in sorted(top_level):
@@ -106,7 +113,162 @@ def _web_command_catalog(orchestrator: Any) -> dict[str, Any]:
                 "section": "settings",
                 "group": "all",
                 "source": "tui",
+                "surfaces": ["tui", "web_palette"],
+                "args": [],
+                "flags": [],
+                "requires_local_token": True,
+                "requires_remote_token": False,
+                "mutates": False,
+                "web_actions": [],
             },
+        )
+    for command, row in command_rows.items():
+        command_keys = (command, command.replace("-", "_"))
+        args = list(row.get("args") or [])
+        flags = list(row.get("flags") or [])
+        for key in command_keys:
+            for subcommand in SLASH_SUBCOMMANDS.get(key, ()):
+                if subcommand not in args:
+                    args.append(str(subcommand))
+            for (root, _subcommand), flag_hints in SLASH_FLAG_HINTS.items():
+                if root != key:
+                    continue
+                for flag in flag_hints:
+                    if flag not in flags:
+                        flags.append(str(flag))
+        row["args"] = args
+        row["flags"] = flags
+    if "remote-control" in command_rows:
+        remote_args = list(command_rows["remote-control"].get("args") or [])
+        remote_flags = list(command_rows["remote-control"].get("flags") or [])
+        for arg in ("status", "push-targets"):
+            if arg not in remote_args:
+                remote_args.append(arg)
+        for flag in ("--relay-url", "--status", "--target-id"):
+            if flag not in remote_flags:
+                remote_flags.append(flag)
+        command_rows["remote-control"].update(
+            {
+                "kind": "remote-control",
+                "detail": "Open remote pairing controls or run governed remote-control status, directory, relay, push, and outbox actions",
+                "section": "automation",
+                "args": remote_args,
+                "flags": remote_flags,
+                "requires_local_token": True,
+                "requires_remote_token": False,
+                "mutates": True,
+                "web_actions": [
+                    {"input": "status", "method": "GET", "path": "/remote-control/status", "mutates": False},
+                    {"input": "directory", "method": "GET", "path": "/remote-control/directory", "mutates": False},
+                    {"input": "relay", "method": "GET|POST", "path": "/remote-control/relay", "mutates": True},
+                    {"input": "relay-outbox", "method": "GET", "path": "/remote-control/relay/outbox", "mutates": False},
+                    {"input": "relay-directory", "method": "POST", "path": "/remote-control/relay/directory", "mutates": True},
+                    {"input": "relay-notify", "method": "POST", "path": "/remote-control/relay/notify", "mutates": True},
+                    {"input": "relay-retry", "method": "POST", "path": "/remote-control/relay/retry", "mutates": True},
+                    {"input": "relay-confirm", "method": "POST", "path": "/remote-control/relay/confirm", "mutates": True},
+                    {"input": "relay-pull", "method": "POST", "path": "/remote-control/relay/pull", "mutates": True},
+                    {"input": "push-targets", "method": "GET", "path": "/remote-control/push/targets", "mutates": False},
+                    {"input": "push-register", "method": "POST", "path": "/remote-control/push/register", "mutates": True},
+                    {"input": "push-disable", "method": "POST", "path": "/remote-control/push/disable", "mutates": True},
+                    {"input": "push-rotate", "method": "POST", "path": "/remote-control/push/rotate", "mutates": True},
+                    {"input": "push", "method": "POST", "path": "/remote-control/push", "mutates": True},
+                    {"input": "pair", "method": "POST", "path": "/remote-control/pair", "mutates": True},
+                    {"input": "revoke", "method": "POST", "path": "/remote-control/revoke", "mutates": True},
+                ],
+            }
+        )
+    for command in ("queue", "q"):
+        if command in command_rows:
+            command_rows[command].update(
+                {
+                    "kind": "queue-control",
+                    "label": "/queue|/q [status|all|session|submit]",
+                    "detail": "Open the active task queue or submit governed work from the web console",
+                    "section": "activity",
+                    "args": ["status", "show", "list", "active", "pending", "all", "session", "submit", "request"],
+                    "flags": ["--limit", "--status"],
+                    "requires_local_token": True,
+                    "requires_remote_token": False,
+                    "mutates": True,
+                    "web_actions": [
+                        {"input": "status", "method": "GET", "path": "/tasks", "mutates": False},
+                        {"input": "session", "method": "GET", "path_template": "/sessions/{session_id}/tasks", "mutates": False},
+                        {"input": "submit", "method": "POST", "path": "/tasks", "mutates": True},
+                    ],
+                }
+            )
+    for command, detail, action, mutates in (
+        ("approval", "Review an approval payload by id from the web console", "review", False),
+        ("approve", "Approve a pending approval by id with the web decision form metadata", "approve", True),
+        ("deny", "Deny a pending approval by id with the web decision form metadata", "deny", True),
+    ):
+        command_rows.setdefault(
+            command,
+            {
+                "command": command,
+                "label": f"/{command} <approval_id>",
+                "group": "govern",
+                "source": "web",
+            },
+        )
+        path_template = "/approvals/{approval_id}" if action == "review" else f"/approvals/{{approval_id}}/{action}"
+        command_rows[command].update(
+            {
+                "label": f"/{command} <approval_id>",
+                "detail": detail,
+                "kind": "approval-control",
+                "section": "security",
+                "surfaces": ["tui", "web_palette", "web_action"],
+                "args": ["approval_id"],
+                "flags": ["--actor", "--reason", "--admin"] if mutates else [],
+                "requires_local_token": True,
+                "requires_remote_token": False,
+                "mutates": mutates,
+                "web_actions": [
+                    {
+                        "input": action,
+                        "method": "GET" if action == "review" else "POST",
+                        "path_template": path_template,
+                        "mutates": mutates,
+                    }
+                ],
+            }
+        )
+    for command, detail in (
+        ("resume", "Resume a waiting or paused task by id, or the selected task from the web console"),
+        ("pause", "Pause a non-terminal task by id, or the selected task from the web console"),
+        ("cancel", "Cancel a non-terminal task by id, or the selected task from the web console"),
+    ):
+        command_rows.setdefault(
+            command,
+            {
+                "command": command,
+                "label": f"/{command} [task_id]",
+                "group": "operate",
+                "source": "web",
+            },
+        )
+        command_rows[command].update(
+            {
+                "label": f"/{command} [task_id]",
+                "detail": detail,
+                "kind": "task-control",
+                "section": "activity",
+                "surfaces": ["tui", "web_palette", "web_action"],
+                "args": ["task_id"],
+                "flags": [],
+                "requires_local_token": True,
+                "requires_remote_token": False,
+                "mutates": command in {"resume", "pause", "cancel"},
+                "web_actions": [
+                    {
+                        "input": command,
+                        "method": "POST",
+                        "path_template": f"/tasks/{{task_id}}/{command}",
+                        "mutates": command in {"resume", "pause", "cancel"},
+                    }
+                ],
+            }
         )
     skill_rows: list[dict[str, Any]] = []
     for skill in orchestrator.skills.list_public():
@@ -122,6 +284,13 @@ def _web_command_catalog(orchestrator: Any) -> dict[str, Any]:
                     "section": "tools",
                     "group": "skills",
                     "source": "skill",
+                    "surfaces": ["tui", "web_palette"],
+                    "args": [],
+                    "flags": [],
+                    "requires_local_token": True,
+                    "requires_remote_token": False,
+                    "mutates": False,
+                    "web_actions": [],
                 }
             )
     return {
@@ -384,6 +553,13 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
             if path == "/backends":
                 self._json({"backends": orchestrator.execution_backends.list()})
                 return
+            if path == "/processes":
+                self._json(orchestrator.processes.status(limit=_limit(query, default=20)))
+                return
+            match_process_logs = re.fullmatch(r"/processes/([^/]+)/logs", path)
+            if match_process_logs:
+                self._json(orchestrator.processes.logs(unquote(match_process_logs.group(1)), max_bytes=int(query.get("max_bytes", ["4096"])[0])))
+                return
             if path == "/browser/sessions":
                 self._json({"sessions": orchestrator.browser.list_sessions()})
                 return
@@ -392,6 +568,9 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 return
             if path == "/skills":
                 self._json({"skills": orchestrator.skills.list_public()})
+                return
+            if path == "/skill-curator":
+                self._json(orchestrator.skill_curator.status())
                 return
             if path == "/plugins":
                 self._json(_plugins_payload(orchestrator))
@@ -1216,7 +1395,20 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 payload = self._read_json()
                 provider = str(_required(payload, "provider"))
                 method = str(payload.get("method") or "api_key").replace("-", "_")
-                if method in {"subscription", "oauth", "oauth_device", "cloud_identity"}:
+                if method == "none":
+                    if payload.get("api_key"):
+                        raise ValueError("none login does not accept API key input")
+                    auth_status = orchestrator.models.auth_status(provider)
+                    if not isinstance(auth_status, dict) or auth_status.get("auth_required", True):
+                        raise ValueError(f"provider {provider!r} requires an explicit auth method")
+                    auth = {
+                        **auth_status,
+                        "method": "none",
+                        "status": "no_auth_required",
+                        "auth_configured": True,
+                        "auth_source": "local_runtime",
+                    }
+                elif method in {"subscription", "oauth", "oauth_device", "cloud_identity"}:
                     if payload.get("api_key"):
                         raise ValueError(f"{method} login does not accept API key input")
                     auth = orchestrator.models.login_provider_external(provider, method=method, verify_external=bool(payload.get("verify_external")) and not bool(payload.get("run_external")))
@@ -1247,6 +1439,29 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     orchestrator.models.verify_auth_readiness_packet(
                         str(_required(payload, "packet")),
                         actor=str(payload.get("actor", "api-operator")),
+                    )
+                )
+                return
+            if path == "/channels/live-activation-packet":
+                payload = self._read_json()
+                self._json(orchestrator.create_channel_live_activation_packet(actor=str(payload.get("actor", "api-operator"))))
+                return
+            if path == "/channels/verify-activation-packet":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.verify_channel_live_activation_packet(
+                        str(_required(payload, "packet")),
+                        actor=str(payload.get("actor", "api-operator")),
+                    )
+                )
+                return
+            if path == "/channels/activate-packet":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.approve_channel_live_activation_packet(
+                        str(_required(payload, "packet")),
+                        actor=str(payload.get("actor", "api-operator")),
+                        approved=bool(payload.get("approved", False)),
                     )
                 )
                 return
@@ -1303,6 +1518,30 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 payload = self._read_json()
                 skill_id = unquote(match_skill_enable.group(1))
                 result = orchestrator.enable_skill(skill_id, approval_id=str(payload["approval_id"]) if payload.get("approval_id") else None)
+                self._json({**result, "skills": orchestrator.skills.list_public()})
+                return
+            if path == "/skill-curator/draft":
+                payload = self._read_json()
+                result = orchestrator.skill_curator.draft_candidate(
+                    str(_required(payload, "skill_id")),
+                    name=str(_required(payload, "name")),
+                    description=str(_required(payload, "description")),
+                    observed_task=str(payload.get("observed_task", "")),
+                    actor=str(payload.get("actor", "api-operator")),
+                )
+                self._json(result)
+                return
+            if path == "/skill-curator/verify-draft":
+                payload = self._read_json()
+                self._json(orchestrator.skill_curator.verify_candidate(str(_required(payload, "candidate_id"))))
+                return
+            if path == "/skill-curator/install-draft":
+                payload = self._read_json()
+                result = orchestrator.skill_curator.install_candidate(
+                    str(_required(payload, "candidate_id")),
+                    actor=str(payload.get("actor", "api-operator")),
+                    approved=payload.get("approved") is True,
+                )
                 self._json({**result, "skills": orchestrator.skills.list_public()})
                 return
             if path == "/browser/sessions":
@@ -1365,13 +1604,44 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 payload = self._read_json()
                 self._json(_with_browser_artifact_urls(orchestrator, orchestrator.browser.render_screenshot(session_id=str(_required(payload, "session_id")))))
                 return
+            if path == "/browser/live-navigate":
+                payload = self._read_json()
+                session_id = str(payload.get("session_id") or orchestrator.browser.create_session(label="API live browser")["id"])
+                url = str(_required(payload, "url"))
+                approval = _browser_action_approval(
+                    orchestrator,
+                    action="live_navigate",
+                    session_id=session_id,
+                    url=url,
+                    approval_id=payload.get("approval_id"),
+                )
+                if not approval["approved"]:
+                    self._json(approval["response"])
+                    return
+                self._json(_with_browser_artifact_urls(orchestrator, orchestrator.browser.live_navigate(session_id=session_id, url=url, approved=True)))
+                return
+            if path == "/browser/live-screenshot":
+                payload = self._read_json()
+                session_id = str(_required(payload, "session_id"))
+                approval = _browser_action_approval(
+                    orchestrator,
+                    action="live_screenshot",
+                    session_id=session_id,
+                    approval_id=payload.get("approval_id"),
+                )
+                if not approval["approved"]:
+                    self._json(approval["response"])
+                    return
+                self._json(_with_browser_artifact_urls(orchestrator, orchestrator.browser.live_screenshot(session_id=session_id, approved=True)))
+                return
             if path == "/browser/click":
                 payload = self._read_json()
                 session_id = str(_required(payload, "session_id"))
                 selector = str(_required(payload, "selector"))
+                live = bool(payload.get("live", False))
                 approval = _browser_action_approval(
                     orchestrator,
-                    action="click",
+                    action="live_click" if live else "click",
                     session_id=session_id,
                     selector=selector,
                     approval_id=payload.get("approval_id"),
@@ -1379,7 +1649,8 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 if not approval["approved"]:
                     self._json(approval["response"])
                     return
-                self._json(orchestrator.browser.click(session_id=session_id, selector=selector, approved=True))
+                result = orchestrator.browser.live_click(session_id=session_id, selector=selector, approved=True) if live else orchestrator.browser.click(session_id=session_id, selector=selector, approved=True)
+                self._json(_with_browser_artifact_urls(orchestrator, result) if live else result)
                 return
             if path == "/browser/fill":
                 payload = self._read_json()
@@ -1387,9 +1658,10 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 fields = payload.get("fields", {})
                 if not isinstance(fields, dict):
                     raise ValueError("browser fill fields must be a JSON object")
+                live = bool(payload.get("live", False))
                 approval = _browser_action_approval(
                     orchestrator,
-                    action="fill",
+                    action="live_fill" if live else "fill",
                     session_id=session_id,
                     fields=fields,
                     approval_id=payload.get("approval_id"),
@@ -1397,15 +1669,17 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 if not approval["approved"]:
                     self._json(approval["response"])
                     return
-                self._json(orchestrator.browser.fill(session_id=session_id, fields=fields, approved=True))
+                result = orchestrator.browser.live_fill(session_id=session_id, fields=fields, approved=True) if live else orchestrator.browser.fill(session_id=session_id, fields=fields, approved=True)
+                self._json(_with_browser_artifact_urls(orchestrator, result) if live else result)
                 return
             if path == "/browser/submit":
                 payload = self._read_json()
                 session_id = str(_required(payload, "session_id"))
                 selector = str(payload["selector"]) if payload.get("selector") else None
+                live = bool(payload.get("live", False))
                 approval = _browser_action_approval(
                     orchestrator,
-                    action="submit",
+                    action="live_submit" if live else "submit",
                     session_id=session_id,
                     selector=selector,
                     approval_id=payload.get("approval_id"),
@@ -1413,7 +1687,58 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 if not approval["approved"]:
                     self._json(approval["response"])
                     return
-                self._json(orchestrator.browser.submit(session_id=session_id, selector=selector, approved=True))
+                result = orchestrator.browser.live_submit(session_id=session_id, selector=selector, approved=True) if live else orchestrator.browser.submit(session_id=session_id, selector=selector, approved=True)
+                self._json(_with_browser_artifact_urls(orchestrator, result) if live else result)
+                return
+            if path == "/browser/download":
+                payload = self._read_json()
+                session_id = str(_required(payload, "session_id"))
+                selector = str(_required(payload, "selector"))
+                approval = _browser_action_approval(
+                    orchestrator,
+                    action="live_download",
+                    session_id=session_id,
+                    selector=selector,
+                    approval_id=payload.get("approval_id"),
+                )
+                if not approval["approved"]:
+                    self._json(approval["response"])
+                    return
+                self._json(_with_browser_artifact_urls(orchestrator, orchestrator.browser.live_download(session_id=session_id, selector=selector, approved=True)))
+                return
+            if path == "/browser/upload":
+                payload = self._read_json()
+                session_id = str(_required(payload, "session_id"))
+                selector = str(_required(payload, "selector"))
+                file_path = str(_required(payload, "file_path"))
+                approval = _browser_action_approval(
+                    orchestrator,
+                    action="live_upload",
+                    session_id=session_id,
+                    selector=selector,
+                    file_path=file_path,
+                    approval_id=payload.get("approval_id"),
+                )
+                if not approval["approved"]:
+                    self._json(approval["response"])
+                    return
+                self._json(_with_browser_artifact_urls(orchestrator, orchestrator.browser.live_upload(session_id=session_id, selector=selector, file_path=file_path, approved=True)))
+                return
+            if path == "/browser/evaluate":
+                payload = self._read_json()
+                session_id = str(_required(payload, "session_id"))
+                script = str(_required(payload, "script"))
+                approval = _browser_action_approval(
+                    orchestrator,
+                    action="live_evaluate",
+                    session_id=session_id,
+                    script=script,
+                    approval_id=payload.get("approval_id"),
+                )
+                if not approval["approved"]:
+                    self._json(approval["response"])
+                    return
+                self._json(_with_browser_artifact_urls(orchestrator, orchestrator.browser.live_evaluate(session_id=session_id, script=script, approved=True)))
                 return
             if path == "/channels/render":
                 payload = self._read_json()
@@ -1443,6 +1768,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     orchestrator.send_webhook(
                         text=str(_required(payload, "text")),
                         approved=bool(payload.get("approved", False)),
+                        approval_id=str(payload["approval_id"]) if payload.get("approval_id") else None,
                         session_id=str(payload["session_id"]) if payload.get("session_id") else None,
                         metadata={"source": "api"},
                     )
@@ -1455,6 +1781,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                         subject=str(_required(payload, "subject")),
                         text=str(_required(payload, "text")),
                         approved=bool(payload.get("approved", False)),
+                        approval_id=str(payload["approval_id"]) if payload.get("approval_id") else None,
                         session_id=str(payload["session_id"]) if payload.get("session_id") else None,
                         metadata={"source": "api"},
                     )
@@ -1466,6 +1793,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     orchestrator.send_chat_webhook(
                         text=str(_required(payload, "text")),
                         approved=bool(payload.get("approved", False)),
+                        approval_id=str(payload["approval_id"]) if payload.get("approval_id") else None,
                         session_id=str(payload["session_id"]) if payload.get("session_id") else None,
                         metadata={"source": "api"},
                     )
@@ -1761,6 +2089,61 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     raise ValueError("context must be a JSON object")
                 self._json(orchestrator.hooks.run_event(str(_required(payload, "event")), context=context, approved=bool(payload.get("approved", False))))
                 return
+            if path == "/processes/start":
+                payload = self._read_json()
+                argv = payload.get("argv")
+                if not isinstance(argv, list):
+                    raise ValueError("argv must be a JSON array")
+                approved = payload.get("approved", False)
+                if not isinstance(approved, bool):
+                    raise ValueError("approved must be a JSON boolean")
+                pty_requested = payload.get("pty", False)
+                if not isinstance(pty_requested, bool):
+                    raise ValueError("pty must be a JSON boolean")
+                self._json(
+                    orchestrator.processes.start(
+                        [str(part) for part in argv],
+                        approved=approved,
+                        actor=str(payload.get("actor") or "web-operator"),
+                        label=str(payload.get("label") or ""),
+                        pty=pty_requested,
+                        rows=int(payload.get("rows", 24)),
+                        cols=int(payload.get("cols", 80)),
+                    )
+                )
+                return
+            match_process_input = re.fullmatch(r"/processes/([^/]+)/input", path)
+            if match_process_input:
+                payload = self._read_json()
+                append_newline = payload.get("append_newline", True)
+                if not isinstance(append_newline, bool):
+                    raise ValueError("append_newline must be a JSON boolean")
+                self._json(
+                    orchestrator.processes.send_input(
+                        unquote(match_process_input.group(1)),
+                        str(payload.get("text") or ""),
+                        append_newline=append_newline,
+                        actor=str(payload.get("actor") or "web-operator"),
+                    )
+                )
+                return
+            match_process_resize = re.fullmatch(r"/processes/([^/]+)/resize", path)
+            if match_process_resize:
+                payload = self._read_json()
+                self._json(
+                    orchestrator.processes.resize(
+                        unquote(match_process_resize.group(1)),
+                        rows=int(payload.get("rows", 24)),
+                        cols=int(payload.get("cols", 80)),
+                        actor=str(payload.get("actor") or "web-operator"),
+                    )
+                )
+                return
+            match_process_stop = re.fullmatch(r"/processes/([^/]+)/stop", path)
+            if match_process_stop:
+                payload = self._read_json()
+                self._json(orchestrator.processes.stop(unquote(match_process_stop.group(1)), actor=str(payload.get("actor") or "web-operator")))
+                return
             match_hook_action = re.fullmatch(r"/hooks/([^/]+)/(enable|disable|remove)", path)
             if match_hook_action:
                 hook_id = unquote(match_hook_action.group(1))
@@ -1786,6 +2169,16 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 return
             if path == "/plugins/reload":
                 self._json({"ok": True, **_plugins_payload(orchestrator)})
+                return
+            if path == "/plugins/marketplace/fetch-manifest":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.plugins.fetch_marketplace_manifest(
+                        str(_required(payload, "plugin_id")),
+                        catalog_path=_optional_str(payload, "catalog_path"),
+                        allowlist=orchestrator.config.network_allowlist,
+                    )
+                )
                 return
             if path == "/plugins/marketplace/install":
                 payload = self._read_json()
@@ -1911,6 +2304,24 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 payload = self._read_json()
                 self._json(orchestrator.mcp.configure_auth_token(str(_required(payload, "server")), token_secret=str(_required(payload, "token_secret"))))
                 return
+            if path == "/mcp/auth/oauth":
+                payload = self._read_json()
+                scopes = payload.get("scopes", payload.get("scope", []))
+                if isinstance(scopes, str):
+                    scopes = [scopes]
+                if not isinstance(scopes, list):
+                    raise ValueError("scopes must be a JSON array")
+                self._json(
+                    orchestrator.mcp.configure_oauth_authorization(
+                        str(_required(payload, "server")),
+                        resource_metadata_url=_optional_str(payload, "resource_metadata"),
+                        authorization_server=_optional_str(payload, "authorization_server"),
+                        token_secret=_optional_str(payload, "token_secret"),
+                        scopes=tuple(str(scope) for scope in scopes),
+                        network_allowlist=orchestrator.config.network_allowlist,
+                    )
+                )
+                return
             if path == "/mcp/call":
                 payload = self._read_json()
                 server = str(_required(payload, "server"))
@@ -1947,6 +2358,27 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                         cron=str(_required(payload, "cron")),
                         task_request=str(_required(payload, "task_request")),
                         channel=str(payload.get("channel", "web")),
+                        context_from=_string_list_payload(payload.get("context_from", [])),
+                        delivery_targets=_string_list_payload(payload.get("delivery_targets", [])),
+                    )
+                )
+                return
+            if path == "/schedules/script":
+                payload = self._read_json()
+                command = payload.get("command", [])
+                if not isinstance(command, list):
+                    command = [str(command)]
+                self._json(
+                    orchestrator.create_script_schedule(
+                        name=str(_required(payload, "name")),
+                        cron=str(_required(payload, "cron")),
+                        command=[str(part) for part in command],
+                        channel=str(payload.get("channel", "web")),
+                        hook_id=str(payload["hook_id"]) if payload.get("hook_id") else None,
+                        context_from=_string_list_payload(payload.get("context_from", [])),
+                        delivery_targets=_string_list_payload(payload.get("delivery_targets", [])),
+                        timeout_seconds=int(payload.get("timeout_seconds", 10)),
+                        max_output_bytes=int(payload.get("max_output_bytes", 4096)),
                     )
                 )
                 return
@@ -2079,6 +2511,17 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     return
                 self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
                 return
+            if path == "/subagents/delegate-child":
+                payload = self._read_json()
+                result = orchestrator.kanban.delegate_subagent_child(
+                    str(_required(payload, "parent_card_id")),
+                    role=str(_required(payload, "role")),
+                    task=str(_required(payload, "task")),
+                    actor=str(payload.get("actor", "api-operator")),
+                    approved=payload.get("approved") is True,
+                )
+                self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
+                return
             if path == "/subagents/handoff":
                 payload = self._read_json()
                 result = orchestrator.kanban.move_subagent_delegation(
@@ -2098,6 +2541,26 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 )
                 self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
                 return
+            if path == "/subagents/autonomy-step":
+                payload = self._read_json()
+                result = orchestrator.kanban.plan_subagent_autonomy_step(
+                    str(_required(payload, "card_id")),
+                    actor=str(payload.get("actor", "api-operator")),
+                    approved=payload.get("approved") is True,
+                    max_steps=int(payload.get("max_steps", 1)),
+                )
+                self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)), include_previews=False)})
+                return
+            if path == "/subagents/autonomy-run":
+                payload = self._read_json()
+                result = orchestrator.kanban.run_subagent_autonomy_loop(
+                    str(_required(payload, "card_id")),
+                    actor=str(payload.get("actor", "api-operator")),
+                    approved=payload.get("approved") is True,
+                    max_steps=int(payload.get("max_steps", 1)),
+                )
+                self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)), include_previews=False)})
+                return
             if path == "/subagents/review-packet":
                 payload = self._read_json()
                 result = orchestrator.kanban.create_subagent_review_packet(
@@ -2111,6 +2574,17 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 result = orchestrator.kanban.verify_subagent_review_packet(
                     str(_required(payload, "packet")),
                     actor=str(payload.get("actor", "api-operator")),
+                )
+                self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)), include_previews=False)})
+                return
+            if path == "/subagents/model-review":
+                payload = self._read_json()
+                session_id = str(payload["session_id"]) if payload.get("session_id") else None
+                result = orchestrator.model_review_subagent(
+                    str(_required(payload, "card_id")),
+                    actor=str(payload.get("actor", "api-operator")),
+                    approved=payload.get("approved") is True,
+                    session_id=session_id,
                 )
                 self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)), include_previews=False)})
                 return
@@ -2740,6 +3214,16 @@ def _optional_int(payload: dict[str, Any], key: str) -> int | None:
     return int(payload[key])
 
 
+def _string_list_payload(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, list):
+        raise ValueError("value must be a JSON array")
+    return [str(item) for item in value]
+
+
 def _optional_str_list(payload: dict[str, Any], key: str) -> list[str] | None:
     if key not in payload or payload[key] is None:
         return None
@@ -2822,9 +3306,12 @@ def _browser_action_approval(
     session_id: str,
     selector: str | None = None,
     fields: dict[str, Any] | None = None,
+    url: str | None = None,
+    file_path: str | None = None,
+    script: str | None = None,
     approval_id: Any = None,
 ) -> dict[str, Any]:
-    payload = orchestrator.browser.action_approval_payload(action=action, session_id=session_id, selector=selector, fields=fields)
+    payload = orchestrator.browser.action_approval_payload(action=action, session_id=session_id, selector=selector, fields=fields, url=url, file_path=file_path, script=script)
     if approval_id:
         approval = orchestrator.approvals.get(str(approval_id))
         if _approved_payload(approval) != payload:

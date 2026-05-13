@@ -130,10 +130,11 @@ class ChannelRegistry:
         self.audit_logger.append("channel.outbound_rendered", {"channel": response.channel, "requires_approval": adapter.spec.approval_required_for_send})
         return rendered
 
-    def record_outbound_delivery(self, *, channel: str, session_id: str | None, payload: dict[str, Any], delivery: dict[str, Any]) -> None:
+    def record_outbound_delivery(self, *, channel: str, session_id: str | None, payload: dict[str, Any], delivery: dict[str, Any]) -> str:
+        event_id = str(uuid4())
         self.store.insert_channel_event(
             {
-                "id": str(uuid4()),
+                "id": event_id,
                 "channel": channel,
                 "direction": "outbound",
                 "session_id": session_id,
@@ -151,8 +152,11 @@ class ChannelRegistry:
                 "status": delivery.get("status"),
                 "domain": delivery.get("domain"),
                 "signed": delivery.get("signed"),
+                "approval_id": delivery.get("approval_id"),
+                "approval_binding_sha256": delivery.get("approval_binding_sha256"),
             },
         )
+        return event_id
 
     def events(self, limit: int = 50) -> list[dict[str, Any]]:
         events = []
@@ -246,7 +250,7 @@ def default_channel_specs() -> tuple[ChannelSpec, ...]:
 def _safe_payload(payload: dict[str, Any]) -> dict[str, Any]:
     raw_keys = payload.get("raw_keys")
     safe: dict[str, Any] = {"raw_keys": list(raw_keys) if isinstance(raw_keys, list) else sorted(payload)}
-    for key in ("sender", "session_id", "delivery_id"):
+    for key in ("sender", "session_id", "delivery_id", "approval_id", "approval_binding_sha256", "approval_payload_sha256"):
         if key in payload:
             safe[key] = str(redact(str(payload[key])))
     for key in ("payload_hash", "body_bytes", "verified_at"):

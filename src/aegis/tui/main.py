@@ -23,7 +23,9 @@ from aegis.channels.base import ChannelResponse
 from aegis.hooks.manager import HOOK_EVENTS
 from aegis.memory.models import MemoryType
 from aegis.migration.openclaw import inspect_hermes_home, inspect_openclaw_home, preview_hermes_memory_import, preview_openclaw_memory_import
+from aegis.personality.context import ContextFileLoader
 from aegis.product.capabilities import build_product_dashboard
+from aegis.product.setup import build_setup_readiness
 from aegis.remote_control import (
     RemoteControlPairingRegistry,
     build_remote_control_directory,
@@ -47,7 +49,9 @@ TOP_LEVEL_COMMANDS = (
     "add-dir",
     "agents",
     "allowed-tools",
+    "android",
     "autofix-pr",
+    "approve",
     "backends",
     "batch",
     "background",
@@ -64,6 +68,7 @@ TOP_LEVEL_COMMANDS = (
     "channel",
     "channels",
     "chrome",
+    "claude-api",
     "clear",
     "checkpoint",
     "compact",
@@ -75,6 +80,7 @@ TOP_LEVEL_COMMANDS = (
     "copy",
     "cost",
     "color",
+    "cron",
     "context",
     "curator",
     "dashboard",
@@ -90,8 +96,11 @@ TOP_LEVEL_COMMANDS = (
     "exit",
     "effort",
     "export",
+    "extra-usage",
     "fast",
     "feedback",
+    "fewer-permission-prompts",
+    "focus",
     "footer",
     "fork",
     "gateway",
@@ -99,11 +108,17 @@ TOP_LEVEL_COMMANDS = (
     "gquota",
     "handoff",
     "help",
+    "history",
     "hooks",
+    "heapdump",
     "image",
+    "ide",
     "indicator",
     "insights",
     "init",
+    "install-github-app",
+    "install-slack-app",
+    "ios",
     "kanban",
     "keybindings",
     "login",
@@ -125,14 +140,20 @@ TOP_LEVEL_COMMANDS = (
     "platforms",
     "permissions",
     "personality",
+    "passes",
     "profile",
+    "process",
+    "processes",
     "plugin",
     "plugins",
+    "powerup",
+    "proactive",
     "pr_comments",
     "privacy-settings",
     "provider",
     "prompt",
     "q",
+    "quit",
     "queue",
     "radio",
     "rc",
@@ -142,6 +163,7 @@ TOP_LEVEL_COMMANDS = (
     "reload",
     "reload-plugins",
     "reload-mcp",
+    "reload_mcp",
     "reload-skills",
     "reload_skills",
     "remote-control",
@@ -159,6 +181,7 @@ TOP_LEVEL_COMMANDS = (
     "rollback",
     "routines",
     "save",
+    "sandbox",
     "schedule",
     "schedules",
     "scroll-speed",
@@ -166,9 +189,11 @@ TOP_LEVEL_COMMANDS = (
     "security-review",
     "session",
     "sessions",
+    "setup",
     "setup-bedrock",
     "setup-vertex",
     "settings",
+    "set-home",
     "sethome",
     "simplify",
     "skills",
@@ -188,6 +213,7 @@ TOP_LEVEL_COMMANDS = (
     "tasks",
     "teleport",
     "terminal-setup",
+    "team-onboarding",
     "theme",
     "timeline",
     "title",
@@ -217,9 +243,9 @@ TOOLS_COMMANDS = ("list", "run", "disable", "enable")
 BACKEND_COMMANDS = ("list", "doctor", "select")
 SKILLS_COMMANDS = ("hub", "search", "browse", "inspect", "install", "disable", "enable")
 PLUGIN_COMMANDS = ("list", "install", "enable", "disable", "remove", "reload", "marketplace", "updates", "fetch-manifest", "fetch-bundle", "install-bundle", "install-marketplace", "update-marketplace", "prepare-update", "apply-prepared-update")
-CURATOR_COMMANDS = ("status", "run", "pin", "unpin", "archive", "restore", "pause", "resume")
+CURATOR_COMMANDS = ("status", "run", "draft", "verify-draft", "install-draft", "pin", "unpin", "archive", "restore", "pause", "resume")
 REPAIR_COMMANDS = ("readiness", "review", "approve", "reject", "candidate", "generate-candidate", "synthesis-prompt", "synthesize-candidate", "review-candidate", "apply-candidate", "rollback-candidate", "attempt")
-SCHEDULE_COMMANDS = ("create", "memory-review-digest", "memory-review-escalation", "evaluation-run", "evaluation-suite", "due", "approve", "activate", "pause", "run-due")
+SCHEDULE_COMMANDS = ("create", "script", "no-agent", "memory-review-digest", "memory-review-escalation", "evaluation-run", "evaluation-suite", "due", "approve", "activate", "pause", "run-due")
 BROWSER_COMMANDS = (
     "status",
     "connect",
@@ -228,19 +254,30 @@ BROWSER_COMMANDS = (
     "sessions",
     "close",
     "navigate",
+    "live-navigate",
+    "live-screenshot",
+    "live-click",
+    "live-fill",
+    "live-submit",
+    "live-download",
+    "live-upload",
+    "live-evaluate",
     "extract",
     "inspect",
+    "dom",
     "table",
     "screenshot",
     "render",
     "click",
     "fill",
+    "submit",
     "activation-packet",
     "verify-activation-packet",
 )
 MCP_COMMANDS = ("list", "register", "auth", "call")
 HOOK_COMMANDS = ("list", "add", "enable", "disable", "remove", "run")
-AGENTS_COMMANDS = ("status", "autonomy-preflight", "profiles", "profile-create", "profile-disable", "delegate", "handoff", "review-packet", "verify-packet", "run", "run-batch")
+AGENTS_COMMANDS = ("status", "autonomy-preflight", "autonomy-step", "autonomy-run", "profiles", "profile-create", "profile-disable", "delegate", "handoff", "review-packet", "verify-packet", "model-review", "run", "run-batch")
+PROCESS_COMMANDS = ("list", "start", "input", "resize", "stop", "logs")
 REMOTE_CONTROL_COMMANDS = ("pair", "directory", "revoke", "relay", "relay-directory", "relay-notify", "push-targets", "push-register", "push-disable", "push-rotate", "push", "relay-outbox", "relay-retry", "relay-confirm", "relay-pull", "relay-action")
 SESSION_COMMANDS = ("new", "open", "rename", "set-model", "set-personality", "activate", "archive", "pause", "append", "history", "tasks", "compact")
 TASK_COMMANDS = ("status", "resume", "pause", "cancel", "events", "timeline", "submit", "list", "all", "session")
@@ -262,16 +299,24 @@ SECURITY_COMMANDS = (
     "rollback-bundle",
     "evaluate",
 )
-CHANNEL_COMMANDS = ("render", "receive", "resolve-approval", "send-webhook", "send-email", "send-chat-webhook", "events")
+CHANNEL_COMMANDS = ("render", "receive", "resolve-approval", "send-webhook", "send-email", "send-chat-webhook", "activation-packet", "verify-activation-packet", "activate-packet", "events")
 EVALUATION_COMMANDS = ("queue", "review", "trends", "delta", "readiness")
 SLASH_COMMAND_ALIASES = {
     "add-dir": "add_dir",
     "allowed-tools": "allowed_tools",
     "app": "desktop",
+    "android": "mobile",
     "bg": "background",
     "btw": "background",
+    "claude-api": "claude_api",
+    "extra-usage": "extra_usage",
+    "fewer-permission-prompts": "fewer_permission_prompts",
     "feedback": "bug",
+    "install-github-app": "install_github_app",
+    "install-slack-app": "install_slack_app",
+    "ios": "mobile",
     "pr-comments": "pr_comments",
+    "proactive": "loop",
     "q": "queue",
     "rc": "remote_control",
     "remote-control": "remote_control",
@@ -286,6 +331,7 @@ SLASH_COMMAND_ALIASES = {
     "snap": "rollback",
     "snapshot": "rollback",
     "terminal-setup": "terminal_setup",
+    "team-onboarding": "team_onboarding",
     "tp": "teleport",
     "web-setup": "web_setup",
     "set-home": "sethome",
@@ -473,6 +519,9 @@ class AegisTui(cmd.Cmd):
         return _complete_options(labels, text)
 
     def completedefault(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        path_labels = _complete_context_paths(text, line, begidx, self.workspace)
+        if path_labels:
+            return path_labels
         labels = _complete_slash(text, line, begidx, endidx)
         stripped = line.lstrip()
         if stripped.startswith("/") and " " not in stripped[:endidx].strip():
@@ -938,11 +987,32 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_channel(self, arg: str) -> None:
-        """channel render|receive|resolve-approval|send-webhook|send-email|send-chat-webhook|events -- inspect and exercise channel adapters."""
+        """channel render|receive|resolve-approval|send-webhook|send-email|send-chat-webhook|activation-packet|verify-activation-packet|activate-packet|events -- inspect and exercise channel adapters."""
         parts = shlex.split(arg)
         if parts and parts[0] == "events":
             limit = int(parts[1]) if len(parts) > 1 else 20
             _print_json({"events": self.orchestrator.channels.events(limit=limit)})
+            return
+        if parts and parts[0] == "activation-packet":
+            _print_json(self.orchestrator.create_channel_live_activation_packet(actor="tui-operator"))
+            return
+        if parts and parts[0] == "verify-activation-packet":
+            if len(parts) < 2:
+                print("usage: channel verify-activation-packet <packet-id-or-path>")
+                return
+            _print_json(self.orchestrator.verify_channel_live_activation_packet(parts[1], actor="tui-operator"))
+            return
+        if parts and parts[0] == "activate-packet":
+            if len(parts) < 2:
+                print("usage: channel activate-packet <packet-id-or-path> --approved [--actor name]")
+                return
+            _print_json(
+                self.orchestrator.approve_channel_live_activation_packet(
+                    parts[1],
+                    actor=_option_value(parts, "--actor") or "tui-operator",
+                    approved="--approved" in parts,
+                )
+            )
             return
         if parts and parts[0] == "resolve-approval":
             if len(parts) < 3:
@@ -959,25 +1029,31 @@ class AegisTui(cmd.Cmd):
             return
         if parts and parts[0] == "send-webhook":
             if len(parts) < 2:
-                print("usage: channel send-webhook <text> --approved")
+                print("usage: channel send-webhook <text> [--approval-id <id>]")
                 return
-            text = " ".join(part for part in parts[1:] if part != "--approved")
-            _print_json(self.orchestrator.send_webhook(text=text, approved="--approved" in parts, session_id=self.session["id"], metadata={"source": "tui"}))
+            approval_id = _option_value(parts, "--approval-id")
+            text_parts = _without_option(parts[1:], "--approval-id") if approval_id else parts[1:]
+            text = " ".join(part for part in text_parts if part != "--approved")
+            _print_json(self.orchestrator.send_webhook(text=text, approved="--approved" in parts, approval_id=approval_id, session_id=self.session["id"], metadata={"source": "tui"}))
             return
         if parts and parts[0] == "send-email":
             if len(parts) < 3:
-                print("usage: channel send-email <subject> <text> --approved")
+                print("usage: channel send-email <subject> <text> [--approval-id <id>]")
                 return
-            subject = parts[1]
-            text = " ".join(part for part in parts[2:] if part != "--approved")
-            _print_json(self.orchestrator.send_email(subject=subject, text=text, approved="--approved" in parts, session_id=self.session["id"], metadata={"source": "tui"}))
+            approval_id = _option_value(parts, "--approval-id")
+            email_parts = _without_option(parts[1:], "--approval-id") if approval_id else parts[1:]
+            subject = email_parts[0]
+            text = " ".join(part for part in email_parts[1:] if part != "--approved")
+            _print_json(self.orchestrator.send_email(subject=subject, text=text, approved="--approved" in parts, approval_id=approval_id, session_id=self.session["id"], metadata={"source": "tui"}))
             return
         if parts and parts[0] == "send-chat-webhook":
             if len(parts) < 2:
-                print("usage: channel send-chat-webhook <text> --approved")
+                print("usage: channel send-chat-webhook <text> [--approval-id <id>]")
                 return
-            text = " ".join(part for part in parts[1:] if part != "--approved")
-            _print_json(self.orchestrator.send_chat_webhook(text=text, approved="--approved" in parts, session_id=self.session["id"], metadata={"source": "tui"}))
+            approval_id = _option_value(parts, "--approval-id")
+            text_parts = _without_option(parts[1:], "--approval-id") if approval_id else parts[1:]
+            text = " ".join(part for part in text_parts if part != "--approved")
+            _print_json(self.orchestrator.send_chat_webhook(text=text, approved="--approved" in parts, approval_id=approval_id, session_id=self.session["id"], metadata={"source": "tui"}))
             return
         if len(parts) >= 3 and parts[0] == "receive":
             self.orchestrator.channels.receive(
@@ -991,7 +1067,7 @@ class AegisTui(cmd.Cmd):
             _print_json({"message": self.orchestrator.channels.events(limit=1)[0]})
             return
         if len(parts) < 3 or parts[0] != "render":
-            print("usage: channel render <channel> <text> | channel receive <channel> <text> | channel resolve-approval <event_id> <approval_id> | channel send-webhook <text> --approved | channel send-email <subject> <text> --approved | channel send-chat-webhook <text> --approved | channel events [limit]")
+            print("usage: channel render <channel> <text> | channel receive <channel> <text> | channel resolve-approval <event_id> <approval_id> | channel send-webhook <text> [--approval-id <id>] | channel send-email <subject> <text> [--approval-id <id>] | channel send-chat-webhook <text> [--approval-id <id>] | channel activation-packet | channel verify-activation-packet <packet> | channel activate-packet <packet> --approved | channel events [limit]")
             return
         channel = parts[1]
         text = " ".join(parts[2:])
@@ -1265,7 +1341,7 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_curator(self, arg: str) -> None:
-        """curator [status|run|pin|unpin|archive|restore|pause|resume] -- maintain local authored skills."""
+        """curator [status|run|draft|verify-draft|install-draft|pin|unpin|archive|restore|pause|resume] -- maintain local authored skills."""
         try:
             parts = shlex.split(arg) if arg else []
         except ValueError as exc:
@@ -1279,6 +1355,30 @@ class AegisTui(cmd.Cmd):
                 return
             if action == "run":
                 _print_json(curator.run(dry_run="--dry-run" in parts[1:]))
+                return
+            if action == "draft":
+                options = _parse_curator_draft_options(parts[1:])
+                _print_json(
+                    curator.draft_candidate(
+                        options["skill_id"],
+                        name=options["name"],
+                        description=options["description"],
+                        observed_task=options["observed_task"],
+                        actor="tui-operator",
+                    )
+                )
+                return
+            if action == "verify-draft":
+                if len(parts) < 2:
+                    print("usage: curator verify-draft <candidate_id>")
+                    return
+                _print_json(curator.verify_candidate(parts[1]))
+                return
+            if action == "install-draft":
+                if len(parts) < 2:
+                    print("usage: curator install-draft <candidate_id> --approved")
+                    return
+                _print_json(curator.install_candidate(parts[1], actor="tui-operator", approved="--approved" in parts[2:]))
                 return
             if action in {"pin", "unpin", "archive", "restore"}:
                 if len(parts) < 2:
@@ -1298,7 +1398,7 @@ class AegisTui(cmd.Cmd):
         except (PermissionError, ValueError) as exc:
             print(f"curator error: {exc}")
             return
-        print("usage: curator [status|run [--dry-run]|pin <skill_id>|unpin <skill_id>|archive <skill_id>|restore <skill_id>|pause|resume]")
+        print("usage: curator [status|run [--dry-run]|draft <skill_id> --name <name> --description <description>|verify-draft <candidate_id>|install-draft <candidate_id> --approved|pin <skill_id>|unpin <skill_id>|archive <skill_id>|restore <skill_id>|pause|resume]")
 
     def do_migrate(self, arg: str) -> None:
         """migrate openclaw|hermes|openclaw-memory-preview|hermes-memory-preview|openclaw-memory-commit|hermes-memory-commit <path> [--owner USER] [--scope SCOPE] -- migration inspection and governed memory commit."""
@@ -1590,7 +1690,7 @@ class AegisTui(cmd.Cmd):
         print("usage: memory search|session-preview|session-commit|create|review-queue|review-digest|review-escalation|review-action|review-batch|recertify|update|merge|resolve-conflict|expire|cleanup-expired|explain|export|delete")
 
     def do_mcp(self, arg: str) -> None:
-        """mcp list|register|call -- inspect, register, discover, or call governed MCP servers."""
+        """mcp list|register|auth|call -- inspect, register, authorize, or call governed MCP servers."""
         parts = shlex.split(arg)
         command = parts[0] if parts else "list"
         if command == "list":
@@ -1665,9 +1765,21 @@ class AegisTui(cmd.Cmd):
             if len(parts) >= 4 and parts[1] == "token":
                 _print_json(self.orchestrator.mcp.configure_auth_token(parts[2], token_secret=parts[3]))
                 return
-            print("usage: mcp auth token <server> <token-secret>")
+            if len(parts) >= 3 and parts[1] == "oauth":
+                _print_json(
+                    self.orchestrator.mcp.configure_oauth_authorization(
+                        parts[2],
+                        resource_metadata_url=(_option_values(parts, "--resource-metadata") or [None])[0],
+                        authorization_server=(_option_values(parts, "--authorization-server") or [None])[0],
+                        token_secret=(_option_values(parts, "--token-secret") or [None])[0],
+                        scopes=tuple(_option_values(parts, "--scope")),
+                        network_allowlist=self.orchestrator.config.network_allowlist,
+                    )
+                )
+                return
+            print("usage: mcp auth token <server> <token-secret> | mcp auth oauth <server> [--resource-metadata url] [--authorization-server url] [--token-secret name] [--scope scope]")
             return
-        print("usage: mcp list | mcp register <name> <command-or-endpoint> <tool,tool>|--discover [--transport stdio|streamable-http] [--token-secret name] [--tool name] [--exclude-tool name] [--no-resources] [--no-prompts] [--enable] [--no-approval] | mcp auth token <server> <token-secret> | mcp call <server> <tool> <json-arguments> [--approved]")
+        print("usage: mcp list | mcp register <name> <command-or-endpoint> <tool,tool>|--discover [--transport stdio|streamable-http] [--token-secret name] [--tool name] [--exclude-tool name] [--no-resources] [--no-prompts] [--enable] [--no-approval] | mcp auth token <server> <token-secret> | mcp auth oauth <server> [--resource-metadata url] [--authorization-server url] [--token-secret name] [--scope scope] | mcp call <server> <tool> <json-arguments> [--approved]")
 
     def do_repairs(self, arg: str) -> None:
         """repairs [status] -- list self-repair proposals."""
@@ -1849,7 +1961,7 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_schedule(self, arg: str) -> None:
-        """schedule create|memory-review-digest|memory-review-escalation|evaluation-run|evaluation-suite|due|approve|activate|pause|run-due -- manage scheduled automations."""
+        """schedule create|script|memory-review-digest|memory-review-escalation|evaluation-run|evaluation-suite|due|approve|activate|pause|run-due -- manage scheduled automations."""
         parts = shlex.split(arg)
         if not parts:
             print("schedule command required")
@@ -1858,13 +1970,13 @@ class AegisTui(cmd.Cmd):
         try:
             if command == "create":
                 if len(parts) < 4:
-                    print("usage: schedule create <name> <cron> <task_request> [--natural-language text] [--channel name]")
+                    print("usage: schedule create <name> <cron> <task_request> [--natural-language text] [--channel name] [--context-from ref] [--deliver-to channel]")
                     return
                 channel = _option_value(parts, "--channel") or "terminal"
                 natural_language = _flag_joined_value(parts, "--natural-language")
-                positional = _positional_without_flags(parts[1:], {"--natural-language": 1, "--channel": 1})
+                positional = _positional_without_flags(parts[1:], {"--natural-language": 1, "--channel": 1, "--context-from": 1, "--deliver-to": 1})
                 if len(positional) < 3:
-                    print("usage: schedule create <name> <cron> <task_request> [--natural-language text] [--channel name]")
+                    print("usage: schedule create <name> <cron> <task_request> [--natural-language text] [--channel name] [--context-from ref] [--deliver-to channel]")
                     return
                 name, cron = positional[0], positional[1]
                 task_request = " ".join(positional[2:])
@@ -1875,6 +1987,33 @@ class AegisTui(cmd.Cmd):
                         cron=cron,
                         task_request=task_request,
                         channel=channel,
+                        context_from=tuple(_option_values(parts, "--context-from")),
+                        delivery_targets=tuple(_option_values(parts, "--deliver-to")),
+                    )
+                )
+                return
+            if command in {"script", "no-agent"}:
+                if "--" not in parts:
+                    print("usage: schedule script <name> <cron> [--channel name] [--context-from ref] [--deliver-to channel] -- <argv...>")
+                    return
+                separator = parts.index("--")
+                options = parts[1:separator]
+                argv = parts[separator + 1 :]
+                positional = _positional_without_flags(options, {"--channel": 1, "--context-from": 1, "--deliver-to": 1, "--hook-id": 1, "--timeout": 1, "--max-output-bytes": 1})
+                if len(positional) < 2 or not argv:
+                    print("usage: schedule script <name> <cron> [--channel name] [--context-from ref] [--deliver-to channel] -- <argv...>")
+                    return
+                _print_json(
+                    self.orchestrator.create_script_schedule(
+                        name=positional[0],
+                        cron=positional[1],
+                        command=argv,
+                        channel=_option_value(options, "--channel") or "terminal",
+                        hook_id=_option_value(options, "--hook-id"),
+                        context_from=tuple(_option_values(options, "--context-from")),
+                        delivery_targets=tuple(_option_values(options, "--deliver-to")),
+                        timeout_seconds=int(_option_value(options, "--timeout") or "10"),
+                        max_output_bytes=int(_option_value(options, "--max-output-bytes") or "4096"),
                     )
                 )
                 return
@@ -2035,7 +2174,7 @@ class AegisTui(cmd.Cmd):
             print(f"evaluation review failed: {exc}")
 
     def do_browser(self, arg: str) -> None:
-        """browser status|connect|disconnect|session|sessions|close|navigate|extract|inspect|activation-packet|verify-activation-packet|dom|table|screenshot|render|click|fill|submit -- operate the governed browser sandbox."""
+        """browser status|connect|disconnect|session|sessions|close|navigate|live-navigate|live-screenshot|live-click|live-fill|live-submit|live-download|live-upload|live-evaluate|extract|inspect|activation-packet|verify-activation-packet|dom|table|screenshot|render|click|fill|submit -- operate the governed browser sandbox."""
         raw_parts = arg.strip().split(maxsplit=1)
         raw_command = raw_parts[0] if raw_parts else "session"
         parts = [raw_command, raw_parts[1]] if raw_command == "fill" and len(raw_parts) > 1 else shlex.split(arg)
@@ -2047,7 +2186,7 @@ class AegisTui(cmd.Cmd):
                         "status": "local_browser_sandbox_ready",
                         "active_session_id": self.browser_session_id,
                         "sessions": self.orchestrator.browser.list_sessions(),
-                        "live_browser_automation": "blocked_until_explicit_adapter",
+                        "live_browser_automation": "read_only_mutation_download_upload_or_javascript_available_if_configured",
                         "activation": self.orchestrator.browser.live_activation_status()["activation"],
                         "raw_secret_values_included": False,
                     }
@@ -2069,7 +2208,7 @@ class AegisTui(cmd.Cmd):
                     {
                         "status": "local_browser_session_connected",
                         "session": session,
-                        "live_browser_automation": "blocked_until_explicit_adapter",
+                        "live_browser_automation": "read_only_mutation_download_upload_or_javascript_available_if_configured",
                         "raw_secret_values_included": False,
                     }
                 )
@@ -2102,8 +2241,98 @@ class AegisTui(cmd.Cmd):
                 self.browser_session_id = result.get("session", {}).get("id", self.browser_session_id)
                 _print_json(result)
                 return
+            if command == "live-navigate":
+                if len(parts) < 2:
+                    print("browser url required")
+                    return
+                if not self.browser_session_id:
+                    self.browser_session_id = self.orchestrator.browser.create_session(label="TUI live browser")["id"]
+                approval_id = _option_value(parts, "--approval-id")
+                approval = _browser_action_approval(self.orchestrator, action="live_navigate", session_id=self.browser_session_id, url=parts[1], approval_id=approval_id)
+                if not approval.get("approved"):
+                    _print_json(approval["response"])
+                    return
+                result = self.orchestrator.browser.live_navigate(session_id=self.browser_session_id, url=parts[1], approved=True)
+                self.browser_session_id = result.get("session", {}).get("id", self.browser_session_id)
+                _print_json(result)
+                return
             if not self.browser_session_id:
                 print("browser session required")
+                return
+            if command == "live-screenshot":
+                approval_id = _option_value(parts, "--approval-id")
+                approval = _browser_action_approval(self.orchestrator, action="live_screenshot", session_id=self.browser_session_id, approval_id=approval_id)
+                if not approval.get("approved"):
+                    _print_json(approval["response"])
+                    return
+                _print_json(self.orchestrator.browser.live_screenshot(session_id=self.browser_session_id, approved=True))
+                return
+            if command == "live-click":
+                if len(parts) < 2:
+                    print("browser selector required")
+                    return
+                approval_id = _option_value(parts, "--approval-id")
+                approval = _browser_action_approval(self.orchestrator, action="live_click", session_id=self.browser_session_id, selector=parts[1], approval_id=approval_id)
+                if not approval.get("approved"):
+                    _print_json(approval["response"])
+                    return
+                _print_json(self.orchestrator.browser.live_click(session_id=self.browser_session_id, selector=parts[1], approved=True))
+                return
+            if command == "live-fill":
+                if len(parts) < 2:
+                    print("browser fields JSON required")
+                    return
+                fields_text, approval_id = _split_json_approval_arg(parts[1])
+                fields = json.loads(fields_text)
+                if not isinstance(fields, dict):
+                    raise ValueError("browser live-fill requires a JSON object")
+                approval = _browser_action_approval(self.orchestrator, action="live_fill", session_id=self.browser_session_id, fields=fields, approval_id=approval_id)
+                if not approval.get("approved"):
+                    _print_json(approval["response"])
+                    return
+                _print_json(self.orchestrator.browser.live_fill(session_id=self.browser_session_id, fields=fields, approved=True))
+                return
+            if command == "live-submit":
+                approval_id = _option_value(parts, "--approval-id")
+                selector = parts[1] if len(parts) > 1 and parts[1] != "--approval-id" else None
+                approval = _browser_action_approval(self.orchestrator, action="live_submit", session_id=self.browser_session_id, selector=selector, approval_id=approval_id)
+                if not approval.get("approved"):
+                    _print_json(approval["response"])
+                    return
+                _print_json(self.orchestrator.browser.live_submit(session_id=self.browser_session_id, selector=selector, approved=True))
+                return
+            if command == "live-download":
+                if len(parts) < 2:
+                    print("browser selector required")
+                    return
+                approval_id = _option_value(parts, "--approval-id")
+                approval = _browser_action_approval(self.orchestrator, action="live_download", session_id=self.browser_session_id, selector=parts[1], approval_id=approval_id)
+                if not approval.get("approved"):
+                    _print_json(approval["response"])
+                    return
+                _print_json(self.orchestrator.browser.live_download(session_id=self.browser_session_id, selector=parts[1], approved=True))
+                return
+            if command == "live-upload":
+                if len(parts) < 3:
+                    print("usage: browser live-upload <file-input-selector> <workspace-file-path>")
+                    return
+                approval_id = _option_value(parts, "--approval-id")
+                approval = _browser_action_approval(self.orchestrator, action="live_upload", session_id=self.browser_session_id, selector=parts[1], file_path=parts[2], approval_id=approval_id)
+                if not approval.get("approved"):
+                    _print_json(approval["response"])
+                    return
+                _print_json(self.orchestrator.browser.live_upload(session_id=self.browser_session_id, selector=parts[1], file_path=parts[2], approved=True))
+                return
+            if command == "live-evaluate":
+                if len(parts) < 2:
+                    print("usage: browser live-evaluate <javascript-with-return>")
+                    return
+                script, approval_id = _split_approval_arg(" ".join(parts[1:]))
+                approval = _browser_action_approval(self.orchestrator, action="live_evaluate", session_id=self.browser_session_id, script=script, approval_id=approval_id)
+                if not approval.get("approved"):
+                    _print_json(approval["response"])
+                    return
+                _print_json(self.orchestrator.browser.live_evaluate(session_id=self.browser_session_id, script=script, approved=True))
                 return
             if command == "extract":
                 _print_json(self.orchestrator.browser.extract_text(session_id=self.browser_session_id))
@@ -3257,7 +3486,7 @@ class AegisTui(cmd.Cmd):
             if label is None and len(parts) > 1 and not parts[1].startswith("--"):
                 label = parts[1]
             allowed_actions = _comma_separated(
-                _option_value(parts, "--allowed-actions") or "status,events,pause,cancel"
+                _option_value(parts, "--allowed-actions") or "status,events,resume,pause,cancel"
             )
             expires_in_seconds = _optional_int(_option_value(parts, "--expires-in-seconds"))
             registry = RemoteControlPairingRegistry(
@@ -3523,6 +3752,10 @@ class AegisTui(cmd.Cmd):
             print("usage: logout <provider>")
             return
         self.do_models(f"auth logout {shlex.quote(provider)}")
+
+    def do_setup(self, arg: str) -> None:
+        """setup -- show guided local setup readiness."""
+        _print_json(build_setup_readiness(self.orchestrator, config_path=self.orchestrator.config.data_dir / "config.toml"))
 
     def do_setup_bedrock(self, arg: str) -> None:
         """setup_bedrock -- show AWS Bedrock cloud-identity setup bridge."""
@@ -3879,10 +4112,34 @@ class AegisTui(cmd.Cmd):
         self.do_models("route alias/fast")
 
     def do_agents(self, arg: str) -> None:
-        """agents [status|autonomy-preflight|profiles|profile-create|profile-disable|delegate|handoff|review-packet|verify-packet|run|run-batch] -- manage subagent delegations."""
+        """agents [status|autonomy-preflight|autonomy-step|autonomy-run|profiles|profile-create|profile-disable|delegate|delegate-child|handoff|review-packet|verify-packet|model-review|run|run-batch] -- manage subagent delegations."""
         parts = shlex.split(arg)
         if parts and parts[0] == "autonomy-preflight":
             _print_json(self.orchestrator.kanban.subagent_autonomy_preflight(actor="tui-operator", limit=20))
+            return
+        if parts and parts[0] == "autonomy-step":
+            if len(parts) < 2:
+                print("usage: agents autonomy-step <card-id> --approved [--max-steps n]")
+                return
+            result = self.orchestrator.kanban.plan_subagent_autonomy_step(
+                parts[1],
+                actor="tui-operator",
+                approved="--approved" in parts[2:],
+                max_steps=_flag_int(parts[2:], "--max-steps", default=1) or 1,
+            )
+            _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20, include_previews=False)})
+            return
+        if parts and parts[0] == "autonomy-run":
+            if len(parts) < 2:
+                print("usage: agents autonomy-run <card-id> --approved [--max-steps n]")
+                return
+            result = self.orchestrator.kanban.run_subagent_autonomy_loop(
+                parts[1],
+                actor="tui-operator",
+                approved="--approved" in parts[2:],
+                max_steps=_flag_int(parts[2:], "--max-steps", default=1) or 1,
+            )
+            _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20, include_previews=False)})
             return
         if parts and parts[0] == "profiles":
             _print_json({"profiles": self.orchestrator.kanban.list_subagent_profiles(), "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
@@ -3916,6 +4173,21 @@ class AegisTui(cmd.Cmd):
             )
             _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
             return
+        if parts and parts[0] == "delegate-child":
+            approved = "--approved" in parts[1:]
+            child_parts = [part for part in parts[1:] if part != "--approved"]
+            if len(child_parts) < 3:
+                print("usage: agents delegate-child <parent-card-id> <role> <task> [--approved]")
+                return
+            result = self.orchestrator.kanban.delegate_subagent_child(
+                child_parts[0],
+                role=child_parts[1],
+                task=" ".join(child_parts[2:]),
+                actor="tui-operator",
+                approved=approved,
+            )
+            _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
+            return
         if parts and parts[0] == "handoff":
             if len(parts) < 3:
                 print("usage: agents handoff <card-id> <lane> [reason]")
@@ -3945,6 +4217,17 @@ class AegisTui(cmd.Cmd):
             result = self.orchestrator.kanban.verify_subagent_review_packet(
                 parts[1],
                 actor="tui-operator",
+            )
+            _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20, include_previews=False)})
+            return
+        if parts and parts[0] == "model-review":
+            if len(parts) < 2:
+                print("usage: agents model-review <card-id> [--approved]")
+                return
+            result = self.orchestrator.model_review_subagent(
+                parts[1],
+                actor="tui-operator",
+                approved="--approved" in parts[2:],
             )
             _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20, include_previews=False)})
             return
@@ -4123,6 +4406,7 @@ class AegisTui(cmd.Cmd):
     def do_context(self, arg: str) -> None:
         """context -- show active session context metadata without raw transcript content."""
         session = self.orchestrator.sessions.get_session(self.session["id"])
+        project_context = ContextFileLoader(self.workspace).manifest()
         _print_json(
             {
                 "status": "metadata_only",
@@ -4139,6 +4423,7 @@ class AegisTui(cmd.Cmd):
                 "ui_preferences": session.get("metadata", {}).get("tui_preferences", {}),
                 "workspace": str(self.workspace),
                 "additional_dirs": [str(path) for path in self.additional_dirs],
+                "project_context_files": project_context,
                 "trust_boundary": "raw transcript content stays behind session history and context firewall processing",
                 "raw_message_content_included": False,
                 "raw_steering_instruction_included": False,
@@ -4319,11 +4604,125 @@ class AegisTui(cmd.Cmd):
                 "status": "browser_integration_readiness",
                 "chrome_extension_connected": False,
                 "static_browser_sandbox": "available",
-                "live_browser_automation": "blocked_by_activation_preflight",
-                "next_actions": ["browser status", "browser inspect", "browser render", "capabilities"],
+                "live_browser_automation": "read_only_mutation_download_upload_or_javascript_available_if_configured",
+                "next_actions": ["browser status", "browser inspect", "browser render", "browser live-navigate https://example.com", "browser live-click <selector>", "browser live-download <selector>", "browser live-upload <selector> <path>", "browser live-evaluate <script>", "capabilities"],
                 "raw_browser_content_included": False,
                 "raw_secret_values_included": False,
             }
+        )
+
+    def _print_claude_style_readiness(self, *, command: str, feature: str, next_actions: list[str], status: str = "metadata_only") -> None:
+        _print_json(
+            {
+                "status": status,
+                "command": command,
+                "feature": feature,
+                "external_action_started": False,
+                "local_controls_only": True,
+                "raw_message_content_included": False,
+                "raw_secret_values_included": False,
+                "next_actions": next_actions,
+            }
+        )
+
+    def do_claude_api(self, arg: str) -> None:
+        """claude_api [migrate|managed-agents-onboard] -- show API migration readiness."""
+        mode = shlex.split(arg)[0] if arg.strip() else "reference"
+        self._print_claude_style_readiness(
+            command="claude-api",
+            feature=f"claude_api_{mode}_readiness",
+            status="claude_api_readiness",
+            next_actions=["models auth targets", "capabilities", "mcp list", "skills hub"],
+        )
+
+    def do_extra_usage(self, arg: str) -> None:
+        """extra_usage -- show account/usage boundary metadata."""
+        self._print_claude_style_readiness(
+            command="extra-usage",
+            feature="account_extra_usage_boundary",
+            status="account_boundary_metadata",
+            next_actions=["usage", "models auth targets", "upgrade"],
+        )
+
+    def do_fewer_permission_prompts(self, arg: str) -> None:
+        """fewer_permission_prompts -- show permission-hardening readiness."""
+        self._print_claude_style_readiness(
+            command="fewer-permission-prompts",
+            feature="permission_prompt_reduction_review",
+            status="permission_review_readiness",
+            next_actions=["permissions", "allowed-tools", "security evaluate"],
+        )
+
+    def do_focus(self, arg: str) -> None:
+        """focus -- show focused-view readiness."""
+        self._print_claude_style_readiness(
+            command="focus",
+            feature="focused_view_metadata",
+            status="focus_view_readiness",
+            next_actions=["tui fullscreen", "details", "statusbar"],
+        )
+
+    def do_heapdump(self, arg: str) -> None:
+        """heapdump -- show diagnostics boundary metadata."""
+        self._print_claude_style_readiness(
+            command="heapdump",
+            feature="diagnostic_heap_snapshot_boundary",
+            status="diagnostic_boundary_metadata",
+            next_actions=["debug", "doctor", "audit export-siem"],
+        )
+
+    def do_ide(self, arg: str) -> None:
+        """ide -- show IDE integration readiness."""
+        self._print_claude_style_readiness(
+            command="ide",
+            feature="ide_integration_readiness",
+            status="ide_readiness",
+            next_actions=["terminal-setup", "web-setup", "capabilities"],
+        )
+
+    def do_install_github_app(self, arg: str) -> None:
+        """install_github_app -- show governed GitHub app setup boundary."""
+        self._print_claude_style_readiness(
+            command="install-github-app",
+            feature="github_app_setup_boundary",
+            status="external_install_boundary",
+            next_actions=["connectors", "web-setup", "autofix-pr"],
+        )
+
+    def do_install_slack_app(self, arg: str) -> None:
+        """install_slack_app -- show governed Slack app setup boundary."""
+        self._print_claude_style_readiness(
+            command="install-slack-app",
+            feature="slack_app_setup_boundary",
+            status="external_install_boundary",
+            next_actions=["channels", "handoff slack", "web-setup"],
+        )
+
+    def do_passes(self, arg: str) -> None:
+        """passes -- show subscription/account boundary metadata."""
+        self._print_claude_style_readiness(
+            command="passes",
+            feature="subscription_share_boundary",
+            status="account_boundary_metadata",
+            next_actions=["usage", "upgrade", "models auth targets"],
+        )
+
+    def do_powerup(self, arg: str) -> None:
+        """powerup -- show local feature discovery surfaces."""
+        self._print_claude_style_readiness(
+            command="powerup",
+            feature="feature_discovery",
+            status="feature_discovery_ready",
+            next_actions=["commands", "capabilities", "menu"],
+        )
+
+    def do_team_onboarding(self, arg: str) -> None:
+        """team_onboarding -- show sanitized onboarding export readiness."""
+        self._print_claude_style_readiness(
+            command="team-onboarding",
+            feature="team_onboarding_report_readiness",
+            status="onboarding_report_readiness",
+            next_actions=["insights 30", "commands", "memory export"],
         )
 
     def do_desktop(self, arg: str) -> None:
@@ -4591,18 +4990,116 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_bashes(self, arg: str) -> None:
-        """bashes -- show governed shell command posture."""
-        shell = next((row for row in self.orchestrator.connectors.status() if row.get("name") == "shell"), None)
-        _print_json(
-            {
-                "status": "metadata_only",
-                "shell_connector": shell,
-                "allowed_commands": list(self.orchestrator.config.allowed_shell_commands),
-                "raw_shell_history_included": False,
-                "raw_secret_values_included": False,
-                "next_actions": ["tools run shell '{\"command\":\"pwd\"}'", "permissions", "sandbox"],
-            }
-        )
+        """bashes [list|start|input|resize|stop|logs] -- manage governed background processes."""
+        try:
+            parts = shlex.split(arg)
+        except ValueError as exc:
+            _print_json({"ok": False, "error": str(exc)})
+            return
+        command = parts[0] if parts else "list"
+        rest = parts[1:] if parts else []
+        try:
+            if command in {"list", "status"}:
+                _print_json(self.orchestrator.processes.status())
+                return
+            if command == "start":
+                approved = False
+                actor = "operator"
+                label = ""
+                pty = False
+                rows = 24
+                cols = 80
+                argv: list[str] = []
+                index = 0
+                while index < len(rest):
+                    part = rest[index]
+                    if part == "--":
+                        argv = rest[index + 1 :]
+                        break
+                    if part == "--approved":
+                        approved = True
+                        index += 1
+                        continue
+                    if part == "--actor":
+                        actor = _next_required(rest, index, "--actor")
+                        index += 2
+                        continue
+                    if part == "--label":
+                        label = _next_required(rest, index, "--label")
+                        index += 2
+                        continue
+                    if part == "--pty":
+                        pty = True
+                        index += 1
+                        continue
+                    if part == "--rows":
+                        rows = int(_next_required(rest, index, "--rows"))
+                        index += 2
+                        continue
+                    if part == "--cols":
+                        cols = int(_next_required(rest, index, "--cols"))
+                        index += 2
+                        continue
+                    argv = rest[index:]
+                    break
+                _print_json(self.orchestrator.processes.start(argv, approved=approved, actor=actor, label=label, pty=pty, rows=rows, cols=cols))
+                return
+            if command == "input":
+                if len(rest) < 2:
+                    _print_json({"ok": False, "error": "usage: bashes input <process-id> <text> [--no-newline]"})
+                    return
+                process_id = rest[0]
+                append_newline = "--no-newline" not in rest[2:]
+                text_parts = [part for part in rest[1:] if part != "--no-newline"]
+                _print_json(self.orchestrator.processes.send_input(process_id, " ".join(text_parts), append_newline=append_newline))
+                return
+            if command == "resize":
+                if not rest:
+                    _print_json({"ok": False, "error": "usage: bashes resize <process-id> --rows N --cols N"})
+                    return
+                process_id = rest[0]
+                rows = 24
+                cols = 80
+                index = 1
+                while index < len(rest):
+                    if rest[index] == "--rows":
+                        rows = int(_next_required(rest, index, "--rows"))
+                        index += 2
+                        continue
+                    if rest[index] == "--cols":
+                        cols = int(_next_required(rest, index, "--cols"))
+                        index += 2
+                        continue
+                    index += 1
+                _print_json(self.orchestrator.processes.resize(process_id, rows=rows, cols=cols))
+                return
+            if command == "stop":
+                if not rest:
+                    _print_json({"ok": False, "error": "usage: bashes stop <process-id>"})
+                    return
+                _print_json(self.orchestrator.processes.stop(rest[0]))
+                return
+            if command == "logs":
+                if not rest:
+                    _print_json({"ok": False, "error": "usage: bashes logs <process-id> [--max-bytes N]"})
+                    return
+                max_bytes = 4096
+                if len(rest) >= 3 and rest[1] == "--max-bytes":
+                    max_bytes = int(rest[2])
+                _print_json(self.orchestrator.processes.logs(rest[0], max_bytes=max_bytes))
+                return
+        except Exception as exc:  # noqa: BLE001 - TUI command should report structured local errors.
+            _print_json({"ok": False, "error": str(exc), "raw_secret_values_included": False})
+            return
+        _print_json({"ok": False, "error": "usage: bashes [list|start|input|resize|stop|logs]", "raw_secret_values_included": False})
+
+    def do_processes(self, arg: str) -> None:
+        """processes -- alias for bashes."""
+        self.do_bashes(arg)
+
+    def do_process(self, arg: str) -> None:
+        """process -- alias for bashes."""
+        self.do_bashes(arg)
 
     def do_pr_comments(self, arg: str) -> None:
         """pr_comments -- show pull request comment integration readiness."""
@@ -5445,7 +5942,7 @@ class AegisTui(cmd.Cmd):
         def redraw() -> None:
             nonlocal rendered_height
             width = min(max(shutil.get_terminal_size((100, 24)).columns, 60), 140)
-            block, height = _live_input_block(self.prompt, buffer, width)
+            block, height = _live_input_block(self.prompt, buffer, width, workspace=self.workspace)
             if rendered_height:
                 sys.stdout.write("\r")
                 if rendered_height > 1:
@@ -5502,9 +5999,19 @@ class AegisTui(cmd.Cmd):
                         redraw()
                     continue
                 if char == "\t":
-                    completions = _complete_slash(buffer.lstrip("/"), buffer, 1, len(buffer)) if buffer.startswith("/") else self.completenames(buffer)
+                    if buffer.startswith("/"):
+                        completion_text, begidx, endidx = _live_completion_context(buffer)
+                        completions = _complete_context_paths(completion_text, buffer, begidx, self.workspace)
+                        if not completions:
+                            completions = _complete_slash(completion_text, buffer, begidx, endidx)
+                    else:
+                        completion_text, begidx, endidx = _word_completion_context(buffer)
+                        completions = _complete_context_paths(completion_text, buffer, begidx, self.workspace)
+                        if not completions:
+                            completion_text, begidx, endidx = buffer, 0, len(buffer)
+                            completions = self.completenames(buffer)
                     if len(completions) == 1:
-                        buffer = completions[0]
+                        buffer = _apply_live_completion(buffer, completions[0], begidx, endidx)
                     elif completions:
                         sys.stdout.write("\n" + _inline_completion_line(completions, width=shutil.get_terminal_size((100, 24)).columns) + "\n")
                         rendered_height = 0
@@ -6044,6 +6551,31 @@ def _parse_subagent_run_batch_options(parts: list[str]) -> dict[str, Any]:
     return options
 
 
+def _parse_curator_draft_options(parts: list[str]) -> dict[str, Any]:
+    if not parts:
+        raise ValueError("curator draft requires a skill_id")
+    options: dict[str, Any] = {"skill_id": parts[0], "name": "", "description": "", "observed_task": ""}
+    index = 1
+    while index < len(parts):
+        part = parts[index]
+        if part == "--name":
+            options["name"] = _next_required(parts, index, "--name")
+            index += 2
+            continue
+        if part == "--description":
+            options["description"] = _next_required(parts, index, "--description")
+            index += 2
+            continue
+        if part == "--observed-task":
+            options["observed_task"] = _next_required(parts, index, "--observed-task")
+            index += 2
+            continue
+        raise ValueError(f"unknown draft option: {part}")
+    if not options["name"] or not options["description"]:
+        raise ValueError("curator draft requires --name and --description")
+    return options
+
+
 def _parse_hook_add_args(parts: list[str]) -> dict[str, Any]:
     if not parts:
         raise ValueError("hook event required")
@@ -6216,10 +6748,10 @@ def _command_reference() -> str:
             "retry|undo             Resubmit or remove the latest session exchange",
             "background|bg|btw <req>  Submit a governed task from the deck",
             "fast [request]         Inspect fast route or submit a quick governed task",
-            "goal|batch|queue|q|loop Goal, queue, and self-improvement readiness",
+            "goal|batch|queue|q|loop|proactive Goal, queue, and self-improvement readiness",
             "remote-control|rc      Local-first remote-control readiness",
             "handoff|remote-env|teleport|tp Guarded remote environment handoff readiness",
-            "mobile|desktop|app     Mobile/desktop control-plane readiness",
+            "mobile|ios|android|desktop|app Mobile/desktop control-plane readiness",
             "evidence [task_id]     Show receipt and audit evidence",
             "timeline [task_id]     Show plan, receipt, and audit sequence",
             "events [task_id]       Show grouped run-event progress",
@@ -6228,10 +6760,12 @@ def _command_reference() -> str:
             "approve <id> [--admin] Approve a gated action",
             "deny <id> [--admin]    Deny a gated action",
             "permissions            Claude-style policy posture alias",
+            "fewer-permission-prompts Permission prompt review readiness",
             "privacy-settings       Local privacy, redaction, and telemetry posture",
             "whoami|yolo            Identity posture and approval-bypass refusal",
             "security-review        Security review posture alias",
-            "doctor|debug|config|settings Runtime diagnosis, safe debug, and config paths",
+            "setup                 Guided local setup readiness",
+            "doctor|debug|config|settings|heapdump Runtime diagnosis, safe debug, and config paths",
             "bug|feedback <summary> Capture a local-only bug report",
             "hooks list|add|run     Governed local lifecycle hooks",
             "dashboard              Runtime command deck",
@@ -6244,32 +6778,34 @@ def _command_reference() -> str:
             "channel render <c> <t>  Render outbound channel payload",
             "channel receive <c> <t> Normalize inbound channel payload",
             "channel resolve-approval <event> <approval>",
-            "channel send-chat-webhook <text> --approved",
+            "channel send-chat-webhook <text> --approval-id <id>",
+            "channel activate-packet <packet> --approved",
             "channel events [limit]  Recent channel activity",
             "models|model           Model providers",
             "login|logout <provider> Model auth aliases",
-            "setup-bedrock|setup-vertex Cloud identity setup bridges",
-            "upgrade                Provider account-upgrade boundary",
+            "setup|setup-bedrock|setup-vertex Guided setup and cloud identity setup bridges",
+            "upgrade|extra-usage|passes Provider account and usage boundaries",
             "usage|stats|insights   Model usage and local analytics",
             "effort [level]         Guarded reasoning-effort status",
             "cost                   Model usage and estimated cost",
             "statusbar|statusline   UI status metadata",
             "theme|skin|color       UI preference metadata",
-            "commands|keybindings   Slash command and terminal keybinding surfaces",
+            "commands|keybindings|powerup|focus|ide Slash command and integration surfaces",
+            "claude-api             Claude API migration and managed-agent reference readiness",
             "provider|usage         Model provider and usage aliases",
             "gquota [model]         Google Gemini Code Assist quota metadata",
             "models auth methods|targets|doctor|readiness-packet|verify-readiness-packet|login|logout <provider>",
             "tools                  Governed tool catalog",
             "toolsets               Group tools by permission and risk",
-            "allowed-tools|bashes   Policy-visible tools and shell posture",
+            "allowed-tools|bashes|processes Policy-visible tools and governed process controls",
             "tools list|run|enable|disable  Governed tool catalog and policy-owned preferences",
-            "agents status|autonomy-preflight|profiles|delegate|handoff|review-packet|verify-packet|run|run-batch  Subagent coordination and runtime preflight",
+            "agents status|autonomy-preflight|autonomy-step|autonomy-run|profiles|delegate|handoff|review-packet|verify-packet|model-review|run|run-batch  Subagent coordination and runtime preflight",
             "skills hub|search|browse|inspect|install  Governed skills and virtual Skill Hub",
-            "curator status|run|pin|archive  Local authored skill maintenance",
+            "curator status|run|draft|verify-draft|install-draft|pin|archive  Local authored skill maintenance",
             "plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-bundle|install-marketplace|update-marketplace|prepare-update|apply-prepared-update",
             "plugin|reload|reload-plugins|reload-skills|reload_skills  Extension inventory aliases",
             "memory health|search|session-preview|create|update|merge|expire",
-            "mcp list|register|call Governed MCP registry",
+            "mcp list|register|auth|call Governed MCP registry",
             "reload-mcp             Refresh governed one-shot MCP registry status",
             "repairs [status]       List self-repair proposals",
             "repair <id>            Inspect self-repair proposal evidence",
@@ -6280,7 +6816,8 @@ def _command_reference() -> str:
             "repair apply-candidate|rollback-candidate <id> <candidate_id>",
             "repair attempt <id> <outcome> [--candidate-id id] [--test-command cmd]",
             "schedules              Scheduled automations",
-            "schedule create <n> <c> <task>",
+            "schedule create <n> <c> <task> [--context-from ref]",
+            "schedule script <n> <c> -- <argv>",
             "schedule memory-review-digest <n> <c>",
             "schedule evaluation-run <n> <c> <scenario>",
             "schedule evaluation-suite <n> <c>",
@@ -6290,7 +6827,7 @@ def _command_reference() -> str:
             "cron                   Alias for scheduled automation",
             "voice|radio            Guarded voice and external media readiness",
             "stickers               Non-runtime merchandise boundary",
-            "browser status|connect|disconnect|session|sessions|close|navigate <url>",
+            "browser status|connect|disconnect|session|sessions|close|navigate <url>|live-navigate <url>|live-screenshot|live-click|live-fill|live-submit|live-download|live-upload|live-evaluate",
             "browser activation-packet|verify-activation-packet <packet>  Live adapter activation receipts",
             "browser extract|inspect|dom [selector]|screenshot|render|click <selector>|fill <json>|submit [selector]",
             "boards                 Work boards and cards",
@@ -6301,6 +6838,8 @@ def _command_reference() -> str:
             "redraw                 Refresh compact home surface",
             "snapshot|snap|rollback Guarded snapshot and rollback status",
             "sethome|set-home       Home workspace/channel readiness",
+            "install-github-app|install-slack-app External app setup boundaries",
+            "team-onboarding        Sanitized onboarding report readiness",
             "diff|review|simplify   Guarded diff, review, and simplify surfaces",
             "ultraplan|ultrareview  Governed plan and deep-review readiness",
             "release-notes          Local release metadata",
@@ -6370,9 +6909,11 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("approve|deny <id>", "decide gated work"),
             ("security", "policy posture"),
             ("permissions|security-review", "Claude-style policy and security review aliases"),
+            ("fewer-permission-prompts", "permission prompt review readiness"),
             ("privacy-settings", "local privacy, redaction, and telemetry posture"),
             ("whoami|yolo", "identity posture and approval-bypass refusal"),
-            ("doctor|debug|config|settings|init", "runtime diagnostics, local paths, and initialization status"),
+            ("setup", "guided local setup readiness"),
+            ("doctor|debug|config|settings|init|heapdump", "runtime diagnostics, local paths, and initialization status"),
             ("bug|feedback <summary>", "local-only bug report capture"),
             ("hooks", "governed local lifecycle hooks"),
             ("audit|evidence|timeline|events", "receipts and replay"),
@@ -6385,37 +6926,39 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("insights [days]", "sanitized local usage analytics"),
             ("gquota [model]", "Google Gemini Code Assist quota metadata"),
             ("login|logout <provider>", "model auth login/logout aliases"),
-            ("setup-bedrock|setup-vertex|upgrade", "cloud identity setup and account boundary"),
+            ("setup|setup-bedrock|setup-vertex|upgrade|extra-usage|passes", "guided setup, cloud identity setup, and account boundary"),
             ("effort|cost", "guarded reasoning-effort metadata and usage cost"),
             ("statusbar|statusline|sb|theme|skin|color|verbose", "UI preference and status metadata"),
-            ("commands|keybindings", "slash command and terminal keybinding surfaces"),
-            ("allowed-tools|bashes", "policy-visible tools and shell posture"),
+            ("commands|keybindings|powerup|focus|ide", "slash command, feature discovery, and terminal integration surfaces"),
+            ("claude-api", "Claude API migration and managed-agent reference readiness"),
+            ("allowed-tools|bashes|processes", "policy-visible tools and governed process controls"),
             ("tools list|run|enable|disable", "safe tool execution and policy-owned preferences"),
             ("toolsets", "tool catalog grouped by permission and risk"),
             ("skills hub|search|browse|inspect|install", "governed skill hub"),
-            ("curator status|run|pin|archive", "local authored skill maintenance"),
+            ("curator status|run|draft|verify-draft|install-draft|pin|archive", "local authored skill maintenance"),
             ("plugin|plugins|reload|reload-plugins|reload-skills", "extension inventory and reload readiness"),
             ("reload_skills", "extension inventory and reload readiness"),
             ("memory search|create|review", "durable memory"),
-            ("mcp|reload-mcp|repair|schedules|cron", "extensions, schedules, and self-repair"),
+            ("mcp|reload-mcp|reload_mcp|repair|schedules|cron", "extensions, schedules, and self-repair"),
         ),
     ),
     (
         "Explore",
         (
             ("capabilities", "parity and readiness"),
-            ("agents status|autonomy-preflight|delegate|review-packet|verify-packet|run", "multi-agent coordination and runtime preflight"),
-            ("remote-control|rc|handoff|remote-env|teleport|tp|mobile|desktop|app", "local-first remote-control readiness"),
+            ("agents status|autonomy-preflight|autonomy-step|autonomy-run|delegate|review-packet|verify-packet|model-review|run", "multi-agent coordination and runtime preflight"),
+            ("remote-control|rc|handoff|remote-env|teleport|tp|mobile|ios|android|desktop|app", "local-first remote-control readiness"),
             ("web-setup", "local web control-plane setup"),
             ("connectors|channels|platforms", "integration surfaces"),
             ("pr_comments|autofix-pr", "pull request comment and autofix readiness"),
-            ("browser status|connect|disconnect|render|activation-packet|verify-activation-packet|chrome", "sandboxed browser work"),
+            ("browser status|connect|disconnect|render|live-navigate|live-screenshot|live-click|live-fill|live-submit|live-download|live-upload|live-evaluate|activation-packet|verify-activation-packet|chrome", "sandboxed browser work"),
             ("boards|backends|sandbox", "work and execution planes"),
             ("voice|radio|terminal-setup|vim|mouse|tui|scroll-speed", "optional interaction and terminal readiness"),
             ("footer|busy|indicator|details|redraw", "runtime UI indicators and safe details"),
             ("rollback|snapshot|snap|diff|review|simplify", "guarded rollback, snapshot, diff, and review status"),
             ("ultraplan|ultrareview", "governed plan and deep-review readiness"),
             ("sethome|set-home", "home workspace/channel readiness"),
+            ("install-github-app|install-slack-app|team-onboarding", "external app setup and onboarding readiness"),
             ("release-notes|update|restart", "operator-controlled update and release readiness"),
         ),
     ),
@@ -6713,9 +7256,10 @@ def _next_command_hint(command: str) -> str:
         "audit": "/evidence <id>",
         "model": "/models auth targets",
         "models": "/models route <id>",
+        "setup": "/models auth doctor",
         "setup-bedrock": "/models auth doctor",
         "setup-vertex": "/models auth doctor",
-        "gquota": "/models auth status google-gemini-oauth",
+        "gquota": "/models auth google-gemini-oauth",
         "login": "/models auth targets",
         "logout": "/models auth methods",
         "upgrade": "/models auth targets",
@@ -6725,7 +7269,8 @@ def _next_command_hint(command: str) -> str:
         "commands": "/commands all",
         "keybindings": "/terminal-setup",
         "allowed-tools": "/toolsets",
-        "bashes": "/sandbox",
+        "bashes": "/bashes start --approved --pty --",
+        "processes": "/processes list",
         "tools": "/tools run <name> <json>",
         "skills": "/skills hub <query>",
         "curator": "/curator run --dry-run",
@@ -6733,7 +7278,7 @@ def _next_command_hint(command: str) -> str:
         "reload": "/plugins",
         "hooks": "/hooks list",
         "memory": "/memory review-queue",
-        "mcp": "/repair readiness",
+        "mcp": "/mcp list",
         "doctor": "/capabilities",
         "statusbar": "/dashboard",
         "footer": "/statusbar",
@@ -6784,6 +7329,9 @@ SLASH_SUBCOMMANDS: dict[str, tuple[str, ...]] = {
     "mcp": MCP_COMMANDS,
     "hooks": HOOK_COMMANDS,
     "agents": AGENTS_COMMANDS,
+    "bashes": PROCESS_COMMANDS,
+    "process": PROCESS_COMMANDS,
+    "processes": PROCESS_COMMANDS,
     "remote-control": REMOTE_CONTROL_COMMANDS,
     "remote_control": REMOTE_CONTROL_COMMANDS,
     "rc": REMOTE_CONTROL_COMMANDS,
@@ -6829,14 +7377,33 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("q", "session"): ("--limit", "--status"),
     ("busy", "queue"): ("--limit", "--status"),
     ("session", "new"): ("--model", "--personality"),
+    ("schedule", "create"): ("--natural-language", "--channel", "--context-from", "--deliver-to"),
+    ("schedule", "script"): ("--channel", "--context-from", "--deliver-to", "--hook-id", "--timeout", "--max-output-bytes"),
+    ("schedule", "no-agent"): ("--channel", "--context-from", "--deliver-to", "--hook-id", "--timeout", "--max-output-bytes"),
     ("schedule", "run-due"): ("--limit", "--now"),
     ("hooks", "add"): ("--id", "--enabled", "--approval-required", "--no-approval-required", "--timeout", "--max-output-bytes"),
     ("hooks", "run"): ("--approved", "--context-json"),
     ("agents", "delegate"): ("--approved",),
+    ("agents", "autonomy-step"): ("--approved", "--max-steps"),
+    ("agents", "autonomy-run"): ("--approved", "--max-steps"),
+    ("agents", "model-review"): ("--approved",),
     ("agents", "run"): ("--approved",),
     ("agents", "run-batch"): ("--approved", "--limit", "--card-id"),
+    ("bashes", "start"): ("--approved", "--actor", "--label", "--pty", "--rows", "--cols"),
+    ("bashes", "logs"): ("--max-bytes",),
+    ("bashes", "input"): ("--no-newline",),
+    ("bashes", "resize"): ("--rows", "--cols"),
+    ("process", "start"): ("--approved", "--actor", "--label", "--pty", "--rows", "--cols"),
+    ("process", "logs"): ("--max-bytes",),
+    ("process", "input"): ("--no-newline",),
+    ("process", "resize"): ("--rows", "--cols"),
+    ("processes", "start"): ("--approved", "--actor", "--label", "--pty", "--rows", "--cols"),
+    ("processes", "logs"): ("--max-bytes",),
+    ("processes", "input"): ("--no-newline",),
+    ("processes", "resize"): ("--rows", "--cols"),
     ("mcp", "call"): ("--approved",),
     ("mcp", "register"): ("--discover", "--transport", "--token-secret", "--tool", "--exclude-tool", "--no-resources", "--no-prompts", "--enable", "--no-approval"),
+    ("mcp", "auth"): ("--resource-metadata", "--authorization-server", "--token-secret", "--scope"),
     ("plugins", "fetch-manifest"): ("--catalog-path",),
     ("plugin", "fetch-manifest"): ("--catalog-path",),
     ("plugins", "fetch-bundle"): ("--catalog-path", "--key-name"),
@@ -6852,6 +7419,8 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("plugins", "apply-prepared-update"): ("--approved", "--enable", "--disable"),
     ("plugin", "apply-prepared-update"): ("--approved", "--enable", "--disable"),
     ("curator", "run"): ("--dry-run",),
+    ("curator", "draft"): ("--name", "--description", "--observed-task"),
+    ("curator", "install-draft"): ("--approved",),
     ("remote-control", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
     ("remote-control", "directory"): ("--pairing-id", "--limit"),
     ("remote-control", "revoke"): ("--relay-auth-secret", "--approved"),
@@ -6902,6 +7471,20 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("rc", "relay-action"): ("--pairing-id", "--task-id", "--action", "--relay-auth-secret", "--session-id", "--reason"),
 }
 
+PATH_COMPLETION_FLAGS = {
+    "--catalog-path",
+    "--config",
+    "--path",
+    "--patch-file",
+    "--synthesis-file",
+    "--workspace",
+}
+
+PATH_COMPLETION_ROOTS = {
+    "add-dir",
+    "image",
+}
+
 
 def _complete_slash(text: str, line: str, begidx: int, endidx: int) -> list[str]:
     stripped = line.lstrip()
@@ -6929,8 +7512,109 @@ def _complete_slash(text: str, line: str, begidx: int, endidx: int) -> list[str]
     return _complete_options(subcommands, current)
 
 
+def _live_completion_context(buffer: str) -> tuple[str, int, int]:
+    endidx = len(buffer)
+    if not buffer.startswith("/"):
+        return buffer, 0, endidx
+    if not buffer or buffer[-1].isspace():
+        return "", endidx, endidx
+    last_break = max(buffer.rfind(" "), buffer.rfind("\t"), buffer.rfind("\n"))
+    begidx = last_break + 1 if last_break >= 0 else 1
+    return buffer[begidx:endidx], begidx, endidx
+
+
+def _word_completion_context(buffer: str) -> tuple[str, int, int]:
+    endidx = len(buffer)
+    if not buffer or buffer[-1].isspace():
+        return "", endidx, endidx
+    last_break = max(buffer.rfind(" "), buffer.rfind("\t"), buffer.rfind("\n"))
+    begidx = last_break + 1 if last_break >= 0 else 0
+    return buffer[begidx:endidx], begidx, endidx
+
+
+def _apply_live_completion(buffer: str, completion: str, begidx: int, endidx: int) -> str:
+    if buffer.startswith("/") and completion.startswith("/"):
+        return completion
+    return f"{buffer[:begidx]}{completion}{buffer[endidx:]}"
+
+
 def _complete_options(options: tuple[str, ...], text: str) -> list[str]:
     return [option for option in options if option.startswith(text)]
+
+
+def _complete_context_paths(text: str, line: str, begidx: int, workspace: str | Path) -> list[str]:
+    token = text.strip()
+    if not token:
+        return []
+    if token.startswith("@"):
+        return _complete_workspace_paths(token, workspace)
+    if _expects_path_completion(line, begidx):
+        return _complete_workspace_paths(token, workspace, context_marker=False)
+    return []
+
+
+def _expects_path_completion(line: str, begidx: int) -> bool:
+    before = line[:begidx]
+    try:
+        parts = shlex.split(before)
+    except ValueError:
+        parts = before.split()
+    if not parts:
+        return False
+    if parts[-1] in PATH_COMPLETION_FLAGS:
+        return True
+    root = parts[0].lstrip("/").replace("_", "-")
+    return root in PATH_COMPLETION_ROOTS and len(parts) == 1
+
+
+def _complete_workspace_paths(text: str, workspace: str | Path, *, context_marker: bool | None = None) -> list[str]:
+    raw = text[1:] if text.startswith("@") else text
+    marker = "@" if (context_marker if context_marker is not None else text.startswith("@")) else ""
+    if raw.startswith(("~", "/")):
+        return []
+    raw = raw.replace("\\", "/")
+    parent_raw, _, fragment = raw.rpartition("/")
+    if not raw.endswith("/") and not parent_raw:
+        parent_raw = "."
+    elif raw.endswith("/"):
+        parent_raw = raw.rstrip("/") or "."
+        fragment = ""
+    root = Path(workspace).expanduser().resolve()
+    try:
+        parent = (root / parent_raw).resolve()
+        parent.relative_to(root)
+    except (OSError, ValueError):
+        return []
+    if not parent.exists() or not parent.is_dir():
+        return []
+    fragment_lower = fragment.lower()
+    rows: list[Path] = []
+    try:
+        candidates = list(parent.iterdir())
+    except OSError:
+        return []
+    for child in candidates:
+        name = child.name
+        if name.startswith(".") and not fragment.startswith("."):
+            continue
+        name_lower = name.lower()
+        if fragment_lower and not (name_lower.startswith(fragment_lower) or fragment_lower in name_lower):
+            continue
+        try:
+            child.resolve().relative_to(root)
+        except (OSError, ValueError):
+            continue
+        rows.append(child)
+    rows.sort(key=lambda path: (not path.is_dir(), path.name.lower()))
+    labels: list[str] = []
+    for child in rows[:20]:
+        try:
+            rel = child.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        suffix = "/" if child.is_dir() else ""
+        labels.append(f"{marker}{rel}{suffix}")
+    return labels
 
 
 def _skill_slash_labels(skill_id: str) -> tuple[str, ...]:
@@ -6980,29 +7664,62 @@ def _complete_subcommand(options: tuple[str, ...], text: str, line: str, begidx:
     return []
 
 
-def _live_input_block(prompt: str, buffer: str, width: int) -> tuple[str, int]:
+def _live_input_block(prompt: str, buffer: str, width: int, *, workspace: str | Path | None = None) -> tuple[str, int]:
     prompt = _strip_readline_markers(prompt)
-    suggestion_lines = _live_slash_hint_lines(buffer, width)
+    context_lines = _live_context_hint_lines(buffer, width, workspace=workspace)
+    slash_lines = [] if context_lines else _live_slash_hint_lines(buffer, width)
+    suggestion_lines = _live_key_hint_lines(buffer, width) + context_lines + slash_lines
     input_lines = _wrapped_prompt_lines(prompt, buffer, width)
     return "\n".join([*suggestion_lines, *input_lines]), len(suggestion_lines) + len(input_lines)
+
+
+def _live_key_hint_lines(buffer: str, width: int) -> list[str]:
+    if buffer:
+        return []
+    return [_paint(_shorten_preserve_spaces("keys     Enter send  Ctrl+V newline  Tab complete", width=max(20, width)), "2;36")]
 
 
 def _live_slash_hint_lines(buffer: str, width: int) -> list[str]:
     if not buffer.startswith("/"):
         return []
-    prefix = buffer[1:].strip()
-    labels = _slash_completion_labels(prefix)
+    completion_text, begidx, endidx = _live_completion_context(buffer)
+    labels = _complete_slash(completion_text, buffer, begidx, endidx)
     if not labels:
         return [_paint("suggest  no slash matches", "2;33")]
-    line = "suggest  " + "  ".join(labels)
-    return [_paint(textwrap.shorten(line, width=max(20, width), placeholder=" ..."), "2;36")]
+    label = _live_completion_hint_label(labels, begidx)
+    line = f"{label:<7} " + "  ".join(labels)
+    return [_paint(_shorten_preserve_spaces(line, width=max(20, width)), "2;36")]
+
+
+def _live_context_hint_lines(buffer: str, width: int, *, workspace: str | Path | None = None) -> list[str]:
+    if not buffer:
+        return []
+    if buffer.startswith("/"):
+        completion_text, begidx, _endidx = _live_completion_context(buffer)
+    else:
+        completion_text, begidx, _endidx = _word_completion_context(buffer)
+    labels = _complete_context_paths(completion_text, buffer, begidx, workspace or Path.cwd())
+    if not labels:
+        return []
+    label = "context" if completion_text.strip().startswith("@") else "path"
+    line = f"{label:<7} " + "  ".join(labels)
+    return [_paint(_shorten_preserve_spaces(line, width=max(20, width)), "2;36")]
+
+
+def _live_completion_hint_label(labels: list[str], begidx: int) -> str:
+    if labels and all(label.startswith("--") for label in labels):
+        return "flags"
+    if labels and all(label.startswith("/") for label in labels) and begidx <= 1:
+        return "slash"
+    return "subcmd"
 
 
 def _wrapped_prompt_lines(prompt: str, buffer: str, width: int) -> list[str]:
     width = max(20, width)
+    usable_width = max(19, width - 1)
     prompt_len = _visible_length(prompt)
-    first_width = max(8, width - prompt_len)
-    continuation = " " * min(prompt_len, max(0, width - 8))
+    first_width = max(8, usable_width - prompt_len)
+    continuation = " " * min(prompt_len, max(0, usable_width - 8))
     if not buffer:
         return [prompt]
     lines: list[str] = []
@@ -7014,7 +7731,7 @@ def _wrapped_prompt_lines(prompt: str, buffer: str, width: int) -> list[str]:
             prefix = continuation
             continue
         while remaining:
-            chunk_width = first_width if prefix == prompt else max(8, width - len(continuation))
+            chunk_width = first_width if prefix == prompt else max(8, usable_width - len(continuation))
             chunk, remaining = remaining[:chunk_width], remaining[chunk_width:]
             lines.append(prefix + chunk)
             prefix = continuation
@@ -7023,6 +7740,14 @@ def _wrapped_prompt_lines(prompt: str, buffer: str, width: int) -> list[str]:
 
 def _inline_completion_line(completions: list[str], *, width: int) -> str:
     return textwrap.shorten("complete " + "  ".join(completions[:12]), width=max(20, width), placeholder=" ...")
+
+
+def _shorten_preserve_spaces(text: str, *, width: int) -> str:
+    if len(text) <= width:
+        return text
+    if width <= 4:
+        return text[:width]
+    return text[: width - 4].rstrip() + " ..."
 
 
 def _read_tui_history_lines(path: Path) -> list[str]:
@@ -7490,6 +8215,14 @@ def _split_json_approval_arg(value: str) -> tuple[str, str | None]:
     return json_text.strip(), approval_id.strip() or None
 
 
+def _split_approval_arg(value: str) -> tuple[str, str | None]:
+    marker = " --approval-id "
+    if marker not in value:
+        return value, None
+    text, approval_id = value.rsplit(marker, 1)
+    return text.strip(), approval_id.strip() or None
+
+
 def _browser_action_approval(
     orchestrator: Any,
     *,
@@ -7497,9 +8230,12 @@ def _browser_action_approval(
     session_id: str,
     selector: str | None = None,
     fields: dict[str, Any] | None = None,
+    url: str | None = None,
+    file_path: str | None = None,
+    script: str | None = None,
     approval_id: str | None = None,
 ) -> dict[str, Any]:
-    payload = orchestrator.browser.action_approval_payload(action=action, session_id=session_id, selector=selector, fields=fields)
+    payload = orchestrator.browser.action_approval_payload(action=action, session_id=session_id, selector=selector, fields=fields, url=url, file_path=file_path, script=script)
     if approval_id:
         approval = orchestrator.approvals.get(approval_id)
         if _approved_payload(approval) != payload:

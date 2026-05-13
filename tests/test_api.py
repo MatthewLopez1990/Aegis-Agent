@@ -123,7 +123,7 @@ class ApiServerSecurityTests(unittest.TestCase):
                     process.kill()
                     process.wait(timeout=5)
 
-    def test_hooks_api_registers_lists_and_runs_governed_hook(self) -> None:
+    def test_skill_curator_api_drafts_verifies_and_installs_disabled_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             port = _free_port()
             workspace = Path(temp) / "workspace"
@@ -154,6 +154,112 @@ class ApiServerSecurityTests(unittest.TestCase):
                 _wait_for_server(port)
                 token = _json_get(port, "/auth")["token"]
 
+                before = _json_get(port, "/skill-curator", token=token)
+                draft = _json_post(
+                    port,
+                    "/skill-curator/draft",
+                    {
+                        "skill_id": "test.api_curated",
+                        "name": "API Curated",
+                        "description": "API reviewed disabled candidate",
+                        "observed_task": "operator pasted token=abc123 during workflow review",
+                        "actor": "api-test",
+                    },
+                    token=token,
+                )
+                verify = _json_post(port, "/skill-curator/verify-draft", {"candidate_id": draft["candidate_id"]}, token=token)
+                gated = _json_post(port, "/skill-curator/install-draft", {"candidate_id": draft["candidate_id"], "approved": "true"}, token=token)
+                installed = _json_post(port, "/skill-curator/install-draft", {"candidate_id": draft["candidate_id"], "approved": True, "actor": "api-test"}, token=token)
+                after = _json_get(port, "/skill-curator", token=token)
+                skills = _json_get(port, "/skills", token=token)
+
+                self.assertEqual(before["status"], "curator_status")
+                self.assertEqual(draft["status"], "skill_candidate_drafted")
+                self.assertNotIn("token=abc123", json.dumps(draft, sort_keys=True))
+                candidate_path = Path(str(draft["candidate_path"]))
+                self.assertTrue(candidate_path.exists())
+                if os.name == "posix":
+                    self.assertEqual(candidate_path.stat().st_mode & 0o777, 0o600)
+                self.assertNotIn("token=abc123", candidate_path.read_text(encoding="utf-8"))
+                self.assertTrue(verify["ok"])
+                self.assertEqual(gated["status"], "approval_required")
+                self.assertEqual(installed["status"], "skill_candidate_installed_disabled")
+                self.assertFalse(installed["auto_enable"])
+                self.assertGreaterEqual(after["candidate_count"], 1)
+                skill_rows = {row["id"]: row for row in skills["skills"]}
+                self.assertIn("test.api_curated", skill_rows)
+                self.assertFalse(skill_rows["test.api_curated"]["enabled"])
+                self.assertEqual(skill_rows["test.api_curated"]["sandbox_profile"], "no_tools")
+                self.assertNotIn("token=abc123", (data_dir / "audit.jsonl").read_text(encoding="utf-8"))
+            finally:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+
+    def test_hooks_api_registers_lists_and_runs_governed_hook(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            port = _free_port()
+            workspace = Path(temp) / "workspace"
+            workspace.mkdir()
+            data_dir = Path(temp) / ".aegis"
+            env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "aegis.cli.main",
+                    "--data-dir",
+                    str(data_dir),
+                    "serve",
+                    "--workspace",
+                    str(workspace),
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                _wait_for_server(port)
+                token = _json_get(port, "/auth")["token"]
+                process_status = _json_get(port, "/processes", token=token)
+                process_gated = _json_post(port, "/processes/start", {"argv": ["python3", "-c", "print('blocked')"]}, token=token)
+                process_started = None
+                if os.name == "posix":
+                    process_started = _json_post(
+                        port,
+                        "/processes/start",
+                        {
+                            "argv": [
+                                "python3",
+                                "-c",
+                                "import sys, time; line=sys.stdin.readline().strip(); print('api-pty:' + line, flush=True); time.sleep(30)",
+                            ],
+                            "approved": True,
+                            "pty": True,
+                            "rows": 22,
+                            "cols": 88,
+                        },
+                        token=token,
+                    )
+                    process_id = process_started["process"]["id"]
+                    process_resize = _json_post(port, f"/processes/{quote(process_id)}/resize", {"rows": 40, "cols": 100}, token=token)
+                    process_input = _json_post(port, f"/processes/{quote(process_id)}/input", {"text": "from-api"}, token=token)
+                    process_logs = {}
+                    for _ in range(100):
+                        process_logs = _json_get(port, f"/processes/{quote(process_id)}/logs", token=token)
+                        if "api-pty:from-api" in process_logs["log"]:
+                            break
+                        time.sleep(0.05)
+                    process_stop = _json_post(port, f"/processes/{quote(process_id)}/stop", {}, token=token)
+
                 added = _json_post(
                     port,
                     "/hooks",
@@ -169,11 +275,39 @@ class ApiServerSecurityTests(unittest.TestCase):
                 listed = _json_get(port, "/hooks", token=token)
                 ran = _json_post(port, "/hooks/run", {"event": "manual", "context": {"message": "api hello"}}, token=token)
 
+                self.assertEqual(process_status["status"], "process_registry_ready")
+                self.assertEqual(process_gated["status"], "approval_required")
+                self.assertFalse(process_gated["raw_command_included"])
+                if process_started is not None:
+                    self.assertTrue(process_started["process"]["pty_attached"])
+                    self.assertEqual(process_resize["receipt"]["event_type"], "process.resized")
+                    self.assertEqual(process_input["receipt"]["event_type"], "process.stdin_sent")
+                    self.assertIn("api-pty:from-api", process_logs["log"])
+                    self.assertEqual(process_stop["receipt"]["receipt_schema"], "aegis.process.v1")
                 self.assertEqual(added["hook"]["id"], "api_notify")
                 self.assertEqual(listed["status"], "governed_local_ready")
                 self.assertEqual(listed["hooks"][0]["id"], "api_notify")
                 self.assertEqual(ran["ran_count"], 1)
                 self.assertIn("api hello", ran["results"][0]["stdout"])
+
+                scheduled = _json_post(
+                    port,
+                    "/schedules/script",
+                    {
+                        "name": "API no-agent",
+                        "cron": "@hourly",
+                        "command": ["python3", "-c", "print('api schedule')"],
+                        "context_from": ["@AGENTS.md"],
+                        "delivery_targets": ["slack"],
+                    },
+                    token=token,
+                )
+                listed_schedules = _json_get(port, "/schedules", token=token)["schedules"]
+                self.assertEqual(scheduled["metadata"]["kind"], "no_agent_hook")
+                self.assertEqual(scheduled["metadata"]["context_from"], ["@AGENTS.md"])
+                self.assertEqual(scheduled["metadata"]["delivery_targets"], ["slack"])
+                self.assertFalse(scheduled["metadata"]["raw_command_included"])
+                self.assertTrue(any(row["id"] == scheduled["id"] for row in listed_schedules))
             finally:
                 process.terminate()
                 try:
@@ -220,6 +354,8 @@ class ApiServerSecurityTests(unittest.TestCase):
                 marketplace = _json_get(port, f"/plugins/marketplace?q=test&catalog_path={quote(str(catalog_path))}", token=token)
                 updates = _json_get(port, f"/plugins/updates?catalog_path={quote(str(catalog_path))}", token=token)
                 enabled = _json_post(port, "/plugins/test.plugin/enable", {}, token=token)
+                with self.assertRaises(HTTPError) as invalid_manifest_fetch:
+                    _json_post(port, "/plugins/marketplace/fetch-manifest", {"plugin_id": "test.plugin", "catalog_path": str(catalog_path)}, token=token)
                 with self.assertRaises(HTTPError) as unapproved_update:
                     _json_post(port, "/plugins/marketplace/update", {"plugin_id": "test.plugin", "catalog_path": str(catalog_path)}, token=token)
                 removed = _json_post(port, "/plugins/test.plugin/remove", {}, token=token)
@@ -230,6 +366,7 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(marketplace["entries"][0]["id"], "test.plugin")
                 self.assertEqual(updates["updates"][0]["status"], "update_available")
                 self.assertTrue(enabled["plugin"]["enabled"])
+                self.assertEqual(invalid_manifest_fetch.exception.code, 400)
                 self.assertEqual(unapproved_update.exception.code, 403)
                 self.assertTrue(removed["removed"])
             finally:
@@ -272,6 +409,19 @@ class ApiServerSecurityTests(unittest.TestCase):
                 token = _json_get(port, "/auth")["token"]
                 task = _json_post(port, "/tasks", {"request": "send message hello"}, token=token)
                 inbound = _json_post(port, "/channels/receive", {"channel": "slack", "sender": "slack-u1", "text": "yes proceed"}, token=token)
+                activation_packet = _json_post(port, "/channels/live-activation-packet", {"actor": "api-channel"}, token=token)
+                verified_packet = _json_post(
+                    port,
+                    "/channels/verify-activation-packet",
+                    {"packet": activation_packet["receipt"]["packet_id"], "actor": "api-channel-verifier"},
+                    token=token,
+                )
+                activation_approval = _json_post(
+                    port,
+                    "/channels/activate-packet",
+                    {"packet": activation_packet["receipt"]["packet_id"], "actor": "api-channel-approver", "approved": True},
+                    token=token,
+                )
 
                 resolved = _json_post(
                     port,
@@ -284,6 +434,17 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(resolved["intent"]["action"], "approval_approve")
                 self.assertEqual(resolved["approval"]["status"], "approved")
                 self.assertEqual(resolved["approval"]["decision"]["actor"], "slack-u1")
+                self.assertEqual(activation_packet["receipt"]["receipt_schema"], "aegis.channel.live_activation_packet.v1")
+                self.assertEqual(activation_packet["receipt"]["preflight_status"], "blocked")
+                self.assertFalse(activation_packet["receipt"]["raw_secret_values_included"])
+                self.assertTrue(verified_packet["ok"])
+                self.assertEqual(verified_packet["receipt"]["receipt_schema"], "aegis.channel.live_activation_packet_verification.v1")
+                self.assertTrue(verified_packet["receipt"]["packet_integrity_ok"])
+                self.assertFalse(verified_packet["receipt"]["raw_packet_payload_included"])
+                self.assertEqual(activation_approval["receipt"]["receipt_schema"], "aegis.channel.live_activation_approval.v1")
+                self.assertEqual(activation_approval["status"], "activation_blocked")
+                self.assertEqual(activation_approval["receipt"]["reason"], "preflight_not_ready")
+                self.assertFalse(activation_approval["receipt"]["send_probe_performed"])
             finally:
                 process.terminate()
                 try:
@@ -376,6 +537,9 @@ class ApiServerSecurityTests(unittest.TestCase):
                 with self.assertRaises(HTTPError) as commands_error:
                     _json_get(port, "/commands")
                 self.assertEqual(commands_error.exception.code, 403)
+                with self.assertRaises(HTTPError) as processes_error:
+                    _json_get(port, "/processes")
+                self.assertEqual(processes_error.exception.code, 403)
 
                 token = _json_get(port, "/auth")["token"]
                 remote_status_initial = _json_get(port, "/remote-control/status", token=token)
@@ -529,7 +693,7 @@ class ApiServerSecurityTests(unittest.TestCase):
                         "label": "API smoke phone",
                         "task_id": remote_control_task["id"],
                         "session_id": web_session["id"],
-                        "allowed_actions": ["status", "events", "pause", "cancel"],
+                        "allowed_actions": ["status", "events", "resume", "pause", "cancel"],
                         "expires_in_seconds": 90,
                     },
                     token=token,
@@ -677,11 +841,14 @@ class ApiServerSecurityTests(unittest.TestCase):
                 model_fallbacks = _json_post(port, "/models/fallbacks", {"identifier": "ollama/llama3", "fallbacks": ["lmstudio/local"]}, token=token)
                 model_route_alias = _json_get(port, "/models/route?identifier=webfast", token=token)
                 model_route_fallbacks = _json_get(port, "/models/route?identifier=ollama/llama3", token=token)
+                model_local_no_auth = _json_post(port, "/models/auth/login", {"provider": "ollama", "method": "none"}, token=token)
                 model_subscription_login = _json_post(port, "/models/auth/login", {"provider": "openai", "method": "subscription"}, token=token)
                 model_subscription_login_external = _json_post(port, "/models/auth/login", {"provider": "openai", "method": "subscription", "run_external": True}, token=token)
                 model_oauth_login_external = _json_post(port, "/models/auth/login", {"provider": "github-copilot", "method": "oauth_device", "run_external": True}, token=token)
                 with self.assertRaises(HTTPError) as model_external_api_key_error:
                     _json_post(port, "/models/auth/login", {"provider": "github-copilot", "method": "oauth_device", "api_key": "ghp_secret"}, token=token)
+                with self.assertRaises(HTTPError) as model_none_api_key_error:
+                    _json_post(port, "/models/auth/login", {"provider": "ollama", "method": "none", "api_key": "local-secret"}, token=token)
                 model_auth_login = _json_post(port, "/models/auth/login", {"provider": "openai", "api_key": "sk-api-secret"}, token=token)
                 model_providers_after_login = _json_get(port, "/model-providers", token=token)
                 model_auth_targets = _json_get(port, "/models/auth/targets", token=token)
@@ -740,16 +907,18 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(subagent_autonomy_preflight["receipt"]["receipt_schema"], "aegis.subagent.autonomy_preflight.v1")
                 self.assertEqual(subagent_autonomy_preflight["receipt"]["actor"], "api-reviewer")
                 self.assertFalse(subagent_autonomy_preflight["receipt"]["autonomous_runtime"])
-                self.assertIn("autonomous_loop_isolation", subagent_autonomy_preflight["receipt"]["missing_controls"])
+                self.assertIn("autonomous_loop_isolation", subagent_autonomy_preflight["receipt"]["implemented_controls"])
+                self.assertIn("recursive_model_loop_executor", subagent_autonomy_preflight["receipt"]["missing_controls"])
                 subagent_profile = _json_post(
                     port,
                     "/subagents/profiles",
-                    {"name": "Researcher", "tool_allowlist": ["web_search"], "max_parallel_cards": 2, "max_tool_calls": 4},
+                    {"name": "Researcher", "tool_allowlist": ["web_search"], "max_parallel_cards": 3, "max_tool_calls": 4, "recursive_depth_limit": 1},
                     token=token,
                 )
                 self.assertTrue(subagent_profile["ok"])
                 self.assertEqual(subagent_profile["profile"]["id"], "researcher")
                 self.assertEqual(subagent_profile["profile"]["max_tool_calls"], 4)
+                self.assertEqual(subagent_profile["profile"]["recursive_depth_limit"], 1)
                 listed_profiles = _json_get(port, "/subagents/profiles", token=token)
                 self.assertTrue(any(profile["id"] == "researcher" for profile in listed_profiles["profiles"]))
                 subagent_gated = _json_post(port, "/subagents/delegate", {"role": "Researcher", "task": "Compare provider auth gaps."}, token=token)
@@ -773,6 +942,33 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertTrue(subagent_replayed["subagents"]["cards"][0]["budget_enforced"])
                 self.assertEqual(subagent_replayed["subagents"]["cards"][0]["budget_snapshot"]["max_tool_calls"], 4)
                 self.assertFalse(subagent_replayed["subagents"]["raw_instruction_included"])
+                subagent_child_gated = _json_post(
+                    port,
+                    "/subagents/delegate-child",
+                    {"parent_card_id": subagent_replayed["card_id"], "role": "Researcher", "task": "Review recursive child receipts."},
+                    token=token,
+                )
+                self.assertEqual(subagent_child_gated["status"], "approval_required")
+                self.assertFalse(subagent_child_gated["recursive_model_loop_enabled"])
+                subagent_child = _json_post(
+                    port,
+                    "/subagents/delegate-child",
+                    {"parent_card_id": subagent_replayed["card_id"], "role": "Researcher", "task": "Review recursive child receipts.", "actor": "api-admin", "approved": True},
+                    token=token,
+                )
+                self.assertTrue(subagent_child["ok"])
+                self.assertEqual(subagent_child["receipt"]["receipt_schema"], "aegis.subagent.child_delegation.v1")
+                self.assertEqual(subagent_child["receipt"]["parent_card_id"], subagent_replayed["card_id"])
+                self.assertEqual(subagent_child["receipt"]["child_recursive_depth_remaining"], 0)
+                self.assertEqual(subagent_child["subagents"]["recursive_child_cards"], 1)
+                self.assertIn("review_gated_recursive_child_delegations", subagent_child["subagents"]["implemented_controls"])
+                subagent_child_done = _json_post(
+                    port,
+                    "/subagents/handoff",
+                    {"card_id": subagent_child["card_id"], "lane": "done", "actor": "api-admin", "reason": "child queue check complete"},
+                    token=token,
+                )
+                self.assertTrue(subagent_child_done["ok"])
                 subagent_handoff = _json_post(
                     port,
                     "/subagents/handoff",
@@ -843,6 +1039,62 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertTrue(subagent_verified_packet["receipt"]["packet_integrity_ok"])
                 self.assertFalse(subagent_verified_packet["receipt"]["raw_packet_payload_included"])
                 self.assertNotIn("Compare provider auth gaps", json.dumps(subagent_verified_packet, sort_keys=True))
+                subagent_model_review_gated = _json_post(
+                    port,
+                    "/subagents/model-review",
+                    {"card_id": subagent_replayed["card_id"], "actor": "api-verifier"},
+                    token=token,
+                )
+                self.assertEqual(subagent_model_review_gated["status"], "approval_required")
+                self.assertFalse(subagent_model_review_gated["model_invocation_performed"])
+                self.assertFalse(subagent_model_review_gated["raw_instruction_forwarded_to_model"])
+                self.assertIn("sanitized_model_review_invocations", subagent_model_review_gated["subagents"]["implemented_controls"])
+                self.assertNotIn("Compare provider auth gaps", json.dumps(subagent_model_review_gated, sort_keys=True))
+                subagent_autonomy_step_gated = _json_post(port, "/subagents/autonomy-step", {"card_id": subagent_replayed["card_id"]}, token=token)
+                self.assertEqual(subagent_autonomy_step_gated["status"], "approval_required")
+                self.assertFalse(subagent_autonomy_step_gated["autonomous_runtime"])
+                subagent_autonomy_step_string_approval = _json_post(
+                    port,
+                    "/subagents/autonomy-step",
+                    {"card_id": subagent_replayed["card_id"], "approved": "true"},
+                    token=token,
+                )
+                self.assertEqual(subagent_autonomy_step_string_approval["status"], "approval_required")
+                subagent_autonomy_step = _json_post(
+                    port,
+                    "/subagents/autonomy-step",
+                    {"card_id": subagent_replayed["card_id"], "actor": "api-planner", "approved": True, "max_steps": 2},
+                    token=token,
+                )
+                self.assertTrue(subagent_autonomy_step["ok"])
+                self.assertEqual(subagent_autonomy_step["receipt"]["receipt_schema"], "aegis.subagent.autonomy_step_plan.v1")
+                self.assertEqual(subagent_autonomy_step["receipt"]["actor"], "api-planner")
+                self.assertEqual(subagent_autonomy_step["receipt"]["max_steps"], 2)
+                self.assertEqual(subagent_autonomy_step["receipt"]["tool_call_sandbox"], "deny_all_until_operator_approved")
+                self.assertTrue(subagent_autonomy_step["receipt"]["packet_integrity_ok"])
+                self.assertFalse(subagent_autonomy_step["receipt"]["model_invocation_performed"])
+                self.assertFalse(subagent_autonomy_step["receipt"]["tool_execution_performed"])
+                self.assertIn("scoped_autonomy_step_plans", subagent_autonomy_step["subagents"]["implemented_controls"])
+                self.assertEqual(subagent_autonomy_step["subagents"]["cards"][0]["autonomy_status"], "step_plan_review_required")
+                self.assertNotIn("Compare provider auth gaps", json.dumps(subagent_autonomy_step, sort_keys=True))
+                subagent_autonomy_run_gated = _json_post(port, "/subagents/autonomy-run", {"card_id": subagent_replayed["card_id"]}, token=token)
+                self.assertEqual(subagent_autonomy_run_gated["status"], "approval_required")
+                self.assertFalse(subagent_autonomy_run_gated["autonomous_runtime"])
+                subagent_autonomy_run = _json_post(
+                    port,
+                    "/subagents/autonomy-run",
+                    {"card_id": subagent_replayed["card_id"], "actor": "api-planner", "approved": True, "max_steps": 2},
+                    token=token,
+                )
+                self.assertTrue(subagent_autonomy_run["ok"])
+                self.assertEqual(subagent_autonomy_run["receipt"]["receipt_schema"], "aegis.subagent.autonomy_loop.v1")
+                self.assertTrue(subagent_autonomy_run["receipt"]["autonomous_loop_isolation"])
+                self.assertTrue(subagent_autonomy_run["receipt"]["isolated_loop_process"])
+                self.assertFalse(subagent_autonomy_run["receipt"]["model_invocation_performed"])
+                self.assertFalse(subagent_autonomy_run["receipt"]["tool_execution_performed"])
+                self.assertIn("isolated_autonomy_loop_rehearsals", subagent_autonomy_run["subagents"]["implemented_controls"])
+                self.assertEqual(subagent_autonomy_run["subagents"]["cards"][0]["autonomy_status"], "loop_review_required")
+                self.assertNotIn("Compare provider auth gaps", json.dumps(subagent_autonomy_run, sort_keys=True))
                 subagent_parent_task = _json_get(port, f"/tasks/{task['id']}", token=token)
                 self.assertTrue(subagent_parent_task["checkpoint"]["subagent_review_required"])
                 self.assertIn("subagent_review_complete", {hint["action"] for hint in subagent_parent_task["action_hints"]})
@@ -880,6 +1132,29 @@ class ApiServerSecurityTests(unittest.TestCase):
                 with self.assertRaises(HTTPError) as disabled_email_send:
                     _json_post(port, "/channels/email/send", {"subject": "Review", "text": "Ready for review"}, token=token)
                 mcp_registered = _json_post(port, "/mcp/servers", {"name": "web-mcp", "command": "python3 /tmp/server.py", "allowed_tools": ["echo"]}, token=token)
+                mcp_remote_registered = _json_post(
+                    port,
+                    "/mcp/servers",
+                    {
+                        "name": "web-remote-mcp",
+                        "command": "http://127.0.0.1:1/mcp",
+                        "allowed_tools": ["echo"],
+                        "transport": "streamable-http",
+                    },
+                    token=token,
+                )
+                mcp_oauth = _json_post(
+                    port,
+                    "/mcp/auth/oauth",
+                    {
+                        "server": "web-remote-mcp",
+                        "resource_metadata": "http://127.0.0.1:1/.well-known/oauth-protected-resource?access_token=raw-secret",
+                        "authorization_server": "http://127.0.0.1:1/oauth/authorize?client_secret=raw-secret",
+                        "token_secret": "MCP_OAUTH_TOKEN",
+                        "scopes": ["tools:read", "tools:call"],
+                    },
+                    token=token,
+                )
                 mcp_servers = _json_get(port, "/mcp/servers", token=token)
                 skill_hub_search = _json_get(port, "/skill-hub?q=browser", token=token)
                 installed_skills = _json_get(port, "/skills", token=token)
@@ -1134,8 +1409,80 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(command_catalog["mode"], "read_only_navigation")
                 self.assertFalse(command_catalog["generic_command_execution_enabled"])
                 self.assertIn("debug", command_names)
+                self.assertIn("setup", command_names)
                 self.assertIn("remote-control", command_names)
+                self.assertIn("claude-api", command_names)
+                self.assertIn("fewer-permission-prompts", command_names)
+                self.assertIn("team-onboarding", command_names)
                 self.assertIn("aegis-project-summary", command_names)
+                command_rows = {row["command"]: row for row in command_catalog["commands"]}
+                self.assertEqual(command_rows["remote-control"]["kind"], "remote-control")
+                self.assertIn("status", command_rows["remote-control"]["args"])
+                self.assertIn("directory", command_rows["remote-control"]["args"])
+                self.assertIn("push-targets", command_rows["remote-control"]["args"])
+                self.assertIn("--pairing-id", command_rows["remote-control"]["flags"])
+                self.assertIn("--target-id", command_rows["remote-control"]["flags"])
+                self.assertTrue(command_rows["remote-control"]["requires_local_token"])
+                self.assertFalse(command_rows["remote-control"]["requires_remote_token"])
+                self.assertTrue(command_rows["remote-control"]["mutates"])
+                self.assertIn("pair", command_rows["remote-control"]["args"])
+                self.assertIn("revoke", command_rows["remote-control"]["args"])
+                self.assertIn("relay-outbox", command_rows["remote-control"]["args"])
+                self.assertIn("--label", command_rows["remote-control"]["flags"])
+                remote_actions = {action["input"]: action for action in command_rows["remote-control"]["web_actions"]}
+                self.assertEqual(remote_actions["status"]["path"], "/remote-control/status")
+                self.assertEqual(remote_actions["directory"]["path"], "/remote-control/directory")
+                self.assertEqual(remote_actions["pair"]["path"], "/remote-control/pair")
+                self.assertEqual(remote_actions["revoke"]["path"], "/remote-control/revoke")
+                self.assertEqual(remote_actions["relay-outbox"]["path"], "/remote-control/relay/outbox")
+                self.assertEqual(remote_actions["push-targets"]["path"], "/remote-control/push/targets")
+                self.assertEqual(remote_actions["relay"]["method"], "GET|POST")
+                self.assertEqual(remote_actions["relay-directory"]["path"], "/remote-control/relay/directory")
+                self.assertEqual(remote_actions["relay-notify"]["path"], "/remote-control/relay/notify")
+                self.assertEqual(remote_actions["relay-retry"]["path"], "/remote-control/relay/retry")
+                self.assertEqual(remote_actions["relay-confirm"]["path"], "/remote-control/relay/confirm")
+                self.assertEqual(remote_actions["relay-pull"]["path"], "/remote-control/relay/pull")
+                self.assertEqual(remote_actions["push-register"]["path"], "/remote-control/push/register")
+                self.assertEqual(remote_actions["push-disable"]["path"], "/remote-control/push/disable")
+                self.assertEqual(remote_actions["push-rotate"]["path"], "/remote-control/push/rotate")
+                self.assertEqual(remote_actions["push"]["path"], "/remote-control/push")
+                self.assertFalse(remote_actions["status"]["mutates"])
+                self.assertFalse(remote_actions["push-targets"]["mutates"])
+                self.assertTrue(remote_actions["relay-directory"]["mutates"])
+                self.assertTrue(remote_actions["push-register"]["mutates"])
+                self.assertTrue(remote_actions["pair"]["mutates"])
+                self.assertEqual(command_rows["queue"]["kind"], "queue-control")
+                self.assertEqual(command_rows["q"]["kind"], "queue-control")
+                self.assertIn("submit", command_rows["queue"]["args"])
+                self.assertIn("--status", command_rows["queue"]["flags"])
+                queue_actions = {action["input"]: action for action in command_rows["queue"]["web_actions"]}
+                self.assertEqual(queue_actions["status"]["path"], "/tasks")
+                self.assertEqual(queue_actions["session"]["path_template"], "/sessions/{session_id}/tasks")
+                self.assertEqual(queue_actions["submit"]["path"], "/tasks")
+                self.assertFalse(queue_actions["status"]["mutates"])
+                self.assertTrue(queue_actions["submit"]["mutates"])
+                self.assertIn("fetch-manifest", command_rows["plugins"]["args"])
+                self.assertIn("--catalog-path", command_rows["plugins"]["flags"])
+                self.assertIn("auth", command_rows["models"]["args"])
+                for task_action in ("resume", "pause", "cancel"):
+                    self.assertEqual(command_rows[task_action]["kind"], "task-control")
+                    self.assertIn("task_id", command_rows[task_action]["args"])
+                    self.assertTrue(command_rows[task_action]["requires_local_token"])
+                    self.assertFalse(command_rows[task_action]["requires_remote_token"])
+                    self.assertTrue(command_rows[task_action]["mutates"])
+                    self.assertEqual(command_rows[task_action]["web_actions"][0]["path_template"], f"/tasks/{{task_id}}/{task_action}")
+                self.assertEqual(command_rows["approval"]["kind"], "approval-control")
+                self.assertIn("approval_id", command_rows["approval"]["args"])
+                self.assertFalse(command_rows["approval"]["mutates"])
+                self.assertEqual(command_rows["approval"]["web_actions"][0]["path_template"], "/approvals/{approval_id}")
+                for approval_action in ("approve", "deny"):
+                    self.assertEqual(command_rows[approval_action]["kind"], "approval-control")
+                    self.assertIn("approval_id", command_rows[approval_action]["args"])
+                    self.assertIn("--actor", command_rows[approval_action]["flags"])
+                    self.assertTrue(command_rows[approval_action]["requires_local_token"])
+                    self.assertFalse(command_rows[approval_action]["requires_remote_token"])
+                    self.assertTrue(command_rows[approval_action]["mutates"])
+                    self.assertEqual(command_rows[approval_action]["web_actions"][0]["path_template"], f"/approvals/{{approval_id}}/{approval_action}")
                 self.assertIn("sessions", sessions)
                 self.assertEqual(policy["profile"]["raw_secret_exposure"], "deny")
                 self.assertIn("raw_secret_exposure", policy["immutable_deny"])
@@ -1231,13 +1578,14 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(remote_pair["token_header"], "X-Aegis-Remote-Token")
                 self.assertEqual(remote_pair["pairing"]["status"], "active")
                 self.assertEqual(remote_pair["pairing"]["task_id"], remote_control_task["id"])
-                self.assertEqual(remote_pair["pairing"]["allowed_actions"], ["cancel", "events", "pause", "status"])
+                self.assertEqual(remote_pair["pairing"]["allowed_actions"], ["cancel", "events", "pause", "resume", "status"])
                 self.assertNotIn(remote_token, json.dumps(remote_pair["pairing"], sort_keys=True))
                 self.assertEqual(remote_status_paired["status"], "remote_pairing_active")
                 self.assertEqual(remote_directory["status"], "remote_directory_available")
                 self.assertEqual(remote_directory["scope"]["type"], "task")
                 self.assertEqual(remote_directory["tasks"][0]["id"], remote_control_task["id"])
                 self.assertEqual(remote_directory["tasks"][0]["links"]["status"], f"/remote-control/tasks/{remote_control_task['id']}")
+                self.assertEqual(remote_directory["tasks"][0]["links"]["resume"], f"/remote-control/tasks/{remote_control_task['id']}/resume")
                 self.assertFalse(remote_directory["user_request_included"])
                 self.assertFalse(remote_directory["plan_receipt_included"])
                 self.assertEqual(local_remote_directory["tasks"][0]["id"], remote_control_task["id"])
@@ -1302,6 +1650,11 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(model_fallbacks["fallbacks"], ["lmstudio/local"])
                 self.assertEqual(model_route_alias["identifier"], "ollama/llama3")
                 self.assertEqual(model_route_fallbacks["fallbacks"], ["lmstudio/local"])
+                self.assertEqual(model_local_no_auth["auth"]["provider"], "ollama")
+                self.assertEqual(model_local_no_auth["auth"]["method"], "none")
+                self.assertEqual(model_local_no_auth["auth"]["status"], "no_auth_required")
+                self.assertFalse(model_local_no_auth["auth"]["auth_required"])
+                self.assertTrue(model_local_no_auth["auth"]["auth_configured"])
                 self.assertEqual(model_subscription_login["auth"]["status"], "external_login_required")
                 self.assertEqual(model_subscription_login["auth"]["external_command"], "codex login")
                 self.assertFalse(model_subscription_login["auth"]["token_captured"])
@@ -1313,6 +1666,7 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertFalse(model_oauth_login_external["auth"]["api_run_external_allowed"])
                 self.assertFalse(model_oauth_login_external["auth"]["token_captured"])
                 self.assertEqual(model_external_api_key_error.exception.code, 400)
+                self.assertEqual(model_none_api_key_error.exception.code, 400)
                 self.assertTrue(model_auth_login["auth"]["auth_configured"])
                 self.assertFalse(model_auth_logout["auth"]["auth_configured"])
                 self.assertTrue(any(row["provider"] == "openai" and row["auth_configured"] for row in model_providers_after_login["providers"]))
@@ -1322,16 +1676,24 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(model_auth_targets["implementation_gap_count"], 0)
                 self.assertEqual(model_auth_target_rows["Claude Code subscription"]["status"], "official_cli_bridge_available")
                 self.assertEqual(model_auth_target_rows["Qwen Code Coding Plan subscription"]["status"], "official_cli_bridge_available")
+                self.assertEqual(model_auth_target_rows["Qwen OAuth (discontinued)"]["status"], "provider_discontinued")
+                self.assertEqual(model_auth_target_rows["Qwen OAuth (discontinued)"]["bridge_status"], "provider_discontinued")
+                self.assertIn("Qwen OAuth (discontinued)", model_auth_targets["provider_discontinued_targets"])
+                self.assertNotIn("Qwen OAuth (discontinued)", model_auth_targets["operator_login_required_targets"])
                 self.assertEqual(model_auth_target_rows["Google Gemini OAuth / Code Assist"]["status"], "oauth_device_flow_available")
                 self.assertEqual(model_auth_target_rows["GitHub Copilot"]["status"], "oauth_device_flow_available")
                 self.assertEqual(model_auth_target_rows["DeepSeek"]["status"], "api_key_ready")
                 self.assertEqual(model_auth_doctor["status"], "operator_login_required")
-                self.assertEqual(model_auth_doctor["checked_login_target_count"], 11)
+                self.assertEqual(model_auth_doctor["checked_login_target_count"], 12)
+                self.assertEqual(model_auth_doctor["provider_discontinued_count"], 1)
                 self.assertEqual(model_auth_doctor["implementation_gap_count"], 0)
                 self.assertFalse(model_auth_doctor["raw_secret_values_included"])
                 model_auth_doctor_checks = {row["target"]: row for row in model_auth_doctor["checks"]}
                 self.assertIn("config_required", model_auth_doctor["activation_state_counts"])
+                self.assertEqual(model_auth_doctor["activation_state_counts"]["provider_discontinued"], 1)
                 self.assertTrue("github-copilot" in model_auth_doctor_checks["GitHub Copilot"]["login_command"])
+                self.assertEqual(model_auth_doctor_checks["Qwen OAuth (discontinued)"]["activation_state"], "provider_discontinued")
+                self.assertEqual(model_auth_doctor_checks["Qwen OAuth (discontinued)"]["login_command"], "")
                 self.assertEqual(model_auth_doctor_checks["Google Vertex AI / Gemini cloud identity"]["activation_state"], "config_required")
                 self.assertIn("models.google_vertex_project", model_auth_doctor_checks["Google Vertex AI / Gemini cloud identity"]["activation"]["missing_config"])
                 self.assertTrue(model_auth_packet["ok"])
@@ -1417,6 +1779,10 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertFalse(mcp_registered["enabled"])
                 self.assertTrue(mcp_registered["approval_required"])
                 self.assertEqual(mcp_registered["allowed_tools"], ["echo"])
+                self.assertEqual(mcp_remote_registered["metadata"]["transport"], "streamable_http")
+                self.assertEqual(mcp_oauth["metadata"]["auth"]["type"], "oauth_bearer_token")
+                self.assertEqual(mcp_oauth["metadata"]["oauth"]["requested_scopes"], ["tools:read", "tools:call"])
+                self.assertNotIn("raw-secret", json.dumps(mcp_oauth, sort_keys=True))
                 self.assertTrue(any(server["name"] == "web-mcp" for server in mcp_servers["servers"]))
                 self.assertEqual(skill_hub_search["mode"], "virtual_catalog_no_code_download")
                 self.assertTrue(any(entry["id"] == "hub.browser-research" for entry in skill_hub_search["entries"]))

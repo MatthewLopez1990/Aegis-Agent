@@ -99,6 +99,59 @@ class SkillTests(unittest.TestCase):
             self.assertNotIn("output_schema", row)
             self.assertNotIn("signature", row)
 
+    def test_skill_curator_drafts_verifies_and_installs_disabled_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            observed_task = "Repeated workflow included token=abc123 and should not be persisted raw."
+            orchestrator = build_orchestrator(data_dir=root / ".aegis", workspace=root)
+
+            drafted = orchestrator.skill_curator.draft_candidate(
+                "test.curated_skill",
+                name="Curated Skill",
+                description="Reviewed disabled candidate",
+                observed_task=observed_task,
+                actor="unit-test",
+            )
+
+            self.assertTrue(drafted["ok"])
+            self.assertEqual(drafted["status"], "skill_candidate_drafted")
+            candidate_path = Path(drafted["candidate_path"])
+            self.assertTrue(candidate_path.exists())
+            if os.name == "posix":
+                self.assertEqual(candidate_path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(candidate_path.parent.stat().st_mode & 0o777, 0o700)
+            candidate_text = candidate_path.read_text(encoding="utf-8")
+            self.assertNotIn("token=abc123", candidate_text)
+            candidate_payload = json.loads(candidate_text)
+            self.assertFalse(candidate_payload["observed_task_included"])
+            self.assertFalse(candidate_payload["raw_secret_values_included"])
+            self.assertIn("unapproved_skill_install", candidate_payload["blocked_operations"])
+
+            status = orchestrator.skill_curator.status()
+            self.assertEqual(status["candidate_count"], 1)
+            self.assertEqual(status["candidates"][0]["candidate_id"], drafted["candidate_id"])
+            self.assertFalse(status["candidates"][0]["observed_task_included"])
+
+            verified = orchestrator.skill_curator.verify_candidate(drafted["candidate_id"])
+            self.assertTrue(verified["ok"])
+            self.assertEqual(verified["status"], "skill_candidate_verified")
+            gated = orchestrator.skill_curator.install_candidate(drafted["candidate_id"])
+            self.assertEqual(gated["status"], "approval_required")
+            self.assertFalse(gated["auto_enable"])
+            installed = orchestrator.skill_curator.install_candidate(drafted["candidate_id"], actor="unit-test", approved=True)
+
+            self.assertEqual(installed["status"], "skill_candidate_installed_disabled")
+            manifest, enabled = orchestrator.skills.get("test.curated_skill")
+            self.assertFalse(enabled)
+            self.assertEqual(manifest.source, "curator-draft")
+            self.assertTrue(manifest.approval_required)
+            audit_text = (root / ".aegis" / "audit.jsonl").read_text(encoding="utf-8")
+            self.assertIn("skill.curator_candidate_drafted", audit_text)
+            self.assertIn("skill.curator_candidate_verified", audit_text)
+            self.assertIn("skill.curator_candidate_install_blocked", audit_text)
+            self.assertIn("skill.curator_candidate_installed", audit_text)
+            self.assertNotIn("token=abc123", audit_text)
+
     def test_disable_unknown_skill_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

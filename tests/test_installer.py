@@ -73,7 +73,8 @@ class InstallerTests(unittest.TestCase):
             doctor_result = subprocess.run([str(shim), "--data-dir", str(state_dir), "models", "auth", "doctor"], check=True, text=True, capture_output=True)
             doctor = json.loads(doctor_result.stdout)["auth_doctor"]
             self.assertEqual(doctor["status"], "operator_login_required")
-            self.assertEqual(doctor["checked_login_target_count"], 11)
+            self.assertEqual(doctor["checked_login_target_count"], 12)
+            self.assertEqual(doctor["provider_discontinued_count"], 1)
             self.assertEqual(doctor["implementation_gap_count"], 0)
             self.assertFalse(doctor["raw_secret_values_included"])
             self.assertNotIn("sk-", doctor_result.stdout)

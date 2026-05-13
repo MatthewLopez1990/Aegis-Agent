@@ -130,6 +130,37 @@ class HookManager:
             "results": results,
         }
 
+    def run_hook(
+        self,
+        hook_id: str,
+        *,
+        context: dict[str, Any] | None = None,
+        approved: bool = False,
+        task_id: str | None = None,
+        correlation_id: str | None = None,
+    ) -> dict[str, Any]:
+        hook = self._read_store()["hooks"].get(str(hook_id))
+        if hook is None:
+            raise KeyError(hook_id)
+        if not bool(hook.get("enabled")):
+            result = {
+                "hook_id": hook["id"],
+                "event": hook["event"],
+                "status": "skipped",
+                "reason": "disabled",
+                "approval_required": bool(hook.get("approval_required")),
+                "command": redact(hook["command"]),
+            }
+            self.audit_logger.append("hook.skipped", result, task_id=task_id, correlation_id=correlation_id)
+            return result
+        return self._run_hook(
+            hook,
+            context=context or {},
+            approved=approved,
+            task_id=task_id,
+            correlation_id=correlation_id,
+        )
+
     def _run_hook(
         self,
         hook: dict[str, Any],

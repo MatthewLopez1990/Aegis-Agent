@@ -27,6 +27,7 @@ class WebhookChannelConfig:
     allow_task_submission: bool = False
     outbound_enabled: bool = False
     outbound_url: str | None = None
+    outbound_rate_limit_per_minute: int = 30
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ class EmailChannelConfig:
     password_secret: str | None = None
     from_address: str | None = None
     to_addresses: tuple[str, ...] = ()
+    outbound_rate_limit_per_minute: int = 30
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,7 @@ class ChatWebhookChannelConfig:
     outbound_enabled: bool = False
     url_secret: str | None = None
     payload_format: str = "generic"
+    outbound_rate_limit_per_minute: int = 30
 
 
 @dataclass(frozen=True)
@@ -100,6 +103,11 @@ class AegisConfig:
     live_graph_contact_writes: bool = False
     live_service_desk_writes: bool = False
     live_messaging_writes: bool = False
+    live_browser_reads: bool = False
+    live_browser_mutations: bool = False
+    live_browser_downloads: bool = False
+    live_browser_uploads: bool = False
+    live_browser_javascript: bool = False
     custom_model_base_url: str | None = None
     azure_foundry_base_url: str | None = None
     google_vertex_project: str | None = None
@@ -157,6 +165,11 @@ def load_config(data_dir: str | Path | None = None, config_path: str | Path | No
     live_graph_contact_writes = bool(security.get("live_graph_contact_writes", False))
     live_service_desk_writes = bool(security.get("live_service_desk_writes", False))
     live_messaging_writes = bool(security.get("live_messaging_writes", False))
+    live_browser_reads = bool(security.get("live_browser_reads", False))
+    live_browser_mutations = bool(security.get("live_browser_mutations", False))
+    live_browser_downloads = bool(security.get("live_browser_downloads", False))
+    live_browser_uploads = bool(security.get("live_browser_uploads", False))
+    live_browser_javascript = bool(security.get("live_browser_javascript", False))
     custom_model_base_url = str(models["custom_base_url"]) if models.get("custom_base_url") else None
     azure_foundry_base_url = str(models["azure_foundry_base_url"]) if models.get("azure_foundry_base_url") else None
     google_vertex_project = str(models["google_vertex_project"]) if models.get("google_vertex_project") else None
@@ -192,6 +205,7 @@ def load_config(data_dir: str | Path | None = None, config_path: str | Path | No
         allow_task_submission=bool(webhook.get("allow_task_submission", False)),
         outbound_enabled=bool(webhook.get("outbound_enabled", False)),
         outbound_url=str(webhook["outbound_url"]) if webhook.get("outbound_url") else None,
+        outbound_rate_limit_per_minute=_positive_int(webhook.get("outbound_rate_limit_per_minute", 30), default=30),
     )
     email_config = EmailChannelConfig(
         outbound_enabled=bool(email.get("outbound_enabled", False)),
@@ -202,11 +216,13 @@ def load_config(data_dir: str | Path | None = None, config_path: str | Path | No
         password_secret=str(email["password_secret"]) if email.get("password_secret") else None,
         from_address=str(email["from_address"]) if email.get("from_address") else None,
         to_addresses=_string_tuple(email.get("to_addresses", ()), field_name="channels.email.to_addresses"),
+        outbound_rate_limit_per_minute=_positive_int(email.get("outbound_rate_limit_per_minute", 30), default=30),
     )
     chat_webhook_config = ChatWebhookChannelConfig(
         outbound_enabled=bool(chat_webhook.get("outbound_enabled", False)),
         url_secret=str(chat_webhook["url_secret"]) if chat_webhook.get("url_secret") else None,
         payload_format=str(chat_webhook.get("payload_format", "generic")),
+        outbound_rate_limit_per_minute=_positive_int(chat_webhook.get("outbound_rate_limit_per_minute", 30), default=30),
     )
     policy_profile = PolicyProfile.secure_default(
         read_only=default_read_only,
@@ -239,6 +255,11 @@ def load_config(data_dir: str | Path | None = None, config_path: str | Path | No
         live_graph_contact_writes=live_graph_contact_writes,
         live_service_desk_writes=live_service_desk_writes,
         live_messaging_writes=live_messaging_writes,
+        live_browser_reads=live_browser_reads,
+        live_browser_mutations=live_browser_mutations,
+        live_browser_downloads=live_browser_downloads,
+        live_browser_uploads=live_browser_uploads,
+        live_browser_javascript=live_browser_javascript,
         custom_model_base_url=custom_model_base_url,
         azure_foundry_base_url=azure_foundry_base_url,
         google_vertex_project=google_vertex_project,
@@ -279,6 +300,11 @@ def write_default_config(data_dir: str | Path | None = None) -> Path:
                     "live_graph_contact_writes = false",
                     "live_service_desk_writes = false",
                     "live_messaging_writes = false",
+                    "live_browser_reads = false",
+                    "live_browser_mutations = false",
+                    "live_browser_downloads = false",
+                    "live_browser_uploads = false",
+                    "live_browser_javascript = false",
                     f"allowed_shell_commands = {list(DEFAULT_ALLOWED_SHELL_COMMANDS)!r}",
                     f"network_allowlist = {list(DEFAULT_NETWORK_ALLOWLIST)!r}",
                     "",
@@ -332,10 +358,12 @@ def write_default_config(data_dir: str | Path | None = None) -> Path:
                     "timestamp_tolerance_seconds = 300",
                     "allow_task_submission = false",
                     "outbound_enabled = false",
+                    "outbound_rate_limit_per_minute = 30",
                     "# outbound_url = \"https://example.com/aegis-webhook\"",
                     "",
                     "[channels.email]",
                     "outbound_enabled = false",
+                    "outbound_rate_limit_per_minute = 30",
                     "# smtp_host = \"smtp.example.com\"",
                     "# smtp_port = 587",
                     "# use_tls = true",
@@ -346,6 +374,7 @@ def write_default_config(data_dir: str | Path | None = None) -> Path:
                     "",
                     "[channels.chat_webhook]",
                     "outbound_enabled = false",
+                    "outbound_rate_limit_per_minute = 30",
                     "# url_secret = \"AEGIS_CHAT_WEBHOOK_URL\"",
                     "# payload_format = \"slack\"  # generic, slack, discord, teams",
                     "",

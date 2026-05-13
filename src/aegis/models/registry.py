@@ -193,6 +193,7 @@ class ModelRegistry:
         api_key_ready: list[str] = []
         local_ready: list[str] = []
         verified_external: list[str] = []
+        provider_discontinued: list[str] = []
         for target in MODEL_PROVIDER_AUTH_TARGETS:
             target_row = dict(target)
             provider_name = target.get("aegis_provider")
@@ -245,7 +246,10 @@ class ModelRegistry:
             if provider is None:
                 if handoff_profile is not None:
                     target_row["status"] = target_row["bridge_status"]
-                    login_required.append(str(target["target"]))
+                    if target_row["bridge_status"] == "provider_discontinued":
+                        provider_discontinued.append(str(target["target"]))
+                    else:
+                        login_required.append(str(target["target"]))
                 else:
                     target_row["status"] = "not_started"
                     not_started.append(str(target["target"]))
@@ -281,7 +285,10 @@ class ModelRegistry:
                         login_required.append(str(target["target"]))
                     elif handoff_profile is not None:
                         target_row["status"] = target_row["bridge_status"]
-                        login_required.append(str(target["target"]))
+                        if target_row["bridge_status"] == "provider_discontinued":
+                            provider_discontinued.append(str(target["target"]))
+                        else:
+                            login_required.append(str(target["target"]))
                     else:
                         target_row["status"] = "provider_native_auth_bridge_required"
                         implementation_gaps.append(str(target["target"]))
@@ -304,6 +311,7 @@ class ModelRegistry:
             "api_key_ready_count": len(api_key_ready),
             "local_ready_count": len(local_ready),
             "verified_external_auth_count": len(verified_external),
+            "provider_discontinued_count": len(provider_discontinued),
             "metadata_or_bridge_pending_count": len(login_required),
             "operator_login_required_count": len(login_required),
             "implementation_gap_count": len(implementation_gaps),
@@ -311,6 +319,7 @@ class ModelRegistry:
             "api_key_ready_targets": api_key_ready,
             "local_ready_targets": local_ready,
             "verified_external_auth_targets": verified_external,
+            "provider_discontinued_targets": provider_discontinued,
             "subscription_bridge_targets": login_required,
             "provider_auth_bridge_targets": implementation_gaps,
             "operator_login_required_targets": login_required,
@@ -370,6 +379,7 @@ class ModelRegistry:
             command_available = bool(row.get("external_command_available", False))
             if executable:
                 command_available = shutil.which(str(executable)) is not None
+            provider_discontinued = row.get("status") == "provider_discontinued" or row.get("bridge_status") == "provider_discontinued"
             login_flag = "--subscription" if method == "subscription" else f"--method {method.replace('_', '-')}"
             verified = target in verified_targets or bool(row.get("auth_configured") and row.get("external_auth_configured"))
             activation = self._auth_activation_preflight(row, method=method, verified=verified, command_available=command_available)
@@ -387,20 +397,22 @@ class ModelRegistry:
                 "external_command_argv": command_argv,
                 "external_command_available": command_available,
                 "setup_required": row.get("setup_required"),
-                "login_command": f"PYTHONPATH=src python3 -m aegis.cli.main model auth login {login_name} {login_flag} --run-external",
-                "verify_command": f"PYTHONPATH=src python3 -m aegis.cli.main model auth login {login_name} {login_flag} --verify-external",
+                "login_command": "" if provider_discontinued else f"PYTHONPATH=src python3 -m aegis.cli.main model auth login {login_name} {login_flag} --run-external",
+                "verify_command": "" if provider_discontinued else f"PYTHONPATH=src python3 -m aegis.cli.main model auth login {login_name} {login_flag} --verify-external",
                 "token_captured": False,
                 "raw_secret_values_included": False,
             }
-            if not verified and executable and not command_available:
+            if not provider_discontinued and not verified and executable and not command_available:
                 missing_commands.append(str(executable))
             checks.append(check)
-        pending = [check["target"] for check in checks if not check["verified"]]
+        pending = [check["target"] for check in checks if not check["verified"] and check.get("activation_state") != "provider_discontinued"]
         return {
             "status": "ready" if not pending else "operator_login_required",
             "target_provider_count": targets["target_provider_count"],
             "checked_login_target_count": len(checks),
             "verified_external_auth_count": targets["verified_external_auth_count"],
+            "provider_discontinued_count": targets["provider_discontinued_count"],
+            "provider_discontinued_targets": targets["provider_discontinued_targets"],
             "operator_login_required_count": len(pending),
             "operator_login_required_targets": pending,
             "missing_external_commands": sorted(set(missing_commands)),
@@ -447,6 +459,7 @@ class ModelRegistry:
             "target_provider_count": packet["target_provider_count"],
             "checked_login_target_count": packet["checked_login_target_count"],
             "operator_login_required_count": packet["operator_login_required_count"],
+            "provider_discontinued_count": packet["provider_discontinued_count"],
             "implementation_gap_count": packet["implementation_gap_count"],
             "raw_secret_values_included": False,
             "raw_token_values_included": False,
@@ -516,6 +529,24 @@ class ModelRegistry:
         required_config: list[str] = []
         missing_config: list[str] = []
         configured_config: list[str] = []
+        if row.get("status") == "provider_discontinued" or row.get("bridge_status") == "provider_discontinued":
+            return {
+                "activation_state": "provider_discontinued",
+                "final_ready": False,
+                "required_controls": ["official_provider_login_flow", "local_operator_verification", "no_raw_token_import"],
+                "configured_controls": [*configured_controls, "provider_discontinued"],
+                "required_config": [],
+                "configured_config": [],
+                "missing_config": [],
+                "blockers": [
+                    {
+                        "control": "provider_discontinued",
+                        "detail": "provider discontinued this auth surface; use the documented replacement API-key or subscription path",
+                    }
+                ],
+                "invocation_bridge": row.get("invocation_bridge"),
+                "raw_secret_values_included": False,
+            }
         if command_available or row.get("oauth_device_flow"):
             configured_controls.append("official_login_handoff")
         else:
@@ -805,6 +836,31 @@ class ModelRegistry:
             "external_login_error": None,
             **_handoff_profile_public_fields(profile),
         }
+        if profile.get("aegis_bridge_status") == "provider_discontinued":
+            status.update(
+                {
+                    "status": "provider_discontinued",
+                    "external_login_attempted": False,
+                    "external_login_exit_code": None,
+                    "external_login_error": "provider discontinued this auth surface; use the documented replacement API-key or subscription path",
+                    "token_captured": False,
+                    "token_capture_supported": False,
+                }
+            )
+            self.audit_logger.append(
+                "model.auth_external_login_requested",
+                {
+                    "provider": status["provider"],
+                    "target": status["target"],
+                    "method": status["method"],
+                    "status": status["status"],
+                    "external_command": status.get("external_command"),
+                    "external_login_attempted": False,
+                    "external_login_exit_code": None,
+                    "token_captured": False,
+                },
+            )
+            return status
         if run_external:
             status.update(_run_external_login_command(command_argv, timeout_seconds=timeout_seconds, manual_profile=profile))
         if run_external or verify_external:
@@ -1315,6 +1371,8 @@ def _model_auth_readiness_packet(*, packet_id: str, actor: str, created_at: str,
         "target_provider_count": int(targets.get("target_provider_count") or 0),
         "checked_login_target_count": len(checks),
         "verified_external_auth_count": int(targets.get("verified_external_auth_count") or 0),
+        "provider_discontinued_count": int(targets.get("provider_discontinued_count") or 0),
+        "provider_discontinued_targets": [_model_auth_safe_text(item, limit=120) for item in targets.get("provider_discontinued_targets", [])],
         "operator_login_required_count": int(doctor.get("operator_login_required_count") or 0),
         "operator_login_required_targets": [_model_auth_safe_text(item, limit=120) for item in doctor.get("operator_login_required_targets", [])],
         "missing_external_commands": [_model_auth_safe_text(item, limit=80) for item in doctor.get("missing_external_commands", [])],
@@ -1410,6 +1468,10 @@ def _model_auth_readiness_checks_valid(packet: dict[str, Any], checks: list[Any]
         required_controls = set(str(item) for item in activation.get("required_controls") or [])
         if not {"official_provider_login_flow", "local_operator_verification", "no_raw_token_import"}.issubset(required_controls):
             return False
+        if check.get("activation_state") == "provider_discontinued":
+            if check.get("login_command") or check.get("verify_command"):
+                return False
+            continue
         if check.get("verified") is not True:
             pending += 1
     return packet.get("operator_login_required_count") == pending
@@ -1424,6 +1486,7 @@ def _model_auth_readiness_packet_summary(packet: dict[str, Any]) -> dict[str, An
         "target_provider_count": packet.get("target_provider_count"),
         "checked_login_target_count": packet.get("checked_login_target_count"),
         "verified_external_auth_count": packet.get("verified_external_auth_count"),
+        "provider_discontinued_count": packet.get("provider_discontinued_count"),
         "operator_login_required_count": packet.get("operator_login_required_count"),
         "implementation_gap_count": packet.get("implementation_gap_count"),
         "missing_external_commands": list(packet.get("missing_external_commands") or []),
@@ -2081,6 +2144,13 @@ MODEL_PROVIDER_AUTH_TARGETS: tuple[dict[str, Any], ...] = (
         "external_command": "qwen auth coding-plan",
         "external_login_instruction": "/auth",
         "account_surface": "Alibaba Cloud Coding Plan / Qwen Code",
+    },
+    {
+        "target": "Qwen OAuth (discontinued)",
+        "platforms": ("Hermes Agent",),
+        "aegis_provider": "qwen",
+        "required_auth": ("oauth",),
+        "account_surface": "Qwen Code / Alibaba Cloud Coding Plan",
     },
     {
         "target": "StepFun Step Plan",

@@ -33,10 +33,18 @@ class WebGuiBrowserSmokeTests(unittest.TestCase):
         self.assertIn('id="model-auth-doctor-run"', markup)
         self.assertIn('id="model-auth-readiness-packet"', markup)
         self.assertIn('id="model-auth-output"', markup)
+        self.assertIn('value="none"', markup)
         self.assertIn('value="oauth_device"', markup)
+        self.assertIn('value="ollama"', markup)
+        self.assertIn('value="lmstudio"', markup)
         self.assertIn('value="github-copilot"', markup)
         self.assertIn('value="google-gemini-oauth"', markup)
         self.assertIn('id="subagent-form"', markup)
+        self.assertIn('id="process-form"', markup)
+        self.assertIn('id="process-input-form"', markup)
+        self.assertIn('id="process-pty"', markup)
+        self.assertIn('id="processes"', markup)
+        self.assertIn('id="process-output"', markup)
         self.assertIn('id="subagent-role"', markup)
         self.assertIn('id="subagent-task"', markup)
         self.assertIn('id="subagent-summary"', markup)
@@ -63,6 +71,11 @@ class WebGuiBrowserSmokeTests(unittest.TestCase):
         self.assertIn("data-model-auth-verify-readiness-packet", app_js)
         self.assertIn("activation_state", app_js)
         self.assertIn("missing_config", app_js)
+        self.assertIn("const syncModelProviderOptions = (providerRows = [], authTargets = [])", app_js)
+        self.assertIn("syncModelProviderOptions(modelProviders.providers || [], modelAuthTargets.targets || dashboard.model_provider_auth_parity?.targets || [])", app_js)
+        self.assertIn('const localNoAuthModelProviders = new Set(["ollama", "lmstudio"])', app_js)
+        self.assertIn('document.getElementById("model-provider").addEventListener("change", syncModelAuthMethodForProvider)', app_js)
+        self.assertIn('if (method === "none")', app_js)
         self.assertIn('if (method === "api_key")', app_js)
         self.assertIn("payload.verify_external", app_js)
         self.assertIn("payload.run_external", app_js)
@@ -74,7 +87,17 @@ class WebGuiBrowserSmokeTests(unittest.TestCase):
         self.assertIn('api("/subagents/run-batch"', app_js)
         self.assertIn('api("/subagents/review-packet"', app_js)
         self.assertIn('api("/subagents/verify-packet"', app_js)
+        self.assertIn('api("/subagents/model-review"', app_js)
+        self.assertIn('api("/subagents/autonomy-step"', app_js)
+        self.assertIn('api("/subagents/autonomy-run"', app_js)
         self.assertIn('api("/subagents/autonomy-preflight?limit=12&actor=web-operator"', app_js)
+        self.assertIn('api("/processes")', app_js)
+        self.assertIn('api("/processes/start"', app_js)
+        self.assertIn('/processes/${encodeURIComponent(processId)}/input', app_js)
+        self.assertIn('/processes/${encodeURIComponent(processId)}/resize', app_js)
+        self.assertIn('data-process-select', app_js)
+        self.assertIn('data-process-stop', app_js)
+        self.assertIn('data-process-logs', app_js)
         self.assertIn('id="subagent-autonomy-preflight"', markup)
         self.assertIn('id="subagent-run-batch"', markup)
         self.assertIn("payload.enabled_profile_count", app_js)
@@ -88,8 +111,15 @@ class WebGuiBrowserSmokeTests(unittest.TestCase):
         self.assertIn('data-subagent-run', app_js)
         self.assertIn('data-subagent-review-packet', app_js)
         self.assertIn('data-subagent-verify-packet', app_js)
+        self.assertIn('data-subagent-model-review', app_js)
+        self.assertIn('data-subagent-autonomy-step', app_js)
+        self.assertIn('data-subagent-autonomy-run', app_js)
         self.assertIn("card.subagent_runs_recorded", app_js)
         self.assertIn("card.review_packets_recorded", app_js)
+        self.assertIn("card.model_reviews_recorded", app_js)
+        self.assertIn("card.autonomy_step_plans_recorded", app_js)
+        self.assertIn("card.autonomy_loop_runs_recorded", app_js)
+        self.assertIn("scoped_autonomy_step_plans", app_js)
         self.assertIn("card.model_ready_review_packet", app_js)
         self.assertIn('setList("subagent-cards"', app_js)
         self.assertIn('name: "subagent_delegate"', app_js)
@@ -160,6 +190,17 @@ if (!node.innerHTML.includes("Web requests never execute interactive provider lo
 }
 renderModelAuthOutput({
   auth: {
+    provider: "ollama",
+    method: "none",
+    status: "no_auth_required",
+    auth_required: false,
+  },
+});
+if (!node.innerHTML.includes("No auth / local") || !node.innerHTML.includes("does not require a stored API key")) {
+  throw new Error(`local no-auth summary missing: ${node.innerHTML}`);
+}
+renderModelAuthOutput({
+  auth: {
     provider: "openai",
     method: "subscription",
     status: "external_login_requires_local_terminal",
@@ -226,9 +267,14 @@ if (frames.length !== 2 || frames[1].event !== "task" || frames[1].data.status !
         self.assertIn('api("/commands")', script)
         self.assertIn("mergeWebSlashCommands", script)
         self.assertIn("privacy-settings", script)
+        self.assertIn('"setup"', script)
         self.assertIn("setup-bedrock", script)
         self.assertIn("setup-vertex", script)
         self.assertIn("autofix-pr", script)
+        self.assertIn("claude-api", script)
+        self.assertIn("fewer-permission-prompts", script)
+        self.assertIn("install-github-app", script)
+        self.assertIn("team-onboarding", script)
         self.assertIn("ultraplan", script)
         self.assertIn("ultrareview", script)
         self.assertIn("release-notes", script)
@@ -240,7 +286,7 @@ if (frames.length !== 2 || frames[1].event !== "task" || frames[1].data.status !
         self.assertIn("const selectedTaskId = () =>", script)
         self.assertIn("const slashTaskId = (parsed)", script)
         self.assertIn('parsed.kind === "task-inspection"', script)
-        self.assertIn("slashCommandMatches(prefix).slice(0, 8)", script)
+        self.assertIn("slashPaletteMatches(value).slice(0, 8)", script)
         self.assertIn('document.getElementById("slash-palette").addEventListener("click"', script)
         self.assertIn('document.getElementById("task-form").requestSubmit()', script)
         self.assertIn('const request = (parsed.kind === "submit" ? parsed.request : input.value).trim()', script)
@@ -260,13 +306,13 @@ if (catalogStart < 0 || catalogEnd < 0 || helperStart < 0 || helperEnd < 0) {
   throw new Error("slash palette helpers not found");
 }
 const api = {};
-eval(`${source.slice(catalogStart, catalogEnd)}\n${source.slice(helperStart, helperEnd)}\napi.matches = slashCommandMatches;\napi.parse = parseTaskSlashCommand;\napi.merge = mergeWebSlashCommands;\napi.commands = () => webSlashCommands;`);
+eval(`${source.slice(catalogStart, catalogEnd)}\n${source.slice(helperStart, helperEnd)}\napi.matches = slashCommandMatches;\napi.context = slashPaletteMatches;\napi.parse = parseTaskSlashCommand;\napi.merge = mergeWebSlashCommands;\napi.commands = () => webSlashCommands;`);
 const su = api.matches("su").map((entry) => entry.command);
 if (su[0] !== "submit" || !su.includes("resume") || su.includes("settings")) {
   throw new Error(`/su fuzzy matches are wrong: ${JSON.stringify(su)}`);
 }
 const parsed = api.parse("/q inspect the failing test");
-if (parsed.kind !== "submit" || parsed.command !== "background" || parsed.request !== "inspect the failing test") {
+if (parsed.kind !== "queue-control" || parsed.command !== "queue" || parsed.request !== "inspect the failing test") {
   throw new Error(`queue alias parsed incorrectly: ${JSON.stringify(parsed)}`);
 }
 const nav = api.parse("/models");
@@ -276,6 +322,26 @@ if (nav.kind !== "section" || nav.section !== "models") {
 const status = api.parse("/status task-123");
 if (status.kind !== "task-inspection" || status.taskView !== "status" || status.request !== "task-123") {
   throw new Error(`status task command parsed incorrectly: ${JSON.stringify(status)}`);
+}
+const pause = api.parse("/pause task-456");
+if (pause.kind !== "task-control" || pause.taskAction !== "pause" || pause.request !== "task-456") {
+  throw new Error(`pause task command parsed incorrectly: ${JSON.stringify(pause)}`);
+}
+const stop = api.parse("/stop task-789");
+if (stop.kind !== "task-control" || stop.command !== "cancel" || stop.taskAction !== "cancel") {
+  throw new Error(`stop alias did not resolve to cancel: ${JSON.stringify(stop)}`);
+}
+const approval = api.parse("/approval approval-123");
+if (approval.kind !== "approval-control" || approval.approvalAction !== "review" || approval.request !== "approval-123") {
+  throw new Error(`approval command parsed incorrectly: ${JSON.stringify(approval)}`);
+}
+const approve = api.parse("/approve approval-123");
+if (approve.kind !== "approval-control" || approve.approvalAction !== "approve" || approve.request !== "approval-123") {
+  throw new Error(`approve command parsed incorrectly: ${JSON.stringify(approve)}`);
+}
+const deny = api.parse("/deny approval-123");
+if (deny.kind !== "approval-control" || deny.approvalAction !== "deny" || deny.request !== "approval-123") {
+  throw new Error(`deny command parsed incorrectly: ${JSON.stringify(deny)}`);
 }
 const events = api.matches("ev").map((entry) => entry.command);
 if (!events.includes("events")) {
@@ -294,8 +360,16 @@ if (!privacy.includes("approvals")) {
   throw new Error(`/privacy-settings alias did not resolve to approvals: ${JSON.stringify(privacy)}`);
 }
 const setup = api.matches("setup").map((entry) => entry.command);
-if (!setup.includes("models")) {
-  throw new Error(`/setup-* aliases did not resolve to models: ${JSON.stringify(setup)}`);
+if (!setup.includes("settings") || !setup.includes("models")) {
+  throw new Error(`/setup aliases did not resolve to settings and model setup: ${JSON.stringify(setup)}`);
+}
+const claudeApi = api.matches("claude").map((entry) => entry.command);
+if (!claudeApi.includes("commands")) {
+  throw new Error(`/claude-api alias did not resolve to commands: ${JSON.stringify(claudeApi)}`);
+}
+const mobile = api.matches("ios").map((entry) => entry.command);
+if (!mobile.includes("remote-control")) {
+  throw new Error(`/ios alias did not resolve to remote control: ${JSON.stringify(mobile)}`);
 }
 const chrome = api.matches("chrome").map((entry) => entry.command);
 if (!chrome.includes("browser")) {
@@ -312,6 +386,10 @@ if (!release.includes("settings")) {
 api.merge([
   { command: "debug", label: "/debug", detail: "TUI diagnostics", kind: "palette", source: "tui" },
   { command: "submit", label: "/submit duplicate", detail: "duplicate should be ignored", kind: "palette" },
+  { command: "remote-control", label: "/remote-control", detail: "Remote action metadata", kind: "remote-control", section: "automation", source: "tui", surfaces: ["tui", "web_palette"], args: ["status", "directory", "pair", "revoke", "relay-outbox", "push-targets"], flags: ["--pairing-id", "--limit", "--label", "--target-id"], requires_local_token: true, requires_remote_token: false, mutates: true, web_actions: [{ input: "status", method: "GET", path: "/remote-control/status", mutates: false }, { input: "push-targets", method: "GET", path: "/remote-control/push/targets", mutates: false }, { input: "pair", method: "POST", path: "/remote-control/pair", mutates: true }] },
+  { command: "q", label: "/queue|/q [status|all|session|submit]", detail: "Queue control metadata", kind: "queue-control", section: "activity", source: "tui", surfaces: ["tui", "web_palette", "web_action"], args: ["status", "all", "session", "submit", "request"], flags: ["--limit", "--status"], requires_local_token: true, mutates: true, web_actions: [{ input: "status", method: "GET", path: "/tasks", mutates: false }, { input: "submit", method: "POST", path: "/tasks", mutates: true }] },
+  { command: "pause", label: "/pause [task_id]", detail: "Pause task metadata", kind: "task-control", section: "activity", source: "tui", args: ["task_id"], requires_local_token: true, mutates: true, web_actions: [{ input: "pause", method: "POST", path_template: "/tasks/{task_id}/pause", mutates: true }] },
+  { command: "approve", label: "/approve <approval_id>", detail: "Approve metadata", kind: "approval-control", section: "security", source: "tui", args: ["approval_id"], flags: ["--actor", "--reason", "--admin"], requires_local_token: true, mutates: true, web_actions: [{ input: "approve", method: "POST", path_template: "/approvals/{approval_id}/approve", mutates: true }] },
   { command: "aegis-project-summary", label: "/aegis-project-summary", detail: "Skill command", kind: "palette", source: "skill" },
 ]);
 const debug = api.parse("/debug");
@@ -321,6 +399,42 @@ if (debug.kind !== "palette" || debug.command !== "debug") {
 const skill = api.matches("aegis-project").map((entry) => entry.command);
 if (!skill.includes("aegis-project-summary")) {
   throw new Error(`dynamic skill slash command missing: ${JSON.stringify(skill)}`);
+}
+const remote = api.parse("/remote-control status");
+if (remote.kind !== "remote-control" || remote.request !== "status" || !remote.webActions.length || !remote.args.includes("directory") || !remote.args.includes("pair")) {
+  throw new Error(`/remote-control metadata did not merge: ${JSON.stringify(remote)}`);
+}
+const queue = api.parse("/q submit review the next slice");
+if (queue.kind !== "queue-control" || queue.command !== "queue" || !queue.webActions.length || !queue.args.includes("submit") || !queue.flags.includes("--status")) {
+  throw new Error(`/queue metadata did not merge: ${JSON.stringify(queue)}`);
+}
+const remoteArgs = api.context("/remote-control sta").map((entry) => entry.completionValue);
+if (!remoteArgs.includes("status")) {
+  throw new Error(`/remote-control subcommand completion missing: ${JSON.stringify(remoteArgs)}`);
+}
+const remoteBlankArgs = api.context("/remote-control ").map((entry) => entry.completionValue);
+if (!remoteBlankArgs.includes("status") || !remoteBlankArgs.includes("directory")) {
+  throw new Error(`/remote-control blank subcommand completion missing: ${JSON.stringify(remoteBlankArgs)}`);
+}
+const remotePushArgs = api.context("/remote-control pu").map((entry) => entry.completionValue);
+if (!remotePushArgs.includes("push-targets")) {
+  throw new Error(`/remote-control push-targets completion missing: ${JSON.stringify(remotePushArgs)}`);
+}
+const remoteFlags = api.context("/remote-control directory --pa").map((entry) => entry.completionValue);
+if (!remoteFlags.includes("--pairing-id")) {
+  throw new Error(`/remote-control flag completion missing: ${JSON.stringify(remoteFlags)}`);
+}
+const queueArgs = api.context("/queue sub").map((entry) => entry.completionValue);
+if (!queueArgs.includes("submit")) {
+  throw new Error(`/queue subcommand completion missing: ${JSON.stringify(queueArgs)}`);
+}
+const mergedPause = api.parse("/pause task-101");
+if (!mergedPause.webActions.length || mergedPause.mutates !== true || !mergedPause.args.includes("task_id")) {
+  throw new Error(`/pause metadata did not merge: ${JSON.stringify(mergedPause)}`);
+}
+const mergedApprove = api.parse("/approve approval-101");
+if (!mergedApprove.webActions.length || mergedApprove.mutates !== true || !mergedApprove.flags.includes("--admin")) {
+  throw new Error(`/approve metadata did not merge: ${JSON.stringify(mergedApprove)}`);
 }
 const submitCount = api.commands().filter((entry) => entry.command === "submit").length;
 if (submitCount !== 1) {
@@ -345,7 +459,7 @@ if (start < 0 || end < 0) {
   throw new Error("task inspection slash dispatcher not found");
 }
 const calls = [];
-const state = { lastTask: { id: "latest-task" }, activeSection: "security" };
+const state = { lastTask: { id: "latest-task" }, activeSection: "security", activeSessionId: "session-active", taskScope: "session", inspectedTaskSessionId: null };
 const applySectionVisibility = () => calls.push(["section", state.activeSection]);
 const loadTaskStatus = async (taskId) => calls.push(["status", taskId, state.activeSection]);
 const loadTaskEvents = async (taskId) => calls.push(["events", taskId, state.activeSection]);
@@ -354,22 +468,218 @@ const loadTaskEvidence = async (taskId) => calls.push(["evidence", taskId, state
 const renderTaskNotice = (title, detail) => calls.push(["notice", title, detail, state.activeSection]);
 const renderTaskError = (message) => calls.push(["error", message]);
 const resumeTask = async (taskId) => calls.push(["resume", taskId]);
+const pauseTask = async (taskId) => calls.push(["pause", taskId]);
+const cancelTask = async (taskId) => calls.push(["cancel", taskId]);
+const loadApprovalDetail = async (approvalId) => calls.push(["approval-detail", approvalId, state.activeSection]);
+const approvalDecisionPayload = () => ({ actor: "web-test", reason: "reviewed", admin: true });
+const refresh = async () => calls.push(["refresh"]);
+const renderTaskResult = (task) => calls.push(["task-result", task.id]);
+const shortId = (value) => String(value || "").slice(0, 8);
+const elements = {
+  "task-path": { value: "/workspace" },
+  "remote-control-actions": { value: "status,events,resume" },
+  "remote-control-ttl": { value: "600" },
+  "remote-control-label": { value: "web pairing" },
+  "remote-control-session-id": { value: "" },
+  "remote-control-task-id": { value: "" },
+  "remote-control-relay-outbox-id": { value: "" },
+  "remote-control-relay-pairing-id": { value: "pair-form" },
+  "remote-control-relay-url": { value: "" },
+  "remote-control-relay-secret": { value: "" },
+  "remote-control-relay-event": { value: "directory-updated" },
+  "remote-control-relay-task-id": { value: "" },
+  "remote-control-relay-approved": { checked: false },
+  "remote-control-relay-dry-run": { checked: false },
+  "remote-control-push-target-id": { value: "" },
+  "remote-control-push-label": { value: "native push" },
+  "remote-control-push-provider": { value: "fcm" },
+  "remote-control-push-secret": { value: "" },
+  "remote-control-device-secret": { value: "" },
+  "remote-control-push-approved": { checked: false },
+  "remote-control-apns-topic": { value: "" },
+  "remote-control-fcm-project": { value: "" },
+};
+const document = {
+  getElementById(id) {
+    if (elements[id]) return elements[id];
+    return { replaceChildren() { calls.push(["replace-children", id]); } };
+  },
+};
+const renderRemoteControlOutput = (payload) => calls.push(["remote-output", payload.status || payload.pairing?.id || "payload"]);
+const renderRemoteControlRelay = (payload) => calls.push(["remote-relay", payload.status || "payload"]);
+const renderRemoteControlOutbox = (payload) => calls.push(["remote-outbox", payload.status || "payload"]);
+const renderRemoteControlPushTargets = (payload) => calls.push(["remote-push-targets", payload.status || "payload"]);
+const renderRemoteControlRelayPull = (payload) => calls.push(["remote-relay-pull", payload.status || "payload"]);
+const api = async (path, options = {}) => {
+  calls.push(["api", path, options.method || "GET", options.body || ""]);
+  if (path === "/tasks" && options.method === "POST") return { id: "task-new-123", status: "planned" };
+  if (path === "/remote-control/pair" && options.method === "POST") return { pairing: { id: "pair-new" }, outbox_id: "outbox-new" };
+  if (path === "/remote-control/revoke" && options.method === "POST") return { status: "remote_pairing_revoked" };
+  if (path === "/remote-control/relay" && options.method === "POST") return { status: "relay_registered" };
+  if (path === "/remote-control/relay/directory" && options.method === "POST") return { status: "relay_directory_published" };
+  if (path === "/remote-control/relay/notify" && options.method === "POST") return { status: "relay_notification_published" };
+  if (path === "/remote-control/relay/retry" && options.method === "POST") return { status: "relay_retry" };
+  if (path === "/remote-control/relay/confirm" && options.method === "POST") return { status: "relay_confirmed" };
+  if (path === "/remote-control/relay/pull" && options.method === "POST") return { status: "relay_action_preview" };
+  if (path === "/remote-control/push/register" && options.method === "POST") return { status: "native_push_target_registered" };
+  if (path === "/remote-control/push/disable" && options.method === "POST") return { status: "native_push_target_disabled" };
+  if (path === "/remote-control/push/rotate" && options.method === "POST") return { status: "native_push_target_rotated" };
+  if (path === "/remote-control/push" && options.method === "POST") return { status: "native_push_published" };
+  if (path.startsWith("/remote-control/push/targets")) return { status: "native_push_target", target: { id: "push-1" } };
+  if (path.startsWith("/remote-control/relay/outbox")) return { status: "relay_outbox" };
+  if (path.startsWith("/remote-control/relay?")) return { status: "relay_preflight" };
+  return { status: path.includes("/directory") ? "scoped_directory" : "remote_control_status" };
+};
 eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = executeLocalSlashCommand;`);
 (async () => {
+  await executeLocalSlashCommand({ kind: "approval-control", command: "approval", approvalAction: "review", label: "/approval", request: "approval-1" });
+  await executeLocalSlashCommand({ kind: "approval-control", command: "approve", approvalAction: "approve", request: "approval-2" });
+  await executeLocalSlashCommand({ kind: "approval-control", command: "deny", approvalAction: "deny", request: "approval-3" });
   await executeLocalSlashCommand({ kind: "task-inspection", command: "status", taskView: "status", request: "task-1" });
+  await executeLocalSlashCommand({ kind: "task-control", command: "resume", taskAction: "resume", request: "task-2" });
+  await executeLocalSlashCommand({ kind: "task-control", command: "pause", taskAction: "pause", request: "" });
+  await executeLocalSlashCommand({ kind: "task-control", command: "cancel", taskAction: "cancel", request: "task-5" });
   await executeLocalSlashCommand({ kind: "task-inspection", command: "events", taskView: "events", request: "" });
   await executeLocalSlashCommand({ kind: "task-inspection", command: "timeline", taskView: "timeline", request: "task-3 extra" });
   await executeLocalSlashCommand({ kind: "task-inspection", command: "evidence", taskView: "evidence", request: "task-4" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "status" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "directory --pairing-id pair-1 --limit 3" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay --relay-url https://relay.example/aegis" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay --relay-url https://relay.example/aegis --pairing-id pair-1 --relay-auth-secret RELAY_SECRET --approved" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay-outbox --status pending --limit 2" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay-directory --pairing-id pair-1 --relay-auth-secret RELAY_SECRET --approved --limit 4" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay-notify --pairing-id pair-1 --relay-auth-secret RELAY_SECRET --approved --event task-updated --task-id task-8" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay-retry --pairing-id pair-1 --relay-auth-secret RELAY_SECRET --approved --limit 5" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay-confirm --pairing-id pair-1 --relay-auth-secret RELAY_SECRET --approved --outbox-id outbox-1" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay-pull --pairing-id pair-1 --relay-auth-secret RELAY_SECRET --approved --dry-run --limit 6" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "push-targets --target-id push-1" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "push-register --label phone --provider fcm --push-auth-secret PUSH_SECRET --device-token-secret DEVICE_SECRET --approved --fcm-project-id aegis-project" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "push-rotate --target-id push-1 --push-auth-secret PUSH_SECRET_2 --device-token-secret DEVICE_SECRET_2 --approved --fcm-project-id aegis-project-2" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "push-disable --target-id push-1 --approved" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "push --pairing-id pair-1 --target-id push-1 --approved --event task-updated --task-id task-8" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "pair --label phone --session-id session-2 --task-id task-9 --allowed-actions status,events --expires-in-seconds 120" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "revoke pair-1" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", detail: "Open remote control", request: "" });
+  await executeLocalSlashCommand({ kind: "queue-control", command: "queue", label: "/queue", section: "activity", request: "all" });
+  await executeLocalSlashCommand({ kind: "queue-control", command: "queue", label: "/queue", section: "activity", request: "submit inspect queue" });
   state.lastTask = null;
   state.lastEvents = null;
   state.lastEvidence = null;
   await executeLocalSlashCommand({ kind: "task-inspection", command: "status", label: "/status [task_id]", taskView: "status", request: "" });
   const expected = [
+    ["section", "security"],
+    ["approval-detail", "approval-1", "security"],
+    ["notice", "/approval", "Approval approval-1 loaded.", "security"],
+    ["section", "security"],
+    ["api", "/approvals/approval-2/approve", "POST", JSON.stringify({ actor: "web-test", reason: "reviewed", admin: true })],
+    ["replace-children", "approval-detail"],
+    ["refresh"],
+    ["notice", "/approve", "Approval approval-2 approved.", "security"],
+    ["section", "security"],
+    ["api", "/approvals/approval-3/deny", "POST", JSON.stringify({ actor: "web-test", reason: "reviewed", admin: true })],
+    ["replace-children", "approval-detail"],
+    ["refresh"],
+    ["notice", "/deny", "Approval approval-3 denied.", "security"],
     ["section", "activity"],
     ["status", "task-1", "activity"],
+    ["resume", "task-2"],
+    ["pause", "latest-task"],
+    ["cancel", "task-5"],
     ["events", "latest-task", "activity"],
     ["timeline", "task-3", "activity"],
     ["evidence", "task-4", "activity"],
+    ["section", "automation"],
+    ["api", "/remote-control/status", "GET", ""],
+    ["remote-output", "remote_control_status"],
+    ["notice", "/remote-control", "Remote control status loaded.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/directory?pairing_id=pair-1&limit=3", "GET", ""],
+    ["remote-output", "scoped_directory"],
+    ["notice", "/remote-control", "Remote control directory loaded.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/relay?relay_url=https%3A%2F%2Frelay.example%2Faegis", "GET", ""],
+    ["remote-relay", "relay_preflight"],
+    ["remote-output", "relay_preflight"],
+    ["notice", "/remote-control", "Remote control relay loaded.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/relay", "POST", JSON.stringify({ pairing_id: "pair-1", relay_auth_secret: "RELAY_SECRET", approved: true, relay_url: "https://relay.example/aegis" })],
+    ["remote-output", "relay_registered"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control relay executed.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/relay/outbox?status=pending&limit=2", "GET", ""],
+    ["remote-outbox", "relay_outbox"],
+    ["remote-output", "relay_outbox"],
+    ["notice", "/remote-control", "Remote control relay-outbox loaded.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/relay/directory", "POST", JSON.stringify({ pairing_id: "pair-1", relay_auth_secret: "RELAY_SECRET", approved: true, limit: 4 })],
+    ["remote-output", "relay_directory_published"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control relay-directory executed.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/relay/notify", "POST", JSON.stringify({ pairing_id: "pair-1", relay_auth_secret: "RELAY_SECRET", approved: true, event: "task-updated", task_id: "task-8" })],
+    ["remote-output", "relay_notification_published"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control relay-notify executed.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/relay/retry", "POST", JSON.stringify({ pairing_id: "pair-1", relay_auth_secret: "RELAY_SECRET", approved: true, limit: 5 })],
+    ["remote-output", "relay_retry"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control relay-retry executed.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/relay/confirm", "POST", JSON.stringify({ pairing_id: "pair-1", relay_auth_secret: "RELAY_SECRET", approved: true, outbox_id: "outbox-1" })],
+    ["remote-output", "relay_confirmed"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control relay-confirm executed.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/relay/pull", "POST", JSON.stringify({ pairing_id: "pair-1", relay_auth_secret: "RELAY_SECRET", approved: true, dry_run: true, limit: 6 })],
+    ["refresh"],
+    ["remote-relay-pull", "relay_action_preview"],
+    ["notice", "/remote-control", "Remote control relay-pull executed.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/push/targets?target_id=push-1", "GET", ""],
+    ["remote-push-targets", "native_push_target"],
+    ["remote-output", "native_push_target"],
+    ["notice", "/remote-control", "Remote control push-targets loaded.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/push/register", "POST", JSON.stringify({ label: "phone", provider: "fcm", push_auth_secret: "PUSH_SECRET", device_token_secret: "DEVICE_SECRET", approved: true, fcm_project_id: "aegis-project" })],
+    ["remote-output", "native_push_target_registered"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control push-register executed.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/push/rotate", "POST", JSON.stringify({ target_id: "push-1", push_auth_secret: "PUSH_SECRET_2", device_token_secret: "DEVICE_SECRET_2", approved: true, fcm_project_id: "aegis-project-2" })],
+    ["remote-output", "native_push_target_rotated"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control push-rotate executed.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/push/disable", "POST", JSON.stringify({ target_id: "push-1", approved: true })],
+    ["remote-output", "native_push_target_disabled"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control push-disable executed.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/push", "POST", JSON.stringify({ pairing_id: "pair-1", target_id: "push-1", approved: true, event: "task-updated", task_id: "task-8" })],
+    ["remote-output", "native_push_published"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control push executed.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/pair", "POST", JSON.stringify({ label: "phone", session_id: "session-2", task_id: "task-9", allowed_actions: ["status", "events"], expires_in_seconds: 120 })],
+    ["remote-output", "pair-new"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control pair created.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/revoke", "POST", JSON.stringify({ pairing_id: "pair-1", approved: false })],
+    ["remote-output", "remote_pairing_revoked"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control pairing pair-1 revoked.", "automation"],
+    ["section", "automation"],
+    ["notice", "/remote-control", "Open remote control", "automation"],
+    ["section", "activity"],
+    ["refresh"],
+    ["notice", "/queue", "All-session task queue loaded.", "activity"],
+    ["api", "/tasks", "POST", JSON.stringify({ request: "inspect queue", path: "/workspace", session_id: "session-active" })],
+    ["task-result", "task-new-123"],
+    ["refresh"],
+    ["notice", "/queue", "Queued task task-new.", "activity"],
     ["section", "activity"],
     ["notice", "/status [task_id]", "Open a task or include a task id, then run this command again.", "activity"],
   ];
@@ -808,11 +1118,17 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn('id="tool-run-presets"', markup)
         self.assertIn('id="mcp-server-transport"', markup)
         self.assertIn('id="mcp-server-token-secret"', markup)
+        self.assertIn('id="mcp-oauth-form"', markup)
+        self.assertIn('id="mcp-oauth-resource"', markup)
+        self.assertIn('id="mcp-oauth-token-secret"', markup)
         self.assertIn('value="streamable-http"', markup)
         self.assertIn("TOOL_RUN_PRESETS", script)
         self.assertIn('name: "message_send"', script)
         self.assertIn('transport: document.getElementById("mcp-server-transport").value', script)
         self.assertIn('token_secret: document.getElementById("mcp-server-token-secret").value || undefined', script)
+        self.assertIn('api("/mcp/auth/oauth"', script)
+        self.assertIn('document.getElementById("mcp-oauth-form").addEventListener("submit"', script)
+        self.assertIn('x.metadata?.oauth?.status || "none"', script)
         self.assertIn('x.metadata?.transport || "stdio"', script)
         self.assertIn('name: "service_ticket_read"', script)
         self.assertIn('name: "github_issue"', script)
@@ -829,8 +1145,27 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn("Open Evidence", script)
         self.assertIn("/browser/inspect", script)
         self.assertIn("browser-inspect", markup)
+        self.assertIn("/browser/live-navigate", script)
+        self.assertIn("browser-live-navigate", markup)
         self.assertIn("/browser/render-screenshot", script)
         self.assertIn("browser-render-screenshot", markup)
+        self.assertIn("/browser/live-screenshot", script)
+        self.assertIn("browser-live-screenshot", markup)
+        self.assertIn("browser-live-click", markup)
+        self.assertIn("browser-live-fill", markup)
+        self.assertIn("browser-live-submit", markup)
+        self.assertIn("browser-live-download", markup)
+        self.assertIn("browser-live-upload", markup)
+        self.assertIn("browser-live-evaluate", markup)
+        self.assertIn("live_click", script)
+        self.assertIn("live_fill", script)
+        self.assertIn("live_submit", script)
+        self.assertIn("live_download", script)
+        self.assertIn("live_upload", script)
+        self.assertIn("live_evaluate", script)
+        self.assertIn("/browser/download", script)
+        self.assertIn("/browser/upload", script)
+        self.assertIn("/browser/evaluate", script)
         self.assertIn('data-browser-live-activation-packet="1"', script)
         self.assertIn("Create Live Activation Packet", script)
         self.assertIn("data-browser-verify-activation-packet", script)
@@ -907,6 +1242,11 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn('id="plugin-marketplace-form"', markup)
         self.assertIn('id="plugin-marketplace-query"', markup)
         self.assertIn('id="plugin-marketplace-catalog"', markup)
+        self.assertIn('id="plugin-prepared-update-form"', markup)
+        self.assertIn('id="plugin-prepared-candidate-id"', markup)
+        self.assertIn('id="plugin-prepared-update-approved"', markup)
+        self.assertIn('id="plugin-prepared-update-enable"', markup)
+        self.assertIn('id="plugin-prepared-update-disable"', markup)
         self.assertIn('id="installed-plugins"', markup)
         self.assertIn('id="plugin-marketplace"', markup)
         self.assertIn('id="plugin-updates"', markup)
@@ -915,7 +1255,10 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn('api("/plugins/reload"', script)
         self.assertIn("/plugins/marketplace?q=", script)
         self.assertIn("/plugins/updates", script)
+        self.assertIn('api("/plugins/marketplace/fetch-manifest"', script)
         self.assertIn('api("/plugins/marketplace/install"', script)
+        self.assertIn('api("/plugins/marketplace/prepare-update"', script)
+        self.assertIn('api("/plugins/marketplace/apply-prepared-update"', script)
         self.assertIn('api("/plugins/marketplace/fetch-bundle"', script)
         self.assertIn('api("/plugins/marketplace/install-bundle"', script)
         self.assertIn('api("/plugins/marketplace/update"', script)
@@ -927,11 +1270,16 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn("data-plugin-disable", script)
         self.assertIn("data-plugin-remove", script)
         self.assertIn("data-plugin-marketplace-install", script)
+        self.assertIn("data-plugin-marketplace-fetch-manifest", script)
         self.assertIn("data-plugin-marketplace-fetch-bundle", script)
         self.assertIn("data-plugin-marketplace-install-bundle", script)
+        self.assertIn("data-plugin-marketplace-prepare-update", script)
         self.assertIn("data-plugin-marketplace-update", script)
+        self.assertIn("pluginPreparedUpdateCandidateId", script)
+        self.assertIn("payload.candidate_id", script)
         self.assertIn('document.getElementById("plugin-install-form").addEventListener("submit"', script)
         self.assertIn('document.getElementById("plugin-marketplace-form").addEventListener("submit"', script)
+        self.assertIn('document.getElementById("plugin-prepared-update-form").addEventListener("submit"', script)
         self.assertIn('document.getElementById("plugin-marketplace").addEventListener("click"', script)
         self.assertIn('document.getElementById("plugin-updates").addEventListener("click"', script)
         self.assertIn('document.getElementById("installed-plugins").addEventListener("click"', script)
@@ -951,6 +1299,7 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn('id="remote-control-session-id"', markup)
         self.assertIn('id="remote-control-task-id"', markup)
         self.assertIn('id="remote-control-actions"', markup)
+        self.assertIn('value="status,events,resume,pause,cancel"', markup)
         self.assertIn('id="remote-control-ttl"', markup)
         self.assertIn('id="remote-control-relay-form"', markup)
         self.assertIn('id="remote-control-relay-url"', markup)
@@ -1042,23 +1391,33 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         script = (root / "app.js").read_text(encoding="utf-8")
 
         self.assertIn('id="channel-webhook-send-form"', markup)
-        self.assertIn('id="channel-webhook-send-approved"', markup)
+        self.assertIn('id="channel-webhook-send-approval-id"', markup)
         self.assertIn('id="channel-chat-webhook-form"', markup)
-        self.assertIn('id="channel-chat-webhook-approved"', markup)
+        self.assertIn('id="channel-chat-webhook-approval-id"', markup)
         self.assertIn('id="channel-email-send-form"', markup)
-        self.assertIn('id="channel-email-send-approved"', markup)
+        self.assertIn('id="channel-email-send-approval-id"', markup)
+        self.assertIn('id="channel-live-activation-packet"', markup)
+        self.assertIn('id="channel-verify-activation-packet"', markup)
+        self.assertIn('id="channel-activate-packet"', markup)
         self.assertIn('document.getElementById("channel-webhook-send-form").addEventListener("submit"', script)
         self.assertIn('document.getElementById("channel-chat-webhook-form").addEventListener("submit"', script)
         self.assertIn('document.getElementById("channel-email-send-form").addEventListener("submit"', script)
+        self.assertIn('document.getElementById("channel-live-activation-packet").addEventListener("click"', script)
+        self.assertIn('document.getElementById("channel-verify-activation-packet").addEventListener("click"', script)
+        self.assertIn('document.getElementById("channel-activate-packet").addEventListener("click"', script)
         self.assertIn('api("/channels/webhook/send"', script)
         self.assertIn('api("/channels/chat-webhook/send"', script)
         self.assertIn('api("/channels/email/send"', script)
+        self.assertIn('api("/channels/live-activation-packet"', script)
+        self.assertIn('api("/channels/verify-activation-packet"', script)
+        self.assertIn('api("/channels/activate-packet"', script)
         self.assertIn('api("/channels/approval-intent/resolve"', script)
         self.assertIn('data-channel-intent-event', script)
         self.assertIn('data-channel-intent-approval', script)
-        self.assertIn('approved: document.getElementById("channel-webhook-send-approved").checked', script)
-        self.assertIn('approved: document.getElementById("channel-chat-webhook-approved").checked', script)
-        self.assertIn('approved: document.getElementById("channel-email-send-approved").checked', script)
+        self.assertIn("channelActivationPacketId", script)
+        self.assertIn('approval_id: document.getElementById("channel-webhook-send-approval-id").value || undefined', script)
+        self.assertIn('approval_id: document.getElementById("channel-chat-webhook-approval-id").value || undefined', script)
+        self.assertIn('approval_id: document.getElementById("channel-email-send-approval-id").value || undefined', script)
         self.assertIn('session_id: state.activeSessionId || undefined', script)
 
     def test_web_policy_control_exposes_rollout_workflows(self) -> None:
@@ -1112,9 +1471,16 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn("data-memory-review-select", script)
         self.assertIn("data-memory-review-batch", script)
         self.assertIn('id="schedule-memory-escalation"', markup)
+        self.assertIn('id="schedule-context-from"', markup)
+        self.assertIn('id="schedule-deliver-to"', markup)
+        self.assertIn('id="schedule-script-form"', markup)
         self.assertIn('document.getElementById("schedule-memory-escalation").addEventListener("click"', script)
+        self.assertIn('document.getElementById("schedule-script-form").addEventListener("submit"', script)
         self.assertIn('api("/schedules/memory-review-escalation"', script)
+        self.assertIn('api("/schedules/script"', script)
+        self.assertIn("context_from: fieldList", script)
         self.assertIn("memory_review_escalation", script)
+        self.assertIn("no_agent_hook", script)
 
     def test_headless_chrome_loads_gui_and_renders_api_backed_state(self) -> None:
         chrome = _chrome_binary()

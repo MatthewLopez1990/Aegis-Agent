@@ -22,7 +22,7 @@ import tarfile
 import tempfile
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import Request
 import wave
 import zlib
@@ -156,7 +156,7 @@ class BuiltinToolExecutor:
             result = self._execute_web_search(params=params)
         elif name in {"vision_analyze", "voice_transcribe", "video_analyze"}:
             result = self._execute_media_read(name=name, params=params, approved=approved)
-        elif name in {"image_generate", "image_edit", "tts", "voice_record", "video_generate"}:
+        elif name in {"image_generate", "image_edit", "tts", "voice_record", "voice_clone", "video_generate"}:
             result = self._execute_media_artifact(name=name, params=params)
         elif name == "http_request":
             result = self._execute_http_request(params=params, approved=approved)
@@ -390,6 +390,8 @@ class BuiltinToolExecutor:
         artifact_dir = root / ".aegis" / "tool-artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         artifact_dir.chmod(0o700)
+        if name == "voice_clone":
+            return self._execute_live_voice_clone_provider(params=params, root=root)
         if name == "video_generate":
             return self._execute_live_video_provider(params=params, artifact_dir=artifact_dir)
         if params.get("provider_url"):
@@ -513,6 +515,129 @@ class BuiltinToolExecutor:
             details={"text_artifact": True},
         )
         return {"ok": True, key: str(path), "artifact_path": str(path), "metadata_path": str(metadata_path), **artifact_receipt, "sandbox_receipt": sandbox_receipt, "mode": "local_placeholder_artifact"}
+
+    def _execute_live_voice_clone_provider(self, *, params: dict[str, Any], root: Path) -> dict[str, Any]:
+        rest = self.connectors.get("generic_rest")
+        if not bool(getattr(rest, "live_writes", False)):
+            return {
+                "ok": False,
+                "tool": "voice_clone",
+                "mode": "live_voice_clone_provider",
+                "status": "not_configured",
+                "reason": "live_rest_writes must be enabled before provider-backed voice cloning",
+                "required_controls": _live_media_required_controls(),
+            }
+        if not params.get("provider_url"):
+            return {
+                "ok": False,
+                "tool": "voice_clone",
+                "mode": "live_voice_clone_provider",
+                "status": "not_configured",
+                "reason": "provider_url is required for provider-backed voice cloning",
+                "required_controls": _live_media_required_controls(),
+            }
+        provider_url = str(params["provider_url"])
+        parsed = urlparse(provider_url)
+        domain = parsed.hostname or ""
+        validation_error = _validate_url(parsed) or (None if parsed.scheme == "https" else "voice clone provider execution requires https")
+        if validation_error:
+            return {"ok": False, "tool": "voice_clone", "mode": "live_voice_clone_provider", "status": "scope_rejected", "reason": validation_error, "required_controls": _live_media_required_controls()}
+        http = self.connectors.get("http")
+        allowlist = tuple(str(item) for item in getattr(http, "allowlist", ()))
+        if not _host_allowed(domain, allowlist):
+            return {"ok": False, "tool": "voice_clone", "mode": "live_voice_clone_provider", "status": "scope_rejected", "reason": f"voice clone provider host {domain!r} is not allowlisted", "required_controls": _live_media_required_controls()}
+        private_error = _private_network_error(domain)
+        if private_error:
+            return {"ok": False, "tool": "voice_clone", "mode": "live_voice_clone_provider", "status": "scope_rejected", "reason": private_error, "required_controls": _live_media_required_controls()}
+        provider_adapter = _live_media_provider_adapter(name="voice_clone", params=params)
+        if provider_adapter["error"]:
+            return {
+                "ok": False,
+                "tool": "voice_clone",
+                "mode": "live_voice_clone_provider",
+                "status": "unsupported_provider_adapter",
+                "reason": provider_adapter["error"],
+                "required_controls": _live_media_required_controls(),
+            }
+        adapter_name = str(provider_adapter["name"] or "generic")
+        if adapter_name != "elevenlabs_voice_clone":
+            return {
+                "ok": False,
+                "tool": "voice_clone",
+                "mode": "live_voice_clone_provider",
+                "status": "unsupported_provider_adapter",
+                "reason": f"{adapter_name} provider adapter does not support provider-backed voice cloning",
+                "required_controls": _live_media_required_controls(),
+            }
+        try:
+            audio_files = [
+                _live_media_audio_file(root=root, audio_path=audio_path, provider_adapter=adapter_name)
+                for audio_path in _voice_clone_audio_paths(params)
+            ]
+        except ToolExecutionError as exc:
+            return {
+                "ok": False,
+                "tool": "voice_clone",
+                "mode": "live_voice_clone_provider",
+                "status": "invalid_source",
+                "reason": str(redact(str(exc))),
+                "required_controls": _live_media_required_controls(),
+            }
+        token_secret = str(params.get("token_secret") or "AEGIS_MEDIA_PROVIDER_TOKEN")
+        handle = self.secrets_broker.request_handle(name=token_secret, requester="media_provider", reason="voice_clone provider-backed voice creation", scopes=("media:execute",))
+        if not handle.present:
+            return {"ok": False, "tool": "voice_clone", "mode": "live_voice_clone_provider", "status": "not_configured", "reason": f"secret {token_secret!r} is not configured", "required_controls": _live_media_required_controls()}
+        token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="media_provider")
+        request_payload = _live_voice_clone_request_payload(params=params, audio_files=audio_files)
+        live_result = _send_live_voice_clone_provider_request(url=provider_url, token=token, payload=request_payload, audio_files=audio_files)
+        provider_receipt = _live_media_provider_receipt(domain=domain, http_status=live_result["http_status"], request_payload=request_payload, handle_present=handle.present, provider_adapter=adapter_name)
+        if not live_result["ok"]:
+            return {
+                "ok": False,
+                "tool": "voice_clone",
+                "mode": "live_voice_clone_provider",
+                "status": "failed",
+                "domain": domain,
+                "http_status": live_result["http_status"],
+                "error": live_result.get("error"),
+                "provider_adapter": adapter_name,
+                "provider_receipt": provider_receipt,
+            }
+        voice_id = str(live_result["voice_id"])
+        audio_receipts = [
+            {
+                "source_audio_sha256": str(audio_file["sha256"]),
+                "source_audio_bytes": int(audio_file["bytes"]),
+                "source_audio_mime_type": str(audio_file["mime_type"]),
+                "source_audio_path_included": False,
+                "raw_audio_included": False,
+            }
+            for audio_file in audio_files
+        ]
+        sandbox_receipt = _media_sandbox_receipt(
+            tool="voice_clone",
+            mode="live_provider_voice_clone",
+            worker_result={"provider_domain": domain, "provider_adapter": adapter_name, "artifact_write": False, "explicit_workspace_reads": ["source_audio"]},
+        )
+        return {
+            "ok": True,
+            "tool": "voice_clone",
+            "status": "created",
+            "mode": "live_provider_voice_clone",
+            "domain": domain,
+            "http_status": live_result["http_status"],
+            "provider_adapter": adapter_name,
+            "provider_receipt": provider_receipt,
+            "sandbox_receipt": sandbox_receipt,
+            "voice_id": voice_id,
+            "voice_id_sha256": hashlib.sha256(voice_id.encode("utf-8")).hexdigest(),
+            "requires_verification": bool(live_result.get("requires_verification")),
+            "sample_count": len(audio_files),
+            "audio_receipts": audio_receipts,
+            "raw_audio_included": False,
+            "raw_response_body_included": False,
+            "raw_secret_values_included": False,
+        }
 
     def _execute_live_video_provider(self, *, params: dict[str, Any], artifact_dir: Path) -> dict[str, Any]:
         rest = self.connectors.get("generic_rest")
@@ -729,13 +854,27 @@ class BuiltinToolExecutor:
         adapter_name = str(provider_adapter["name"] or "generic")
         source_file: dict[str, Any] | None = None
         mask_file: dict[str, Any] | None = None
-        if adapter_name == "openai_image_edit":
+        audio_file: dict[str, Any] | None = None
+        if adapter_name in {"openai_image_edit", "google_imagen_edit", "google_imagen_upscale", "google_imagen_product"}:
             try:
                 root = _workspace_root(self.connectors)
-                source_file = _live_media_source_file(root=root, source_path=source_path, field="image")
+                source_file = _live_media_source_file(root=root, source_path=source_path, field="image", provider_adapter=adapter_name)
                 mask_path = str(params.get("mask_path") or params.get("mask") or "").strip()
-                if mask_path:
-                    mask_file = _live_media_source_file(root=root, source_path=mask_path, field="mask")
+                if mask_path and adapter_name in {"openai_image_edit", "google_imagen_edit", "google_imagen_product"}:
+                    mask_file = _live_media_source_file(root=root, source_path=mask_path, field="mask", provider_adapter=adapter_name)
+            except ToolExecutionError as exc:
+                return {
+                    "ok": False,
+                    "tool": name,
+                    "mode": "live_media_provider",
+                    "status": "invalid_source",
+                    "reason": str(redact(str(exc))),
+                    "required_controls": _live_media_required_controls(),
+                }
+        if adapter_name == "elevenlabs_speech_to_speech":
+            try:
+                root = _workspace_root(self.connectors)
+                audio_file = _live_media_audio_file(root=root, audio_path=str(params.get("audio_path") or params.get("source_audio_path") or params.get("path") or ""), provider_adapter=adapter_name)
             except ToolExecutionError as exc:
                 return {
                     "ok": False,
@@ -750,8 +889,8 @@ class BuiltinToolExecutor:
         if not handle.present:
             return {"ok": False, "tool": name, "mode": "live_media_provider", "status": "not_configured", "reason": f"secret {token_secret!r} is not configured", "required_controls": _live_media_required_controls()}
         token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="media_provider")
-        request_payload = _live_media_request_payload(name=name, prompt=prompt, text=text, source_path=source_path, params=params, provider_adapter=adapter_name, source_file=source_file, mask_file=mask_file)
-        live_result = _send_live_media_provider_request(url=provider_url, token=token, tool=name, payload=request_payload, provider_adapter=adapter_name, source_file=source_file, mask_file=mask_file)
+        request_payload = _live_media_request_payload(name=name, prompt=prompt, text=text, source_path=source_path, params=params, provider_adapter=adapter_name, source_file=source_file, mask_file=mask_file, audio_file=audio_file)
+        live_result = _send_live_media_provider_request(url=provider_url, token=token, tool=name, payload=request_payload, provider_adapter=adapter_name, source_file=source_file, mask_file=mask_file, audio_file=audio_file)
         if not live_result["ok"]:
             return {
                 "ok": False,
@@ -775,6 +914,8 @@ class BuiltinToolExecutor:
             explicit_reads.append("source_image")
         if mask_file is not None:
             explicit_reads.append("mask_image")
+        if audio_file is not None:
+            explicit_reads.append("source_audio")
         sandbox_receipt = _media_sandbox_receipt(
             tool=name,
             mode=f"live_provider_{extension}",
@@ -785,7 +926,7 @@ class BuiltinToolExecutor:
             "mime_type": mime_type,
             "prompt_length": len(prompt),
             "text_length": len(text),
-            "source_present": bool(source_path),
+            "source_present": bool(source_path or audio_file),
             "provider_adapter": adapter_name,
             "provider_receipt": provider_receipt,
         }
@@ -857,7 +998,7 @@ class BuiltinToolExecutor:
                 "required_controls": _live_media_required_controls(),
             }
         adapter_name = str(provider_adapter["name"] or "generic")
-        if adapter_name != "openai_transcription":
+        if adapter_name not in {"openai_transcription", "elevenlabs_transcription"}:
             return {
                 "ok": False,
                 "tool": "voice_transcribe",
@@ -988,6 +1129,8 @@ class BuiltinToolExecutor:
             task_request=str(params["task"]),
             channel=str(params.get("channel", "tool")),
             metadata={"source_tool": "cron_schedule"},
+            context_from=tuple(params.get("context_from", ())) if isinstance(params.get("context_from", ()), (list, tuple)) else (),
+            delivery_targets=tuple(params.get("delivery_targets", ())) if isinstance(params.get("delivery_targets", ()), (list, tuple)) else (),
         )
         return {"ok": True, "schedule_id": schedule["id"], "status": schedule["status"], "next_run_at": schedule["next_run_at"]}
 
@@ -2101,8 +2244,44 @@ class BuiltinToolExecutor:
         }[name]
         action = str(params.get("action", default_action))
         session_id = str(params["session_id"]) if params.get("session_id") else None
-        live_actions = {"live_navigate", "live_click", "live_fill", "live_submit", "live_screenshot", "live_render_screenshot", "live_evaluate"}
-        if action in live_actions or bool(params.get("live")):
+        if bool(params.get("live")) and action == "navigate":
+            action = "live_navigate"
+        if bool(params.get("live")) and action in {"screenshot", "render_screenshot"}:
+            action = "live_screenshot"
+        if action == "live_navigate":
+            return self.browser.live_navigate(session_id=session_id, url=str(params["url"]), approved=approved)
+        if action in {"live_screenshot", "live_render_screenshot"}:
+            if session_id is None:
+                raise ToolExecutionError("live browser screenshot requires session_id")
+            return self.browser.live_screenshot(session_id=session_id, approved=approved)
+        if action == "live_click" or (bool(params.get("live")) and action == "click"):
+            if session_id is None:
+                raise ToolExecutionError("live browser click requires session_id")
+            return self.browser.live_click(session_id=session_id, selector=str(params["selector"]), approved=approved)
+        if action == "live_fill" or (bool(params.get("live")) and action == "fill"):
+            if session_id is None:
+                raise ToolExecutionError("live browser fill requires session_id")
+            fields = params.get("fields", {})
+            if not isinstance(fields, dict):
+                raise ToolExecutionError("live browser fill fields must be an object")
+            return self.browser.live_fill(session_id=session_id, fields=fields, approved=approved)
+        if action == "live_submit" or (bool(params.get("live")) and action == "submit"):
+            if session_id is None:
+                raise ToolExecutionError("live browser submit requires session_id")
+            return self.browser.live_submit(session_id=session_id, selector=str(params["selector"]) if params.get("selector") else None, approved=approved)
+        if action == "live_download" or (bool(params.get("live")) and action == "download"):
+            if session_id is None:
+                raise ToolExecutionError("live browser download requires session_id")
+            return self.browser.live_download(session_id=session_id, selector=str(params["selector"]), approved=approved)
+        if action == "live_upload" or (bool(params.get("live")) and action == "upload"):
+            if session_id is None:
+                raise ToolExecutionError("live browser upload requires session_id")
+            return self.browser.live_upload(session_id=session_id, selector=str(params["selector"]), file_path=str(params["file_path"]), approved=approved)
+        if action == "live_evaluate" or (bool(params.get("live")) and action == "evaluate"):
+            if session_id is None:
+                raise ToolExecutionError("live browser evaluate requires session_id")
+            return self.browser.live_evaluate(session_id=session_id, script=str(params["script"]), approved=approved)
+        if bool(params.get("live")):
             selector = str(params["selector"]) if params.get("selector") else None
             return self.browser.deny_live_automation(action=action, session_id=session_id, selector=selector)
         if action == "session":
@@ -2207,6 +2386,21 @@ def _bounded_float(value: Any, *, minimum: float, maximum: float, label: str) ->
     if parsed < minimum or parsed > maximum:
         raise ToolExecutionError(f"{label} must be between {minimum:g} and {maximum:g}")
     return parsed
+
+
+def _as_bool(value: Any, *, label: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    raise ToolExecutionError(f"{label} must be boolean")
+
+
+def _camel_to_snake(value: str) -> str:
+    return re.sub(r"(?<!^)([A-Z])", r"_\1", value).lower()
 
 
 def _weather_period(period: dict[str, Any]) -> dict[str, Any]:
@@ -3187,6 +3381,26 @@ def _live_media_provider_adapter(*, name: str, params: dict[str, Any]) -> dict[s
         if name != "image_generate":
             return {"name": raw, "error": "openai_images provider adapter currently supports image_generate only"}
         return {"name": "openai_images", "error": None}
+    if raw in {"stability_ai", "stability", "stability_v1", "stability_text_to_image", "stability_v1_text_to_image"}:
+        if name != "image_generate":
+            return {"name": raw, "error": "stability_v1_text_to_image provider adapter currently supports image_generate only"}
+        return {"name": "stability_v1_text_to_image", "error": None}
+    if raw in {"google_imagen", "vertex_imagen", "vertex_ai_imagen", "imagen", "imagen_predict", "google_vertex_imagen"}:
+        if name != "image_generate":
+            return {"name": raw, "error": "google_imagen provider adapter currently supports image_generate only"}
+        return {"name": "google_imagen", "error": None}
+    if raw in {"google_imagen_edit", "vertex_imagen_edit", "vertex_ai_imagen_edit", "imagen_edit", "google_vertex_imagen_edit"}:
+        if name != "image_edit":
+            return {"name": raw, "error": "google_imagen_edit provider adapter currently supports image_edit only"}
+        return {"name": "google_imagen_edit", "error": None}
+    if raw in {"google_imagen_upscale", "vertex_imagen_upscale", "vertex_ai_imagen_upscale", "imagen_upscale", "google_vertex_imagen_upscale"}:
+        if name != "image_edit":
+            return {"name": raw, "error": "google_imagen_upscale provider adapter currently supports image_edit only"}
+        return {"name": "google_imagen_upscale", "error": None}
+    if raw in {"google_imagen_product", "vertex_imagen_product", "vertex_ai_imagen_product", "imagen_product", "imagen_product_edit", "google_vertex_imagen_product", "google_imagen_product_image"}:
+        if name != "image_edit":
+            return {"name": raw, "error": "google_imagen_product provider adapter currently supports image_edit only"}
+        return {"name": "google_imagen_product", "error": None}
     if raw in {"openai_image_edit", "openai_images_edit", "openai_images_edits", "openai_compatible_image_edit"}:
         if name != "image_edit":
             return {"name": raw, "error": "openai_image_edit provider adapter currently supports image_edit only"}
@@ -3195,10 +3409,30 @@ def _live_media_provider_adapter(*, name: str, params: dict[str, Any]) -> dict[s
         if name != "tts":
             return {"name": raw, "error": "openai_tts provider adapter currently supports tts only"}
         return {"name": "openai_tts", "error": None}
+    if raw in {"elevenlabs", "elevenlabs_tts", "eleven_labs", "eleven_labs_tts"}:
+        if name != "tts":
+            return {"name": raw, "error": "elevenlabs_tts provider adapter currently supports tts only"}
+        return {"name": "elevenlabs_tts", "error": None}
+    if raw in {"elevenlabs_speech_to_speech", "elevenlabs_sts", "elevenlabs_voice_changer", "eleven_labs_speech_to_speech", "eleven_labs_sts"}:
+        if name != "tts":
+            return {"name": raw, "error": "elevenlabs_speech_to_speech provider adapter currently supports tts only"}
+        return {"name": "elevenlabs_speech_to_speech", "error": None}
+    if raw in {"elevenlabs_text_to_dialogue", "elevenlabs_dialogue", "elevenlabs_dialog", "eleven_labs_text_to_dialogue", "eleven_labs_dialogue"}:
+        if name != "tts":
+            return {"name": raw, "error": "elevenlabs_text_to_dialogue provider adapter currently supports tts only"}
+        return {"name": "elevenlabs_text_to_dialogue", "error": None}
+    if raw in {"elevenlabs_voice_clone", "elevenlabs_ivc", "elevenlabs_instant_voice_clone", "eleven_labs_voice_clone", "eleven_labs_ivc"}:
+        if name != "voice_clone":
+            return {"name": raw, "error": "elevenlabs_voice_clone provider adapter currently supports voice_clone only"}
+        return {"name": "elevenlabs_voice_clone", "error": None}
     if raw in {"openai_transcription", "openai_transcriptions", "openai_audio_transcription", "openai_compatible_transcription"}:
         if name != "voice_transcribe":
             return {"name": raw, "error": "openai_transcription provider adapter currently supports voice_transcribe only"}
         return {"name": "openai_transcription", "error": None}
+    if raw in {"elevenlabs_transcription", "elevenlabs_stt", "elevenlabs_speech_to_text", "eleven_labs_transcription", "eleven_labs_stt"}:
+        if name != "voice_transcribe":
+            return {"name": raw, "error": "elevenlabs_transcription provider adapter currently supports voice_transcribe only"}
+        return {"name": "elevenlabs_transcription", "error": None}
     if raw in {"openai_video", "openai_videos", "openai_sora", "sora", "openai_compatible_video"}:
         if name != "video_generate":
             return {"name": raw, "error": "openai_video provider adapter currently supports video_generate only"}
@@ -3293,6 +3527,7 @@ def _live_media_request_payload(
     provider_adapter: str,
     source_file: dict[str, Any] | None = None,
     mask_file: dict[str, Any] | None = None,
+    audio_file: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if provider_adapter == "openai_images":
         payload: dict[str, Any] = {
@@ -3310,6 +3545,94 @@ def _live_media_request_payload(
         if background:
             payload["background"] = background[:80]
         return payload
+    if provider_adapter == "stability_v1_text_to_image":
+        payload = {
+            "text_prompts": [
+                {
+                    "text": prompt,
+                    "weight": 1,
+                }
+            ],
+            "samples": 1,
+        }
+        if params.get("cfg_scale") is not None:
+            payload["cfg_scale"] = _bounded_float(params.get("cfg_scale"), minimum=0.0, maximum=35.0, label="cfg_scale")
+        for key in ("height", "width"):
+            value = params.get(key)
+            if value is not None:
+                try:
+                    parsed = int(value)
+                except (TypeError, ValueError) as exc:
+                    raise ToolExecutionError(f"{key} must be an integer") from exc
+                if parsed < 128 or parsed > 2048:
+                    raise ToolExecutionError(f"{key} must be between 128 and 2048")
+                payload[key] = parsed
+        for key, maximum in (("steps", 150), ("seed", 4294967295)):
+            value = params.get(key)
+            if value is not None:
+                try:
+                    parsed = int(value)
+                except (TypeError, ValueError) as exc:
+                    raise ToolExecutionError(f"{key} must be an integer") from exc
+                if parsed < 0 or parsed > maximum:
+                    raise ToolExecutionError(f"{key} must be between 0 and {maximum}")
+                payload[key] = parsed
+        for key in ("clip_guidance_preset", "sampler", "style_preset"):
+            value = str(params.get(key) or "").strip()
+            if value:
+                payload[key] = value[:80]
+        return payload
+    if provider_adapter == "google_imagen":
+        instance: dict[str, Any] = {"prompt": prompt}
+        parameters: dict[str, Any] = {"sampleCount": 1}
+        sample_count = params.get("sample_count", params.get("sampleCount"))
+        if sample_count is not None:
+            try:
+                parsed_count = int(sample_count)
+            except (TypeError, ValueError) as exc:
+                raise ToolExecutionError("sampleCount must be an integer") from exc
+            if parsed_count < 1 or parsed_count > 4:
+                raise ToolExecutionError("sampleCount must be between 1 and 4")
+            parameters["sampleCount"] = parsed_count
+        negative_prompt = str(params.get("negative_prompt") or params.get("negativePrompt") or "").strip()
+        if negative_prompt:
+            parameters["negativePrompt"] = negative_prompt[:2000]
+        aspect_ratio = str(params.get("aspect_ratio") or params.get("aspectRatio") or "").strip()
+        if aspect_ratio:
+            parameters["aspectRatio"] = aspect_ratio[:40]
+        for key in ("safetyFilterLevel", "personGeneration"):
+            value = str(params.get(key) or params.get(_camel_to_snake(key)) or "").strip()
+            if value:
+                parameters[key] = value[:80]
+        for key in ("addWatermark", "enhancePrompt", "includeRaiReason"):
+            value = params.get(key, params.get(_camel_to_snake(key)))
+            if value is not None:
+                parameters[key] = _as_bool(value, label=key)
+        seed = params.get("seed")
+        if seed is not None:
+            try:
+                parsed_seed = int(seed)
+            except (TypeError, ValueError) as exc:
+                raise ToolExecutionError("seed must be an integer") from exc
+            if parsed_seed < 0 or parsed_seed > 4294967295:
+                raise ToolExecutionError("seed must be between 0 and 4294967295")
+            parameters["seed"] = parsed_seed
+        output_mime = str(params.get("output_mime_type") or params.get("mime_type") or params.get("mimeType") or "").strip()
+        compression_quality = params.get("compression_quality", params.get("compressionQuality"))
+        if output_mime or compression_quality is not None:
+            output_options: dict[str, Any] = {}
+            if output_mime:
+                output_options["mimeType"] = output_mime[:80]
+            if compression_quality is not None:
+                try:
+                    parsed_quality = int(compression_quality)
+                except (TypeError, ValueError) as exc:
+                    raise ToolExecutionError("compressionQuality must be an integer") from exc
+                if parsed_quality < 0 or parsed_quality > 100:
+                    raise ToolExecutionError("compressionQuality must be between 0 and 100")
+                output_options["compressionQuality"] = parsed_quality
+            parameters["outputOptions"] = output_options
+        return {"instances": [instance], "parameters": parameters}
     if provider_adapter == "openai_image_edit":
         payload = {
             "model": str(params.get("model") or "gpt-image-1.5")[:200],
@@ -3339,6 +3662,285 @@ def _live_media_request_payload(
             if value:
                 payload[key] = value[:80]
         return payload
+    if provider_adapter == "google_imagen_edit":
+        if source_file is None:
+            raise ToolExecutionError("google_imagen_edit requires a workspace-scoped source image")
+        reference_images: list[dict[str, Any]] = [
+            {
+                "referenceType": "REFERENCE_TYPE_RAW",
+                "referenceId": 1,
+                "referenceImage": {
+                    "bytesBase64Encoded": "<redacted>",
+                    "sha256": str(source_file["sha256"]),
+                    "mimeType": str(source_file["mime_type"]),
+                    "byteCount": int(source_file["bytes"]),
+                },
+            }
+        ]
+        if mask_file:
+            mask_mode = str(params.get("mask_mode") or params.get("maskMode") or "MASK_MODE_USER_PROVIDED")[:80]
+            allowed_mask_modes = {
+                "MASK_MODE_USER_PROVIDED",
+                "MASK_MODE_BACKGROUND",
+                "MASK_MODE_FOREGROUND",
+                "MASK_MODE_SEMANTIC",
+            }
+            if mask_mode not in allowed_mask_modes:
+                raise ToolExecutionError("maskMode must be a supported Google Imagen mask mode")
+            mask_config: dict[str, Any] = {
+                "maskMode": mask_mode,
+            }
+            dilation = params.get("mask_dilation", params.get("dilation"))
+            if dilation is not None:
+                mask_config["dilation"] = _bounded_float(dilation, minimum=0.0, maximum=1.0, label="mask_dilation")
+            mask_classes = _google_imagen_mask_classes(params.get("mask_classes", params.get("maskClasses")))
+            if mask_classes:
+                mask_config["maskClasses"] = mask_classes
+            reference_images.append(
+                {
+                    "referenceType": "REFERENCE_TYPE_MASK",
+                    "referenceId": 2,
+                    "referenceImage": {
+                        "bytesBase64Encoded": "<redacted>",
+                        "sha256": str(mask_file["sha256"]),
+                        "mimeType": str(mask_file["mime_type"]),
+                        "byteCount": int(mask_file["bytes"]),
+                    },
+                    "maskImageConfig": mask_config,
+                }
+            )
+        instance: dict[str, Any] = {"referenceImages": reference_images}
+        if prompt:
+            instance["prompt"] = prompt
+        parameters: dict[str, Any] = {"sampleCount": 1}
+        sample_count = params.get("sample_count", params.get("sampleCount"))
+        if sample_count is not None:
+            try:
+                parsed_count = int(sample_count)
+            except (TypeError, ValueError) as exc:
+                raise ToolExecutionError("sampleCount must be an integer") from exc
+            if parsed_count < 1 or parsed_count > 4:
+                raise ToolExecutionError("sampleCount must be between 1 and 4")
+            parameters["sampleCount"] = parsed_count
+        edit_mode = str(params.get("edit_mode") or params.get("editMode") or "").strip()
+        if mask_file and not edit_mode:
+            edit_mode = "EDIT_MODE_INPAINT_INSERTION"
+        if edit_mode:
+            allowed_edit_modes = {
+                "EDIT_MODE_INPAINT_REMOVAL",
+                "EDIT_MODE_INPAINT_INSERTION",
+                "EDIT_MODE_BGSWAP",
+                "EDIT_MODE_OUTPAINT",
+            }
+            if edit_mode not in allowed_edit_modes:
+                raise ToolExecutionError("editMode must be a supported Google Imagen edit mode")
+            parameters["editMode"] = edit_mode
+        base_steps = params.get("base_steps", params.get("baseSteps"))
+        if base_steps is not None:
+            try:
+                parsed_steps = int(base_steps)
+            except (TypeError, ValueError) as exc:
+                raise ToolExecutionError("baseSteps must be an integer") from exc
+            if parsed_steps < 1 or parsed_steps > 150:
+                raise ToolExecutionError("baseSteps must be between 1 and 150")
+            parameters["editConfig"] = {"baseSteps": parsed_steps}
+        guidance_scale = params.get("guidance_scale", params.get("guidanceScale"))
+        if guidance_scale is not None:
+            try:
+                parsed_guidance = int(guidance_scale)
+            except (TypeError, ValueError) as exc:
+                raise ToolExecutionError("guidanceScale must be an integer") from exc
+            if parsed_guidance < 0 or parsed_guidance > 500:
+                raise ToolExecutionError("guidanceScale must be between 0 and 500")
+            parameters["guidanceScale"] = parsed_guidance
+        for key in ("addWatermark", "includeRaiReason", "includeSafetyAttributes"):
+            value = params.get(key, params.get(_camel_to_snake(key)))
+            if value is not None:
+                parameters[key] = _as_bool(value, label=key)
+        for key in ("language", "negativePrompt", "personGeneration", "safetySetting"):
+            value = str(params.get(key) or params.get(_camel_to_snake(key)) or "").strip()
+            if value:
+                parameters[key] = value[:2000] if key == "negativePrompt" else value[:80]
+        seed = params.get("seed")
+        if seed is not None:
+            try:
+                parsed_seed = int(seed)
+            except (TypeError, ValueError) as exc:
+                raise ToolExecutionError("seed must be an integer") from exc
+            if parsed_seed < 0 or parsed_seed > 4294967295:
+                raise ToolExecutionError("seed must be between 0 and 4294967295")
+            parameters["seed"] = parsed_seed
+        output_mime = str(params.get("output_mime_type") or params.get("mime_type") or params.get("mimeType") or "").strip()
+        compression_quality = params.get("compression_quality", params.get("compressionQuality"))
+        if output_mime or compression_quality is not None:
+            output_options: dict[str, Any] = {}
+            if output_mime:
+                output_options["mimeType"] = output_mime[:80]
+            if compression_quality is not None:
+                try:
+                    parsed_quality = int(compression_quality)
+                except (TypeError, ValueError) as exc:
+                    raise ToolExecutionError("compressionQuality must be an integer") from exc
+                if parsed_quality < 0 or parsed_quality > 100:
+                    raise ToolExecutionError("compressionQuality must be between 0 and 100")
+                output_options["compressionQuality"] = parsed_quality
+            parameters["outputOptions"] = output_options
+        return {"instances": [instance], "parameters": parameters}
+    if provider_adapter == "google_imagen_product":
+        if source_file is None:
+            raise ToolExecutionError("google_imagen_product requires a workspace-scoped source image")
+        mask_mode = str(params.get("mask_mode") or params.get("maskMode") or "MASK_MODE_BACKGROUND")[:80]
+        allowed_mask_modes = {
+            "MASK_MODE_USER_PROVIDED",
+            "MASK_MODE_BACKGROUND",
+            "MASK_MODE_FOREGROUND",
+            "MASK_MODE_SEMANTIC",
+        }
+        if mask_mode not in allowed_mask_modes:
+            raise ToolExecutionError("maskMode must be a supported Google Imagen mask mode")
+        mask_config: dict[str, Any] = {"maskMode": mask_mode}
+        dilation = params.get("mask_dilation", params.get("dilation"))
+        if dilation is not None:
+            mask_config["dilation"] = _bounded_float(dilation, minimum=0.0, maximum=1.0, label="mask_dilation")
+        mask_classes = _google_imagen_mask_classes(params.get("mask_classes", params.get("maskClasses")))
+        if mask_classes:
+            mask_config["maskClasses"] = mask_classes
+        mask_reference: dict[str, Any] = {
+            "referenceType": "REFERENCE_TYPE_MASK",
+            "referenceId": 2,
+            "maskImageConfig": mask_config,
+        }
+        if mask_file:
+            mask_reference["referenceImage"] = {
+                "bytesBase64Encoded": "<redacted>",
+                "sha256": str(mask_file["sha256"]),
+                "mimeType": str(mask_file["mime_type"]),
+                "byteCount": int(mask_file["bytes"]),
+            }
+        reference_images = [
+            {
+                "referenceType": "REFERENCE_TYPE_RAW",
+                "referenceId": 1,
+                "referenceImage": {
+                    "bytesBase64Encoded": "<redacted>",
+                    "sha256": str(source_file["sha256"]),
+                    "mimeType": str(source_file["mime_type"]),
+                    "byteCount": int(source_file["bytes"]),
+                },
+            },
+            mask_reference,
+        ]
+        instance = {"referenceImages": reference_images}
+        if prompt:
+            instance["prompt"] = prompt
+        parameters: dict[str, Any] = {"sampleCount": 1, "editMode": "EDIT_MODE_BGSWAP"}
+        sample_count = params.get("sample_count", params.get("sampleCount"))
+        if sample_count is not None:
+            try:
+                parsed_count = int(sample_count)
+            except (TypeError, ValueError) as exc:
+                raise ToolExecutionError("sampleCount must be an integer") from exc
+            if parsed_count < 1 or parsed_count > 4:
+                raise ToolExecutionError("sampleCount must be between 1 and 4")
+            parameters["sampleCount"] = parsed_count
+        edit_mode = str(params.get("edit_mode") or params.get("editMode") or "EDIT_MODE_BGSWAP").strip()
+        allowed_edit_modes = {
+            "EDIT_MODE_INPAINT_REMOVAL",
+            "EDIT_MODE_INPAINT_INSERTION",
+            "EDIT_MODE_BGSWAP",
+            "EDIT_MODE_OUTPAINT",
+        }
+        if edit_mode not in allowed_edit_modes:
+            raise ToolExecutionError("editMode must be a supported Google Imagen edit mode")
+        parameters["editMode"] = edit_mode
+        base_steps = params.get("base_steps", params.get("baseSteps"))
+        if base_steps is not None:
+            try:
+                parsed_steps = int(base_steps)
+            except (TypeError, ValueError) as exc:
+                raise ToolExecutionError("baseSteps must be an integer") from exc
+            if parsed_steps < 1 or parsed_steps > 150:
+                raise ToolExecutionError("baseSteps must be between 1 and 150")
+            parameters["editConfig"] = {"baseSteps": parsed_steps}
+        guidance_scale = params.get("guidance_scale", params.get("guidanceScale"))
+        if guidance_scale is not None:
+            try:
+                parsed_guidance = int(guidance_scale)
+            except (TypeError, ValueError) as exc:
+                raise ToolExecutionError("guidanceScale must be an integer") from exc
+            if parsed_guidance < 0 or parsed_guidance > 500:
+                raise ToolExecutionError("guidanceScale must be between 0 and 500")
+            parameters["guidanceScale"] = parsed_guidance
+        for key in ("addWatermark", "includeRaiReason", "includeSafetyAttributes"):
+            value = params.get(key, params.get(_camel_to_snake(key)))
+            if value is not None:
+                parameters[key] = _as_bool(value, label=key)
+        for key in ("language", "negativePrompt", "personGeneration", "safetySetting"):
+            value = str(params.get(key) or params.get(_camel_to_snake(key)) or "").strip()
+            if value:
+                parameters[key] = value[:2000] if key == "negativePrompt" else value[:80]
+        seed = params.get("seed")
+        if seed is not None:
+            try:
+                parsed_seed = int(seed)
+            except (TypeError, ValueError) as exc:
+                raise ToolExecutionError("seed must be an integer") from exc
+            if parsed_seed < 0 or parsed_seed > 4294967295:
+                raise ToolExecutionError("seed must be between 0 and 4294967295")
+            parameters["seed"] = parsed_seed
+        output_mime = str(params.get("output_mime_type") or params.get("mime_type") or params.get("mimeType") or "").strip()
+        compression_quality = params.get("compression_quality", params.get("compressionQuality"))
+        if output_mime or compression_quality is not None:
+            output_options: dict[str, Any] = {}
+            if output_mime:
+                output_options["mimeType"] = output_mime[:80]
+            if compression_quality is not None:
+                try:
+                    parsed_quality = int(compression_quality)
+                except (TypeError, ValueError) as exc:
+                    raise ToolExecutionError("compressionQuality must be an integer") from exc
+                if parsed_quality < 0 or parsed_quality > 100:
+                    raise ToolExecutionError("compressionQuality must be between 0 and 100")
+                output_options["compressionQuality"] = parsed_quality
+            parameters["outputOptions"] = output_options
+        return {"instances": [instance], "parameters": parameters}
+    if provider_adapter == "google_imagen_upscale":
+        if source_file is None:
+            raise ToolExecutionError("google_imagen_upscale requires a workspace-scoped source image")
+        factor = str(params.get("upscale_factor") or params.get("upscaleFactor") or params.get("scale") or "x2").strip().lower()
+        if factor not in {"x2", "x3", "x4"}:
+            raise ToolExecutionError("upscaleFactor must be x2, x3, or x4")
+        instance = {
+            "prompt": str(params.get("prompt") or prompt or "Upscale the image")[:2000],
+            "image": {
+                "bytesBase64Encoded": "<redacted>",
+                "sha256": str(source_file["sha256"]),
+                "mimeType": str(source_file["mime_type"]),
+                "byteCount": int(source_file["bytes"]),
+            },
+        }
+        parameters: dict[str, Any] = {
+            "mode": "upscale",
+            "upscaleConfig": {
+                "upscaleFactor": factor,
+            },
+        }
+        output_mime = str(params.get("output_mime_type") or params.get("mime_type") or params.get("mimeType") or "").strip()
+        compression_quality = params.get("compression_quality", params.get("compressionQuality"))
+        if output_mime or compression_quality is not None:
+            output_options: dict[str, Any] = {}
+            if output_mime:
+                output_options["mimeType"] = output_mime[:80]
+            if compression_quality is not None:
+                try:
+                    parsed_quality = int(compression_quality)
+                except (TypeError, ValueError) as exc:
+                    raise ToolExecutionError("compressionQuality must be an integer") from exc
+                if parsed_quality < 0 or parsed_quality > 100:
+                    raise ToolExecutionError("compressionQuality must be between 0 and 100")
+                output_options["compressionQuality"] = parsed_quality
+            parameters["outputOptions"] = output_options
+        return {"instances": [instance], "parameters": parameters}
     if provider_adapter == "openai_tts":
         payload = {
             "model": str(params.get("model") or "gpt-4o-mini-tts")[:200],
@@ -3348,6 +3950,67 @@ def _live_media_request_payload(
         response_format = str(params.get("response_format") or params.get("format") or "").strip()
         if response_format:
             payload["response_format"] = response_format[:40]
+        return payload
+    if provider_adapter == "elevenlabs_tts":
+        payload = {
+            "text": text,
+            "model_id": str(params.get("model_id") or params.get("model") or "eleven_multilingual_v2")[:200],
+        }
+        voice_settings: dict[str, Any] = {}
+        for key in ("stability", "similarity_boost", "style"):
+            value = params.get(key)
+            if value is not None:
+                voice_settings[key] = _bounded_float(value, minimum=0.0, maximum=1.0, label=key)
+        speaker_boost = params.get("use_speaker_boost")
+        if speaker_boost is not None:
+            voice_settings["use_speaker_boost"] = _as_bool(speaker_boost, label="use_speaker_boost")
+        if voice_settings:
+            payload["voice_settings"] = voice_settings
+        language_code = str(params.get("language_code") or params.get("languageCode") or "").strip()
+        if language_code:
+            payload["language_code"] = language_code[:40]
+        return payload
+    if provider_adapter == "elevenlabs_speech_to_speech":
+        if audio_file is None:
+            raise ToolExecutionError("elevenlabs_speech_to_speech requires a workspace-scoped audio file")
+        payload = {
+            "model_id": str(params.get("model_id") or params.get("model") or "eleven_english_sts_v2")[:200],
+            "audio_present": True,
+            "audio_sha256": str(audio_file["sha256"]),
+            "audio_mime_type": str(audio_file["mime_type"]),
+            "audio_bytes": int(audio_file["bytes"]),
+        }
+        remove_noise = params.get("remove_background_noise", params.get("removeBackgroundNoise"))
+        if remove_noise is not None:
+            payload["remove_background_noise"] = _as_bool(remove_noise, label="remove_background_noise")
+        return payload
+    if provider_adapter == "elevenlabs_text_to_dialogue":
+        payload = {
+            "inputs": _elevenlabs_dialogue_inputs(params=params, fallback_text=text),
+            "model_id": str(params.get("model_id") or params.get("model") or "eleven_v3")[:200],
+        }
+        output_format = str(params.get("output_format") or params.get("format") or "").strip()
+        if output_format:
+            if not re.fullmatch(r"[A-Za-z0-9_]+", output_format):
+                raise ToolExecutionError("output_format contains unsupported characters")
+            payload["output_format"] = output_format[:80]
+        language_code = str(params.get("language_code") or params.get("languageCode") or "").strip()
+        if language_code:
+            payload["language_code"] = language_code[:40]
+        seed = params.get("seed")
+        if seed is not None:
+            try:
+                parsed_seed = int(seed)
+            except (TypeError, ValueError) as exc:
+                raise ToolExecutionError("seed must be an integer") from exc
+            if parsed_seed < 0 or parsed_seed > 4294967295:
+                raise ToolExecutionError("seed must be between 0 and 4294967295")
+            payload["seed"] = parsed_seed
+        normalization = str(params.get("apply_text_normalization") or params.get("text_normalization") or "").strip().lower()
+        if normalization:
+            if normalization not in {"auto", "on", "off"}:
+                raise ToolExecutionError("apply_text_normalization must be auto, on, or off")
+            payload["apply_text_normalization"] = normalization
         return payload
     if provider_adapter == "openai_transcription":
         payload = {
@@ -3366,6 +4029,18 @@ def _live_media_request_payload(
         if temperature is not None:
             payload["temperature"] = _bounded_float(temperature, minimum=0.0, maximum=1.0, label="temperature")
         return payload
+    if provider_adapter == "elevenlabs_transcription":
+        payload = {
+            "model_id": str(params.get("model_id") or params.get("model") or "scribe_v2")[:200],
+        }
+        language_code = str(params.get("language_code") or params.get("language") or "").strip()
+        if language_code:
+            payload["language_code"] = language_code[:40]
+        for key in ("diarize", "tag_audio_events"):
+            value = params.get(key)
+            if value is not None:
+                payload[key] = _as_bool(value, label=key)
+        return payload
     payload: dict[str, Any] = {"tool": name}
     if name in {"image_generate", "image_edit"}:
         payload["prompt"] = prompt
@@ -3377,10 +4052,151 @@ def _live_media_request_payload(
     return payload
 
 
+def _google_imagen_mask_classes(value: Any) -> list[int]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        candidates = [item.strip() for item in value.split(",") if item.strip()]
+    elif isinstance(value, (list, tuple)):
+        candidates = list(value)
+    else:
+        raise ToolExecutionError("maskClasses must be a list of integers")
+    parsed: list[int] = []
+    for candidate in candidates:
+        try:
+            item = int(candidate)
+        except (TypeError, ValueError) as exc:
+            raise ToolExecutionError("maskClasses must be a list of integers") from exc
+        if item < 0 or item > 255:
+            raise ToolExecutionError("maskClasses entries must be between 0 and 255")
+        parsed.append(item)
+    return parsed[:20]
+
+
+def _elevenlabs_dialogue_inputs(*, params: dict[str, Any], fallback_text: str) -> list[dict[str, str]]:
+    raw_inputs = params.get("inputs", params.get("dialogue", params.get("turns")))
+    if raw_inputs in (None, ""):
+        raw_inputs = [{"text": fallback_text, "voice_id": params.get("voice_id") or params.get("voice") or ""}]
+    if isinstance(raw_inputs, str):
+        try:
+            parsed = json.loads(raw_inputs)
+        except json.JSONDecodeError as exc:
+            raise ToolExecutionError("ElevenLabs dialogue inputs must be a JSON list when provided as a string") from exc
+        raw_inputs = parsed
+    if not isinstance(raw_inputs, list) or not raw_inputs:
+        raise ToolExecutionError("elevenlabs_text_to_dialogue requires at least one dialogue input")
+    inputs: list[dict[str, str]] = []
+    unique_voices: set[str] = set()
+    total_text = 0
+    for index, item in enumerate(raw_inputs[:50]):
+        if not isinstance(item, dict):
+            raise ToolExecutionError("ElevenLabs dialogue inputs must be objects with text and voice_id")
+        text_value = str(item.get("text") or "").strip()
+        voice_id = str(item.get("voice_id") or item.get("voiceId") or item.get("voice") or "").strip()
+        if not text_value:
+            raise ToolExecutionError(f"ElevenLabs dialogue input {index + 1} requires text")
+        if not voice_id:
+            raise ToolExecutionError(f"ElevenLabs dialogue input {index + 1} requires voice_id")
+        if len(voice_id) > 200 or not re.fullmatch(r"[A-Za-z0-9_-]+", voice_id):
+            raise ToolExecutionError("ElevenLabs dialogue voice_id contains unsupported characters")
+        total_text += len(text_value)
+        if total_text > 2000:
+            raise ToolExecutionError("ElevenLabs dialogue text must be 2000 characters or less per request")
+        unique_voices.add(voice_id)
+        if len(unique_voices) > 10:
+            raise ToolExecutionError("ElevenLabs dialogue supports at most 10 unique voice IDs per request")
+        inputs.append({"text": text_value[:2000], "voice_id": voice_id})
+    return inputs
+
+
+def _elevenlabs_dialogue_request_url(*, url: str, payload: dict[str, Any]) -> str:
+    output_format = str(payload.get("output_format") or "").strip()
+    if not output_format:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}output_format={quote(output_format, safe='')}"
+
+
+def _voice_clone_audio_paths(params: dict[str, Any]) -> list[str]:
+    raw_paths = params.get("audio_paths", params.get("files", params.get("audio_path")))
+    if raw_paths in (None, ""):
+        raise ToolExecutionError("voice_clone requires at least one audio_path")
+    if isinstance(raw_paths, str):
+        text = raw_paths.strip()
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ToolExecutionError("voice_clone audio_paths must be a JSON list or comma-separated string") from exc
+            raw_paths = parsed
+        else:
+            raw_paths = [item.strip() for item in text.split(",") if item.strip()]
+    elif isinstance(raw_paths, tuple):
+        raw_paths = list(raw_paths)
+    if not isinstance(raw_paths, list) or not raw_paths:
+        raise ToolExecutionError("voice_clone requires at least one audio_path")
+    paths = [str(item).strip() for item in raw_paths if str(item).strip()]
+    if not paths:
+        raise ToolExecutionError("voice_clone requires at least one audio_path")
+    if len(paths) > 10:
+        raise ToolExecutionError("voice_clone supports at most 10 audio files per request")
+    return paths
+
+
+def _live_voice_clone_request_payload(*, params: dict[str, Any], audio_files: list[dict[str, Any]]) -> dict[str, Any]:
+    if not audio_files:
+        raise ToolExecutionError("voice_clone requires at least one audio file")
+    name = str(params.get("name") or params.get("voice_name") or "").strip()
+    if not name:
+        raise ToolExecutionError("voice_clone requires a name")
+    if len(name) > 120:
+        raise ToolExecutionError("voice_clone name must be 120 characters or less")
+    total_bytes = sum(int(audio_file["bytes"]) for audio_file in audio_files)
+    if total_bytes > 25 * 1024 * 1024:
+        raise ToolExecutionError("voice_clone audio samples exceed the 25 MiB request limit")
+    payload: dict[str, Any] = {
+        "name": name,
+        "sample_count": len(audio_files),
+        "sample_sha256": [str(audio_file["sha256"]) for audio_file in audio_files],
+        "sample_bytes": [int(audio_file["bytes"]) for audio_file in audio_files],
+        "sample_mime_types": sorted({str(audio_file["mime_type"]) for audio_file in audio_files}),
+    }
+    remove_noise = params.get("remove_background_noise", params.get("removeBackgroundNoise"))
+    if remove_noise is not None:
+        payload["remove_background_noise"] = _as_bool(remove_noise, label="remove_background_noise")
+    description = str(params.get("description") or "").strip()
+    if description:
+        payload["description"] = description[:500]
+    labels = _voice_clone_labels(params.get("labels"))
+    if labels:
+        payload["labels"] = labels
+    return payload
+
+
+def _voice_clone_labels(value: Any) -> dict[str, str]:
+    if value in (None, ""):
+        return {}
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ToolExecutionError("voice_clone labels must be a JSON object") from exc
+        value = parsed
+    if not isinstance(value, dict):
+        raise ToolExecutionError("voice_clone labels must be an object")
+    labels: dict[str, str] = {}
+    for key, item in value.items():
+        label_key = str(key).strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", label_key):
+            raise ToolExecutionError("voice_clone label keys must be simple identifiers")
+        labels[label_key] = str(item).strip()[:120]
+    return labels
+
+
 def _live_media_provider_receipt(*, domain: str, http_status: int, request_payload: dict[str, Any], handle_present: bool, provider_adapter: str = "generic") -> dict[str, Any]:
     encoded = json.dumps(request_payload, sort_keys=True, default=str).encode("utf-8")
     request_format = "application/json"
-    if provider_adapter in {"openai_image_edit", "openai_transcription"}:
+    if provider_adapter in {"openai_image_edit", "openai_transcription", "elevenlabs_transcription", "elevenlabs_speech_to_speech", "elevenlabs_voice_clone"}:
         request_format = "multipart/form-data"
     elif provider_adapter == "openai_video" and "action" in request_payload:
         request_format = "path_operation"
@@ -3409,23 +4225,55 @@ def _send_live_media_provider_request(
     provider_adapter: str = "generic",
     source_file: dict[str, Any] | None = None,
     mask_file: dict[str, Any] | None = None,
+    audio_file: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if provider_adapter == "openai_image_edit":
         if source_file is None:
             return {"ok": False, "http_status": 0, "error": "openai_image_edit requires a workspace-scoped source image"}
         body, content_type = _encode_openai_image_edit_multipart(payload=payload, source_file=source_file, mask_file=mask_file)
-    else:
-        body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    elif provider_adapter == "google_imagen_edit":
+        if source_file is None:
+            return {"ok": False, "http_status": 0, "error": "google_imagen_edit requires a workspace-scoped source image"}
+        body = _encode_google_imagen_edit_json(payload=payload, source_file=source_file, mask_file=mask_file)
         content_type = "application/json"
+    elif provider_adapter == "google_imagen_upscale":
+        if source_file is None:
+            return {"ok": False, "http_status": 0, "error": "google_imagen_upscale requires a workspace-scoped source image"}
+        body = _encode_google_imagen_upscale_json(payload=payload, source_file=source_file)
+        content_type = "application/json"
+    elif provider_adapter == "google_imagen_product":
+        if source_file is None:
+            return {"ok": False, "http_status": 0, "error": "google_imagen_product requires a workspace-scoped source image"}
+        body = _encode_google_imagen_product_json(payload=payload, source_file=source_file, mask_file=mask_file)
+        content_type = "application/json"
+    elif provider_adapter == "elevenlabs_speech_to_speech":
+        if audio_file is None:
+            return {"ok": False, "http_status": 0, "error": "elevenlabs_speech_to_speech requires a workspace-scoped audio file"}
+        body, content_type = _encode_elevenlabs_speech_to_speech_multipart(payload=payload, audio_file=audio_file)
+    else:
+        body_payload = dict(payload)
+        if provider_adapter == "elevenlabs_text_to_dialogue":
+            body_payload.pop("output_format", None)
+        body = json.dumps(body_payload, sort_keys=True, default=str).encode("utf-8")
+        content_type = "application/json"
+    headers = {
+        "Content-Type": content_type,
+        "User-Agent": "Aegis-Agent/0.1",
+    }
+    if provider_adapter in {"elevenlabs_tts", "elevenlabs_speech_to_speech", "elevenlabs_text_to_dialogue"}:
+        headers["xi-api-key"] = token
+    else:
+        headers["Authorization"] = f"Bearer {token}"
+    if provider_adapter in {"stability_v1_text_to_image", "google_imagen", "google_imagen_edit", "google_imagen_upscale", "google_imagen_product"}:
+        headers["Accept"] = "application/json"
+    if provider_adapter in {"elevenlabs_speech_to_speech", "elevenlabs_text_to_dialogue"}:
+        headers["Accept"] = "audio/mpeg"
+    request_url = _elevenlabs_dialogue_request_url(url=url, payload=payload) if provider_adapter == "elevenlabs_text_to_dialogue" else url
     request = Request(
-        url,
+        request_url,
         data=body,
         method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": content_type,
-            "User-Agent": "Aegis-Agent/0.1",
-        },
+        headers=headers,
     )
     try:
         response_context = _open_without_redirects(request, timeout=30)
@@ -3457,7 +4305,7 @@ def _send_live_media_provider_request(
             content = base64.b64decode(encoded_media, validate=True)
         except ValueError:
             return {"ok": False, "http_status": status, "error": "media provider returned invalid base64 media"}
-        mime_type = str(candidate.get("mime_type") or candidate.get("mime") or candidate.get("content_type") or "")
+        mime_type = str(candidate.get("mime_type") or candidate.get("mime") or candidate.get("content_type") or _media_mime_from_provider_json(candidate, tool=tool) or "")
     else:
         content = raw
         mime_type = content_type
@@ -3474,18 +4322,19 @@ def _send_live_media_provider_request(
     return result
 
 
-def _live_media_source_file(*, root: Path, source_path: str, field: str) -> dict[str, Any]:
+def _live_media_source_file(*, root: Path, source_path: str, field: str, provider_adapter: str = "openai_image_edit") -> dict[str, Any]:
+    adapter_label = provider_adapter
     if not str(source_path or "").strip():
-        raise ToolExecutionError(f"openai_image_edit requires a {field}_path inside the workspace")
+        raise ToolExecutionError(f"{adapter_label} requires a {field}_path inside the workspace")
     path = _resolve_under_root(root, source_path)
     if not path.is_file():
-        raise ToolExecutionError(f"openai_image_edit {field}_path does not exist or is not a file")
+        raise ToolExecutionError(f"{adapter_label} {field}_path does not exist or is not a file")
     content = path.read_bytes()
     if not content:
-        raise ToolExecutionError(f"openai_image_edit {field}_path is empty")
+        raise ToolExecutionError(f"{adapter_label} {field}_path is empty")
     if len(content) > 10 * 1024 * 1024:
-        raise ToolExecutionError(f"openai_image_edit {field}_path exceeds the 10 MiB upload limit")
-    mime_type, extension = _source_image_upload_mime(content)
+        raise ToolExecutionError(f"{adapter_label} {field}_path exceeds the 10 MiB upload limit")
+    mime_type, extension = _source_image_upload_mime(content, provider_adapter=provider_adapter)
     return {
         "field": field,
         "filename": f"{field}.{extension}",
@@ -3496,28 +4345,36 @@ def _live_media_source_file(*, root: Path, source_path: str, field: str) -> dict
     }
 
 
-def _source_image_upload_mime(content: bytes) -> tuple[str, str]:
+def _source_image_upload_mime(content: bytes, *, provider_adapter: str = "openai_image_edit") -> tuple[str, str]:
+    google_imagen_source_adapter = provider_adapter in {"google_imagen_edit", "google_imagen_upscale", "google_imagen_product"}
     if content.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png", "png"
     if content.startswith(b"\xff\xd8"):
         return "image/jpeg", "jpg"
-    if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+    if google_imagen_source_adapter and (content.startswith(b"GIF87a") or content.startswith(b"GIF89a")):
+        return "image/gif", "gif"
+    if google_imagen_source_adapter and content.startswith(b"BM"):
+        return "image/bmp", "bmp"
+    if not google_imagen_source_adapter and content.startswith(b"RIFF") and content[8:12] == b"WEBP":
         return "image/webp", "webp"
+    if google_imagen_source_adapter:
+        raise ToolExecutionError(f"{provider_adapter} source images must be PNG, JPEG, GIF, or BMP")
     raise ToolExecutionError("openai_image_edit source images must be PNG, JPEG, or WEBP")
 
 
-def _live_media_audio_file(*, root: Path, audio_path: str) -> dict[str, Any]:
+def _live_media_audio_file(*, root: Path, audio_path: str, provider_adapter: str = "openai_transcription") -> dict[str, Any]:
+    adapter_label = provider_adapter
     if not str(audio_path or "").strip():
-        raise ToolExecutionError("openai_transcription requires an audio_path inside the workspace")
+        raise ToolExecutionError(f"{adapter_label} requires an audio_path inside the workspace")
     path = _resolve_under_root(root, audio_path)
     if not path.is_file():
-        raise ToolExecutionError("openai_transcription audio_path does not exist or is not a file")
+        raise ToolExecutionError(f"{adapter_label} audio_path does not exist or is not a file")
     content = path.read_bytes()
     if not content:
-        raise ToolExecutionError("openai_transcription audio_path is empty")
+        raise ToolExecutionError(f"{adapter_label} audio_path is empty")
     if len(content) > 10 * 1024 * 1024:
-        raise ToolExecutionError("openai_transcription audio_path exceeds the 10 MiB upload limit")
-    mime_type, extension = _source_audio_upload_mime(path)
+        raise ToolExecutionError(f"{adapter_label} audio_path exceeds the 10 MiB upload limit")
+    mime_type, extension = _source_audio_upload_mime(path, provider_adapter=provider_adapter)
     return {
         "path": path,
         "filename": f"audio.{extension}",
@@ -3528,7 +4385,7 @@ def _live_media_audio_file(*, root: Path, audio_path: str) -> dict[str, Any]:
     }
 
 
-def _source_audio_upload_mime(path: Path) -> tuple[str, str]:
+def _source_audio_upload_mime(path: Path, *, provider_adapter: str = "openai_transcription") -> tuple[str, str]:
     extension = path.suffix.lower().lstrip(".")
     mime_by_extension = {
         "flac": "audio/flac",
@@ -3543,7 +4400,7 @@ def _source_audio_upload_mime(path: Path) -> tuple[str, str]:
     }
     if extension in mime_by_extension:
         return mime_by_extension[extension], extension
-    raise ToolExecutionError("openai_transcription audio files must be FLAC, MP3, MP4, MPEG, MPGA, M4A, OGG, WAV, or WEBM")
+    raise ToolExecutionError(f"{provider_adapter} audio files must be FLAC, MP3, MP4, MPEG, MPGA, M4A, OGG, WAV, or WEBM")
 
 
 def _encode_openai_image_edit_multipart(*, payload: dict[str, Any], source_file: dict[str, Any], mask_file: dict[str, Any] | None = None) -> tuple[bytes, str]:
@@ -3573,6 +4430,116 @@ def _encode_openai_image_edit_multipart(*, payload: dict[str, Any], source_file:
     return bytes(body), f"multipart/form-data; boundary={boundary}"
 
 
+def _encode_google_imagen_edit_json(*, payload: dict[str, Any], source_file: dict[str, Any], mask_file: dict[str, Any] | None = None) -> bytes:
+    instances = payload.get("instances")
+    if not isinstance(instances, list) or not instances or not isinstance(instances[0], dict):
+        raise ToolExecutionError("google_imagen_edit request payload must include one instance")
+    redacted_instance = instances[0]
+    reference_images = redacted_instance.get("referenceImages")
+    if not isinstance(reference_images, list) or not reference_images:
+        raise ToolExecutionError("google_imagen_edit request payload must include referenceImages")
+    actual_references: list[dict[str, Any]] = []
+    for reference in reference_images:
+        if not isinstance(reference, dict):
+            continue
+        reference_type = str(reference.get("referenceType") or "")
+        upload = source_file if reference_type == "REFERENCE_TYPE_RAW" else mask_file if reference_type == "REFERENCE_TYPE_MASK" else None
+        if upload is None:
+            continue
+        actual_reference: dict[str, Any] = {
+            "referenceType": reference_type,
+            "referenceId": reference.get("referenceId", 1 if reference_type == "REFERENCE_TYPE_RAW" else 2),
+            "referenceImage": {
+                "bytesBase64Encoded": base64.b64encode(bytes(upload["content"])).decode("ascii"),
+            },
+        }
+        mask_config = reference.get("maskImageConfig")
+        if isinstance(mask_config, dict) and reference_type == "REFERENCE_TYPE_MASK":
+            actual_reference["maskImageConfig"] = mask_config
+        actual_references.append(actual_reference)
+    if not any(reference.get("referenceType") == "REFERENCE_TYPE_RAW" for reference in actual_references):
+        raise ToolExecutionError("google_imagen_edit requires a raw source reference image")
+    actual_instance: dict[str, Any] = {"referenceImages": actual_references}
+    prompt = redacted_instance.get("prompt")
+    if prompt:
+        actual_instance["prompt"] = str(prompt)
+    actual_payload: dict[str, Any] = {"instances": [actual_instance]}
+    parameters = payload.get("parameters")
+    if isinstance(parameters, dict):
+        actual_payload["parameters"] = parameters
+    return json.dumps(actual_payload, sort_keys=True, default=str).encode("utf-8")
+
+
+def _encode_google_imagen_upscale_json(*, payload: dict[str, Any], source_file: dict[str, Any]) -> bytes:
+    instances = payload.get("instances")
+    if not isinstance(instances, list) or not instances or not isinstance(instances[0], dict):
+        raise ToolExecutionError("google_imagen_upscale request payload must include one instance")
+    redacted_instance = instances[0]
+    actual_instance: dict[str, Any] = {
+        "prompt": str(redacted_instance.get("prompt") or "Upscale the image"),
+        "image": {
+            "bytesBase64Encoded": base64.b64encode(bytes(source_file["content"])).decode("ascii"),
+        },
+    }
+    actual_payload: dict[str, Any] = {"instances": [actual_instance]}
+    parameters = payload.get("parameters")
+    if isinstance(parameters, dict):
+        actual_payload["parameters"] = parameters
+    return json.dumps(actual_payload, sort_keys=True, default=str).encode("utf-8")
+
+
+def _encode_google_imagen_product_json(*, payload: dict[str, Any], source_file: dict[str, Any], mask_file: dict[str, Any] | None = None) -> bytes:
+    instances = payload.get("instances")
+    if not isinstance(instances, list) or not instances or not isinstance(instances[0], dict):
+        raise ToolExecutionError("google_imagen_product request payload must include one instance")
+    redacted_instance = instances[0]
+    reference_images = redacted_instance.get("referenceImages")
+    if not isinstance(reference_images, list) or not reference_images:
+        raise ToolExecutionError("google_imagen_product request payload must include referenceImages")
+    actual_references: list[dict[str, Any]] = []
+    for reference in reference_images:
+        if not isinstance(reference, dict):
+            continue
+        reference_type = str(reference.get("referenceType") or "")
+        if reference_type == "REFERENCE_TYPE_RAW":
+            actual_references.append(
+                {
+                    "referenceType": reference_type,
+                    "referenceId": reference.get("referenceId", 1),
+                    "referenceImage": {
+                        "bytesBase64Encoded": base64.b64encode(bytes(source_file["content"])).decode("ascii"),
+                    },
+                }
+            )
+            continue
+        if reference_type == "REFERENCE_TYPE_MASK":
+            actual_reference: dict[str, Any] = {
+                "referenceType": reference_type,
+                "referenceId": reference.get("referenceId", 2),
+            }
+            if mask_file is not None:
+                actual_reference["referenceImage"] = {
+                    "bytesBase64Encoded": base64.b64encode(bytes(mask_file["content"])).decode("ascii"),
+                }
+            mask_config = reference.get("maskImageConfig")
+            if isinstance(mask_config, dict):
+                actual_reference["maskImageConfig"] = mask_config
+            actual_references.append(actual_reference)
+    if not any(reference.get("referenceType") == "REFERENCE_TYPE_RAW" for reference in actual_references):
+        raise ToolExecutionError("google_imagen_product requires a raw source reference image")
+    if not any(reference.get("referenceType") == "REFERENCE_TYPE_MASK" for reference in actual_references):
+        raise ToolExecutionError("google_imagen_product requires a mask reference image config")
+    actual_instance: dict[str, Any] = {"referenceImages": actual_references}
+    prompt = redacted_instance.get("prompt")
+    if prompt:
+        actual_instance["prompt"] = str(prompt)
+    actual_payload: dict[str, Any] = {"instances": [actual_instance]}
+    parameters = payload.get("parameters")
+    if isinstance(parameters, dict):
+        actual_payload["parameters"] = parameters
+    return json.dumps(actual_payload, sort_keys=True, default=str).encode("utf-8")
+
+
 def _encode_openai_transcription_multipart(*, payload: dict[str, Any], audio_file: dict[str, Any]) -> tuple[bytes, str]:
     boundary = f"aegis-{uuid4().hex}"
     body = bytearray()
@@ -3591,6 +4558,84 @@ def _encode_openai_transcription_multipart(*, payload: dict[str, Any], audio_fil
     return bytes(body), f"multipart/form-data; boundary={boundary}"
 
 
+def _encode_elevenlabs_speech_to_speech_multipart(*, payload: dict[str, Any], audio_file: dict[str, Any]) -> tuple[bytes, str]:
+    boundary = f"aegis-{uuid4().hex}"
+    body = bytearray()
+    metadata_keys = {"audio_present", "audio_sha256", "audio_mime_type", "audio_bytes"}
+    for key in sorted(payload):
+        if key in metadata_keys:
+            continue
+        value = payload[key]
+        body.extend(f"--{boundary}\r\n".encode("ascii"))
+        body.extend(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("ascii"))
+        body.extend(str(value).lower().encode("utf-8") if isinstance(value, bool) else str(value).encode("utf-8"))
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}\r\n".encode("ascii"))
+    body.extend(f'Content-Disposition: form-data; name="audio"; filename="{audio_file["filename"]}"\r\n'.encode("ascii"))
+    body.extend(f'Content-Type: {audio_file["mime_type"]}\r\n\r\n'.encode("ascii"))
+    body.extend(audio_file["content"])
+    body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode("ascii"))
+    return bytes(body), f"multipart/form-data; boundary={boundary}"
+
+
+def _encode_elevenlabs_voice_clone_multipart(*, payload: dict[str, Any], audio_files: list[dict[str, Any]]) -> tuple[bytes, str]:
+    boundary = f"aegis-{uuid4().hex}"
+    body = bytearray()
+    metadata_keys = {"sample_count", "sample_sha256", "sample_bytes", "sample_mime_types"}
+    for key in sorted(payload):
+        if key in metadata_keys:
+            continue
+        value = payload[key]
+        if key == "labels":
+            value = json.dumps(value, sort_keys=True)
+        body.extend(f"--{boundary}\r\n".encode("ascii"))
+        body.extend(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("ascii"))
+        body.extend(str(value).lower().encode("utf-8") if isinstance(value, bool) else str(value).encode("utf-8"))
+        body.extend(b"\r\n")
+    for audio_file in audio_files:
+        body.extend(f"--{boundary}\r\n".encode("ascii"))
+        body.extend(f'Content-Disposition: form-data; name="files[]"; filename="{audio_file["filename"]}"\r\n'.encode("ascii"))
+        body.extend(f'Content-Type: {audio_file["mime_type"]}\r\n\r\n'.encode("ascii"))
+        body.extend(audio_file["content"])
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode("ascii"))
+    return bytes(body), f"multipart/form-data; boundary={boundary}"
+
+
+def _send_live_voice_clone_provider_request(*, url: str, token: str, payload: dict[str, Any], audio_files: list[dict[str, Any]]) -> dict[str, Any]:
+    body, content_type = _encode_elevenlabs_voice_clone_multipart(payload=payload, audio_files=audio_files)
+    headers = {
+        "Content-Type": content_type,
+        "User-Agent": "Aegis-Agent/0.1",
+        "xi-api-key": token,
+    }
+    request = Request(url, data=body, method="POST", headers=headers)
+    try:
+        response_context = _open_without_redirects(request, timeout=30)
+    except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            return {"ok": False, "http_status": exc.code, "error": "HTTP redirects are not followed by the governed voice clone adapter"}
+        return {"ok": False, "http_status": exc.code, "error": f"voice clone provider failed with status {exc.code}"}
+    except URLError as exc:
+        return {"ok": False, "http_status": 0, "error": f"voice clone provider request failed: {exc.reason}"}
+    with response_context as response:
+        status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+        raw = response.read(2 * 1024 * 1024)
+    if not 200 <= status < 300:
+        return {"ok": False, "http_status": status, "error": f"voice clone provider failed with status {status}"}
+    try:
+        decoded = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {"ok": False, "http_status": status, "error": "voice clone provider JSON response could not be decoded"}
+    if not isinstance(decoded, dict):
+        return {"ok": False, "http_status": status, "error": "voice clone provider JSON response must be an object"}
+    voice_id = decoded.get("voice_id") or decoded.get("voiceId") or decoded.get("id")
+    if not isinstance(voice_id, str) or not voice_id.strip():
+        return {"ok": False, "http_status": status, "error": "voice clone provider response did not include voice_id"}
+    return {"ok": True, "http_status": status, "voice_id": voice_id.strip(), "requires_verification": bool(decoded.get("requires_verification"))}
+
+
 def _send_live_transcription_provider_request(
     *,
     url: str,
@@ -3599,18 +4644,22 @@ def _send_live_transcription_provider_request(
     provider_adapter: str,
     audio_file: dict[str, Any],
 ) -> dict[str, Any]:
-    if provider_adapter != "openai_transcription":
+    if provider_adapter not in {"openai_transcription", "elevenlabs_transcription"}:
         return {"ok": False, "http_status": 0, "error": f"unsupported transcription provider adapter: {provider_adapter}"}
     body, content_type = _encode_openai_transcription_multipart(payload=payload, audio_file=audio_file)
+    headers = {
+        "Content-Type": content_type,
+        "User-Agent": "Aegis-Agent/0.1",
+    }
+    if provider_adapter == "elevenlabs_transcription":
+        headers["xi-api-key"] = token
+    else:
+        headers["Authorization"] = f"Bearer {token}"
     request = Request(
         url,
         data=body,
         method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": content_type,
-            "User-Agent": "Aegis-Agent/0.1",
-        },
+        headers=headers,
     )
     try:
         response_context = _open_without_redirects(request, timeout=30)
@@ -3746,6 +4795,23 @@ def _media_base64_from_provider_json(decoded: dict[str, Any], *, tool: str) -> s
                 value = first.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
+    artifacts = decoded.get("artifacts")
+    if isinstance(artifacts, list):
+        for artifact in artifacts:
+            candidates = artifact if isinstance(artifact, list) else [artifact]
+            for candidate in candidates:
+                if isinstance(candidate, dict):
+                    value = candidate.get("base64")
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+    predictions = decoded.get("predictions")
+    if isinstance(predictions, list):
+        for prediction in predictions:
+            if isinstance(prediction, dict):
+                for key in ("bytesBase64Encoded", "bytes_base64_encoded", "imageBytes", "image_bytes", "base64"):
+                    value = prediction.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
     data_items = decoded.get("data")
     if isinstance(data_items, list) and data_items:
         first = data_items[0]
@@ -3759,6 +4825,46 @@ def _media_base64_from_provider_json(decoded: dict[str, Any], *, tool: str) -> s
     if isinstance(audio, dict):
         for key in ("data", "audio_base64", "b64_json"):
             value = audio.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return ""
+
+
+def _media_mime_from_provider_json(decoded: dict[str, Any], *, tool: str) -> str:
+    predictions = decoded.get("predictions")
+    if isinstance(predictions, list):
+        for prediction in predictions:
+            if isinstance(prediction, dict):
+                value = prediction.get("mimeType") or prediction.get("mime_type") or prediction.get("contentType") or prediction.get("content_type")
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    data_items = decoded.get("data")
+    if isinstance(data_items, list):
+        for item in data_items:
+            if isinstance(item, dict):
+                value = item.get("mime_type") or item.get("mimeType") or item.get("content_type") or item.get("contentType")
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    images = decoded.get("images")
+    if isinstance(images, list):
+        for item in images:
+            if isinstance(item, dict):
+                value = item.get("mime_type") or item.get("mimeType") or item.get("content_type") or item.get("contentType")
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    artifacts = decoded.get("artifacts")
+    if isinstance(artifacts, list):
+        for artifact in artifacts:
+            candidates = artifact if isinstance(artifact, list) else [artifact]
+            for candidate in candidates:
+                if isinstance(candidate, dict):
+                    value = candidate.get("mime_type") or candidate.get("mimeType") or candidate.get("content_type") or candidate.get("contentType")
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+    if tool == "tts":
+        audio = decoded.get("audio")
+        if isinstance(audio, dict):
+            value = audio.get("mime_type") or audio.get("mimeType") or audio.get("content_type") or audio.get("contentType")
             if isinstance(value, str) and value.strip():
                 return value.strip()
     return ""

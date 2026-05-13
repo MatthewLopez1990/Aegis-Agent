@@ -20,11 +20,14 @@ const state = {
   taskScope: "session",
   memoryQuery: "",
   skillHubQuery: "",
+  channelActivationPacketId: "",
   pluginMarketplaceQuery: "",
   pluginMarketplaceCatalogPath: "",
+  pluginPreparedUpdateCandidateId: "",
   pendingSubagentDelegation: null,
   pendingSkillEnable: {},
   slashSelectionIndex: 0,
+  slashPaletteEntries: [],
 };
 
 const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "blocked", "cancelled"]);
@@ -46,22 +49,28 @@ const TOOL_RUN_PRESETS = [
 
 const WEB_SLASH_COMMANDS = [
   { command: "submit", label: "/submit <request>", detail: "Submit a governed task", kind: "submit", acceptsRequest: true },
-  { command: "background", aliases: ["bg", "btw", "queue", "q"], label: "/background|/bg|/btw <request>", detail: "Queue governed work from the active session", kind: "submit", acceptsRequest: true },
-  { command: "resume", aliases: ["continue"], label: "/resume", detail: "Resume the last waiting or paused task", kind: "resume" },
+  { command: "background", aliases: ["bg", "btw"], label: "/background|/bg|/btw <request>", detail: "Queue governed work from the active session", kind: "submit", acceptsRequest: true },
+  { command: "queue", aliases: ["q"], label: "/queue|/q [status|all|session|submit]", detail: "Open the active queue or submit governed work", kind: "queue-control", section: "activity" },
+  { command: "resume", aliases: ["continue"], label: "/resume [task_id]", detail: "Resume the selected waiting or paused task", kind: "task-control", taskAction: "resume" },
+  { command: "pause", label: "/pause [task_id]", detail: "Pause the selected non-terminal task", kind: "task-control", taskAction: "pause" },
+  { command: "cancel", aliases: ["stop"], label: "/cancel|/stop [task_id]", detail: "Cancel the selected non-terminal task", kind: "task-control", taskAction: "cancel" },
   { command: "tasks", aliases: ["task", "list"], label: "/tasks", detail: "Open the task feed", kind: "section", section: "activity" },
-  { command: "approvals", aliases: ["approve", "permissions", "privacy-settings", "whoami", "yolo"], label: "/approvals", detail: "Open pending approval and privacy gates", kind: "section", section: "security" },
-  { command: "models", aliases: ["model", "login", "logout", "setup-bedrock", "setup-vertex", "upgrade"], label: "/models", detail: "Open provider login and model routing controls", kind: "section", section: "models" },
+  { command: "approval", label: "/approval <approval_id>", detail: "Review an approval request", kind: "approval-control", approvalAction: "review" },
+  { command: "approve", label: "/approve <approval_id>", detail: "Approve a pending approval", kind: "approval-control", approvalAction: "approve" },
+  { command: "deny", label: "/deny <approval_id>", detail: "Deny a pending approval", kind: "approval-control", approvalAction: "deny" },
+  { command: "approvals", aliases: ["permissions", "privacy-settings", "whoami", "yolo"], label: "/approvals", detail: "Open pending approval and privacy gates", kind: "section", section: "security" },
+  { command: "models", aliases: ["model", "login", "logout", "setup-bedrock", "setup-vertex", "upgrade", "extra-usage", "passes"], label: "/models", detail: "Open provider login and model routing controls", kind: "section", section: "models" },
   { command: "tools", aliases: ["tool", "allowed-tools"], label: "/tools", detail: "Open governed tool and MCP controls", kind: "section", section: "tools" },
   { command: "browser", aliases: ["chrome"], label: "/browser|/chrome", detail: "Open guarded browser controls", kind: "section", section: "tools" },
   { command: "memory", aliases: ["mem"], label: "/memory", detail: "Open governed memory controls", kind: "section", section: "memory" },
-  { command: "remote-control", aliases: ["rc", "remote"], label: "/remote-control", detail: "Open remote pairing and relay controls", kind: "section", section: "automation" },
+  { command: "remote-control", aliases: ["rc", "remote", "mobile", "ios", "android"], label: "/remote-control", detail: "Open remote pairing and relay controls", kind: "section", section: "automation" },
   { command: "schedules", aliases: ["schedule", "hooks"], label: "/schedules", detail: "Open automation, hooks, and scheduled runs", kind: "section", section: "automation" },
   { command: "status", label: "/status [task_id]", detail: "Show task status for an id or the selected task", kind: "task-inspection", taskView: "status" },
   { command: "events", label: "/events [task_id]", detail: "Stream grouped run events for an id or the selected task", kind: "task-inspection", taskView: "events" },
   { command: "timeline", label: "/timeline [task_id]", detail: "Open ordered plan, receipt, and audit events", kind: "task-inspection", taskView: "timeline" },
   { command: "evidence", aliases: ["audit"], label: "/evidence [task_id]", detail: "Open receipts and audit evidence for an id or the selected task", kind: "task-inspection", taskView: "evidence" },
-  { command: "settings", aliases: ["dashboard", "controls", "recap", "release-notes", "tui", "scroll-speed", "radio", "stickers"], label: "/settings", detail: "Open runtime posture and UI controls", kind: "section", section: "security" },
-  { command: "commands", aliases: ["help", "keybindings", "autofix-pr", "simplify", "ultraplan", "ultrareview"], label: "/commands", detail: "Show slash command suggestions", kind: "palette" },
+  { command: "settings", aliases: ["dashboard", "controls", "setup", "recap", "release-notes", "tui", "scroll-speed", "radio", "stickers", "focus", "heapdump", "ide"], label: "/settings", detail: "Open runtime posture and UI controls", kind: "section", section: "security" },
+  { command: "commands", aliases: ["help", "keybindings", "autofix-pr", "simplify", "ultraplan", "ultrareview", "claude-api", "fewer-permission-prompts", "powerup", "team-onboarding", "install-github-app", "install-slack-app"], label: "/commands", detail: "Show slash command suggestions", kind: "palette" },
 ];
 
 let webSlashCommands = WEB_SLASH_COMMANDS.slice();
@@ -77,6 +86,15 @@ const normalizeWebSlashCommand = (entry) => {
     kind: entry.kind || "palette",
     section: entry.section || "settings",
     source: entry.source || "web",
+    surfaces: Array.isArray(entry.surfaces) ? entry.surfaces.map(String) : ["web"],
+    args: Array.isArray(entry.args) ? entry.args.map(String) : [],
+    flags: Array.isArray(entry.flags) ? entry.flags.map(String) : [],
+    requiresLocalToken: Boolean(entry.requires_local_token ?? entry.requiresLocalToken),
+    requiresRemoteToken: Boolean(entry.requires_remote_token ?? entry.requiresRemoteToken),
+    mutates: Boolean(entry.mutates),
+    webActions: Array.isArray(entry.web_actions) ? entry.web_actions : Array.isArray(entry.webActions) ? entry.webActions : [],
+    taskAction: entry.taskAction || entry.task_action || "",
+    approvalAction: entry.approvalAction || entry.approval_action || "",
     acceptsRequest: Boolean(entry.acceptsRequest),
   };
 };
@@ -89,7 +107,26 @@ const mergeWebSlashCommands = (commands = []) => {
     .filter(Boolean)
     .forEach((entry) => {
       const terms = slashCommandTerms(entry);
-      if (terms.some((term) => knownTerms.has(term))) return;
+      const existing = merged.find((candidate) => terms.some((term) => slashCommandTerms(candidate).includes(term)));
+      if (existing) {
+        if (entry.webActions.length) {
+          existing.aliases = [...new Set([...(existing.aliases || []), ...(entry.aliases || [])])];
+          existing.detail = entry.detail || existing.detail;
+          existing.kind = entry.kind || existing.kind;
+          existing.section = entry.section || existing.section;
+          existing.source = entry.source || existing.source;
+          existing.surfaces = entry.surfaces.length ? entry.surfaces : existing.surfaces;
+          existing.args = entry.args.length ? entry.args : existing.args;
+          existing.flags = entry.flags.length ? entry.flags : existing.flags;
+          existing.requiresLocalToken = entry.requiresLocalToken;
+          existing.requiresRemoteToken = entry.requiresRemoteToken;
+          existing.mutates = entry.mutates;
+          existing.webActions = entry.webActions;
+          existing.taskAction = entry.taskAction || existing.taskAction;
+          existing.approvalAction = entry.approvalAction || existing.approvalAction;
+        }
+        return;
+      }
       terms.forEach((term) => knownTerms.add(term));
       merged.push(entry);
     });
@@ -128,6 +165,29 @@ const escapeHtml = (value) =>
 
 const text = (value) => escapeHtml(Array.isArray(value) ? value.join(", ") : value);
 
+const fieldList = (id) =>
+  String(document.getElementById(id)?.value || "")
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+const processArgvValue = () => {
+  const raw = String(document.getElementById("process-argv")?.value || "").trim();
+  if (!raw) return [];
+  if (raw.startsWith("[")) {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new Error("Process argv JSON must be an array.");
+    return parsed.map(String);
+  }
+  return (raw.match(/"([^"\\]*(?:\\.[^"\\]*)*)"|'([^']*)'|\S+/g) || []).map((part) =>
+    part.startsWith('"') && part.endsWith('"')
+      ? part.slice(1, -1).replace(/\\"/g, '"')
+      : part.startsWith("'") && part.endsWith("'")
+        ? part.slice(1, -1)
+        : part
+  );
+};
+
 const copyButton = (label, value) =>
   value ? `<button type="button" class="secondary" data-copy-command="${escapeHtml(value)}">${text(label)}</button>` : "";
 
@@ -158,6 +218,62 @@ const slashCommandForToken = (token) => {
   return webSlashCommands.find((entry) => slashCommandTerms(entry).includes(normalized)) || null;
 };
 
+const slashConcreteOptions = (options = []) =>
+  options.map(String).filter((option) => option && !option.endsWith("_id") && option !== "request");
+
+const slashInputContext = (rawValue) => {
+  const raw = String(rawValue || "");
+  const trimmedStart = raw.trimStart();
+  if (!trimmedStart.startsWith("/")) return { kind: "task" };
+  const match = trimmedStart.match(/^\/([a-zA-Z0-9_.:-]*)([\s\S]*)$/);
+  if (!match) return { kind: "unknown", prefix: "" };
+  const commandToken = match[1] || "";
+  const remainder = match[2] || "";
+  if (!commandToken || !remainder) {
+    return { kind: "command", prefix: commandToken };
+  }
+  const entry = slashCommandForToken(commandToken);
+  if (!entry) return { kind: "command", prefix: commandToken };
+  const endsWithSpace = /\s$/.test(remainder);
+  const current = endsWithSpace ? "" : (remainder.match(/(\S+)$/)?.[1] || "");
+  const replaceStart = raw.length - current.length;
+  const parts = remainder.trim().split(/\s+/).filter(Boolean);
+  const wantsFlag = current.startsWith("--") || parts.some((part) => part.startsWith("--"));
+  return {
+    kind: wantsFlag ? "flag" : "arg",
+    command: entry.command,
+    entry,
+    prefix: current,
+    replaceStart,
+    replaceEnd: raw.length,
+  };
+};
+
+const slashOptionMatches = (context) => {
+  const options = slashConcreteOptions(context.kind === "flag" ? context.entry?.flags : context.entry?.args);
+  const prefix = String(context.prefix || "").toLowerCase();
+  return options
+    .filter((option) => !prefix || option.toLowerCase().startsWith(prefix) || option.toLowerCase().includes(prefix))
+    .map((option) => ({
+      command: context.command,
+      label: option,
+      detail: `${context.kind === "flag" ? "Flag" : "Option"} for /${context.command}`,
+      kind: "completion",
+      completionKind: context.kind,
+      completionValue: option,
+      replaceStart: context.replaceStart,
+      replaceEnd: context.replaceEnd,
+    }));
+};
+
+const slashPaletteMatches = (rawValue) => {
+  const context = slashInputContext(rawValue);
+  if (context.kind === "arg" || context.kind === "flag") {
+    return slashOptionMatches(context);
+  }
+  return slashCommandMatches(context.prefix || "");
+};
+
 const parseTaskSlashCommand = (rawValue) => {
   const raw = String(rawValue || "");
   const trimmedStart = raw.trimStart();
@@ -183,10 +299,12 @@ const renderSlashPalette = () => {
     palette.hidden = true;
     palette.replaceChildren();
     state.slashSelectionIndex = 0;
+    state.slashPaletteEntries = [];
     return;
   }
   const prefix = value.slice(1).split(/\s+/, 1)[0];
-  const matches = slashCommandMatches(prefix).slice(0, 8);
+  const matches = slashPaletteMatches(value).slice(0, 8);
+  state.slashPaletteEntries = matches;
   if (!matches.length) {
     palette.hidden = false;
     palette.innerHTML = `<div class="slash-palette-header"><span>No slash matches</span><span>/${text(prefix)}</span></div>`;
@@ -197,7 +315,7 @@ const renderSlashPalette = () => {
   palette.innerHTML = `
     <div class="slash-palette-header"><span>Slash Commands</span><span>Tab completes · Ctrl+Enter sends</span></div>
     ${matches.map((entry, index) => `
-      <button type="button" class="slash-palette-row ${index === state.slashSelectionIndex ? "active" : ""}" data-slash-command="${text(entry.command)}">
+      <button type="button" class="slash-palette-row ${index === state.slashSelectionIndex ? "active" : ""}" data-slash-index="${index}">
         <strong>${text(entry.label)}</strong>
         <span>${text(entry.detail)}</span>
       </button>
@@ -207,6 +325,12 @@ const renderSlashPalette = () => {
 
 const applySlashCompletion = (entry) => {
   const input = document.getElementById("task-request");
+  if (entry.completionKind) {
+    input.value = `${input.value.slice(0, entry.replaceStart)}${entry.completionValue} ${input.value.slice(entry.replaceEnd)}`;
+    input.focus();
+    renderSlashPalette();
+    return;
+  }
   const parsed = parseTaskSlashCommand(input.value);
   const suffix = parsed.request ? ` ${parsed.request}` : entry.acceptsRequest ? " " : "";
   input.value = `/${entry.command}${suffix}`;
@@ -245,6 +369,45 @@ const setList = (id, rows, mapper, emptyLabel = "No records") => {
     return;
   }
   node.replaceChildren(...rows.map((row) => item(mapper(row))));
+};
+
+const modelProviderFallbackLabel = (provider) =>
+  String(provider || "")
+    .split("-")
+    .filter(Boolean)
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(" ");
+
+const syncModelProviderOptions = (providerRows = [], authTargets = []) => {
+  const select = document.getElementById("model-provider");
+  const selected = select.value;
+  const labels = new Map(Array.from(select.options).map((option) => [option.value, option.textContent]));
+  providerRows.forEach((row) => {
+    const provider = row.provider;
+    if (provider && !labels.has(provider)) {
+      labels.set(provider, row.label || modelProviderFallbackLabel(provider));
+    }
+  });
+  authTargets.forEach((row) => {
+    const provider = row.aegis_provider || row.provider;
+    if (provider && !labels.has(provider)) {
+      labels.set(provider, row.target || modelProviderFallbackLabel(provider));
+    }
+  });
+  const existing = new Set(Array.from(select.options).map((option) => option.value));
+  Array.from(labels.entries())
+    .filter(([provider]) => provider && !existing.has(provider))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .forEach(([provider, label]) => {
+      const option = document.createElement("option");
+      option.value = provider;
+      option.textContent = label;
+      select.append(option);
+    });
+  if (labels.has(selected)) {
+    select.value = selected;
+  }
+  syncModelAuthMethodForProvider();
 };
 
 const connectorPolicyMeta = (connector) => {
@@ -342,6 +505,7 @@ const refresh = async () => {
       modelUsage,
       tools,
       backends,
+      processes,
       browserSessions,
       skillHub,
       skills,
@@ -383,6 +547,7 @@ const refresh = async () => {
       api("/model-usage"),
       api("/tools"),
       api("/backends"),
+      api("/processes"),
       api("/browser/sessions"),
       api(`/skill-hub?q=${encodeURIComponent(state.skillHubQuery)}`),
       api("/skills"),
@@ -410,16 +575,12 @@ const refresh = async () => {
     ]);
 
     mergeWebSlashCommands(commandCatalog.commands || []);
+    syncModelProviderOptions(modelProviders.providers || [], modelAuthTargets.targets || dashboard.model_provider_auth_parity?.targets || []);
     syncPendingSkillEnableApprovals([...(approvedApprovals.approvals || []), ...(approvals.approvals || [])]);
     renderMetrics(dashboard);
     renderRemoteControlRelay(remoteControlRelay);
     renderRemoteControlOutbox(remoteControlOutbox);
-    setList("remote-control-push-targets", remoteControl.native_push_targets || [], (x) => ({
-      title: x.label || x.id,
-      detail: `${x.provider || "provider"} · auth ${x.push_auth_secret_configured ? "configured" : "missing"} · device ${x.device_token_secret_configured ? "configured" : "missing"}`,
-      meta: `${x.status} · rotated ${x.rotation_count || 0} · ${x.last_push_delivery_state || "not pushed"}${x.last_push_at ? ` · ${x.last_push_at}` : ""}`,
-      tone: x.status === "active" ? "ready" : "attention",
-    }), "No native push targets");
+    setList("remote-control-push-targets", remoteControl.native_push_targets || [], remoteControlPushTargetItem, "No native push targets");
     setList("remote-control-pairings", remoteControl.pairings || [], (x) => ({
       title: x.label || x.id,
       detail: `Session ${x.session_id || "any"} · task ${x.task_id || "any"} · actions ${(x.allowed_actions || []).join(", ") || "none"}`,
@@ -530,6 +691,21 @@ const refresh = async () => {
       meta: `${x.risk_level} · ${x.enabled ? "enabled" : "disabled"} · ${x.activation?.status || "unknown"} · ${x.activation?.preflight_status || "unknown"}`,
       tone: x.enabled ? "ready" : "",
     }));
+    setList("processes", processes.processes || [], (x) => ({
+      title: x.label || shortId(x.id),
+      detail: `${x.executable || "process"} · argv ${x.argv_count || 0} · ${x.pty_attached ? `pty ${x.terminal_rows || 24}x${x.terminal_cols || 80}` : "background log"}`,
+      meta: `${x.status || "unknown"} · ${shortId(x.id)} · raw command ${formatBool(x.raw_command_included)}`,
+      tone: x.status === "running" ? "ready" : x.status === "stop_requested" ? "attention" : "",
+      actions: `
+        <button type="button" class="secondary" data-process-select="${escapeHtml(x.id)}">Use</button>
+        <button type="button" class="secondary" data-process-logs="${escapeHtml(x.id)}">Logs</button>
+        ${
+          ["running", "stop_requested"].includes(x.status)
+            ? `<button type="button" class="secondary" data-process-stop="${escapeHtml(x.id)}">Stop</button>`
+            : ""
+        }
+      `,
+    }), "No background processes");
     if (!state.browserSessionId && browserSessions.sessions.length) {
       state.browserSessionId = browserSessions.sessions[0].id;
     }
@@ -576,19 +752,19 @@ const refresh = async () => {
       detail: `${x.description || "Marketplace metadata"} Resources: ${(x.resource_kinds || []).join(", ") || "none"}`,
       meta: `${x.installed ? `installed ${x.installed_version || "unknown"}` : "not installed"} · catalog v${x.version || "0.0.0"} · ${x.install_mode || "manual"} · verified manifest ${formatBool(x.marketplace_install_supported)} · signed bundle ${formatBool(x.marketplace_bundle_install_supported)}`,
       tone: x.update_available ? "attention" : x.installed ? "ready" : "",
-      actions: `${x.bundle_fetch_supported ? `<button type="button" class="secondary" data-plugin-marketplace-fetch-bundle="${escapeHtml(x.id)}">Fetch Bundle</button>` : ""}${x.marketplace_bundle_install_supported ? `<button type="button" class="secondary" data-plugin-marketplace-install-bundle="${escapeHtml(x.id)}">Install Bundle</button>` : ""}${x.marketplace_install_supported ? `<button type="button" class="secondary" data-plugin-marketplace-install="${escapeHtml(x.id)}">Install</button>` : ""}`,
+      actions: `${x["manifest_fetch_supported"] ? `<button type="button" class="secondary" data-plugin-marketplace-fetch-manifest="${escapeHtml(x.id)}">Fetch Manifest</button>` : ""}${x.bundle_fetch_supported ? `<button type="button" class="secondary" data-plugin-marketplace-fetch-bundle="${escapeHtml(x.id)}">Fetch Bundle</button>` : ""}${x.marketplace_bundle_install_supported ? `<button type="button" class="secondary" data-plugin-marketplace-install-bundle="${escapeHtml(x.id)}">Install Bundle</button>` : ""}${x.marketplace_install_supported ? `<button type="button" class="secondary" data-plugin-marketplace-install="${escapeHtml(x.id)}">Install</button>` : ""}`,
     }), "No marketplace plugin metadata");
     setList("plugin-updates", pluginUpdates.updates || [], (x) => ({
       title: x.name || x.id,
       detail: `${x.installed_version} -> ${x.available_version}. ${(x.next_actions || []).join(" ")}`,
       meta: `${x.status} · ${x.install_mode || "manual_manifest_review"} · review ${formatBool(x.requires_review)}`,
       tone: "attention",
-      actions: `<button type="button" class="secondary" data-plugin-marketplace-update="${escapeHtml(x.id)}">Apply Update</button>`,
+      actions: `<button type="button" class="secondary" data-plugin-marketplace-prepare-update="${escapeHtml(x.id)}">Prepare</button><button type="button" class="secondary" data-plugin-marketplace-update="${escapeHtml(x.id)}">Apply Direct</button>`,
     }), "No plugin updates");
     setList("mcp-servers", mcpServers.servers, (x) => ({
       title: x.name,
       detail: x.command,
-      meta: `${x.metadata?.transport || "stdio"} · ${x.enabled ? "enabled" : "disabled"} · ${x.approval_required ? "approval required" : "approval optional"} · ${x.allowed_tools.join(", ") || "no tools"}`,
+      meta: `${x.metadata?.transport || "stdio"} · auth ${x.metadata?.auth?.type || "none"} · oauth ${x.metadata?.oauth?.status || "none"} · ${x.enabled ? "enabled" : "disabled"} · ${x.approval_required ? "approval required" : "approval optional"} · ${x.allowed_tools.join(", ") || "no tools"}`,
     }), "No MCP servers");
     setList("schedules", schedules.schedules, (x) => ({
       title: x.name,
@@ -601,7 +777,9 @@ const refresh = async () => {
               ? `Evaluation run for ${x.metadata.scenario || "scheduled evaluation"}`
               : x.metadata?.kind === "evaluation_suite"
                 ? `Evaluation suite ${x.metadata.suite || "security"} for ${x.metadata.reviewer || "scheduler"}`
-                : x.task_request,
+                : x.metadata?.kind === "no_agent_hook"
+                  ? `No-agent hook ${x.metadata.hook_id || "scheduled hook"}`
+                  : x.task_request,
       meta: `${x.status} · ${x.cron} · next ${x.next_run_at}`,
       tone: "attention",
       actions: `
@@ -759,7 +937,8 @@ const renderSubagents = (payload) => {
   const summary = document.getElementById("subagent-summary");
   const batchControl = (payload.implemented_controls || []).includes("operator_approved_batch_runtime") ? " · batch run ready" : "";
   const reviewPacketControl = (payload.implemented_controls || []).includes("model_ready_review_packets") ? " · review packets ready" : "";
-  summary.textContent = `${payload.open_cards || 0} open · ${payload.ready_cards || 0} ready · ${payload.in_progress_cards || 0} active · ${payload.review_cards || 0} review · ${payload.done_cards || 0} done · profiles ${payload.enabled_profile_count || 0}/${payload.profile_count || 0} · autonomous runtime ${payload.autonomous_runtime ? "enabled" : "blocked"}${batchControl}${reviewPacketControl}`;
+  const autonomyStepControl = (payload.implemented_controls || []).includes("scoped_autonomy_step_plans") ? " · step plans ready" : "";
+  summary.textContent = `${payload.open_cards || 0} open · ${payload.ready_cards || 0} ready · ${payload.in_progress_cards || 0} active · ${payload.review_cards || 0} review · ${payload.done_cards || 0} done · profiles ${payload.enabled_profile_count || 0}/${payload.profile_count || 0} · autonomous runtime ${payload.autonomous_runtime ? "enabled" : "blocked"}${batchControl}${reviewPacketControl}${autonomyStepControl}`;
   setList("subagent-cards", payload.cards || [], (x) => ({
     title: x.title,
     detail: x.description_preview || "No preview",
@@ -785,6 +964,18 @@ const subagentCardMeta = (card) => {
   if (reviewPacketCount || hasReviewPacket) {
     parts.push(`packets ${reviewPacketCount || 1}`);
   }
+  if (card.model_reviews_recorded) {
+    parts.push(`model reviews ${card.model_reviews_recorded}`);
+  }
+  if (card.autonomy_step_plans_recorded) {
+    parts.push(`step plans ${card.autonomy_step_plans_recorded}`);
+  }
+  if (card.autonomy_loop_runs_recorded) {
+    parts.push(`loop runs ${card.autonomy_loop_runs_recorded}`);
+  }
+  if (card.autonomy_status) {
+    parts.push(`autonomy ${card.autonomy_status}`);
+  }
   if (hasReviewPacket) {
     parts.push("model-ready");
   }
@@ -809,10 +1000,13 @@ const subagentLaneActions = (card) => {
   if (card.lane !== "done") {
     const label = subagentHasReviewPacket(card) ? "Refresh Review Packet" : "Create Review Packet";
     actions.push(`<button type="button" class="secondary" data-subagent-review-packet="${escapeHtml(card.id)}">${text(label)}</button>`);
+    actions.push(`<button type="button" class="secondary" data-subagent-autonomy-step="${escapeHtml(card.id)}">Plan Step</button>`);
+    actions.push(`<button type="button" class="secondary" data-subagent-autonomy-run="${escapeHtml(card.id)}">Run Loop</button>`);
   }
   const reviewPacket = card.review_packet || card.model_review_packet || {};
   if (reviewPacket.packet_id) {
     actions.push(`<button type="button" class="secondary" data-subagent-verify-packet="${escapeHtml(reviewPacket.packet_id)}">Verify Packet</button>`);
+    actions.push(`<button type="button" class="secondary" data-subagent-model-review="${escapeHtml(card.id)}">Model Review</button>`);
   }
   if (nextLane) {
     actions.push(`<button type="button" class="secondary" data-subagent-card="${escapeHtml(card.id)}" data-subagent-lane="${escapeHtml(nextLane)}">${text(nextLane.replaceAll("_", " "))}</button>`);
@@ -1681,6 +1875,17 @@ const modelAuthOutputSummary = (payload = {}) => {
     return modelAuthDoctorSummary(doctor);
   }
   const auth = payload.auth || payload;
+  if (auth && auth.method === "none") {
+    return `
+      <dl class="task-facts">
+        <div><dt>Provider</dt><dd>${text(auth.provider || "unknown")}</dd></div>
+        <div><dt>Method</dt><dd>No auth / local</dd></div>
+        <div><dt>State</dt><dd>${text(auth.status || "no_auth_required")}</dd></div>
+        <div><dt>Token Capture</dt><dd>not used</dd></div>
+      </dl>
+      <div class="next-action">This provider is local and does not require a stored API key or subscription login.</div>
+    `;
+  }
   if (!auth || !["subscription", "oauth", "oauth_device", "cloud_identity"].includes(auth.method)) {
     return "";
   }
@@ -1787,13 +1992,306 @@ const selectedTaskId = () =>
 
 const slashTaskId = (parsed) => String(parsed.request || "").trim().split(/\s+/, 1)[0] || selectedTaskId();
 
-const executeLocalSlashCommand = async (parsed) => {
-  if (parsed.kind === "resume") {
-    if (!state.lastTask?.id) {
-      renderTaskNotice("No resumable task is selected", "Open a waiting or paused task, then run /resume again.");
+const slashApprovalId = (parsed) => String(parsed.request || "").trim().split(/\s+/, 1)[0];
+
+const queueStatusTokens = new Set(["status", "show", "list", "active", "pending", "all", "session"]);
+
+const executeQueueSlashCommand = async (parsed) => {
+  const parts = String(parsed.request || "").trim().split(/\s+/).filter(Boolean);
+  const action = parts[0] && !parts[0].startsWith("--") ? parts.shift().toLowerCase() : "status";
+  if (action === "submit" || !queueStatusTokens.has(action)) {
+    const request = action === "submit" ? parts.join(" ").trim() : String(parsed.request || "").trim();
+    if (!request) {
+      renderTaskNotice(parsed.label || "/queue", "Add a request after the queue command before sending.");
       return;
     }
-    await resumeTask(state.lastTask.id);
+    const path = document.getElementById("task-path").value || undefined;
+    const result = await api("/tasks", { method: "POST", body: JSON.stringify({ request, path, session_id: state.activeSessionId }) });
+    renderTaskResult(result);
+    await refresh();
+    renderTaskNotice(parsed.label || "/queue", `Queued task ${shortId(result.id)}.`);
+    return;
+  }
+  state.activeSection = parsed.section || "activity";
+  state.taskScope = action === "all" ? "all" : "session";
+  if (action === "all") {
+    state.inspectedTaskSessionId = null;
+  } else if (action === "session" && parts[0]) {
+    state.inspectedTaskSessionId = parts[0];
+  }
+  applySectionVisibility();
+  await refresh();
+  renderTaskNotice(parsed.label || "/queue", action === "all" ? "All-session task queue loaded." : "Active-session task queue loaded.");
+};
+
+const remoteControlSlashRequest = (request) => {
+  const parts = String(request || "").trim().split(/\s+/).filter(Boolean);
+  const action = (parts.shift() || "").toLowerCase();
+  const options = {};
+  const positionals = [];
+  const query = new URLSearchParams();
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (part.startsWith("--") && parts[index + 1] && !parts[index + 1].startsWith("--")) {
+      options[part] = parts[index + 1];
+      const queryKey = part.slice(2).replaceAll("-", "_");
+      if (["pairing_id", "limit", "relay_url", "status", "target_id"].includes(queryKey)) {
+        query.set(queryKey, parts[index + 1]);
+      }
+      index += 1;
+    } else if (part.startsWith("--")) {
+      options[part] = true;
+    } else if (!part.startsWith("--")) {
+      positionals.push(part);
+      if (action === "directory" && !query.has("pairing_id")) {
+        query.set("pairing_id", part);
+      }
+    }
+  }
+  return { action, options, positionals, query: query.toString() };
+};
+
+const remoteControlElementValue = (id) => {
+  const element = document.getElementById(id);
+  return element && typeof element.value === "string" ? element.value.trim() : "";
+};
+
+const remoteControlOptionValue = (options, flag, elementId = "", fallback = "") => {
+  const value = options[flag];
+  if (value !== undefined && value !== true && value !== false) return String(value).trim();
+  return elementId ? remoteControlElementValue(elementId) || fallback : fallback;
+};
+
+const remoteControlBooleanOption = (options, flag, elementId = "") => {
+  const value = options[flag];
+  if (value === true) return true;
+  if (typeof value === "string") return ["1", "true", "yes", "approved"].includes(value.trim().toLowerCase());
+  const element = elementId ? document.getElementById(elementId) : null;
+  return Boolean(element && element.checked);
+};
+
+const remoteControlOptionalValue = (value) => {
+  const normalized = String(value || "").trim();
+  return normalized || undefined;
+};
+
+const remoteControlIntOption = (options, flag, fallback, defaultValue) => {
+  const parsed = Number.parseInt(remoteControlOptionValue(options, flag, "", String(fallback || defaultValue)), 10);
+  return Number.isFinite(parsed) ? parsed : defaultValue;
+};
+
+const remoteControlSlashRelayPayload = (options) => ({
+  pairing_id: remoteControlOptionValue(options, "--pairing-id", "remote-control-relay-pairing-id"),
+  relay_auth_secret: remoteControlOptionValue(options, "--relay-auth-secret", "remote-control-relay-secret"),
+  approved: remoteControlBooleanOption(options, "--approved", "remote-control-relay-approved"),
+});
+
+const remoteControlSlashPushPayload = (options) => ({
+  label: remoteControlOptionValue(options, "--label", "remote-control-push-label", "native push") || "native push",
+  target_id: remoteControlOptionalValue(remoteControlOptionValue(options, "--target-id", "remote-control-push-target-id")),
+  provider: remoteControlOptionValue(options, "--provider", "remote-control-push-provider"),
+  push_auth_secret: remoteControlOptionValue(options, "--push-auth-secret", "remote-control-push-secret"),
+  device_token_secret: remoteControlOptionValue(options, "--device-token-secret", "remote-control-device-secret"),
+  approved: remoteControlBooleanOption(options, "--approved", "remote-control-push-approved"),
+  apns_topic: remoteControlOptionalValue(remoteControlOptionValue(options, "--apns-topic", "remote-control-apns-topic")),
+  fcm_project_id: remoteControlOptionalValue(remoteControlOptionValue(options, "--fcm-project-id", "remote-control-fcm-project")),
+});
+
+const executeRemoteControlPostSlash = async (parsed, action, path, payload, render = "output") => {
+  state.activeSection = "automation";
+  applySectionVisibility();
+  const result = await api(path, { method: "POST", body: JSON.stringify(payload) });
+  if (render === "pull") {
+    await refresh();
+    renderRemoteControlRelayPull(result);
+  } else {
+    renderRemoteControlOutput(result);
+    await refresh();
+  }
+  renderTaskNotice(parsed.label || "/remote-control", `Remote control ${action} executed.`);
+  return true;
+};
+
+const executeRemoteControlSlashCommand = async (parsed) => {
+  const { action, options, positionals, query } = remoteControlSlashRequest(parsed.request);
+  if (!action) return false;
+  let path = "";
+  if (action === "status") {
+    path = "/remote-control/status";
+  } else if (action === "directory") {
+    path = `/remote-control/directory${query ? `?${query}` : ""}`;
+  } else if (action === "relay") {
+    if (options["--approved"] || options["--pairing-id"] || options["--relay-auth-secret"]) {
+      return executeRemoteControlPostSlash(parsed, action, "/remote-control/relay", {
+        ...remoteControlSlashRelayPayload(options),
+        relay_url: remoteControlOptionValue(options, "--relay-url", "remote-control-relay-url"),
+      });
+    }
+    path = `/remote-control/relay${query ? `?${query}` : ""}`;
+  } else if (action === "relay-outbox") {
+    path = `/remote-control/relay/outbox${query ? `?${query}` : ""}`;
+  } else if (action === "relay-directory") {
+    return executeRemoteControlPostSlash(parsed, action, "/remote-control/relay/directory", {
+      ...remoteControlSlashRelayPayload(options),
+      limit: remoteControlIntOption(options, "--limit", "", 12),
+    });
+  } else if (action === "relay-notify") {
+    return executeRemoteControlPostSlash(parsed, action, "/remote-control/relay/notify", {
+      ...remoteControlSlashRelayPayload(options),
+      event: remoteControlOptionValue(options, "--event", "remote-control-relay-event", "directory-updated") || "directory-updated",
+      task_id: remoteControlOptionalValue(remoteControlOptionValue(options, "--task-id", "remote-control-relay-task-id")),
+    });
+  } else if (action === "relay-retry") {
+    return executeRemoteControlPostSlash(parsed, action, "/remote-control/relay/retry", {
+      ...remoteControlSlashRelayPayload(options),
+      limit: remoteControlIntOption(options, "--limit", "", 10),
+    });
+  } else if (action === "relay-confirm") {
+    return executeRemoteControlPostSlash(parsed, action, "/remote-control/relay/confirm", {
+      ...remoteControlSlashRelayPayload(options),
+      outbox_id: remoteControlOptionValue(options, "--outbox-id", "remote-control-relay-outbox-id"),
+    });
+  } else if (action === "relay-pull") {
+    return executeRemoteControlPostSlash(parsed, action, "/remote-control/relay/pull", {
+      ...remoteControlSlashRelayPayload(options),
+      dry_run: remoteControlBooleanOption(options, "--dry-run", "remote-control-relay-dry-run"),
+      limit: remoteControlIntOption(options, "--limit", "", 10),
+    }, "pull");
+  } else if (action === "push-targets") {
+    path = `/remote-control/push/targets${query ? `?${query}` : ""}`;
+  } else if (action === "push-register") {
+    return executeRemoteControlPostSlash(parsed, action, "/remote-control/push/register", remoteControlSlashPushPayload(options));
+  } else if (action === "push-disable") {
+    return executeRemoteControlPostSlash(parsed, action, "/remote-control/push/disable", {
+      target_id: remoteControlOptionValue(options, "--target-id", "remote-control-push-target-id"),
+      approved: remoteControlBooleanOption(options, "--approved", "remote-control-push-approved"),
+    });
+  } else if (action === "push-rotate") {
+    const pushPayload = remoteControlSlashPushPayload(options);
+    return executeRemoteControlPostSlash(parsed, action, "/remote-control/push/rotate", {
+      target_id: pushPayload.target_id,
+      push_auth_secret: remoteControlOptionalValue(pushPayload.push_auth_secret),
+      device_token_secret: remoteControlOptionalValue(pushPayload.device_token_secret),
+      approved: pushPayload.approved,
+      apns_topic: pushPayload.apns_topic,
+      fcm_project_id: pushPayload.fcm_project_id,
+    });
+  } else if (action === "push") {
+    const pushPayload = remoteControlSlashPushPayload(options);
+    const payload = {
+      pairing_id: remoteControlOptionValue(options, "--pairing-id", "remote-control-relay-pairing-id"),
+      target_id: pushPayload.target_id,
+      approved: pushPayload.approved,
+      event: remoteControlOptionValue(options, "--event", "remote-control-relay-event", "directory-updated") || "directory-updated",
+      task_id: remoteControlOptionalValue(remoteControlOptionValue(options, "--task-id", "remote-control-relay-task-id")),
+      apns_topic: pushPayload.apns_topic,
+      fcm_project_id: pushPayload.fcm_project_id,
+    };
+    if (!pushPayload.target_id) {
+      payload.provider = pushPayload.provider;
+      payload.push_auth_secret = pushPayload.push_auth_secret;
+      payload.device_token_secret = pushPayload.device_token_secret;
+    }
+    return executeRemoteControlPostSlash(parsed, action, "/remote-control/push", payload);
+  } else if (action === "pair") {
+    const allowedActions = (options["--allowed-actions"] || document.getElementById("remote-control-actions").value)
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const ttl = Number.parseInt(options["--expires-in-seconds"] || document.getElementById("remote-control-ttl").value || "600", 10);
+    const payload = {
+      label: options["--label"] || document.getElementById("remote-control-label").value || "web pairing",
+      session_id: options["--session-id"] || document.getElementById("remote-control-session-id").value || undefined,
+      task_id: options["--task-id"] || document.getElementById("remote-control-task-id").value || undefined,
+      allowed_actions: allowedActions,
+      expires_in_seconds: Number.isFinite(ttl) ? ttl : 600,
+    };
+    state.activeSection = "automation";
+    applySectionVisibility();
+    const payloadResult = await api("/remote-control/pair", { method: "POST", body: JSON.stringify(payload) });
+    document.getElementById("remote-control-relay-outbox-id").value = payloadResult.outbox_id || "";
+    renderRemoteControlOutput(payloadResult);
+    await refresh();
+    renderTaskNotice(parsed.label || "/remote-control", "Remote control pair created.");
+    return true;
+  } else if (action === "revoke") {
+    const pairingId = options["--pairing-id"] || positionals[0] || document.getElementById("remote-control-relay-pairing-id").value.trim();
+    if (!pairingId) {
+      renderTaskNotice(parsed.label || "/remote-control", "Include a pairing id before revoking remote control.");
+      return true;
+    }
+    state.activeSection = "automation";
+    applySectionVisibility();
+    const relayAuthSecret = remoteControlOptionValue(options, "--relay-auth-secret", "");
+    const payloadResult = await api("/remote-control/revoke", {
+      method: "POST",
+      body: JSON.stringify({
+        pairing_id: pairingId,
+        relay_auth_secret: remoteControlOptionalValue(relayAuthSecret),
+        approved: remoteControlBooleanOption(options, "--approved", "remote-control-relay-approved"),
+      }),
+    });
+    renderRemoteControlOutput(payloadResult);
+    await refresh();
+    renderTaskNotice(parsed.label || "/remote-control", `Remote control pairing ${pairingId} revoked.`);
+    return true;
+  } else {
+    return false;
+  }
+  state.activeSection = "automation";
+  applySectionVisibility();
+  const payload = await api(path);
+  if (action === "relay") renderRemoteControlRelay(payload);
+  if (action === "relay-outbox") renderRemoteControlOutbox(payload);
+  if (action === "push-targets") renderRemoteControlPushTargets(payload);
+  renderRemoteControlOutput(payload);
+  renderTaskNotice(parsed.label || "/remote-control", `Remote control ${action} loaded.`);
+  return true;
+};
+
+const executeLocalSlashCommand = async (parsed) => {
+  if (parsed.kind === "queue-control") {
+    await executeQueueSlashCommand(parsed);
+    return;
+  }
+  if (parsed.kind === "approval-control") {
+    const approvalId = slashApprovalId(parsed);
+    const action = parsed.approvalAction || parsed.command;
+    state.activeSection = "security";
+    applySectionVisibility();
+    if (!approvalId) {
+      renderTaskNotice(`/${parsed.command || action}`, `Include an approval id, then run /${parsed.command || action} again.`);
+      return;
+    }
+    if (action === "review") {
+      await loadApprovalDetail(approvalId);
+      renderTaskNotice(parsed.label || "/approval", `Approval ${approvalId} loaded.`);
+    } else if (action === "approve" || action === "deny") {
+      await api(`/approvals/${encodeURIComponent(approvalId)}/${action}`, { method: "POST", body: JSON.stringify(approvalDecisionPayload()) });
+      document.getElementById("approval-detail").replaceChildren();
+      await refresh();
+      renderTaskNotice(`/${action}`, `Approval ${approvalId} ${action === "approve" ? "approved" : "denied"}.`);
+    } else {
+      renderTaskError(`unsupported approval action: ${action}`);
+    }
+    return;
+  }
+  if (parsed.kind === "task-control") {
+    const taskId = slashTaskId(parsed);
+    const action = parsed.taskAction || parsed.command;
+    if (!taskId) {
+      renderTaskNotice(`/${parsed.command || action}`, `Open a task or include a task id, then run /${parsed.command || action} again.`);
+      return;
+    }
+    if (action === "resume") {
+      await resumeTask(taskId);
+    } else if (action === "pause") {
+      await pauseTask(taskId);
+    } else if (action === "cancel") {
+      await cancelTask(taskId);
+    } else {
+      renderTaskError(`unsupported task action: ${action}`);
+    }
     return;
   }
   if (parsed.kind === "task-inspection") {
@@ -1819,6 +2317,13 @@ const executeLocalSlashCommand = async (parsed) => {
       return;
     }
     await loadTaskEvidence(taskId);
+    return;
+  }
+  if (parsed.command === "remote-control") {
+    if (String(parsed.request || "").trim() && await executeRemoteControlSlashCommand(parsed)) return;
+    state.activeSection = parsed.section || "automation";
+    applySectionVisibility();
+    renderTaskNotice(parsed.label || "/remote-control", parsed.detail || "Open remote pairing and relay controls.");
     return;
   }
   if (parsed.kind === "section") {
@@ -1910,6 +2415,14 @@ const renderToolRunOutput = (payload) => {
   `;
 };
 
+const renderProcessOutput = (payload) => {
+  const node = document.getElementById("process-output");
+  node.innerHTML = `
+    <strong>${text(payload.status || (payload.ok ? "process result" : "process notice"))}</strong>
+    <code>${text(JSON.stringify(payload, null, 2))}</code>
+  `;
+};
+
 const installToolRunPresets = () => {
   const node = document.getElementById("tool-run-presets");
   if (!node) return;
@@ -1942,6 +2455,11 @@ const renderMcpCallOutput = (payload) => {
 };
 
 const renderPluginOutput = (payload) => {
+  if (payload.candidate_id) {
+    state.pluginPreparedUpdateCandidateId = payload.candidate_id;
+    const candidateInput = document.getElementById("plugin-prepared-candidate-id");
+    if (candidateInput) candidateInput.value = payload.candidate_id;
+  }
   const node = document.getElementById("plugin-output");
   node.innerHTML = `
     <strong>${text(payload.plugin?.name || payload.plugin?.id || payload.status || "Plugin")}</strong>
@@ -1955,6 +2473,19 @@ const renderRemoteControlOutput = (payload) => {
     <strong>${text(payload.pairing?.label || payload.pairing?.id || payload.status || "Remote control")}</strong>
     <code>${text(JSON.stringify(payload, null, 2))}</code>
   `;
+};
+
+const remoteControlPushTargetItem = (target) => ({
+  title: target.label || target.id,
+  detail: `${target.provider || "provider"} · auth ${target.push_auth_secret_configured ? "configured" : "missing"} · device ${target.device_token_secret_configured ? "configured" : "missing"}`,
+  meta: `${target.status} · rotated ${target.rotation_count || 0} · ${target.last_push_delivery_state || "not pushed"}${target.last_push_at ? ` · ${target.last_push_at}` : ""}`,
+  tone: target.status === "active" ? "ready" : "attention",
+});
+
+const renderRemoteControlPushTargets = (payload = {}) => {
+  if (Array.isArray(payload.targets)) {
+    setList("remote-control-push-targets", payload.targets, remoteControlPushTargetItem, "No native push targets");
+  }
 };
 
 const renderRemoteControlRelay = (payload = {}) => {
@@ -1995,6 +2526,9 @@ const renderRemoteControlOutbox = (payload = {}) => {
 };
 
 const renderChannelOutput = (payload) => {
+  if (payload.receipt?.packet_id && String(payload.receipt?.receipt_schema || "").startsWith("aegis.channel.live_activation_packet")) {
+    state.channelActivationPacketId = payload.receipt.packet_id;
+  }
   const node = document.getElementById("channel-render-output");
   node.innerHTML = `
     <strong>${text(payload.status || "Channel Render")}</strong>
@@ -2140,8 +2674,7 @@ taskRequestInput.addEventListener("keydown", (event) => {
     return;
   }
   if (!value.startsWith("/")) return;
-  const prefix = value.slice(1).split(/\s+/, 1)[0];
-  const matches = slashCommandMatches(prefix).slice(0, 8);
+  const matches = slashPaletteMatches(value).slice(0, 8);
   if (!matches.length) return;
   if (event.key === "ArrowDown") {
     event.preventDefault();
@@ -2160,9 +2693,8 @@ taskRequestInput.addEventListener("keydown", (event) => {
 });
 
 document.getElementById("slash-palette").addEventListener("click", (event) => {
-  const command = event.target.closest("[data-slash-command]")?.dataset.slashCommand;
-  if (!command) return;
-  const entry = slashCommandForToken(command);
+  const index = Number(event.target.closest("[data-slash-index]")?.dataset.slashIndex);
+  const entry = Number.isInteger(index) ? state.slashPaletteEntries[index] : null;
   if (entry) {
     applySlashCompletion(entry);
   }
@@ -2593,13 +3125,31 @@ document.getElementById("repair-rollback-form").addEventListener("submit", async
   await refresh();
 });
 
+const localNoAuthModelProviders = new Set(["ollama", "lmstudio"]);
+
+const syncModelAuthMethodForProvider = () => {
+  const provider = document.getElementById("model-provider").value;
+  const method = document.getElementById("model-auth-method");
+  if (localNoAuthModelProviders.has(provider) && method.value === "api_key") {
+    method.value = "none";
+  } else if (!localNoAuthModelProviders.has(provider) && method.value === "none") {
+    method.value = "api_key";
+  }
+};
+
+document.getElementById("model-provider").addEventListener("change", syncModelAuthMethodForProvider);
+syncModelAuthMethodForProvider();
+
 document.getElementById("model-auth-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  syncModelAuthMethodForProvider();
   const provider = document.getElementById("model-provider").value;
   const method = document.getElementById("model-auth-method").value;
   const apiKey = document.getElementById("model-api-key").value;
   const payload = { provider, method };
-  if (method === "api_key") {
+  if (method === "none") {
+    // Local providers should never send placeholder key material.
+  } else if (method === "api_key") {
     payload.api_key = apiKey;
   } else {
     payload.verify_external = document.getElementById("model-auth-verify-external").checked;
@@ -2747,7 +3297,7 @@ document.getElementById("channel-webhook-send-form").addEventListener("submit", 
     method: "POST",
     body: JSON.stringify({
       text: document.getElementById("channel-webhook-send-text").value || "",
-      approved: document.getElementById("channel-webhook-send-approved").checked,
+      approval_id: document.getElementById("channel-webhook-send-approval-id").value || undefined,
       session_id: state.activeSessionId || undefined,
     }),
   });
@@ -2761,7 +3311,7 @@ document.getElementById("channel-chat-webhook-form").addEventListener("submit", 
     method: "POST",
     body: JSON.stringify({
       text: document.getElementById("channel-chat-webhook-text").value || "",
-      approved: document.getElementById("channel-chat-webhook-approved").checked,
+      approval_id: document.getElementById("channel-chat-webhook-approval-id").value || undefined,
       session_id: state.activeSessionId || undefined,
     }),
   });
@@ -2776,12 +3326,38 @@ document.getElementById("channel-email-send-form").addEventListener("submit", as
     body: JSON.stringify({
       subject: document.getElementById("channel-email-send-subject").value || "Aegis update",
       text: document.getElementById("channel-email-send-text").value || "",
-      approved: document.getElementById("channel-email-send-approved").checked,
+      approval_id: document.getElementById("channel-email-send-approval-id").value || undefined,
       session_id: state.activeSessionId || undefined,
     }),
   });
   renderChannelOutput(result);
   await refresh();
+});
+
+document.getElementById("channel-live-activation-packet").addEventListener("click", async () => {
+  const result = await api("/channels/live-activation-packet", {
+    method: "POST",
+    body: JSON.stringify({ actor: "web-operator" }),
+  });
+  renderChannelOutput(result);
+});
+
+document.getElementById("channel-verify-activation-packet").addEventListener("click", async () => {
+  const activationPacket = state.channelActivationPacketId;
+  const result = await api("/channels/verify-activation-packet", {
+    method: "POST",
+    body: JSON.stringify({ packet: activationPacket, actor: "web-operator" }),
+  });
+  renderChannelOutput(result);
+});
+
+document.getElementById("channel-activate-packet").addEventListener("click", async () => {
+  const activationPacket = state.channelActivationPacketId;
+  const result = await api("/channels/activate-packet", {
+    method: "POST",
+    body: JSON.stringify({ packet: activationPacket, actor: "web-operator", approved: true }),
+  });
+  renderChannelOutput(result);
 });
 
 document.getElementById("policy-evaluate-form").addEventListener("submit", async (event) => {
@@ -3105,6 +3681,26 @@ document.getElementById("mcp-server-form").addEventListener("submit", async (eve
   await refresh();
 });
 
+document.getElementById("mcp-oauth-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const scopes = document
+    .getElementById("mcp-oauth-scopes")
+    .value.split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  await api("/mcp/auth/oauth", {
+    method: "POST",
+    body: JSON.stringify({
+      server: document.getElementById("mcp-oauth-server").value || "remote-mcp",
+      resource_metadata: document.getElementById("mcp-oauth-resource").value || undefined,
+      authorization_server: document.getElementById("mcp-oauth-authorization").value || undefined,
+      token_secret: document.getElementById("mcp-oauth-token-secret").value || undefined,
+      scopes,
+    }),
+  });
+  await refresh();
+});
+
 document.getElementById("skill-hub-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   state.skillHubQuery = document.getElementById("skill-hub-query").value || "";
@@ -3159,10 +3755,23 @@ document.getElementById("plugin-marketplace-form").addEventListener("submit", as
 });
 
 document.getElementById("plugin-marketplace").addEventListener("click", async (event) => {
+  const manifestPluginId = event.target.dataset.pluginMarketplaceFetchManifest;
   const bundlePluginId = event.target.dataset.pluginMarketplaceFetchBundle;
   const bundleInstallPluginId = event.target.dataset.pluginMarketplaceInstallBundle;
-  const pluginId = bundlePluginId || bundleInstallPluginId || event.target.dataset.pluginMarketplaceInstall;
+  const pluginId = manifestPluginId || bundlePluginId || bundleInstallPluginId || event.target.dataset.pluginMarketplaceInstall;
   if (!pluginId) return;
+  if (manifestPluginId) {
+    const result = await api("/plugins/marketplace/fetch-manifest", {
+      method: "POST",
+      body: JSON.stringify({
+        plugin_id: manifestPluginId,
+        catalog_path: state.pluginMarketplaceCatalogPath || undefined,
+      }),
+    });
+    renderPluginOutput(result);
+    await refresh();
+    return;
+  }
   if (bundlePluginId) {
     const result = await api("/plugins/marketplace/fetch-bundle", {
       method: "POST",
@@ -3199,14 +3808,44 @@ document.getElementById("plugin-marketplace").addEventListener("click", async (e
 });
 
 document.getElementById("plugin-updates").addEventListener("click", async (event) => {
-  const pluginId = event.target.dataset.pluginMarketplaceUpdate;
+  const preparePluginId = event.target.dataset.pluginMarketplacePrepareUpdate;
+  const pluginId = preparePluginId || event.target.dataset.pluginMarketplaceUpdate;
   if (!pluginId) return;
+  if (preparePluginId) {
+    const result = await api("/plugins/marketplace/prepare-update", {
+      method: "POST",
+      body: JSON.stringify({
+        plugin_id: preparePluginId,
+        catalog_path: state.pluginMarketplaceCatalogPath || undefined,
+      }),
+    });
+    renderPluginOutput(result);
+    await refresh();
+    return;
+  }
   const result = await api("/plugins/marketplace/update", {
     method: "POST",
     body: JSON.stringify({
       plugin_id: pluginId,
       approved: true,
       catalog_path: state.pluginMarketplaceCatalogPath || undefined,
+    }),
+  });
+  renderPluginOutput(result);
+  await refresh();
+});
+
+document.getElementById("plugin-prepared-update-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const candidateId = document.getElementById("plugin-prepared-candidate-id").value || state.pluginPreparedUpdateCandidateId;
+  const disable = document.getElementById("plugin-prepared-update-disable").checked;
+  const enable = document.getElementById("plugin-prepared-update-enable").checked && !disable;
+  const result = await api("/plugins/marketplace/apply-prepared-update", {
+    method: "POST",
+    body: JSON.stringify({
+      candidate_id: candidateId,
+      approved: document.getElementById("plugin-prepared-update-approved").checked,
+      enable: disable ? false : enable ? true : undefined,
     }),
   });
   renderPluginOutput(result);
@@ -3296,6 +3935,90 @@ document.getElementById("tool-run-presets").addEventListener("click", (event) =>
   renderToolRunOutput({ status: "preset_loaded", tool: preset.name, params: preset.params });
 });
 
+document.getElementById("process-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  let argv = [];
+  try {
+    argv = processArgvValue();
+  } catch (error) {
+    renderProcessOutput({ status: "bad_argv", reason: error.message });
+    return;
+  }
+  const result = await api("/processes/start", {
+    method: "POST",
+    body: JSON.stringify({
+      argv,
+      label: document.getElementById("process-label").value || "",
+      actor: "web-operator",
+      approved: true,
+      pty: Boolean(document.getElementById("process-pty")?.checked),
+      rows: Number(document.getElementById("process-rows")?.value || 24),
+      cols: Number(document.getElementById("process-cols")?.value || 80),
+    }),
+  });
+  renderProcessOutput(result);
+  await refresh();
+});
+
+document.getElementById("process-input-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const processId = String(document.getElementById("process-input-id")?.value || "").trim();
+  if (!processId) {
+    renderProcessOutput({ status: "missing_process_id" });
+    return;
+  }
+  const result = await api(`/processes/${encodeURIComponent(processId)}/input`, {
+    method: "POST",
+    body: JSON.stringify({
+      text: document.getElementById("process-input-text").value || "",
+      append_newline: true,
+      actor: "web-operator",
+    }),
+  });
+  renderProcessOutput(result);
+  await refresh();
+});
+
+document.getElementById("process-resize-button").addEventListener("click", async () => {
+  const processId = String(document.getElementById("process-input-id")?.value || "").trim();
+  if (!processId) {
+    renderProcessOutput({ status: "missing_process_id" });
+    return;
+  }
+  const result = await api(`/processes/${encodeURIComponent(processId)}/resize`, {
+    method: "POST",
+    body: JSON.stringify({
+      rows: Number(document.getElementById("process-rows")?.value || 24),
+      cols: Number(document.getElementById("process-cols")?.value || 80),
+      actor: "web-operator",
+    }),
+  });
+  renderProcessOutput(result);
+  await refresh();
+});
+
+document.getElementById("processes").addEventListener("click", async (event) => {
+  const selectId = event.target.dataset.processSelect;
+  if (selectId) {
+    document.getElementById("process-input-id").value = selectId;
+    return;
+  }
+  const logId = event.target.dataset.processLogs;
+  if (logId) {
+    const result = await api(`/processes/${encodeURIComponent(logId)}/logs?max_bytes=4096`);
+    renderProcessOutput(result);
+    return;
+  }
+  const stopId = event.target.dataset.processStop;
+  if (!stopId) return;
+  const result = await api(`/processes/${encodeURIComponent(stopId)}/stop`, {
+    method: "POST",
+    body: JSON.stringify({ actor: "web-operator" }),
+  });
+  renderProcessOutput(result);
+  await refresh();
+});
+
 document.getElementById("tool-run-output").addEventListener("click", async (event) => {
   const approvalId = event.target.dataset.toolRunApproved;
   if (!approvalId || !state.pendingToolRun || state.pendingToolRun.approval_id !== approvalId) return;
@@ -3347,6 +4070,22 @@ document.getElementById("browser-inspect").addEventListener("click", async () =>
   renderBrowserOutput(await api("/browser/inspect", { method: "POST", body: JSON.stringify({ session_id: state.browserSessionId }) }));
 });
 
+document.getElementById("browser-live-navigate").addEventListener("click", async () => {
+  if (!state.browserSessionId) {
+    const session = await api("/browser/sessions", { method: "POST", body: JSON.stringify({ label: "Web live browser" }) });
+    state.browserSessionId = session.id;
+  }
+  const url = document.getElementById("browser-url").value || "https://example.com";
+  state.pendingBrowserAction = { action: "live_navigate", session_id: state.browserSessionId, url };
+  renderBrowserOutput(
+    await api("/browser/live-navigate", {
+      method: "POST",
+      body: JSON.stringify({ session_id: state.browserSessionId, url }),
+    })
+  );
+  await refresh();
+});
+
 document.getElementById("browser-dom-snapshot").addEventListener("click", async () => {
   if (!state.browserSessionId) {
     renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
@@ -3383,6 +4122,16 @@ document.getElementById("browser-render-screenshot").addEventListener("click", a
   await refresh();
 });
 
+document.getElementById("browser-live-screenshot").addEventListener("click", async () => {
+  if (!state.browserSessionId) {
+    renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
+    return;
+  }
+  state.pendingBrowserAction = { action: "live_screenshot", session_id: state.browserSessionId };
+  renderBrowserOutput(await api("/browser/live-screenshot", { method: "POST", body: JSON.stringify({ session_id: state.browserSessionId }) }));
+  await refresh();
+});
+
 document.getElementById("browser-click").addEventListener("click", async () => {
   if (!state.browserSessionId) {
     renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
@@ -3394,6 +4143,22 @@ document.getElementById("browser-click").addEventListener("click", async () => {
     await api("/browser/click", {
       method: "POST",
       body: JSON.stringify({ session_id: state.browserSessionId, selector }),
+    })
+  );
+  await refresh();
+});
+
+document.getElementById("browser-live-click").addEventListener("click", async () => {
+  if (!state.browserSessionId) {
+    renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
+    return;
+  }
+  const selector = document.getElementById("browser-selector").value || "body";
+  state.pendingBrowserAction = { action: "live_click", session_id: state.browserSessionId, selector };
+  renderBrowserOutput(
+    await api("/browser/click", {
+      method: "POST",
+      body: JSON.stringify({ session_id: state.browserSessionId, selector, live: true }),
     })
   );
   await refresh();
@@ -3421,6 +4186,28 @@ document.getElementById("browser-fill").addEventListener("click", async () => {
   await refresh();
 });
 
+document.getElementById("browser-live-fill").addEventListener("click", async () => {
+  if (!state.browserSessionId) {
+    renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
+    return;
+  }
+  let fields = {};
+  try {
+    fields = JSON.parse(document.getElementById("browser-fill-fields").value || "{}");
+  } catch (error) {
+    renderBrowserOutput({ status: "bad_fields", reason: "Fill fields must be a JSON object." });
+    return;
+  }
+  state.pendingBrowserAction = { action: "live_fill", session_id: state.browserSessionId, fields };
+  renderBrowserOutput(
+    await api("/browser/fill", {
+      method: "POST",
+      body: JSON.stringify({ session_id: state.browserSessionId, fields, live: true }),
+    })
+  );
+  await refresh();
+});
+
 document.getElementById("browser-submit").addEventListener("click", async () => {
   if (!state.browserSessionId) {
     renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
@@ -3432,6 +4219,71 @@ document.getElementById("browser-submit").addEventListener("click", async () => 
     await api("/browser/submit", {
       method: "POST",
       body: JSON.stringify({ session_id: state.browserSessionId, selector: selector || undefined }),
+    })
+  );
+  await refresh();
+});
+
+document.getElementById("browser-live-submit").addEventListener("click", async () => {
+  if (!state.browserSessionId) {
+    renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
+    return;
+  }
+  const selector = document.getElementById("browser-selector").value.trim();
+  state.pendingBrowserAction = { action: "live_submit", session_id: state.browserSessionId, selector: selector || undefined };
+  renderBrowserOutput(
+    await api("/browser/submit", {
+      method: "POST",
+      body: JSON.stringify({ session_id: state.browserSessionId, selector: selector || undefined, live: true }),
+    })
+  );
+  await refresh();
+});
+
+document.getElementById("browser-live-download").addEventListener("click", async () => {
+  if (!state.browserSessionId) {
+    renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
+    return;
+  }
+  const selector = document.getElementById("browser-selector").value || "a";
+  state.pendingBrowserAction = { action: "live_download", session_id: state.browserSessionId, selector };
+  renderBrowserOutput(
+    await api("/browser/download", {
+      method: "POST",
+      body: JSON.stringify({ session_id: state.browserSessionId, selector }),
+    })
+  );
+  await refresh();
+});
+
+document.getElementById("browser-live-upload").addEventListener("click", async () => {
+  if (!state.browserSessionId) {
+    renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
+    return;
+  }
+  const selector = document.getElementById("browser-selector").value || "input[type=file]";
+  const filePath = document.getElementById("browser-upload-path").value.trim();
+  state.pendingBrowserAction = { action: "live_upload", session_id: state.browserSessionId, selector, file_path: filePath };
+  renderBrowserOutput(
+    await api("/browser/upload", {
+      method: "POST",
+      body: JSON.stringify({ session_id: state.browserSessionId, selector, file_path: filePath }),
+    })
+  );
+  await refresh();
+});
+
+document.getElementById("browser-live-evaluate").addEventListener("click", async () => {
+  if (!state.browserSessionId) {
+    renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
+    return;
+  }
+  const script = document.getElementById("browser-evaluate-script").value || "return document.title";
+  state.pendingBrowserAction = { action: "live_evaluate", session_id: state.browserSessionId, script };
+  renderBrowserOutput(
+    await api("/browser/evaluate", {
+      method: "POST",
+      body: JSON.stringify({ session_id: state.browserSessionId, script }),
     })
   );
   await refresh();
@@ -3468,13 +4320,38 @@ document.getElementById("browser-output").addEventListener("click", async (event
   const approvalId = event.target.dataset.browserRunApproved;
   if (!approvalId || !state.pendingBrowserAction || state.pendingBrowserAction.approval_id !== approvalId) return;
   const action = state.pendingBrowserAction;
-  const path = action.action === "fill" ? "/browser/fill" : action.action === "submit" ? "/browser/submit" : "/browser/click";
+  const path =
+    action.action === "fill" || action.action === "live_fill"
+      ? "/browser/fill"
+      : action.action === "submit" || action.action === "live_submit"
+        ? "/browser/submit"
+        : action.action === "live_download"
+          ? "/browser/download"
+        : action.action === "live_upload"
+          ? "/browser/upload"
+        : action.action === "live_evaluate"
+          ? "/browser/evaluate"
+        : action.action === "live_navigate"
+          ? "/browser/live-navigate"
+          : action.action === "live_screenshot"
+            ? "/browser/live-screenshot"
+            : "/browser/click";
   const body =
-    action.action === "fill"
-      ? { session_id: action.session_id, fields: action.fields, approval_id: approvalId }
-      : action.action === "submit"
-        ? { session_id: action.session_id, selector: action.selector, approval_id: approvalId }
-      : { session_id: action.session_id, selector: action.selector, approval_id: approvalId };
+    action.action === "fill" || action.action === "live_fill"
+      ? { session_id: action.session_id, fields: action.fields, approval_id: approvalId, live: action.action === "live_fill" }
+      : action.action === "submit" || action.action === "live_submit"
+        ? { session_id: action.session_id, selector: action.selector, approval_id: approvalId, live: action.action === "live_submit" }
+        : action.action === "live_download"
+          ? { session_id: action.session_id, selector: action.selector, approval_id: approvalId }
+        : action.action === "live_upload"
+          ? { session_id: action.session_id, selector: action.selector, file_path: action.file_path, approval_id: approvalId }
+        : action.action === "live_evaluate"
+          ? { session_id: action.session_id, script: action.script, approval_id: approvalId }
+        : action.action === "live_navigate"
+          ? { session_id: action.session_id, url: action.url, approval_id: approvalId }
+          : action.action === "live_screenshot"
+            ? { session_id: action.session_id, approval_id: approvalId }
+            : { session_id: action.session_id, selector: action.selector, approval_id: approvalId, live: action.action === "live_click" };
   const result = await api(path, { method: "POST", body: JSON.stringify(body) });
   if (result.ok) {
     state.pendingBrowserAction = null;
@@ -3804,6 +4681,26 @@ document.getElementById("schedule-form").addEventListener("submit", async (event
       cron: document.getElementById("schedule-cron").value || "@daily",
       task_request: document.getElementById("schedule-task").value || "Summarize my project",
       channel: "web",
+      context_from: fieldList("schedule-context-from"),
+      delivery_targets: fieldList("schedule-deliver-to"),
+    }),
+  });
+  renderScheduleOutput(result);
+  await refresh();
+});
+
+document.getElementById("schedule-script-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const command = JSON.parse(document.getElementById("schedule-script-command").value || '["python3","-c","print(\\"ok\\")"]');
+  const result = await api("/schedules/script", {
+    method: "POST",
+    body: JSON.stringify({
+      name: document.getElementById("schedule-name").value || "No-agent script",
+      cron: document.getElementById("schedule-cron").value || "@daily",
+      command,
+      channel: "web",
+      context_from: fieldList("schedule-context-from"),
+      delivery_targets: fieldList("schedule-deliver-to"),
     }),
   });
   renderScheduleOutput(result);
@@ -4103,6 +5000,39 @@ document.getElementById("subagent-cards").addEventListener("click", async (event
     const result = await api("/subagents/review-packet", {
       method: "POST",
       body: JSON.stringify({ card_id: reviewPacketCard, actor: "web-operator" }),
+    });
+    renderSubagentOutput(result);
+    renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
+    await refresh();
+    return;
+  }
+  const modelReviewCard = event.target.dataset.subagentModelReview;
+  if (modelReviewCard) {
+    const result = await api("/subagents/model-review", {
+      method: "POST",
+      body: JSON.stringify({ card_id: modelReviewCard, actor: "web-operator", approved: true, limit: 12 }),
+    });
+    renderSubagentOutput(result);
+    renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
+    await refresh();
+    return;
+  }
+  const autonomyStepCard = event.target.dataset.subagentAutonomyStep;
+  if (autonomyStepCard) {
+    const result = await api("/subagents/autonomy-step", {
+      method: "POST",
+      body: JSON.stringify({ card_id: autonomyStepCard, actor: "web-operator", approved: true, max_steps: 1, limit: 12 }),
+    });
+    renderSubagentOutput(result);
+    renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
+    await refresh();
+    return;
+  }
+  const autonomyRunCard = event.target.dataset.subagentAutonomyRun;
+  if (autonomyRunCard) {
+    const result = await api("/subagents/autonomy-run", {
+      method: "POST",
+      body: JSON.stringify({ card_id: autonomyRunCard, actor: "web-operator", approved: true, max_steps: 1, limit: 12 }),
     });
     renderSubagentOutput(result);
     renderSubagents(result.subagents || await api("/subagents/status?limit=12"));

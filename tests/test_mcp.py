@@ -347,12 +347,71 @@ class McpTests(unittest.TestCase):
                 self.assertEqual(challenge["parameters"]["error"], "invalid_token")
                 self.assertEqual(challenge["parameters"]["error_description"], "[REDACTED_AUTH_DESCRIPTION]")
                 self.assertFalse(challenge["raw_header_included"])
+                recorded = orchestrator.mcp.get_server("remote-auth-required")
+                self.assertEqual(recorded["metadata"]["oauth"]["status"], "oauth_metadata_required")
+                self.assertEqual(
+                    recorded["metadata"]["oauth"]["resource_metadata_url"],
+                    "https://auth.example/.well-known/oauth-protected-resource",
+                )
+                self.assertEqual(recorded["metadata"]["last_http_auth_challenge"]["parameters"]["resource_metadata"], "https://auth.example/.well-known/oauth-protected-resource")
+                self.assertFalse(recorded["metadata"]["oauth"]["raw_tokens_captured"])
                 audit_text = (root / ".aegis" / "audit.jsonl").read_text(encoding="utf-8")
                 self.assertIn("mcp.http_auth_required", audit_text)
                 self.assertIn("resource_metadata", audit_text)
                 self.assertIn("raw_www_authenticate_header_included", audit_text)
                 self.assertNotIn("raw-secret", audit_text)
                 self.assertNotIn("mcp-token-123", audit_text)
+            finally:
+                server.close()
+
+    def test_streamable_http_mcp_oauth_metadata_uses_brokered_token_without_registry_secret_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            server = _HttpMcpFixture(expected_bearer="oauth-token-123")
+            try:
+                orchestrator = build_orchestrator(data_dir=root / ".aegis", workspace=root)
+                orchestrator.secrets_broker.store_secret(name="MCP_OAUTH_TOKEN", value="oauth-token-123")
+                orchestrator.mcp.register_server(
+                    name="remote-oauth-api",
+                    command=server.url,
+                    allowed_tools=("echo",),
+                    transport="streamable-http",
+                    network_allowlist=("127.0.0.1",),
+                    enabled=True,
+                )
+
+                configured = orchestrator.mcp.configure_oauth_authorization(
+                    "remote-oauth-api",
+                    resource_metadata_url=f"{server.url}/.well-known/oauth-protected-resource?access_token=raw-secret",
+                    authorization_server=f"http://127.0.0.1:{server.server.server_address[1]}/oauth/authorize?client_secret=raw-secret",
+                    token_secret="MCP_OAUTH_TOKEN",
+                    scopes=("tools:read", "tools:call", "tools:call"),
+                    network_allowlist=("127.0.0.1",),
+                )
+                self.assertEqual(configured["metadata"]["auth"]["type"], "oauth_bearer_token")
+                self.assertEqual(configured["metadata"]["auth"]["token_secret"], "MCP_OAUTH_TOKEN")
+                self.assertEqual(configured["metadata"]["oauth"]["status"], "oauth_bearer_ready")
+                self.assertEqual(configured["metadata"]["oauth"]["requested_scopes"], ["tools:read", "tools:call"])
+                self.assertTrue(configured["metadata"]["oauth"]["token_secret_configured"])
+                self.assertTrue(configured["metadata"]["oauth"]["resource_metadata_url"].endswith("/mcp/.well-known/oauth-protected-resource"))
+                self.assertTrue(configured["metadata"]["oauth"]["authorization_server"].endswith("/oauth/authorize"))
+                self.assertNotIn("raw-secret", json.dumps(configured, sort_keys=True))
+
+                result = orchestrator.mcp.call_tool(
+                    server="remote-oauth-api",
+                    tool="echo",
+                    arguments={"text": "hello oauth"},
+                    approved=True,
+                    network_allowlist=("127.0.0.1",),
+                )
+                self.assertEqual(result.result["content"][0]["text"], "hello oauth")
+                self.assertTrue(server.authorization_headers)
+                self.assertTrue(all(header == "Bearer oauth-token-123" for header in server.authorization_headers))
+                audit_text = (root / ".aegis" / "audit.jsonl").read_text(encoding="utf-8")
+                self.assertIn("mcp.oauth_configured", audit_text)
+                self.assertIn('"auth": "brokered_bearer"', audit_text)
+                self.assertNotIn("oauth-token-123", audit_text)
+                self.assertNotIn("raw-secret", audit_text)
             finally:
                 server.close()
 

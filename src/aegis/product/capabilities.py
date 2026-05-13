@@ -19,6 +19,7 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
     channels = orchestrator.channels.list_channels()
     tools = orchestrator.tool_catalog.list()
     backends = orchestrator.execution_backends.list()
+    processes = orchestrator.processes.status(limit=12)
     providers = orchestrator.models.list_providers()
     schedules = orchestrator.schedules.list_schedules()
     sessions = orchestrator.sessions.list_sessions()
@@ -70,6 +71,8 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
             "backend_gate_tools": len(backend_gate_tools),
             "limited_or_facade_tools": limited_or_facade_tools,
             "execution_backends": len(backends),
+            "background_processes": processes["process_count"],
+            "active_background_processes": processes["active_process_count"],
             "model_providers": len(providers),
             "configured_or_local_providers": len(configured_providers),
             "sessions": len(sessions),
@@ -115,7 +118,7 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
             {
                 "name": "Safe defaults",
                 "state": "enforced",
-                "detail": "Live writes, sends, shell execution, MCP calls, generated skills, and risky backends are approval-gated.",
+                "detail": "Live writes, sends, shell execution, MCP calls, generated skills, reviewed skill draft installs, and risky backends are approval-gated.",
             },
         ],
         "capability_groups": [
@@ -170,8 +173,8 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
             {
                 "name": "Execution backends",
                 "state": "policy_visible",
-                "coverage": f"{len(backends)} backend definitions",
-                "detail": "Local, Docker, SSH, Singularity, Modal, Daytona, and Vercel Sandbox are represented for policy decisions.",
+                "coverage": f"{len(backends)} backend definitions, {processes['active_process_count']} active background process(es)",
+                "detail": "Local, Docker, SSH, Singularity, Modal, Daytona, and Vercel Sandbox are represented for policy decisions; governed argv-only background processes expose approval-gated start, PTY, stdin, resize, stop, status, and redacted private logs.",
             },
         ],
         "competitive_targets": competitive_targets,
@@ -185,10 +188,12 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
             live_connector_adapters,
             available_live_connector_adapters,
             backends,
+            processes,
             subagent_delegations,
         ),
         "implementation_readiness": implementation_readiness,
         "subagent_delegations": subagent_delegations,
+        "background_processes": processes,
         "enterprise_readiness": enterprise_readiness,
         "memory_readiness": memory_readiness,
         "self_improvement_readiness": self_improvement_readiness,
@@ -314,9 +319,11 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "approved remote-control relay action proxy",
                 "scoped remote-control directory",
                 "allowlisted brokered-bearer Streamable HTTP MCP",
+                "remote MCP OAuth protected-resource metadata and brokered OAuth bearer configuration",
+                "reviewed private skill draft candidates",
             ],
             "security_delta": "Aegis treats all external outputs as tainted data and requires approval for high-impact actions by default.",
-            "live_gap": "API-key-ready Hermes providers including Hugging Face, NVIDIA NIM, Vercel AI Gateway, OpenCode, Kilo Code, Ollama Cloud, Arcee, GMI, StepFun, Xiaomi, Tencent TokenHub, Kimi China, and MiniMax China are routable alongside brokered Nous Portal OAuth, MiniMax Token Plan, brokered MiniMax OAuth, brokered Google Gemini OAuth / Code Assist, verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, Google Vertex AI, AWS Bedrock, and Azure Foundry cloud-identity bridges; remaining work is local operator sign-in/configuration for unverified accounts and future provider-native bridges beyond the tracked target set.",
+            "live_gap": "API-key-ready Hermes providers including Hugging Face, NVIDIA NIM, Vercel AI Gateway, OpenCode, Kilo Code, Ollama Cloud, Arcee, GMI, StepFun, Xiaomi, Tencent TokenHub, Kimi China, and MiniMax China are routable alongside brokered Nous Portal OAuth, MiniMax Token Plan, brokered MiniMax OAuth, brokered Google Gemini OAuth / Code Assist, verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, Google Vertex AI, AWS Bedrock, Azure Foundry cloud-identity bridges, and remote MCP OAuth protected-resource metadata/brokered bearer configuration; remaining work is local operator sign-in/configuration for unverified accounts and future provider-native bridges beyond the tracked target set.",
             "target_requirements": [
                 "provider_native_oauth_and_device_flows",
                 "subscription_login_bridge",
@@ -332,14 +339,15 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "browser tool surface",
                 "media tool surface",
                 "plugins and skills",
+                "reviewed skill draft candidates",
                 "multi-agent routing primitives",
                 "schedules",
                 "diagnostic panels",
-                "migration inspection",
+                "metadata-only migration inspection",
                 "session-bound run visibility",
             ],
             "security_delta": "Aegis defaults to mock or dry-run mode for broad-access capabilities until credentials, scopes, rollback, and approvals are explicit.",
-            "live_gap": "Mobile nodes, native desktop wrappers, and live third-party channel implementations remain staged behind secure adapter work.",
+            "live_gap": "Mobile nodes, native desktop wrappers, and live third-party channel implementations remain staged; generic/OpenAI-style media plus Stability AI v1 image generation, Google Vertex Imagen image generation/edit/upscale/product background-swap, ElevenLabs TTS, ElevenLabs speech-to-speech, ElevenLabs text-to-dialogue, ElevenLabs instant voice cloning, and ElevenLabs speech-to-text are implemented, while additional provider-specific image, audio, and video adapters remain staged behind secure adapter work.",
             "target_requirements": [
                 "native_shell_depth",
                 "live_browser_automation",
@@ -372,6 +380,8 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "model-ready subagent review packets",
                 "governed lifecycle hooks",
                 "governed local plugin install lifecycle",
+                "reviewed private skill draft candidates",
+                "disabled skill candidate installation",
                 "verified plugin marketplace manifest fetch/install",
                 "signed remote plugin bundle review",
                 "explicit signed remote plugin bundle install",
@@ -382,7 +392,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "approved PR autofix response posting",
             ],
             "security_delta": "Aegis exposes Claude-style controls through the governed local runtime and requires scoped pairings, approved relay registration, and redacted receipts before off-device access.",
-            "live_gap": "Unattended plugin bundle auto-install, unattended plugin auto-update, recursive subagent model-loop depth, broad cloud relay delivery, and future provider OAuth bridges beyond the tracked target set remain explicit gaps instead of silent stubs; the HTTPS relay notification path now exposes a mobile/gateway delivery contract, one-delivery relay confirmation reconciliation, and CLI/TUI/API/web can register, rotate, and publish approved brokered APNS/FCM target records without capturing raw device tokens.",
+            "live_gap": "Unattended unreviewed plugin bundle auto-install, unattended plugin auto-update, recursive subagent model-loop depth, broad cloud relay delivery, and future provider OAuth bridges beyond the tracked target set remain explicit gaps instead of silent stubs; reviewed skill draft candidates can now be staged, verified, and installed disabled from CLI/TUI/API without raw observed task capture.",
             "target_requirements": [
                 "unattended_remote_plugin_bundle_auto_install",
                 "unattended_plugin_auto_update",
@@ -403,6 +413,7 @@ def _live_gap_backlog(
     live_connector_adapters: list[dict[str, Any]],
     available_live_connector_adapters: list[dict[str, Any]],
     backends: list[dict[str, Any]],
+    processes: dict[str, Any],
     subagent_delegations: dict[str, Any],
 ) -> list[dict[str, Any]]:
     readiness_by_state = {row["state"]: row for row in readiness}
@@ -486,14 +497,16 @@ def _live_gap_backlog(
             "next_steps": [
                 "Add per-provider credential handles and domain allowlists.",
                 "Keep live writes approval-gated with runtime rate limits and redacted receipts.",
+                "Create, verify, and explicitly approve channel activation packets before promoting signed webhook, email, or chat-webhook delivery.",
                 "Promote each adapter only after mock, denied, approved, and audit-path tests pass.",
             ],
-            "required_controls": ["human_approval", "secret_broker", "network_allowlist", "rate_limits", "rollback_receipts", "audit_receipts"],
-            "verification_gates": ["mock_fallback", "denied_write", "approved_write", "rate_limit_denial", "rollback_receipt", "receipt_redaction"],
+            "required_controls": ["human_approval", "secret_broker", "network_allowlist", "rate_limits", "rollback_receipts", "audit_receipts", "channel_activation_packet_verification", "channel_activation_approval_receipt"],
+            "verification_gates": ["mock_fallback", "denied_write", "approved_write", "rate_limit_denial", "rollback_receipt", "receipt_redaction", "channel_activation_packet_integrity", "channel_activation_approval_receipt"],
             "evaluation_scenarios": [
                 "connector_abuse.write_without_scope",
                 "live_connector_receipts.redacted_write_summary",
                 "live_connector_rate_limit.exceeded",
+                "channel.live_activation_approval",
                 "generic_rest.live_write_rate_limit",
                 "github_gitlab.live_write_rate_limit",
                 "github_gitlab.rollback_offer_receipt",
@@ -508,16 +521,19 @@ def _live_gap_backlog(
         {
             "area": "browser_and_media_depth",
             "platforms": ["OpenClaw"],
-            "status": "facade_hardening_required",
-            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, approved static-anchor navigation, and private Playwright/Chromium live-browser activation packet review artifacts are available for stored HTTP-content sessions; provider-backed media artifacts, transcription, and video jobs can run through allowlisted HTTPS adapters with media_sandbox_profile_v1 receipts, including OpenAI-style image JSON, multipart image edit, TTS, audio transcription, and video generation adapters, while real page automation and broader provider-specific media depth still require expansion.",
+            "status": "live_javascript_available_media_depth_remaining",
+            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, approved static-anchor navigation, private Playwright/Chromium live-browser activation packet review artifacts, opt-in approved headless Chromium read-only snapshots, opt-in approved Chromium CDP selector mutation, opt-in approved private live downloads, opt-in approved workspace-scoped live uploads, and opt-in approved bounded live JavaScript evaluation are available; provider-backed media artifacts, transcription, and video jobs can run through allowlisted HTTPS adapters with media_sandbox_profile_v1 receipts, including OpenAI-style image JSON, Stability AI v1 text-to-image JSON, Google Vertex Imagen predict JSON, multipart image edit, OpenAI-style TTS, ElevenLabs TTS, OpenAI-style audio transcription, ElevenLabs speech-to-text, and video generation adapters, while persistent browser state, raw DOM capture, and raw network body capture remain blocked by design; broader provider-specific media depth still requires expansion.",
             "sample_tools": facade_tools[:8],
             "next_steps": [
-                "Use live-browser activation packets only as readiness evidence until the live browser adapter itself is implemented and approved.",
-                "Extend rendering toward real browser automation only after network, cookie, and JavaScript boundaries are enforceable.",
+                "Use the live-browser read-only adapter only for approved allowlisted screenshot evidence with ephemeral state.",
+                "Use the live selector mutation adapter only for approved allowlisted click/fill/submit operations with ephemeral state.",
+                "Use the live download adapter only for approved allowlisted selector downloads with private artifact hashes and size limits.",
+                "Use the live upload adapter only for approved allowlisted file input selectors with workspace-scoped source files, private evidence hashes, and size/type limits.",
+                "Use the live JavaScript adapter only for approved allowlisted pages with script-hash approval, bounded redacted results, and private evidence hashes.",
                 "Extend provider-backed media execution toward provider-specific image, audio, and video adapters after redacted receipt coverage is proven.",
                 "Gate any page mutation, recording, or generated media write behind approval.",
             ],
-            "required_controls": ["sandbox_isolation", "taint_preservation", "artifact_hashing", "human_approval", "activation_packet_verification"],
+            "required_controls": ["sandbox_isolation", "taint_preservation", "artifact_hashing", "human_approval", "activation_packet_verification", "live_browser_readonly_approval", "live_browser_selector_mutation_approval", "live_browser_download_approval", "live_browser_upload_approval", "live_browser_javascript_approval"],
             "verification_gates": [
                 "unsupported_selector_truthfulness",
                 "artifact_hash_stability",
@@ -525,6 +541,11 @@ def _live_gap_backlog(
                 "no_raw_secret_capture",
                 "live_browser_activation_packet_schema",
                 "live_browser_activation_packet_verification",
+                "approved_live_browser_readonly_snapshot",
+                "approved_live_browser_selector_mutation",
+                "approved_live_browser_download",
+                "approved_live_browser_upload",
+                "approved_live_browser_javascript",
                 "playwright_chromium_adapter_preflight",
                 "disabled_live_browser_denial",
             ],
@@ -574,6 +595,26 @@ def _live_gap_backlog(
                     "evidence": "operators can verify private activation packet checksum, schema, blockers, cookie/storage isolation flags, redacted artifact controls, and approval gates while selector-event dispatch remains disabled",
                 },
                 {
+                    "control": "approved_live_browser_readonly_adapter",
+                    "evidence": "approved live_navigate and live_screenshot actions can run headless Chromium with an ephemeral profile, main-frame allowlist checks, disabled JavaScript/images, private PNG artifacts, and no raw DOM/cookie/storage return",
+                },
+                {
+                    "control": "approved_live_browser_selector_mutation_adapter",
+                    "evidence": "approved live_click, live_fill, and live_submit actions can run through a Chromium CDP ephemeral profile with allowlisted navigation, private PNG/evidence artifacts, no persistent cookies/storage, no downloads/uploads, and no raw DOM/cookie/storage return",
+                },
+                {
+                    "control": "approved_live_browser_download_adapter",
+                    "evidence": "approved live_download actions can click an allowlisted page selector through a Chromium CDP ephemeral profile and store one bounded private download artifact with screenshot/evidence hashes, no uploads, no persistent cookies/storage, and no raw DOM/cookie/storage return",
+                },
+                {
+                    "control": "approved_live_browser_upload_adapter",
+                    "evidence": "approved live_upload actions can attach one workspace-scoped allowlisted source file to an allowlisted page file input through a Chromium CDP ephemeral profile with private screenshot/evidence hashes, no persistent cookies/storage, and no raw file/DOM/cookie/storage return",
+                },
+                {
+                    "control": "approved_live_browser_javascript_adapter",
+                    "evidence": "approved live_evaluate actions can run bounded JavaScript on an allowlisted page through a Chromium CDP ephemeral profile with script-hash approvals, private screenshot/evidence hashes, redacted result summaries, no persistent cookies/storage, and no raw DOM/cookie/storage/network-body return",
+                },
+                {
                     "control": "platform_media_sandbox_profiles_v1",
                     "evidence": "local and provider-backed media paths return media_sandbox_profile_v1 receipts covering execution, network, filesystem, device, secret, content, and artifact boundaries",
                 },
@@ -582,16 +623,56 @@ def _live_gap_backlog(
                     "evidence": "approved provider-backed image generation can send an OpenAI-style image JSON request and persist returned data[].b64_json artifacts without storing raw prompt, response body, or secret values",
                 },
                 {
+                    "control": "stability_v1_image_provider_adapter",
+                    "evidence": "approved provider-backed image generation can send a Stability AI v1 text-to-image JSON request and persist returned artifacts[].base64 image data without storing raw prompt, response body, or secret values",
+                },
+                {
+                    "control": "google_imagen_provider_adapter",
+                    "evidence": "approved provider-backed image generation can send a Google Vertex Imagen predict-style JSON request and persist returned predictions[].bytesBase64Encoded image data without storing raw prompt, response body, or secret values",
+                },
+                {
                     "control": "openai_style_image_edit_provider_adapter",
                     "evidence": "approved provider-backed image edits can upload one workspace-scoped source image through an OpenAI-style multipart request and persist returned data[].b64_json artifacts without storing raw prompt, source bytes, response body, or secret values",
+                },
+                {
+                    "control": "google_imagen_edit_provider_adapter",
+                    "evidence": "approved provider-backed image edits can send a Google Vertex Imagen edit predict-style JSON request with workspace-scoped reference images and persist returned predictions[].bytesBase64Encoded artifacts without storing raw prompt, source bytes, response body, or secret values",
+                },
+                {
+                    "control": "google_imagen_upscale_provider_adapter",
+                    "evidence": "approved provider-backed image upscale can send a Google Vertex Imagen upscale predict-style JSON request with a workspace-scoped source image and persist returned predictions[].bytesBase64Encoded artifacts without storing raw prompt, source bytes, response body, or secret values",
+                },
+                {
+                    "control": "google_imagen_product_provider_adapter",
+                    "evidence": "approved provider-backed product image edits can send a Google Vertex Imagen background-swap request with workspace-scoped source images, automatic or user-provided mask references, and returned predictions[].bytesBase64Encoded artifacts without storing raw prompt, source bytes, response body, or secret values",
                 },
                 {
                     "control": "openai_style_tts_provider_adapter",
                     "evidence": "approved provider-backed TTS can send an OpenAI-style speech request and persist the returned audio artifact without storing raw text, response body, or secret values",
                 },
                 {
+                    "control": "elevenlabs_tts_provider_adapter",
+                    "evidence": "approved provider-backed TTS can send an ElevenLabs text-to-speech JSON request with a brokered xi-api-key header and persist the returned audio artifact without storing raw text, response body, or secret values",
+                },
+                {
+                    "control": "elevenlabs_speech_to_speech_provider_adapter",
+                    "evidence": "approved provider-backed speech-to-speech can upload one workspace-scoped audio file through an ElevenLabs multipart request with a brokered xi-api-key header and persist the returned audio artifact without storing raw source audio, response body, or secret values",
+                },
+                {
+                    "control": "elevenlabs_text_to_dialogue_provider_adapter",
+                    "evidence": "approved provider-backed dialogue generation can send bounded ElevenLabs text-and-voice-id turns with a brokered xi-api-key header and persist the returned audio artifact without storing raw text, response body, or secret values",
+                },
+                {
+                    "control": "elevenlabs_voice_clone_provider_adapter",
+                    "evidence": "approved provider-backed instant voice cloning can upload bounded workspace-scoped audio samples through an ElevenLabs multipart request with a brokered xi-api-key header and return a redacted voice resource receipt without storing raw audio, response body, or secret values",
+                },
+                {
                     "control": "openai_style_transcription_provider_adapter",
                     "evidence": "approved provider-backed audio transcription can upload one workspace-scoped audio file through an OpenAI-style multipart request and return transcript text without storing raw audio, raw response bodies, or secret values",
+                },
+                {
+                    "control": "elevenlabs_transcription_provider_adapter",
+                    "evidence": "approved provider-backed audio transcription can upload one workspace-scoped audio file through an ElevenLabs speech-to-text multipart request with a brokered xi-api-key header and return transcript text without storing raw audio, raw response bodies, or secret values",
                 },
                 {
                     "control": "openai_style_video_provider_adapter",
@@ -618,14 +699,44 @@ def _live_gap_backlog(
                     "evidence": "explicit live browser automation requests fail closed with activation preflight blockers",
                 },
             ],
+            "provider_media_adapters": {
+                "implemented": [
+                    {"adapter": "openai_images", "tool": "image_generate", "response_shape": "data[].b64_json"},
+                    {"adapter": "stability_v1_text_to_image", "tool": "image_generate", "response_shape": "artifacts[].base64"},
+                    {"adapter": "google_imagen", "tool": "image_generate", "response_shape": "predictions[].bytesBase64Encoded"},
+                    {"adapter": "openai_image_edit", "tool": "image_edit", "response_shape": "data[].b64_json"},
+                    {"adapter": "google_imagen_edit", "tool": "image_edit", "response_shape": "predictions[].bytesBase64Encoded"},
+                    {"adapter": "google_imagen_upscale", "tool": "image_edit", "response_shape": "predictions[].bytesBase64Encoded"},
+                    {"adapter": "google_imagen_product", "tool": "image_edit", "response_shape": "predictions[].bytesBase64Encoded"},
+                    {"adapter": "openai_tts", "tool": "tts", "response_shape": "binary_audio"},
+                    {"adapter": "elevenlabs_tts", "tool": "tts", "response_shape": "binary_audio"},
+                    {"adapter": "elevenlabs_speech_to_speech", "tool": "tts", "response_shape": "binary_audio"},
+                    {"adapter": "elevenlabs_text_to_dialogue", "tool": "tts", "response_shape": "binary_audio"},
+                    {"adapter": "elevenlabs_voice_clone", "tool": "voice_clone", "response_shape": "voice_id"},
+                    {"adapter": "openai_transcription", "tool": "voice_transcribe", "response_shape": "transcript_text"},
+                    {"adapter": "elevenlabs_transcription", "tool": "voice_transcribe", "response_shape": "transcript_text"},
+                    {"adapter": "openai_video", "tool": "video_generate", "response_shape": "job_lifecycle_and_bounded_artifacts"},
+                ],
+                "remaining_by_modality": {
+                    "image": ["additional non-Google product-image adapters"],
+                    "audio": ["additional non-ElevenLabs voice-cloning adapters"],
+                    "video": ["additional provider-native video lifecycle adapters"],
+                },
+                "raw_prompt_or_secret_storage": False,
+                "raw_response_body_storage": False,
+            },
             "remaining_depth_work": [
-                "live_browser_automation_adapter",
                 "provider_specific_media_adapter_expansion",
             ],
             "evaluation_scenarios": [
                 "artifact_integrity.browser_media_receipts",
                 "browser.live_activation_packet_preflight",
                 "browser.live_activation_packet_verification",
+                "browser.live_readonly_snapshot",
+                "browser.live_selector_mutation",
+                "browser.live_download",
+                "browser.live_upload",
+                "browser.live_evaluate",
                 "browser.live_automation_denied_until_adapter_ready",
             ],
             "operator_checklist": _browser_media_operator_checklist(
@@ -642,10 +753,25 @@ def _live_gap_backlog(
                     "live_browser_activation_packets",
                     "playwright_chromium_adapter_preflight",
                     "live_browser_activation_packet_verification",
+                    "approved_live_browser_readonly_adapter",
+                    "approved_live_browser_selector_mutation_adapter",
+                    "approved_live_browser_download_adapter",
+                    "approved_live_browser_upload_adapter",
+                    "approved_live_browser_javascript_adapter",
                     "openai_style_image_provider_adapter",
+                    "stability_v1_image_provider_adapter",
+                    "google_imagen_provider_adapter",
                     "openai_style_image_edit_provider_adapter",
+                    "google_imagen_edit_provider_adapter",
+                    "google_imagen_upscale_provider_adapter",
+                    "google_imagen_product_provider_adapter",
                     "openai_style_tts_provider_adapter",
+                    "elevenlabs_tts_provider_adapter",
+                    "elevenlabs_speech_to_speech_provider_adapter",
+                    "elevenlabs_text_to_dialogue_provider_adapter",
+                    "elevenlabs_voice_clone_provider_adapter",
                     "openai_style_transcription_provider_adapter",
+                    "elevenlabs_transcription_provider_adapter",
                     "openai_style_video_provider_adapter",
                     "static_dom_snapshot_no_js",
                     "approved_static_form_fill",
@@ -653,7 +779,6 @@ def _live_gap_backlog(
                     "disabled_live_browser_denial",
                 ],
                 remaining_depth_work=[
-                    "live_browser_automation_adapter",
                     "provider_specific_media_adapter_expansion",
                 ],
             ),
@@ -662,20 +787,21 @@ def _live_gap_backlog(
         {
             "area": "subagent_runtime_depth",
             "platforms": ["Hermes Agent", "Claude Code"],
-            "status": "isolated_worker_ready_autonomous_recursion_blocked",
+            "status": "isolated_loop_ready_autonomous_recursion_blocked",
             "detail": (
                 f"Approved subagent work is tracked through a durable, auditable delegation queue with "
-                f"{subagent_delegations['open_cards']} open card(s), {subagent_delegations.get('enabled_profile_count', 0)} enabled profile(s), enforced queue budgets, sanitized handoff receipts, approved isolated worker-run receipts, parent-bound review receipts, model-ready review packets, operator-approved batch-run receipts, and explicit autonomy preflight receipts; recursive autonomous model-loop execution remains blocked."
+                f"{subagent_delegations['open_cards']} open card(s), {subagent_delegations.get('enabled_profile_count', 0)} enabled profile(s), enforced queue budgets, review-gated recursive child delegation budgets, sanitized handoff receipts, approved isolated worker-run receipts, parent-bound review receipts, model-ready review packets, approved sanitized model-review invocations, operator-approved batch-run receipts, scoped autonomy step-plan receipts, isolated autonomy loop rehearsal receipts, and explicit autonomy preflight receipts; recursive autonomous model-loop execution remains blocked."
             ),
             "sample_tools": ["subagent_delegate"],
             "operator_checklist": _subagent_operator_checklist(subagent_delegations),
             "next_steps": [
-                "Promote model-ready review packets into any future reviewer/model handoff without raw instruction or worker output forwarding.",
-                "Only consider recursive autonomous model loops after deeper isolation, budget, and review controls land.",
+                "Use approved autonomy-step plans and autonomy-run rehearsals to build and exercise scoped isolated loop boundaries without model or tool execution.",
+                "Use approved model-review invocations to review packet integrity without raw instruction or worker output forwarding.",
+                "Only consider recursive autonomous model loops after the recursive model-loop executor lands.",
             ],
-            "required_controls": ["human_approval", "tainted_instruction_metadata", "durable_queue", "recursive_budget_limits", "handoff_receipts", "isolated_worker_receipts", "parent_bound_review_receipts", "model_ready_review_packets", "operator_batch_receipts", "autonomy_preflight_receipts"],
-            "verification_gates": ["approval_required_delegation", "status_queue_visibility", "raw_instruction_redaction", "isolated_worker_receipts", "parent_bound_review_receipt", "parent_task_review_binding", "model_ready_review_packet_sanitization", "operator_batch_receipts", "autonomy_preflight_receipt", "blocked_autonomous_runtime"],
-            "evaluation_scenarios": ["subagent.delegation_queue_visibility", "subagent.isolated_worker_receipts", "subagent.parent_bound_review_receipt", "subagent.model_ready_review_packet", "subagent.operator_batch_receipts", "subagent.autonomy_preflight", "subagent.autonomous_runtime_blocked"],
+            "required_controls": ["human_approval", "tainted_instruction_metadata", "durable_queue", "recursive_budget_limits", "review_gated_recursive_child_delegations", "handoff_receipts", "isolated_worker_receipts", "parent_bound_review_receipts", "model_ready_review_packets", "sanitized_model_review_invocations", "operator_batch_receipts", "scoped_autonomy_step_plans", "autonomous_loop_isolation", "isolated_autonomy_loop_rehearsals", "autonomy_preflight_receipts"],
+            "verification_gates": ["approval_required_delegation", "status_queue_visibility", "raw_instruction_redaction", "recursive_child_delegation_receipt", "isolated_worker_receipts", "parent_bound_review_receipt", "parent_task_review_binding", "model_ready_review_packet_sanitization", "sanitized_model_review_context", "operator_batch_receipts", "autonomy_step_plan_receipt", "isolated_autonomy_loop_receipt", "autonomy_preflight_receipt", "blocked_autonomous_runtime"],
+            "evaluation_scenarios": ["subagent.delegation_queue_visibility", "subagent.recursive_child_delegation", "subagent.isolated_worker_receipts", "subagent.parent_bound_review_receipt", "subagent.model_ready_review_packet", "subagent.sanitized_model_review", "subagent.operator_batch_receipts", "subagent.autonomy_step_plan", "subagent.isolated_autonomy_loop", "subagent.autonomy_preflight", "subagent.autonomous_runtime_blocked"],
             "configured_provider_count": len(configured_providers),
         },
         {
@@ -691,22 +817,30 @@ def _live_gap_backlog(
             "detail": (
                 "Some nonlocal execution adapters are enabled with receipts; hosted sandbox backends still require provider-specific activation work."
                 if implemented_backends
-                else "Nonlocal execution adapters exist but are disabled by default; configure scoped credentials, allowlists, and rollback posture before use."
+                else "Local governed background processes are available for argv-only and PTY-backed runs; nonlocal execution adapters exist but are disabled by default and require scoped credentials, allowlists, and rollback posture before use."
                 if available_backends
                 else "Enable backend-gated execution paths only after sandbox credentials, scope limits, rollback, and receipts are implemented."
             ),
             "sample_tools": backend_tools[:8],
+            "local_process_registry": {
+                "status": processes.get("status"),
+                "active_process_count": processes.get("active_process_count"),
+                "implemented_controls": processes.get("implemented_controls", []),
+                "remaining_depth_work": processes.get("remaining_depth_work", []),
+                "raw_command_included": False,
+                "raw_secret_values_included": False,
+            },
             "implemented_backend_adapters": implemented_backends,
             "available_backend_adapters": available_backends,
-            "operator_checklist": _remote_backend_operator_checklist(implemented_backends, available_backends),
+            "operator_checklist": _remote_backend_operator_checklist(implemented_backends, available_backends, processes),
             "next_steps": [
                 "Add backend-specific auth checks through brokered handles.",
                 "Enforce workspace, network, resource, and rollback limits before dispatch.",
                 "Record activation, execution, and cleanup receipts for every remote run.",
             ],
-            "required_controls": ["brokered_backend_auth", "scope_limits", "resource_limits", "rollback_receipts"],
-            "verification_gates": ["disabled_backend_denial", "approved_activation", "cleanup_receipt", "scope_escape_rejection"],
-            "evaluation_scenarios": ["backend_activation.remote_execution_disabled"],
+            "required_controls": ["approval_required_process_start", "executable_allowlist", "private_redacted_process_logs", "pty_stdin_resize_receipts", "brokered_backend_auth", "scope_limits", "resource_limits", "rollback_receipts"],
+            "verification_gates": ["process_start_approval_gate", "process_log_redaction", "process_pty_input_resize_receipts", "disabled_backend_denial", "approved_activation", "cleanup_receipt", "scope_escape_rejection"],
+            "evaluation_scenarios": ["processes.governed_background_registry", "backend_activation.remote_execution_disabled"],
             "configured_provider_count": len(configured_providers),
         },
     ]
@@ -745,6 +879,11 @@ def _subagent_operator_checklist(subagent_delegations: dict[str, Any]) -> list[d
             "detail": "Delegation creation enforces profile parallel-card ceilings and pins recursion, tool-call, runtime, workspace, and network budgets to every card.",
         },
         {
+            "control": "review_gated_recursive_child_delegations",
+            "state": "enforced" if "review_gated_recursive_child_delegations" in subagent_delegations.get("implemented_controls", []) else "pending",
+            "detail": "A parent subagent card can create child cards only with explicit approval, remaining recursive depth, and sanitized child-delegation receipts.",
+        },
+        {
             "control": "isolated_parallel_runtime",
             "state": "enforced" if "isolated_parallel_runtime" in subagent_delegations.get("implemented_controls", []) else "blocked",
             "detail": "Approved subagent runs execute as isolated deterministic worker subprocesses without model, tool, or network access; recursive autonomous subagents remain disabled.",
@@ -763,6 +902,26 @@ def _subagent_operator_checklist(subagent_delegations: dict[str, Any]) -> list[d
             "control": "model_ready_review_packets",
             "state": "enforced" if "model_ready_review_packets" in subagent_delegations.get("implemented_controls", []) else "pending",
             "detail": "Operators can create private JSON/checksum review packets for model or reviewer handoff with only hashes, counts, statuses, and receipts, excluding raw instructions and worker output.",
+        },
+        {
+            "control": "sanitized_model_review_invocations",
+            "state": "enforced" if "sanitized_model_review_invocations" in subagent_delegations.get("implemented_controls", []) else "pending",
+            "detail": "Approved model reviews invoke the configured model with only verified packet metadata and store redacted receipt metadata on the card.",
+        },
+        {
+            "control": "scoped_autonomy_step_plans",
+            "state": "enforced" if "scoped_autonomy_step_plans" in subagent_delegations.get("implemented_controls", []) else "pending",
+            "detail": "Approved autonomy-step plans write private checksum-backed scoped context from verified review metadata, deny tool execution, and require operator review.",
+        },
+        {
+            "control": "autonomous_loop_isolation",
+            "state": "enforced" if "autonomous_loop_isolation" in subagent_delegations.get("implemented_controls", []) else "pending",
+            "detail": "Approved autonomy-run rehearsals execute sanitized step plans inside an isolated subprocess with no model, tool, network, or raw instruction access.",
+        },
+        {
+            "control": "isolated_autonomy_loop_rehearsals",
+            "state": "enforced" if "isolated_autonomy_loop_rehearsals" in subagent_delegations.get("implemented_controls", []) else "pending",
+            "detail": "The isolated loop rehearsal records private plan integrity, subprocess isolation, review-gate, and tool-sandbox receipts while keeping recursive model loops disabled.",
         },
         {
             "control": "autonomy_preflight_receipts",
@@ -891,11 +1050,12 @@ def _configured_live_channel_activation(name: str) -> dict[str, Any]:
     return {
         "status": "live_outbound_enabled",
         "preflight_status": "ready_for_approved_send",
-        "required_controls": ["explicit_channel_config", "human_approval", "secret_broker_or_allowlist", "redacted_receipts"],
-        "configured_controls": ["explicit_channel_config", "redacted_receipts"],
+        "required_controls": ["explicit_channel_config", "human_approval", "secret_broker_or_allowlist", "redacted_receipts", "activation_approval_receipt"],
+        "configured_controls": ["explicit_channel_config", "redacted_receipts", "activation_approval_receipt"],
         "blockers": [],
-        "verification_gates": ["approved_send", "receipt_redaction"],
+        "verification_gates": ["activation_packet_integrity", "activation_approval_receipt", "approved_send", "receipt_redaction"],
         "next_steps": [
+            f"Approve a verified {name} activation packet to record the promotion receipt.",
             f"Send one approved {name} delivery in the target environment.",
             "Confirm delivery receipts stay redacted before using the channel broadly.",
         ],
@@ -948,19 +1108,44 @@ def _browser_media_operator_checklist(implemented_controls: list[str], remaining
             "detail": "Packet verification checks adapter, isolation, redaction, and approval blockers as review evidence while denied live automation requests remain blocked separately.",
         },
         {
+            "control": "live_browser_readonly_adapter",
+            "state": "available_opt_in" if "approved_live_browser_readonly_adapter" in implemented else "pending",
+            "detail": "Approved live_navigate and live_screenshot can capture allowlisted pages with headless Chromium, an ephemeral profile, private PNG evidence, and no raw DOM/cookie/storage return.",
+        },
+        {
+            "control": "live_browser_selector_mutation_adapter",
+            "state": "available_opt_in" if "approved_live_browser_selector_mutation_adapter" in implemented else "pending",
+            "detail": "Approved live_click, live_fill, and live_submit can mutate allowlisted pages with Chromium CDP through an ephemeral profile while persistent state and raw DOM capture stay blocked.",
+        },
+        {
+            "control": "live_browser_download_adapter",
+            "state": "available_opt_in" if "approved_live_browser_download_adapter" in implemented else "pending",
+            "detail": "Approved live_download can store one bounded private download artifact from an allowlisted page selector with Chromium CDP while uploads, persistent state, and raw DOM capture stay blocked.",
+        },
+        {
+            "control": "live_browser_upload_adapter",
+            "state": "available_opt_in" if "approved_live_browser_upload_adapter" in implemented else "pending",
+            "detail": "Approved live_upload can attach one workspace-scoped allowlisted source file to an allowlisted page file input with Chromium CDP while persistent state, raw DOM capture, and raw source content return stay blocked.",
+        },
+        {
+            "control": "live_browser_javascript_adapter",
+            "state": "available_opt_in" if "approved_live_browser_javascript_adapter" in implemented else "pending",
+            "detail": "Approved live_evaluate can run bounded JavaScript on allowlisted pages with Chromium CDP while raw DOM, cookie/storage values, network bodies, and persistent state stay blocked.",
+        },
+        {
             "control": "media_worker_sandbox",
             "state": "available" if {"sandboxed_media_worker_process", "os_level_media_worker_limits"}.issubset(implemented) else "partial",
             "detail": "Local media artifacts run in an isolated subprocess with OS limits where supported.",
         },
         {
             "control": "live_browser_automation",
-            "state": "blocked_with_preflight" if "disabled_live_browser_denial" in implemented else "not_started" if "live_browser_automation_adapter" in remaining else "ready_for_review",
-            "detail": "Real page automation stays blocked with explicit activation evidence until network, cookie, JavaScript, and mutation boundaries are enforceable.",
+            "state": "javascript_available_media_depth_remaining" if "approved_live_browser_javascript_adapter" in implemented else "upload_available_depth_remaining" if "approved_live_browser_upload_adapter" in implemented else "download_available_depth_remaining" if "approved_live_browser_download_adapter" in implemented else "selector_mutation_available_depth_remaining" if "approved_live_browser_selector_mutation_adapter" in implemented else "read_only_available_mutation_blocked" if "approved_live_browser_readonly_adapter" in implemented else "blocked_with_preflight" if "disabled_live_browser_denial" in implemented else "not_started",
+            "detail": "Read-only live screenshot capture, approved selector click/fill/submit mutation, approved private selector downloads, approved workspace-scoped selector uploads, and approved bounded JavaScript evaluation are available when explicitly configured; persistent browser state, raw DOM capture, and raw network body capture remain blocked.",
         },
         {
             "control": "provider_media_depth",
             "state": "partial" if "provider_backed_media_artifacts" in implemented else "not_started",
-            "detail": "Provider-backed image, TTS, transcription, and video job paths exist, including OpenAI-style image JSON, multipart image edit, TTS, audio transcription, and video generation adapters; additional provider-specific image/audio/video adapters still need expansion.",
+            "detail": "Provider-backed image, TTS, transcription, and video job paths exist, including OpenAI-style image JSON, Stability AI v1 text-to-image JSON, Google Vertex Imagen predict JSON, multipart image edit, OpenAI-style TTS, ElevenLabs TTS, OpenAI-style audio transcription, ElevenLabs speech-to-text, and video generation adapters; additional provider-specific image/audio/video adapters still need expansion.",
         },
         {
             "control": "platform_media_sandbox_profiles",
@@ -1001,7 +1186,7 @@ def _available_live_connector_adapters(connectors: list[dict[str, Any]], config:
                     "name": name,
                     "status": "available_opt_in",
                     "capabilities": list(_LIVE_CHANNEL_CAPABILITIES[name]),
-                    "required_controls": ["explicit_channel_config", "human_approval", "secret_broker_or_allowlist", "redacted_receipts"],
+                    "required_controls": ["explicit_channel_config", "human_approval", "secret_broker_or_allowlist", "redacted_receipts", "activation_approval_receipt"],
                     "activation": _live_channel_activation(name),
                     "raw_secret_values_included": False,
                 }
@@ -1013,16 +1198,18 @@ def _live_channel_activation(name: str) -> dict[str, Any]:
     return {
         "status": "live_channel_required",
         "preflight_status": "blocked",
-        "required_controls": ["explicit_channel_config", "human_approval", "secret_broker_or_allowlist", "redacted_receipts"],
+        "required_controls": ["explicit_channel_config", "human_approval", "secret_broker_or_allowlist", "redacted_receipts", "activation_approval_receipt"],
         "configured_controls": ["redacted_receipts"],
         "blockers": [
             {"control": "explicit_channel_config", "detail": f"{name} outbound channel is not fully enabled"},
             {"control": "human_approval", "detail": f"{name} outbound sends require approval before delivery"},
             {"control": "secret_broker_or_allowlist", "detail": f"{name} credentials or provider target must be brokered and allowlisted"},
+            {"control": "activation_approval_receipt", "detail": f"{name} activation requires a verified packet approval receipt before promotion"},
         ],
-        "verification_gates": ["disabled_channel_denial", "approved_send", "receipt_redaction"],
+        "verification_gates": ["disabled_channel_denial", "activation_packet_integrity", "activation_approval_receipt", "approved_send", "receipt_redaction"],
         "next_steps": [
             f"Configure only the scoped outbound {name} channel needed for the deployment.",
+            "Create, verify, and approve a private activation packet without sending a probe payload.",
             "Keep sends approval-gated and store only redacted delivery receipts.",
         ],
     }
@@ -1052,7 +1239,7 @@ def _live_connector_operator_checklist(
         {
             "control": "human_approval",
             "state": "enforced",
-            "detail": "High-impact live writes and sends remain approval-gated before execution.",
+            "detail": "High-impact live writes and sends remain approval-gated before execution; channel sends require payload-bound approval ids rather than standalone approved booleans.",
         },
         {
             "control": "receipt_redaction",
@@ -1062,7 +1249,7 @@ def _live_connector_operator_checklist(
         {
             "control": "runtime_rate_limits",
             "state": "partial",
-            "detail": "Generic REST, GitHub, GitLab, service-desk, Microsoft Graph, and messaging live writes enforce in-memory per-operation rate limits; remaining live adapters must add provider-specific limits before promotion.",
+            "detail": "Generic REST, GitHub, GitLab, service-desk, Microsoft Graph, messaging live writes, and outbound channel sends enforce in-memory per-operation rate limits; remaining live adapters must add provider-specific limits before promotion.",
         },
         {
             "control": "rollback_receipts",
@@ -1083,6 +1270,11 @@ def _live_connector_operator_checklist(
             "control": "promotion_scope",
             "state": "partial" if live_connector_adapters else "not_started" if available_live_connector_adapters else "needs_adapter",
             "detail": f"{len(live_connector_adapters)} live adapters enabled; {len(available_live_connector_adapters)} opt-in adapters still available.",
+        },
+        {
+            "control": "channel_activation_approval_receipt",
+            "state": "available",
+            "detail": "Verified channel activation packets can be explicitly approved with a no-send receipt before any live delivery probe or broader promotion.",
         },
     ]
 
@@ -1144,8 +1336,18 @@ def _available_backend_adapters(backends: list[dict[str, Any]]) -> list[dict[str
     return adapters
 
 
-def _remote_backend_operator_checklist(implemented_backends: list[dict[str, Any]], available_backends: list[dict[str, Any]]) -> list[dict[str, str]]:
+def _remote_backend_operator_checklist(
+    implemented_backends: list[dict[str, Any]],
+    available_backends: list[dict[str, Any]],
+    processes: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
+    process_controls = set((processes or {}).get("implemented_controls", []))
     return [
+        {
+            "control": "local_background_process_registry",
+            "state": "enforced" if {"approval_required_start", "private_redacted_logs", "stop_receipts", "interactive_pty_attach", "stdin_streaming", "terminal_resize_events"}.issubset(process_controls) else "pending",
+            "detail": "Local background processes use argv-only execution, executable allowlists, explicit approval, private redacted logs, PTY attach, stdin streaming, resize receipts, and stop receipts.",
+        },
         {
             "control": "explicit_backend_enablement",
             "state": "required_per_backend",

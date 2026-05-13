@@ -26,19 +26,125 @@ PERSONALITY_NAMES = (
     "creative",
 )
 
+CONTEXT_FILE_TRUST: tuple[tuple[str, TrustClass], ...] = (
+    ("SOUL.md", TrustClass.USER_DIRECTIVE),
+    ("AGENTS.md", TrustClass.DEVELOPER_TRUSTED),
+    ("CLAUDE.md", TrustClass.DEVELOPER_TRUSTED),
+    (".hermes.md", TrustClass.DEVELOPER_TRUSTED),
+    ("HERMES.md", TrustClass.DEVELOPER_TRUSTED),
+    (".cursorrules", TrustClass.DEVELOPER_TRUSTED),
+    ("TOOLS.md", TrustClass.USER_DIRECTIVE),
+)
+CURSOR_RULES_DIR = Path(".cursor") / "rules"
+CURSOR_RULES_PATTERN = "*.mdc"
+
 
 class ContextFileLoader:
-    def __init__(self, workspace: str | Path) -> None:
+    def __init__(self, workspace: str | Path, *, max_files: int = 12, max_bytes_per_file: int = 32_000) -> None:
         self.workspace = Path(workspace).expanduser().resolve()
         self.firewall = ContextFirewall()
+        self.max_files = max_files
+        self.max_bytes_per_file = max_bytes_per_file
 
-    def load(self) -> list[ContextItem]:
+    def load(self, target_path: str | Path | None = None) -> list[ContextItem]:
+        return list(self.firewall.process(self._raw_items(target_path)).items)
+
+    def model_context(self, target_path: str | Path | None = None) -> tuple[str, ...]:
+        return self.firewall.process(self._raw_items(target_path)).model_context
+
+    def manifest(self, target_path: str | Path | None = None) -> dict[str, Any]:
+        paths = self._candidate_paths(target_path)
+        return {
+            "workspace": str(self.workspace),
+            "target_path": str(self._resolve_target_dir(target_path)) if target_path is not None else str(self.workspace),
+            "max_files": self.max_files,
+            "max_bytes_per_file": self.max_bytes_per_file,
+            "sources": [str(path) for path in paths],
+            "raw_content_included": False,
+        }
+
+    def _raw_items(self, target_path: str | Path | None = None) -> list[ContextItem]:
         items: list[ContextItem] = []
-        for filename, trust in (("SOUL.md", TrustClass.USER_DIRECTIVE), ("AGENTS.md", TrustClass.DEVELOPER_TRUSTED), ("TOOLS.md", TrustClass.USER_DIRECTIVE)):
-            path = self.workspace / filename
-            if path.exists() and path.is_file():
-                items.append(self.firewall.label_content(path.read_text(encoding="utf-8", errors="replace"), source=str(path), trust_class=trust))
-        return list(self.firewall.process(items).items)
+        for path in self._candidate_paths(target_path):
+            content = self._read_bounded(path)
+            items.append(self.firewall.label_content(content, source=str(path), trust_class=self._trust_for_path(path)))
+        return items
+
+    def _candidate_paths(self, target_path: str | Path | None = None) -> list[Path]:
+        paths: list[Path] = []
+        seen: set[Path] = set()
+        for directory in self._context_dirs(target_path):
+            for filename, _trust in CONTEXT_FILE_TRUST:
+                if filename == "SOUL.md" and directory != self.workspace:
+                    continue
+                if self._append_candidate(paths, seen, directory / filename):
+                    return paths
+                if filename == ".cursorrules":
+                    rules_dir = directory / CURSOR_RULES_DIR
+                    for rule_path in sorted(rules_dir.glob(CURSOR_RULES_PATTERN)):
+                        if self._append_candidate(paths, seen, rule_path):
+                            return paths
+        return paths
+
+    def _append_candidate(self, paths: list[Path], seen: set[Path], path: Path) -> bool:
+        if len(paths) >= self.max_files:
+            return True
+        if path in seen or not path.exists() or not path.is_file():
+            return False
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(self.workspace)
+        except (OSError, ValueError):
+            return False
+        paths.append(path)
+        seen.add(path)
+        return len(paths) >= self.max_files
+
+    def _trust_for_path(self, path: Path) -> TrustClass:
+        trust_by_name = dict(CONTEXT_FILE_TRUST)
+        if path.name in trust_by_name:
+            return trust_by_name[path.name]
+        if path.suffix == ".mdc" and path.parent.name == "rules" and path.parent.parent.name == ".cursor":
+            return TrustClass.DEVELOPER_TRUSTED
+        raise ValueError(f"unsupported context file path: {path}")
+
+    def _context_dirs(self, target_path: str | Path | None = None) -> list[Path]:
+        target_dir = self._resolve_target_dir(target_path)
+        try:
+            relative = target_dir.relative_to(self.workspace)
+        except ValueError:
+            return [self.workspace]
+        dirs = [self.workspace]
+        current = self.workspace
+        for part in relative.parts:
+            current = current / part
+            dirs.append(current)
+        return dirs
+
+    def _resolve_target_dir(self, target_path: str | Path | None) -> Path:
+        if target_path is None:
+            return self.workspace
+        raw = Path(target_path).expanduser()
+        candidate = raw.resolve() if raw.is_absolute() else (self.workspace / raw).resolve()
+        try:
+            candidate.relative_to(self.workspace)
+        except ValueError:
+            return self.workspace
+        if candidate.exists() and candidate.is_file():
+            return candidate.parent
+        if candidate.suffix and not candidate.exists():
+            return candidate.parent
+        return candidate
+
+    def _read_bounded(self, path: Path) -> str:
+        data = path.read_bytes()[: self.max_bytes_per_file + 1]
+        truncated = len(data) > self.max_bytes_per_file
+        if truncated:
+            data = data[: self.max_bytes_per_file]
+        content = data.decode("utf-8", errors="replace")
+        if truncated:
+            content += f"\n[TRUNCATED_CONTEXT_FILE max_bytes={self.max_bytes_per_file}]"
+        return content
 
     def profile(self, personality: str = "default") -> dict[str, Any]:
         if personality not in PERSONALITY_NAMES:

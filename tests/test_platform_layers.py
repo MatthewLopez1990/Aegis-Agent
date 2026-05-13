@@ -74,9 +74,10 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(implementation_statuses["video_analyze"], "local_metadata")
             self.assertEqual(implementation_statuses["video_generate"], "allowlisted_live_or_local")
             self.assertEqual(implementation_statuses["voice_transcribe"], "allowlisted_live_or_local")
-            self.assertEqual(implementation_statuses["browser_screenshot"], "local_png_snapshot")
+            self.assertEqual(implementation_statuses["browser_screenshot"], "local_or_opt_in_live_png_snapshot")
             self.assertEqual(implementation_statuses["tts"], "allowlisted_live_or_local")
             self.assertEqual(implementation_statuses["voice_record"], "local_wav_silence")
+            self.assertEqual(implementation_statuses["voice_clone"], "allowlisted_live_provider")
             self.assertEqual(implementation_statuses["package_install"], "backend_gate")
             self.assertEqual(implementation_statuses["code_execute"], "local")
             self.assertEqual(implementation_statuses["github_pr"], "allowlisted_live_read_write_or_mock_connector")
@@ -111,6 +112,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertTrue(implemented["tts"])
             self.assertFalse(implemented["package_install"])
             self.assertTrue(implemented["voice_record"])
+            self.assertTrue(implemented["voice_clone"])
             self.assertTrue(implemented["code_execute"])
             calc = orchestrator.tools.execute("calculator", {"expression": "2 + 3 * 4"})
             self.assertEqual(calc["result"], 14.0)
@@ -1006,7 +1008,8 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(autonomy_preflight["receipt"]["receipt_schema"], "aegis.subagent.autonomy_preflight.v1")
             self.assertFalse(autonomy_preflight["receipt"]["autonomous_runtime"])
             self.assertFalse(autonomy_preflight["receipt"]["model_invocation_performed"])
-            self.assertIn("autonomous_loop_isolation", autonomy_preflight["receipt"]["missing_controls"])
+            self.assertIn("autonomous_loop_isolation", autonomy_preflight["receipt"]["implemented_controls"])
+            self.assertIn("recursive_model_loop_executor", autonomy_preflight["receipt"]["missing_controls"])
             self.assertIn("tool_call_sandbox_denial", autonomy_preflight["receipt"]["verification_gates"])
             self.assertNotIn("Compare browser automation gaps", json.dumps(autonomy_preflight, sort_keys=True))
             handoff = orchestrator.kanban.move_subagent_delegation(
@@ -1086,6 +1089,56 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(subagent_status["cards"][0]["review_packets_recorded"], 1)
             self.assertTrue(subagent_status["cards"][0]["model_ready_review_packet_available"])
             self.assertEqual(subagent_status["cards"][0]["review_packet"]["receipt_schema"], "aegis.subagent.model_review_packet.v1")
+            autonomy_step_gated = orchestrator.kanban.plan_subagent_autonomy_step(approved_delegate["card_id"])
+            self.assertEqual(autonomy_step_gated["status"], "approval_required")
+            autonomy_step = orchestrator.kanban.plan_subagent_autonomy_step(
+                approved_delegate["card_id"],
+                approved=True,
+                actor="operator",
+                max_steps=2,
+            )
+            self.assertTrue(autonomy_step["ok"])
+            self.assertEqual(autonomy_step["receipt"]["receipt_schema"], "aegis.subagent.autonomy_step_plan.v1")
+            self.assertEqual(autonomy_step["receipt"]["max_steps"], 2)
+            self.assertEqual(autonomy_step["receipt"]["tool_call_sandbox"], "deny_all_until_operator_approved")
+            self.assertTrue(autonomy_step["receipt"]["packet_integrity_ok"])
+            self.assertTrue(autonomy_step["receipt"]["scoped_model_context_builder"])
+            self.assertFalse(autonomy_step["receipt"]["autonomous_runtime"])
+            self.assertFalse(autonomy_step["receipt"]["model_invocation_performed"])
+            self.assertFalse(autonomy_step["receipt"]["tool_execution_performed"])
+            autonomy_plan_path = Path(autonomy_step["receipt"]["artifact"])
+            self.assertTrue(autonomy_plan_path.exists())
+            self.assertEqual(stat.S_IMODE(autonomy_plan_path.stat().st_mode), 0o600)
+            self.assertNotIn("Compare browser automation gaps", autonomy_plan_path.read_text(encoding="utf-8"))
+            self.assertNotIn("Compare browser automation gaps", json.dumps(autonomy_step, sort_keys=True))
+            subagent_status = orchestrator.kanban.subagent_status()
+            self.assertIn("scoped_autonomy_step_plans", subagent_status["implemented_controls"])
+            self.assertIn("scoped_model_context_builder", subagent_status["implemented_controls"])
+            self.assertIn("tool_call_sandbox", subagent_status["implemented_controls"])
+            self.assertEqual(subagent_status["cards"][0]["autonomy_step_plans_recorded"], 1)
+            self.assertEqual(subagent_status["cards"][0]["autonomy_status"], "step_plan_review_required")
+            autonomy_run_gated = orchestrator.kanban.run_subagent_autonomy_loop(approved_delegate["card_id"])
+            self.assertEqual(autonomy_run_gated["status"], "approval_required")
+            autonomy_run = orchestrator.kanban.run_subagent_autonomy_loop(
+                approved_delegate["card_id"],
+                approved=True,
+                actor="operator",
+                max_steps=2,
+            )
+            self.assertTrue(autonomy_run["ok"])
+            self.assertEqual(autonomy_run["receipt"]["receipt_schema"], "aegis.subagent.autonomy_loop.v1")
+            self.assertTrue(autonomy_run["receipt"]["autonomous_loop_isolation"])
+            self.assertTrue(autonomy_run["receipt"]["isolated_loop_process"])
+            self.assertFalse(autonomy_run["receipt"]["model_invocation_performed"])
+            self.assertFalse(autonomy_run["receipt"]["tool_execution_performed"])
+            self.assertEqual(autonomy_run["receipt"]["worker_result"]["worker_schema"], "aegis.subagent.autonomy_loop_worker.v1")
+            self.assertFalse(autonomy_run["receipt"]["worker_result"]["forbidden_raw_keys_present"])
+            self.assertNotIn("Compare browser automation gaps", json.dumps(autonomy_run, sort_keys=True))
+            subagent_status = orchestrator.kanban.subagent_status()
+            self.assertIn("autonomous_loop_isolation", subagent_status["implemented_controls"])
+            self.assertIn("isolated_autonomy_loop_rehearsals", subagent_status["implemented_controls"])
+            self.assertEqual(subagent_status["cards"][0]["autonomy_loop_runs_recorded"], 1)
+            self.assertEqual(subagent_status["cards"][0]["autonomy_status"], "loop_review_required")
             kanban_tool = orchestrator.tools.execute("kanban_create", {"title": "Review connector parity", "description": "Track remaining stubs"}, approved=True, task_id="parent-task")
             self.assertTrue(kanban_tool["ok"])
             self.assertEqual(orchestrator.kanban.list_cards(kanban_tool["board_id"])[0]["title"], "Review connector parity")
@@ -1271,13 +1324,27 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("model_auth.raw_token_capture_rejected", backlog["model_provider_auth_login_parity"]["evaluation_scenarios"])
             self.assertIn("allowlisted_live_or_local", readiness["ready"]["statuses"])
             self.assertIn("model_ready_review_packets", backlog["subagent_runtime_depth"]["required_controls"])
+            self.assertIn("sanitized_model_review_invocations", backlog["subagent_runtime_depth"]["required_controls"])
+            self.assertIn("scoped_autonomy_step_plans", backlog["subagent_runtime_depth"]["required_controls"])
+            self.assertIn("autonomous_loop_isolation", backlog["subagent_runtime_depth"]["required_controls"])
+            self.assertIn("isolated_autonomy_loop_rehearsals", backlog["subagent_runtime_depth"]["required_controls"])
             self.assertIn("autonomy_preflight_receipts", backlog["subagent_runtime_depth"]["required_controls"])
             self.assertIn("model_ready_review_packet_sanitization", backlog["subagent_runtime_depth"]["verification_gates"])
+            self.assertIn("sanitized_model_review_context", backlog["subagent_runtime_depth"]["verification_gates"])
+            self.assertIn("autonomy_step_plan_receipt", backlog["subagent_runtime_depth"]["verification_gates"])
+            self.assertIn("isolated_autonomy_loop_receipt", backlog["subagent_runtime_depth"]["verification_gates"])
             self.assertIn("autonomy_preflight_receipt", backlog["subagent_runtime_depth"]["verification_gates"])
             self.assertIn("subagent.model_ready_review_packet", backlog["subagent_runtime_depth"]["evaluation_scenarios"])
+            self.assertIn("subagent.sanitized_model_review", backlog["subagent_runtime_depth"]["evaluation_scenarios"])
+            self.assertIn("subagent.autonomy_step_plan", backlog["subagent_runtime_depth"]["evaluation_scenarios"])
+            self.assertIn("subagent.isolated_autonomy_loop", backlog["subagent_runtime_depth"]["evaluation_scenarios"])
             self.assertIn("subagent.autonomy_preflight", backlog["subagent_runtime_depth"]["evaluation_scenarios"])
             subagent_checklist = {item["control"]: item for item in backlog["subagent_runtime_depth"]["operator_checklist"]}
             self.assertEqual(subagent_checklist["model_ready_review_packets"]["state"], "enforced")
+            self.assertEqual(subagent_checklist["sanitized_model_review_invocations"]["state"], "enforced")
+            self.assertEqual(subagent_checklist["scoped_autonomy_step_plans"]["state"], "enforced")
+            self.assertEqual(subagent_checklist["autonomous_loop_isolation"]["state"], "enforced")
+            self.assertEqual(subagent_checklist["isolated_autonomy_loop_rehearsals"]["state"], "enforced")
             self.assertEqual(subagent_checklist["autonomy_preflight_receipts"]["state"], "enforced")
             self.assertTrue(backlog["provider_and_channel_live_connectors"]["sample_tools"])
             self.assertIn("service_ticket_write", backlog["provider_and_channel_live_connectors"]["sample_tools"])
@@ -1305,17 +1372,26 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(checklist["mock_fallback"]["state"], "available")
             self.assertEqual(checklist["read_surface_inventory"]["state"], "available")
             self.assertEqual(checklist["promotion_scope"]["state"], "not_started")
+            self.assertEqual(checklist["channel_activation_approval_receipt"]["state"], "available")
             self.assertIn("human_approval", backlog["provider_and_channel_live_connectors"]["required_controls"])
+            self.assertIn("channel_activation_approval_receipt", backlog["provider_and_channel_live_connectors"]["required_controls"])
             self.assertIn("rate_limit_denial", backlog["provider_and_channel_live_connectors"]["verification_gates"])
             self.assertIn("rollback_receipt", backlog["provider_and_channel_live_connectors"]["verification_gates"])
             self.assertIn("receipt_redaction", backlog["provider_and_channel_live_connectors"]["verification_gates"])
+            self.assertIn("channel_activation_approval_receipt", backlog["provider_and_channel_live_connectors"]["verification_gates"])
             self.assertIn("service_desk.rollback_close_ticket_receipt", backlog["provider_and_channel_live_connectors"]["evaluation_scenarios"])
             self.assertIn("messaging.rollback_message_receipt", backlog["provider_and_channel_live_connectors"]["evaluation_scenarios"])
             self.assertIn("live_connector_receipts.redacted_write_summary", backlog["provider_and_channel_live_connectors"]["evaluation_scenarios"])
+            self.assertIn("channel.live_activation_approval", backlog["provider_and_channel_live_connectors"]["evaluation_scenarios"])
             self.assertIn("approval_required_mutation", backlog["browser_and_media_depth"]["verification_gates"])
             self.assertIn("activation_packet_verification", backlog["browser_and_media_depth"]["required_controls"])
             self.assertIn("live_browser_activation_packet_schema", backlog["browser_and_media_depth"]["verification_gates"])
             self.assertIn("live_browser_activation_packet_verification", backlog["browser_and_media_depth"]["verification_gates"])
+            self.assertIn("approved_live_browser_readonly_snapshot", backlog["browser_and_media_depth"]["verification_gates"])
+            self.assertIn("approved_live_browser_selector_mutation", backlog["browser_and_media_depth"]["verification_gates"])
+            self.assertIn("approved_live_browser_download", backlog["browser_and_media_depth"]["verification_gates"])
+            self.assertIn("approved_live_browser_upload", backlog["browser_and_media_depth"]["verification_gates"])
+            self.assertIn("approved_live_browser_javascript", backlog["browser_and_media_depth"]["verification_gates"])
             self.assertIn("playwright_chromium_adapter_preflight", backlog["browser_and_media_depth"]["verification_gates"])
             self.assertIn("disabled_live_browser_denial", backlog["browser_and_media_depth"]["verification_gates"])
             browser_hardening_controls = {control["control"] for control in backlog["browser_and_media_depth"]["implemented_hardening_controls"]}
@@ -1328,25 +1404,45 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("provider_backed_media_artifacts", browser_hardening_controls)
             self.assertIn("platform_media_sandbox_profiles_v1", browser_hardening_controls)
             self.assertIn("openai_style_image_provider_adapter", browser_hardening_controls)
+            self.assertIn("stability_v1_image_provider_adapter", browser_hardening_controls)
+            self.assertIn("google_imagen_provider_adapter", browser_hardening_controls)
             self.assertIn("openai_style_image_edit_provider_adapter", browser_hardening_controls)
+            self.assertIn("google_imagen_edit_provider_adapter", browser_hardening_controls)
+            self.assertIn("google_imagen_upscale_provider_adapter", browser_hardening_controls)
+            self.assertIn("google_imagen_product_provider_adapter", browser_hardening_controls)
             self.assertIn("openai_style_tts_provider_adapter", browser_hardening_controls)
+            self.assertIn("elevenlabs_tts_provider_adapter", browser_hardening_controls)
+            self.assertIn("elevenlabs_speech_to_speech_provider_adapter", browser_hardening_controls)
+            self.assertIn("elevenlabs_text_to_dialogue_provider_adapter", browser_hardening_controls)
+            self.assertIn("elevenlabs_voice_clone_provider_adapter", browser_hardening_controls)
             self.assertIn("openai_style_transcription_provider_adapter", browser_hardening_controls)
+            self.assertIn("elevenlabs_transcription_provider_adapter", browser_hardening_controls)
             self.assertIn("openai_style_video_provider_adapter", browser_hardening_controls)
             self.assertIn("browser_automation_boundary_receipts", browser_hardening_controls)
             self.assertIn("live_browser_activation_packets", browser_hardening_controls)
             self.assertIn("playwright_chromium_adapter_preflight", browser_hardening_controls)
             self.assertIn("live_browser_activation_packet_verification", browser_hardening_controls)
+            self.assertIn("approved_live_browser_readonly_adapter", browser_hardening_controls)
+            self.assertIn("approved_live_browser_selector_mutation_adapter", browser_hardening_controls)
+            self.assertIn("approved_live_browser_download_adapter", browser_hardening_controls)
+            self.assertIn("approved_live_browser_upload_adapter", browser_hardening_controls)
+            self.assertIn("approved_live_browser_javascript_adapter", browser_hardening_controls)
             self.assertIn("static_dom_snapshot_no_js", browser_hardening_controls)
             self.assertIn("approved_static_form_fill", browser_hardening_controls)
             self.assertIn("approved_static_form_submit", browser_hardening_controls)
             self.assertIn("approved_static_anchor_navigation", browser_hardening_controls)
             self.assertIn("disabled_live_browser_denial", browser_hardening_controls)
-            self.assertIn("live_browser_automation_adapter", backlog["browser_and_media_depth"]["remaining_depth_work"])
+            self.assertNotIn("live_browser_arbitrary_js_adapter", backlog["browser_and_media_depth"]["remaining_depth_work"])
             self.assertNotIn("stricter_platform_media_sandbox_profiles", backlog["browser_and_media_depth"]["remaining_depth_work"])
             self.assertIn("provider_specific_media_adapter_expansion", backlog["browser_and_media_depth"]["remaining_depth_work"])
             self.assertIn("artifact_integrity.browser_media_receipts", backlog["browser_and_media_depth"]["evaluation_scenarios"])
             self.assertIn("browser.live_activation_packet_preflight", backlog["browser_and_media_depth"]["evaluation_scenarios"])
             self.assertIn("browser.live_activation_packet_verification", backlog["browser_and_media_depth"]["evaluation_scenarios"])
+            self.assertIn("browser.live_readonly_snapshot", backlog["browser_and_media_depth"]["evaluation_scenarios"])
+            self.assertIn("browser.live_selector_mutation", backlog["browser_and_media_depth"]["evaluation_scenarios"])
+            self.assertIn("browser.live_download", backlog["browser_and_media_depth"]["evaluation_scenarios"])
+            self.assertIn("browser.live_upload", backlog["browser_and_media_depth"]["evaluation_scenarios"])
+            self.assertIn("browser.live_evaluate", backlog["browser_and_media_depth"]["evaluation_scenarios"])
             self.assertIn("browser.live_automation_denied_until_adapter_ready", backlog["browser_and_media_depth"]["evaluation_scenarios"])
             browser_checklist = {item["control"]: item for item in backlog["browser_and_media_depth"]["operator_checklist"]}
             self.assertEqual(browser_checklist["browser_boundary_receipts"]["state"], "available")
@@ -1357,8 +1453,13 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(browser_checklist["live_browser_activation_packets"]["state"], "available_adapter_blocked")
             self.assertEqual(browser_checklist["playwright_chromium_adapter_preflight"]["state"], "blocked_adapter_candidate")
             self.assertEqual(browser_checklist["live_browser_activation_packet_verification"]["state"], "verified_adapter_blocked")
+            self.assertEqual(browser_checklist["live_browser_readonly_adapter"]["state"], "available_opt_in")
+            self.assertEqual(browser_checklist["live_browser_selector_mutation_adapter"]["state"], "available_opt_in")
+            self.assertEqual(browser_checklist["live_browser_download_adapter"]["state"], "available_opt_in")
+            self.assertEqual(browser_checklist["live_browser_upload_adapter"]["state"], "available_opt_in")
+            self.assertEqual(browser_checklist["live_browser_javascript_adapter"]["state"], "available_opt_in")
             self.assertEqual(browser_checklist["media_worker_sandbox"]["state"], "available")
-            self.assertEqual(browser_checklist["live_browser_automation"]["state"], "blocked_with_preflight")
+            self.assertEqual(browser_checklist["live_browser_automation"]["state"], "javascript_available_media_depth_remaining")
             self.assertEqual(browser_checklist["provider_media_depth"]["state"], "partial")
             self.assertEqual(browser_checklist["platform_media_sandbox_profiles"]["state"], "ready_for_review")
             self.assertIn("disabled_backend_denial", backlog["remote_backend_activation"]["verification_gates"])
@@ -1582,6 +1683,377 @@ class PlatformLayerTests(unittest.TestCase):
             checksum_result = orchestrator.browser.verify_live_activation_packet(write_packet("checksum-mismatch", packet_payload, checksum="0" * 64))
             self.assertFalse(checksum_result["ok"])
             self.assertFalse(checksum_result["receipt"]["checksum_matches"])
+
+    def test_browser_live_readonly_chromium_adapter_is_approval_gated_and_private(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "[security]",
+                        "live_browser_reads = true",
+                        'network_allowlist = ["example.com"]',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+
+            with (
+                patch.object(browser_controller_module, "_find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch.object(browser_controller_module, "_private_network_error", return_value=None),
+                patch.object(browser_controller_module, "_capture_live_chromium_snapshot", side_effect=_fake_live_chrome_snapshot) as live_capture,
+            ):
+                status = orchestrator.browser.live_activation_status()
+                approval_required = orchestrator.tools.execute("browser", {"action": "live_navigate", "url": "https://example.com"}, approved=False)
+                live_nav = orchestrator.tools.execute("browser", {"action": "live_navigate", "url": "https://example.com"}, approved=True)
+                browser_session_id = live_nav["session"]["id"]
+                live_screenshot = orchestrator.tools.execute("browser_screenshot", {"session_id": browser_session_id, "live": True}, approved=True)
+                live_click = orchestrator.tools.execute("browser_click", {"session_id": browser_session_id, "selector": "#submit", "live": True}, approved=True)
+                blocked_domain = orchestrator.tools.execute("browser", {"action": "live_navigate", "url": "https://evil.test"}, approved=True)
+
+            self.assertEqual(status["activation"]["status"], "live_browser_readonly_adapter_enabled")
+            self.assertEqual(status["activation"]["preflight_status"], "ready_readonly_mutation_blocked")
+            self.assertEqual(status["activation"]["selected_adapter"], "headless-chromium-readonly")
+            self.assertTrue(status["live_browser_adapter_enabled"])
+            self.assertEqual(approval_required["status"], "approval_required")
+            self.assertTrue(live_nav["ok"])
+            self.assertEqual(live_nav["mode"], "live_chromium_readonly_no_persistent_state")
+            self.assertEqual(live_nav["artifact_type"], "png_live_browser_readonly_snapshot")
+            self.assertFalse(live_nav["javascript_executed"])
+            self.assertFalse(live_nav["cookies_persisted"])
+            self.assertFalse(live_nav["raw_browser_content_included"])
+            self.assertEqual(live_nav["sandbox_receipt"]["sandbox_profile"], "live_chromium_readonly_ephemeral_profile")
+            self.assertEqual(live_nav["sandbox_receipt"]["navigation_network"], "main_frame_allowlist_only")
+            self.assertFalse(live_nav["sandbox_receipt"]["real_selector_events_dispatched"])
+            self.assertTrue(Path(live_nav["artifact_path"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertEqual(stat.S_IMODE(Path(live_nav["artifact_path"]).stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(Path(live_nav["evidence_path"]).stat().st_mode), 0o600)
+            live_evidence = json.loads(Path(live_nav["evidence_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(live_evidence["evidence_schema"], "aegis.browser.live_read_evidence.v1")
+            self.assertFalse(live_evidence["content_returned"])
+            self.assertFalse(live_evidence["raw_browser_content_included"])
+            self.assertEqual(live_evidence["automation_boundaries"]["capture_surface"], "live_browser_readonly_screenshot")
+            self.assertEqual(live_evidence["automation_boundaries"]["navigation_network"], "main_frame_allowlist_only")
+            self.assertFalse(live_evidence["automation_boundaries"]["real_page_mutation_allowed"])
+            self.assertTrue(live_screenshot["ok"])
+            self.assertEqual(live_screenshot["action"], "live_screenshot")
+            self.assertFalse(live_click["ok"])
+            self.assertEqual(live_click["status"], "blocked_pending_live_browser_adapter")
+            self.assertEqual(live_click["activation"]["preflight_status"], "ready_readonly_mutation_blocked")
+            self.assertFalse(blocked_domain["ok"])
+            self.assertEqual(blocked_domain["status"], "live_browser_navigation_blocked")
+            self.assertIn("not allowlisted", blocked_domain["reason"])
+            self.assertEqual(live_capture.call_args.kwargs["allowlist"], ("example.com",))
+
+    def test_browser_live_selector_mutation_adapter_is_approval_gated_and_private(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "[security]",
+                        "live_browser_mutations = true",
+                        'network_allowlist = ["example.com"]',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+
+            with (
+                patch.object(browser_controller_module, "_find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch.object(browser_controller_module, "_private_network_error", return_value=None),
+                patch.object(browser_controller_module, "_capture_live_chromium_snapshot", side_effect=_fake_live_chrome_snapshot),
+                patch.object(browser_controller_module, "_capture_live_chromium_mutation", side_effect=_fake_live_chrome_mutation) as live_mutation,
+            ):
+                status = orchestrator.browser.live_activation_status()
+                live_nav = orchestrator.tools.execute("browser", {"action": "live_navigate", "url": "https://example.com/form"}, approved=True)
+                browser_session_id = live_nav["session"]["id"]
+                approval_required = orchestrator.tools.execute("browser_click", {"session_id": browser_session_id, "selector": "#submit", "live": True}, approved=False)
+                approval_payload = orchestrator.browser.action_approval_payload(
+                    action="live_fill",
+                    session_id=browser_session_id,
+                    fields={"#email": "token=abc123"},
+                )
+                live_click = orchestrator.tools.execute("browser_click", {"session_id": browser_session_id, "selector": "#submit", "live": True}, approved=True)
+                live_fill = orchestrator.tools.execute("browser_fill", {"session_id": browser_session_id, "fields": {"#email": "token=abc123"}, "live": True}, approved=True)
+                live_submit = orchestrator.tools.execute("browser_submit", {"session_id": browser_session_id, "selector": "#form", "live": True}, approved=True)
+
+            self.assertEqual(status["activation"]["status"], "live_browser_mutation_adapter_enabled")
+            self.assertEqual(status["activation"]["preflight_status"], "ready_mutation_adapter_enabled")
+            self.assertEqual(status["activation"]["selected_adapter"], "chromium-cdp-ephemeral-mutation")
+            self.assertTrue(status["live_browser_adapter_enabled"])
+            self.assertTrue(status["live_browser_mutation_adapter_enabled"])
+            self.assertEqual(approval_required["status"], "approval_required")
+            self.assertNotIn("abc123", json.dumps(approval_payload, sort_keys=True))
+            self.assertEqual(approval_payload["field_selectors"], ["#email"])
+            self.assertEqual(live_click["status"], "mutated")
+            self.assertEqual(live_click["mode"], "live_chromium_cdp_ephemeral_mutation")
+            self.assertTrue(live_click["javascript_executed"])
+            self.assertTrue(live_click["real_selector_events_dispatched"])
+            self.assertTrue(live_click["real_page_mutation_allowed"])
+            self.assertFalse(live_click["cookies_persisted"])
+            self.assertFalse(live_click["raw_browser_content_included"])
+            self.assertEqual(live_click["sandbox_receipt"]["sandbox_profile"], "live_chromium_cdp_ephemeral_mutation")
+            self.assertEqual(live_click["sandbox_receipt"]["remote_subresources_loaded"], "allowlisted_only")
+            self.assertFalse(live_click["sandbox_receipt"]["downloads_allowed"])
+            self.assertTrue(Path(live_click["artifact_path"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertEqual(stat.S_IMODE(Path(live_click["artifact_path"]).stat().st_mode), 0o600)
+            mutation_evidence = json.loads(Path(live_click["evidence_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(mutation_evidence["evidence_schema"], "aegis.browser.live_mutation_evidence.v1")
+            self.assertEqual(mutation_evidence["automation_boundaries"]["capture_surface"], "live_browser_mutation_snapshot")
+            self.assertEqual(mutation_evidence["automation_boundaries"]["remote_subresources_loaded"], "allowlisted_only")
+            self.assertTrue(mutation_evidence["automation_boundaries"]["real_page_mutation_allowed"])
+            self.assertFalse(mutation_evidence["raw_cookie_values_included"])
+            self.assertNotIn("abc123", json.dumps(live_fill, sort_keys=True))
+            self.assertEqual(live_fill["field_selectors"], ["#email"])
+            self.assertEqual(live_submit["action"], "live_submit")
+            self.assertEqual(live_mutation.call_args.kwargs["allowlist"], ("example.com",))
+
+    def test_browser_live_download_adapter_is_approval_gated_and_private(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "[security]",
+                        "live_browser_downloads = true",
+                        'network_allowlist = ["example.com"]',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+
+            with (
+                patch.object(browser_controller_module, "_find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch.object(browser_controller_module, "_private_network_error", return_value=None),
+                patch.object(browser_controller_module, "_capture_live_chromium_snapshot", side_effect=_fake_live_chrome_snapshot),
+                patch.object(browser_controller_module, "_capture_live_chromium_download", side_effect=_fake_live_chrome_download) as live_download,
+            ):
+                status = orchestrator.browser.live_activation_status()
+                live_nav = orchestrator.tools.execute("browser", {"action": "live_navigate", "url": "https://example.com/downloads"}, approved=True)
+                browser_session_id = live_nav["session"]["id"]
+                approval_required = orchestrator.tools.execute("browser", {"action": "live_download", "session_id": browser_session_id, "selector": "#report"}, approved=False)
+                approval_payload = orchestrator.browser.action_approval_payload(action="live_download", session_id=browser_session_id, selector="#report")
+                downloaded = orchestrator.tools.execute("browser", {"action": "live_download", "session_id": browser_session_id, "selector": "#report"}, approved=True)
+                live_click = orchestrator.tools.execute("browser_click", {"session_id": browser_session_id, "selector": "#submit", "live": True}, approved=True)
+
+            self.assertEqual(status["activation"]["status"], "live_browser_download_adapter_enabled")
+            self.assertEqual(status["activation"]["preflight_status"], "ready_download_adapter_enabled")
+            self.assertEqual(status["activation"]["selected_adapter"], "chromium-cdp-ephemeral-download")
+            self.assertTrue(status["live_browser_adapter_enabled"])
+            self.assertTrue(status["live_browser_download_adapter_enabled"])
+            self.assertFalse(status["live_browser_mutation_adapter_enabled"])
+            self.assertEqual(approval_required["status"], "approval_required")
+            self.assertEqual(approval_payload["download_effect"], "live_browser_private_download")
+            self.assertEqual(approval_payload["max_download_bytes"], 25 * 1024 * 1024)
+            self.assertTrue(downloaded["ok"])
+            self.assertEqual(downloaded["status"], "downloaded")
+            self.assertEqual(downloaded["mode"], "live_chromium_cdp_ephemeral_download")
+            self.assertEqual(downloaded["artifact_type"], "browser_live_download_artifact")
+            self.assertEqual(downloaded["filename"], "report.pdf")
+            self.assertEqual(downloaded["mime_type"], "application/pdf")
+            self.assertEqual(downloaded["download_domain"], "example.com")
+            self.assertEqual(downloaded["download_url_sha256"], hashlib.sha256(b"https://example.com/downloads/report.pdf").hexdigest())
+            self.assertTrue(downloaded["downloads_allowed"])
+            self.assertFalse(downloaded["uploads_allowed"])
+            self.assertFalse(downloaded["raw_browser_content_included"])
+            self.assertFalse(downloaded["raw_cookie_values_included"])
+            self.assertFalse(downloaded["raw_network_body_returned"])
+            self.assertEqual(Path(downloaded["artifact_path"]).read_bytes(), b"fake-download-bytes")
+            self.assertEqual(stat.S_IMODE(Path(downloaded["artifact_path"]).stat().st_mode), 0o600)
+            self.assertTrue(Path(downloaded["metadata_path"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+            download_evidence = json.loads(Path(downloaded["evidence_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(download_evidence["evidence_schema"], "aegis.browser.live_download_evidence.v1")
+            self.assertEqual(download_evidence["download_domain"], "example.com")
+            self.assertEqual(download_evidence["download_url_sha256"], downloaded["download_url_sha256"])
+            self.assertEqual(download_evidence["automation_boundaries"]["capture_surface"], "live_browser_download_snapshot")
+            self.assertTrue(download_evidence["automation_boundaries"]["downloads_allowed"])
+            self.assertFalse(download_evidence["automation_boundaries"]["uploads_allowed"])
+            self.assertFalse(download_evidence["content_returned"])
+            self.assertFalse(live_click["ok"])
+            self.assertEqual(live_click["status"], "blocked_pending_live_browser_adapter")
+            self.assertEqual(live_download.call_args.kwargs["allowlist"], ("example.com",))
+
+    def test_browser_live_download_mime_type_is_magic_based(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            pdf = root / "report.any"
+            png = root / "image.any"
+            csv = root / "rows.any"
+            binary = root / "program.txt"
+            pdf.write_bytes(b"%PDF-1.7\n%aegis")
+            png.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+            csv.write_text("a,b\n1,2\n", encoding="utf-8")
+            binary.write_bytes(b"\x00\x01\x02\x03not text")
+
+            self.assertEqual(browser_controller_module._live_download_mime_type(pdf, filename="report.pdf"), "application/pdf")
+            self.assertEqual(browser_controller_module._live_download_mime_type(png, filename="image.png"), "image/png")
+            self.assertEqual(browser_controller_module._live_download_mime_type(csv, filename="rows.csv"), "text/csv")
+            self.assertEqual(browser_controller_module._live_download_mime_type(binary, filename="program.txt"), "application/octet-stream")
+            self.assertNotIn("application/octet-stream", browser_controller_module._ALLOWED_LIVE_BROWSER_DOWNLOAD_MIME_TYPES)
+
+    def test_browser_live_upload_adapter_is_approval_gated_workspace_scoped_and_private(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "report.pdf"
+            source.write_bytes(b"%PDF-1.7\nfake upload")
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "[security]",
+                        "live_browser_uploads = true",
+                        'network_allowlist = ["example.com"]',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+
+            with (
+                patch.object(browser_controller_module, "_find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch.object(browser_controller_module, "_private_network_error", return_value=None),
+                patch.object(browser_controller_module, "_capture_live_chromium_snapshot", side_effect=_fake_live_chrome_snapshot),
+                patch.object(browser_controller_module, "_capture_live_chromium_upload", side_effect=_fake_live_chrome_upload) as live_upload,
+            ):
+                status = orchestrator.browser.live_activation_status()
+                live_nav = orchestrator.tools.execute("browser", {"action": "live_navigate", "url": "https://example.com/uploads"}, approved=True)
+                browser_session_id = live_nav["session"]["id"]
+                approval_required = orchestrator.tools.execute(
+                    "browser",
+                    {"action": "live_upload", "session_id": browser_session_id, "selector": "#file", "file_path": "report.pdf"},
+                    approved=False,
+                )
+                approval_payload = orchestrator.browser.action_approval_payload(action="live_upload", session_id=browser_session_id, selector="#file", file_path="report.pdf")
+                uploaded = orchestrator.tools.execute(
+                    "browser",
+                    {"action": "live_upload", "session_id": browser_session_id, "selector": "#file", "file_path": "report.pdf"},
+                    approved=True,
+                )
+
+            self.assertEqual(status["activation"]["status"], "live_browser_upload_adapter_enabled")
+            self.assertEqual(status["activation"]["preflight_status"], "ready_upload_adapter_enabled")
+            self.assertEqual(status["activation"]["selected_adapter"], "chromium-cdp-ephemeral-upload")
+            self.assertTrue(status["live_browser_adapter_enabled"])
+            self.assertTrue(status["live_browser_upload_adapter_enabled"])
+            self.assertEqual(approval_required["status"], "approval_required")
+            self.assertEqual(approval_payload["upload_effect"], "live_browser_workspace_file_upload")
+            self.assertEqual(approval_payload["source_filename"], "report.pdf")
+            self.assertEqual(approval_payload["source_mime_type"], "application/pdf")
+            self.assertEqual(approval_payload["source_sha256"], hashlib.sha256(source.read_bytes()).hexdigest())
+            self.assertEqual(approval_payload["max_upload_bytes"], 10 * 1024 * 1024)
+            self.assertTrue(uploaded["ok"])
+            self.assertEqual(uploaded["status"], "uploaded")
+            self.assertEqual(uploaded["mode"], "live_chromium_cdp_ephemeral_upload")
+            self.assertEqual(uploaded["artifact_type"], "png_live_browser_upload_snapshot")
+            self.assertEqual(uploaded["source_filename"], "report.pdf")
+            self.assertEqual(uploaded["source_mime_type"], "application/pdf")
+            self.assertEqual(uploaded["source_sha256"], hashlib.sha256(source.read_bytes()).hexdigest())
+            self.assertTrue(uploaded["uploads_allowed"])
+            self.assertFalse(uploaded["downloads_allowed"])
+            self.assertFalse(uploaded["raw_browser_content_included"])
+            self.assertFalse(uploaded["raw_cookie_values_included"])
+            self.assertFalse(uploaded["raw_network_body_returned"])
+            self.assertTrue(Path(uploaded["artifact_path"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertEqual(stat.S_IMODE(Path(uploaded["artifact_path"]).stat().st_mode), 0o600)
+            upload_evidence = json.loads(Path(uploaded["evidence_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(upload_evidence["evidence_schema"], "aegis.browser.live_upload_evidence.v1")
+            self.assertEqual(upload_evidence["automation_boundaries"]["capture_surface"], "live_browser_upload_snapshot")
+            self.assertTrue(upload_evidence["automation_boundaries"]["uploads_allowed"])
+            self.assertFalse(upload_evidence["automation_boundaries"]["downloads_allowed"])
+            self.assertFalse(upload_evidence["content_returned"])
+            self.assertEqual(live_upload.call_args.kwargs["allowlist"], ("example.com",))
+            self.assertEqual(live_upload.call_args.kwargs["source_path"], source.resolve())
+
+    def test_browser_live_javascript_adapter_is_approval_gated_bounded_and_private(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "[security]",
+                        "live_browser_javascript = true",
+                        'network_allowlist = ["example.com"]',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            script = "return {title: document.title, count: 2}"
+
+            with (
+                patch.object(browser_controller_module, "_find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch.object(browser_controller_module, "_private_network_error", return_value=None),
+                patch.object(browser_controller_module, "_capture_live_chromium_snapshot", side_effect=_fake_live_chrome_snapshot),
+                patch.object(browser_controller_module, "_capture_live_chromium_evaluate", side_effect=_fake_live_chrome_evaluate) as live_evaluate,
+            ):
+                status = orchestrator.browser.live_activation_status()
+                live_nav = orchestrator.tools.execute("browser", {"action": "live_navigate", "url": "https://example.com/app"}, approved=True)
+                browser_session_id = live_nav["session"]["id"]
+                approval_required = orchestrator.tools.execute(
+                    "browser",
+                    {"action": "live_evaluate", "session_id": browser_session_id, "script": script},
+                    approved=False,
+                )
+                approval_payload = orchestrator.browser.action_approval_payload(action="live_evaluate", session_id=browser_session_id, script=script)
+                evaluated = orchestrator.tools.execute(
+                    "browser",
+                    {"action": "live_evaluate", "session_id": browser_session_id, "script": script},
+                    approved=True,
+                )
+
+            self.assertEqual(status["activation"]["status"], "live_browser_javascript_adapter_enabled")
+            self.assertEqual(status["activation"]["preflight_status"], "ready_javascript_adapter_enabled")
+            self.assertEqual(status["activation"]["selected_adapter"], "chromium-cdp-ephemeral-javascript")
+            self.assertTrue(status["live_browser_javascript_adapter_enabled"])
+            self.assertEqual(approval_required["status"], "approval_required")
+            self.assertEqual(approval_payload["evaluate_effect"], "live_browser_approved_javascript")
+            self.assertEqual(approval_payload["script_sha256"], hashlib.sha256(script.encode("utf-8")).hexdigest())
+            self.assertEqual(approval_payload["script_chars"], len(script))
+            self.assertTrue(approval_payload["raw_dom_return_blocked"])
+            self.assertTrue(evaluated["ok"])
+            self.assertEqual(evaluated["mode"], "live_chromium_cdp_ephemeral_evaluate")
+            self.assertEqual(evaluated["artifact_type"], "png_live_browser_evaluate_snapshot")
+            self.assertEqual(evaluated["script_sha256"], hashlib.sha256(script.encode("utf-8")).hexdigest())
+            self.assertTrue(evaluated["javascript_executed"])
+            self.assertFalse(evaluated["downloads_allowed"])
+            self.assertFalse(evaluated["uploads_allowed"])
+            self.assertFalse(evaluated["raw_browser_content_included"])
+            self.assertFalse(evaluated["raw_cookie_values_included"])
+            self.assertFalse(evaluated["raw_network_body_returned"])
+            self.assertEqual(evaluated["evaluation_result"]["result"]["kind"], "object")
+            self.assertTrue(Path(evaluated["artifact_path"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertEqual(stat.S_IMODE(Path(evaluated["artifact_path"]).stat().st_mode), 0o600)
+            evaluate_evidence = json.loads(Path(evaluated["evidence_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(evaluate_evidence["evidence_schema"], "aegis.browser.live_evaluate_evidence.v1")
+            self.assertEqual(evaluate_evidence["automation_boundaries"]["capture_surface"], "live_browser_javascript_snapshot")
+            self.assertTrue(evaluate_evidence["automation_boundaries"]["arbitrary_javascript_evaluation_allowed"])
+            self.assertFalse(evaluate_evidence["automation_boundaries"]["raw_dom_returned"])
+            self.assertFalse(evaluate_evidence["content_returned"])
+            self.assertEqual(live_evaluate.call_args.kwargs["allowlist"], ("example.com",))
+            self.assertEqual(live_evaluate.call_args.kwargs["script"], script)
 
     def test_browser_static_form_submit_uses_http_connector_without_js(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1847,6 +2319,246 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertNotIn("abc123", metadata_text)
             self.assertNotIn("secret-media-token", metadata_text)
 
+    def test_stability_v1_image_provider_adapter_uses_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            png_bytes = (
+                b"\x89PNG\r\n\x1a\n"
+                b"\x00\x00\x00\rIHDR"
+                b"\x00\x00\x00\x02\x00\x00\x00\x03"
+                b"\x08\x02\x00\x00\x00"
+                b"\x00\x00\x00\x00"
+                b"\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+            captured: dict[str, str] = {}
+
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "application/json"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return json.dumps(
+                        {
+                            "artifacts": [
+                                {
+                                    "base64": base64.b64encode(png_bytes).decode("ascii"),
+                                    "finishReason": "SUCCESS",
+                                    "seed": 123,
+                                }
+                            ]
+                        }
+                    ).encode("utf-8")
+
+            def fake_open(request, timeout):
+                captured["url"] = request.full_url
+                captured["authorization"] = request.headers.get("Authorization", "")
+                captured["accept"] = request.headers.get("Accept", "")
+                captured["body"] = request.data.decode("utf-8")
+                return FakeResponse()
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                generated = orchestrator.tools.execute(
+                    "image_generate",
+                    {
+                        "prompt": "draw a private roadmap token=abc123",
+                        "provider_url": "https://media.example.com/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image",
+                        "provider_adapter": "stability_v1_text_to_image",
+                        "cfg_scale": 7,
+                        "height": 1024,
+                        "width": 1024,
+                        "steps": 30,
+                        "sampler": "K_DPM_2_ANCESTRAL",
+                    },
+                    approved=True,
+                )
+
+            body = json.loads(captured["body"])
+            metadata_text = Path(generated["metadata_path"]).read_text(encoding="utf-8")
+            self.assertTrue(generated["ok"])
+            self.assertEqual(generated["provider_adapter"], "stability_v1_text_to_image")
+            self.assertEqual(generated["mode"], "live_provider_png")
+            self.assertEqual(Path(generated["asset_path"]).read_bytes(), png_bytes)
+            self.assertEqual(captured["authorization"], "Bearer secret-media-token")
+            self.assertEqual(captured["accept"], "application/json")
+            self.assertEqual(body["text_prompts"][0]["text"], "draw a private roadmap token=abc123")
+            self.assertEqual(body["text_prompts"][0]["weight"], 1)
+            self.assertEqual(body["cfg_scale"], 7.0)
+            self.assertEqual(body["height"], 1024)
+            self.assertEqual(body["width"], 1024)
+            self.assertEqual(body["samples"], 1)
+            self.assertEqual(body["steps"], 30)
+            self.assertEqual(body["sampler"], "K_DPM_2_ANCESTRAL")
+            self.assertNotIn("tool", body)
+            self.assertNotIn("model", body)
+            self.assertEqual(generated["provider_receipt"]["provider_adapter"], "stability_v1_text_to_image")
+            self.assertEqual(generated["provider_receipt"]["payload_keys"], ["cfg_scale", "height", "sampler", "samples", "steps", "text_prompts", "width"])
+            self.assertFalse(generated["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(generated["provider_receipt"]["raw_secret_values_included"])
+            self.assertEqual(generated["sandbox_receipt"]["provider_adapter"], "stability_v1_text_to_image")
+            self.assertNotIn("draw a private roadmap", metadata_text)
+            self.assertNotIn("abc123", metadata_text)
+            self.assertNotIn("secret-media-token", metadata_text)
+
+            wrong_tool_adapter = executor_module._live_media_provider_adapter(
+                name="image_edit",
+                params={"provider_adapter": "stability_v1_text_to_image"},
+            )
+            self.assertEqual(wrong_tool_adapter["name"], "stability_v1_text_to_image")
+            self.assertIn("supports image_generate only", str(wrong_tool_adapter["error"]))
+
+            with self.assertRaises(executor_module.ToolExecutionError):
+                executor_module._live_media_request_payload(
+                    name="image_generate",
+                    prompt="draw a private roadmap",
+                    text="",
+                    source_path="",
+                    params={"height": "not-an-integer"},
+                    provider_adapter="stability_v1_text_to_image",
+                )
+
+    def test_google_imagen_provider_adapter_uses_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            png_bytes = (
+                b"\x89PNG\r\n\x1a\n"
+                b"\x00\x00\x00\rIHDR"
+                b"\x00\x00\x00\x02\x00\x00\x00\x03"
+                b"\x08\x02\x00\x00\x00"
+                b"\x00\x00\x00\x00"
+                b"\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+            captured: dict[str, str] = {}
+
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "application/json"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return json.dumps(
+                        {
+                            "predictions": [
+                                {
+                                    "bytesBase64Encoded": base64.b64encode(png_bytes).decode("ascii"),
+                                    "mimeType": "image/png",
+                                    "raiFilteredReason": "not-filtered",
+                                }
+                            ]
+                        }
+                    ).encode("utf-8")
+
+            def fake_open(request, timeout):
+                captured["url"] = request.full_url
+                captured["authorization"] = request.headers.get("Authorization", "")
+                captured["accept"] = request.headers.get("Accept", "")
+                captured["body"] = request.data.decode("utf-8")
+                return FakeResponse()
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                generated = orchestrator.tools.execute(
+                    "image_generate",
+                    {
+                        "prompt": "draw a private roadmap token=abc123",
+                        "provider_url": "https://media.example.com/v1/projects/demo/locations/us-central1/publishers/google/models/imagen-4.0-generate-preview-06-06:predict",
+                        "provider_adapter": "google_imagen",
+                        "sampleCount": 1,
+                        "aspectRatio": "1:1",
+                        "output_mime_type": "image/png",
+                        "addWatermark": False,
+                    },
+                    approved=True,
+                )
+
+            body = json.loads(captured["body"])
+            metadata_text = Path(generated["metadata_path"]).read_text(encoding="utf-8")
+            self.assertTrue(generated["ok"])
+            self.assertEqual(generated["provider_adapter"], "google_imagen")
+            self.assertEqual(generated["mode"], "live_provider_png")
+            self.assertEqual(Path(generated["asset_path"]).read_bytes(), png_bytes)
+            self.assertEqual(captured["authorization"], "Bearer secret-media-token")
+            self.assertEqual(captured["accept"], "application/json")
+            self.assertEqual(body["instances"][0]["prompt"], "draw a private roadmap token=abc123")
+            self.assertEqual(body["parameters"]["sampleCount"], 1)
+            self.assertEqual(body["parameters"]["aspectRatio"], "1:1")
+            self.assertEqual(body["parameters"]["outputOptions"], {"mimeType": "image/png"})
+            self.assertFalse(body["parameters"]["addWatermark"])
+            self.assertNotIn("tool", body)
+            self.assertEqual(generated["provider_receipt"]["provider_adapter"], "google_imagen")
+            self.assertEqual(generated["provider_receipt"]["payload_keys"], ["instances", "parameters"])
+            self.assertFalse(generated["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(generated["provider_receipt"]["raw_secret_values_included"])
+            self.assertFalse(generated["provider_receipt"]["raw_response_body_included"])
+            self.assertEqual(generated["sandbox_receipt"]["provider_adapter"], "google_imagen")
+            self.assertNotIn("draw a private roadmap", metadata_text)
+            self.assertNotIn("abc123", metadata_text)
+            self.assertNotIn("secret-media-token", metadata_text)
+
+            wrong_tool_adapter = executor_module._live_media_provider_adapter(
+                name="image_edit",
+                params={"provider_adapter": "google_imagen"},
+            )
+            self.assertEqual(wrong_tool_adapter["name"], "google_imagen")
+            self.assertIn("supports image_generate only", str(wrong_tool_adapter["error"]))
+
+            with self.assertRaises(executor_module.ToolExecutionError):
+                executor_module._live_media_request_payload(
+                    name="image_generate",
+                    prompt="draw a private roadmap",
+                    text="",
+                    source_path="",
+                    params={"sampleCount": 5},
+                    provider_adapter="google_imagen",
+                )
+
     def test_openai_style_image_edit_provider_adapter_uploads_source_with_redacted_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1959,6 +2671,425 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertFalse(denied["ok"])
             self.assertEqual(denied["status"], "invalid_source")
 
+    def test_google_imagen_edit_provider_adapter_uploads_references_with_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            png_bytes = (
+                b"\x89PNG\r\n\x1a\n"
+                b"\x00\x00\x00\rIHDR"
+                b"\x00\x00\x00\x02\x00\x00\x00\x03"
+                b"\x08\x02\x00\x00\x00"
+                b"\x00\x00\x00\x00"
+                b"\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+            mask_bytes = (
+                b"\x89PNG\r\n\x1a\n"
+                b"\x00\x00\x00\rIHDR"
+                b"\x00\x00\x00\x02\x00\x00\x00\x03"
+                b"\x08\x00\x00\x00\x00"
+                b"\x00\x00\x00\x00"
+                b"\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+            (root / "source.png").write_bytes(png_bytes)
+            (root / "mask.png").write_bytes(mask_bytes)
+            captured: dict[str, str] = {}
+
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "application/json"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return json.dumps(
+                        {
+                            "predictions": [
+                                {
+                                    "bytesBase64Encoded": base64.b64encode(png_bytes).decode("ascii"),
+                                    "mimeType": "image/png",
+                                }
+                            ]
+                        }
+                    ).encode("utf-8")
+
+            def fake_open(request, timeout):
+                captured["url"] = request.full_url
+                captured["authorization"] = request.headers.get("Authorization", "")
+                captured["accept"] = request.headers.get("Accept", "")
+                captured["content_type"] = request.get_header("Content-type") or request.get_header("Content-Type") or ""
+                captured["body"] = request.data.decode("utf-8")
+                return FakeResponse()
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                edited = orchestrator.tools.execute(
+                    "image_edit",
+                    {
+                        "prompt": "edit the private roadmap token=abc123",
+                        "source_path": "source.png",
+                        "mask_path": "mask.png",
+                        "provider_url": "https://media.example.com/v1/projects/demo/locations/us-central1/publishers/google/models/imagen-3.0-capability-001:predict",
+                        "provider_adapter": "google_imagen_edit",
+                        "editMode": "EDIT_MODE_INPAINT_INSERTION",
+                        "baseSteps": 35,
+                        "sampleCount": 1,
+                        "mask_dilation": 0.01,
+                        "output_mime_type": "image/png",
+                        "addWatermark": False,
+                    },
+                    approved=True,
+                )
+
+            body = json.loads(captured["body"])
+            references = body["instances"][0]["referenceImages"]
+            metadata_text = Path(edited["metadata_path"]).read_text(encoding="utf-8")
+            source_b64 = base64.b64encode(png_bytes).decode("ascii")
+            mask_b64 = base64.b64encode(mask_bytes).decode("ascii")
+            self.assertTrue(edited["ok"])
+            self.assertEqual(edited["provider_adapter"], "google_imagen_edit")
+            self.assertEqual(edited["mode"], "live_provider_png")
+            self.assertEqual(Path(edited["asset_path"]).read_bytes(), png_bytes)
+            self.assertEqual(captured["authorization"], "Bearer secret-media-token")
+            self.assertEqual(captured["accept"], "application/json")
+            self.assertEqual(captured["content_type"], "application/json")
+            self.assertEqual(body["instances"][0]["prompt"], "edit the private roadmap token=abc123")
+            self.assertEqual(references[0]["referenceType"], "REFERENCE_TYPE_RAW")
+            self.assertEqual(references[0]["referenceImage"]["bytesBase64Encoded"], source_b64)
+            self.assertEqual(references[1]["referenceType"], "REFERENCE_TYPE_MASK")
+            self.assertEqual(references[1]["referenceImage"]["bytesBase64Encoded"], mask_b64)
+            self.assertEqual(references[1]["maskImageConfig"], {"dilation": 0.01, "maskMode": "MASK_MODE_USER_PROVIDED"})
+            self.assertEqual(body["parameters"]["sampleCount"], 1)
+            self.assertEqual(body["parameters"]["editMode"], "EDIT_MODE_INPAINT_INSERTION")
+            self.assertEqual(body["parameters"]["editConfig"], {"baseSteps": 35})
+            self.assertEqual(body["parameters"]["outputOptions"], {"mimeType": "image/png"})
+            self.assertFalse(body["parameters"]["addWatermark"])
+            self.assertEqual(edited["provider_receipt"]["provider_adapter"], "google_imagen_edit")
+            self.assertEqual(edited["provider_receipt"]["request_format"], "application/json")
+            self.assertEqual(edited["provider_receipt"]["payload_keys"], ["instances", "parameters"])
+            self.assertFalse(edited["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(edited["provider_receipt"]["raw_secret_values_included"])
+            self.assertFalse(edited["provider_receipt"]["raw_response_body_included"])
+            self.assertEqual(edited["sandbox_receipt"]["provider_adapter"], "google_imagen_edit")
+            self.assertEqual(edited["sandbox_receipt"]["explicit_workspace_reads"], ["source_image", "mask_image"])
+            self.assertNotIn("edit the private roadmap", metadata_text)
+            self.assertNotIn("abc123", metadata_text)
+            self.assertNotIn("source.png", metadata_text)
+            self.assertNotIn(source_b64, metadata_text)
+            self.assertNotIn(mask_b64, metadata_text)
+            self.assertNotIn("secret-media-token", metadata_text)
+
+            wrong_tool_adapter = executor_module._live_media_provider_adapter(
+                name="image_generate",
+                params={"provider_adapter": "google_imagen_edit"},
+            )
+            self.assertEqual(wrong_tool_adapter["name"], "google_imagen_edit")
+            self.assertIn("supports image_edit only", str(wrong_tool_adapter["error"]))
+
+            with self.assertRaises(executor_module.ToolExecutionError):
+                executor_module._live_media_request_payload(
+                    name="image_edit",
+                    prompt="edit the private roadmap",
+                    text="",
+                    source_path="source.png",
+                    params={"sampleCount": 5},
+                    provider_adapter="google_imagen_edit",
+                    source_file={
+                        "field": "image",
+                        "filename": "image.png",
+                        "content": png_bytes,
+                        "mime_type": "image/png",
+                        "bytes": len(png_bytes),
+                        "sha256": hashlib.sha256(png_bytes).hexdigest(),
+                    },
+                )
+
+    def test_google_imagen_upscale_provider_adapter_uploads_source_with_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            png_bytes = (
+                b"\x89PNG\r\n\x1a\n"
+                b"\x00\x00\x00\rIHDR"
+                b"\x00\x00\x00\x02\x00\x00\x00\x03"
+                b"\x08\x02\x00\x00\x00"
+                b"\x00\x00\x00\x00"
+                b"\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+            (root / "source.png").write_bytes(png_bytes)
+            captured: dict[str, str] = {}
+
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "application/json"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return json.dumps({"predictions": [{"bytesBase64Encoded": base64.b64encode(png_bytes).decode("ascii"), "mimeType": "image/png"}]}).encode("utf-8")
+
+            def fake_open(request, timeout):
+                captured["authorization"] = request.headers.get("Authorization", "")
+                captured["accept"] = request.headers.get("Accept", "")
+                captured["content_type"] = request.get_header("Content-type") or request.get_header("Content-Type") or ""
+                captured["body"] = request.data.decode("utf-8")
+                return FakeResponse()
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                upscaled = orchestrator.tools.execute(
+                    "image_edit",
+                    {
+                        "prompt": "Upscale private roadmap token=abc123",
+                        "source_path": "source.png",
+                        "provider_url": "https://media.example.com/v1/projects/demo/locations/us-central1/publishers/google/models/imagen-4.0-upscale-preview:predict",
+                        "provider_adapter": "google_imagen_upscale",
+                        "upscaleFactor": "x4",
+                        "output_mime_type": "image/png",
+                    },
+                    approved=True,
+                )
+
+            body = json.loads(captured["body"])
+            metadata_text = Path(upscaled["metadata_path"]).read_text(encoding="utf-8")
+            source_b64 = base64.b64encode(png_bytes).decode("ascii")
+            self.assertTrue(upscaled["ok"])
+            self.assertEqual(upscaled["provider_adapter"], "google_imagen_upscale")
+            self.assertEqual(upscaled["mode"], "live_provider_png")
+            self.assertEqual(Path(upscaled["asset_path"]).read_bytes(), png_bytes)
+            self.assertEqual(captured["authorization"], "Bearer secret-media-token")
+            self.assertEqual(captured["accept"], "application/json")
+            self.assertEqual(captured["content_type"], "application/json")
+            self.assertEqual(body["instances"][0]["prompt"], "Upscale private roadmap token=abc123")
+            self.assertEqual(body["instances"][0]["image"]["bytesBase64Encoded"], source_b64)
+            self.assertEqual(body["parameters"], {"mode": "upscale", "outputOptions": {"mimeType": "image/png"}, "upscaleConfig": {"upscaleFactor": "x4"}})
+            self.assertEqual(upscaled["provider_receipt"]["provider_adapter"], "google_imagen_upscale")
+            self.assertEqual(upscaled["provider_receipt"]["payload_keys"], ["instances", "parameters"])
+            self.assertFalse(upscaled["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(upscaled["provider_receipt"]["raw_secret_values_included"])
+            self.assertFalse(upscaled["provider_receipt"]["raw_response_body_included"])
+            self.assertEqual(upscaled["sandbox_receipt"]["provider_adapter"], "google_imagen_upscale")
+            self.assertEqual(upscaled["sandbox_receipt"]["explicit_workspace_reads"], ["source_image"])
+            self.assertNotIn("Upscale private roadmap", metadata_text)
+            self.assertNotIn("abc123", metadata_text)
+            self.assertNotIn("source.png", metadata_text)
+            self.assertNotIn(source_b64, metadata_text)
+            self.assertNotIn("secret-media-token", metadata_text)
+
+            wrong_tool_adapter = executor_module._live_media_provider_adapter(
+                name="image_generate",
+                params={"provider_adapter": "google_imagen_upscale"},
+            )
+            self.assertEqual(wrong_tool_adapter["name"], "google_imagen_upscale")
+            self.assertIn("supports image_edit only", str(wrong_tool_adapter["error"]))
+
+            with self.assertRaises(executor_module.ToolExecutionError):
+                executor_module._live_media_request_payload(
+                    name="image_edit",
+                    prompt="Upscale private roadmap",
+                    text="",
+                    source_path="source.png",
+                    params={"upscaleFactor": "x8"},
+                    provider_adapter="google_imagen_upscale",
+                    source_file={
+                        "field": "image",
+                        "filename": "image.png",
+                        "content": png_bytes,
+                        "mime_type": "image/png",
+                        "bytes": len(png_bytes),
+                        "sha256": hashlib.sha256(png_bytes).hexdigest(),
+                    },
+                )
+
+    def test_google_imagen_product_provider_adapter_uploads_source_with_auto_mask_and_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            png_bytes = (
+                b"\x89PNG\r\n\x1a\n"
+                b"\x00\x00\x00\rIHDR"
+                b"\x00\x00\x00\x02\x00\x00\x00\x03"
+                b"\x08\x02\x00\x00\x00"
+                b"\x00\x00\x00\x00"
+                b"\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+            (root / "product.png").write_bytes(png_bytes)
+            captured: dict[str, str] = {}
+
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "application/json"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return json.dumps({"predictions": [{"bytesBase64Encoded": base64.b64encode(png_bytes).decode("ascii"), "mimeType": "image/png"}]}).encode("utf-8")
+
+            def fake_open(request, timeout):
+                captured["authorization"] = request.headers.get("Authorization", "")
+                captured["accept"] = request.headers.get("Accept", "")
+                captured["content_type"] = request.get_header("Content-type") or request.get_header("Content-Type") or ""
+                captured["body"] = request.data.decode("utf-8")
+                return FakeResponse()
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                edited = orchestrator.tools.execute(
+                    "image_edit",
+                    {
+                        "prompt": "Swap the private product background token=abc123",
+                        "source_path": "product.png",
+                        "provider_url": "https://media.example.com/v1/projects/demo/locations/us-central1/publishers/google/models/imagen-3.0-capability-001:predict",
+                        "provider_adapter": "google_imagen_product",
+                        "baseSteps": 28,
+                        "sampleCount": 1,
+                        "mask_dilation": 0.02,
+                        "output_mime_type": "image/png",
+                        "addWatermark": False,
+                        "includeRaiReason": False,
+                    },
+                    approved=True,
+                )
+
+            body = json.loads(captured["body"])
+            references = body["instances"][0]["referenceImages"]
+            metadata_text = Path(edited["metadata_path"]).read_text(encoding="utf-8")
+            source_b64 = base64.b64encode(png_bytes).decode("ascii")
+            self.assertTrue(edited["ok"])
+            self.assertEqual(edited["provider_adapter"], "google_imagen_product")
+            self.assertEqual(edited["mode"], "live_provider_png")
+            self.assertEqual(Path(edited["asset_path"]).read_bytes(), png_bytes)
+            self.assertEqual(captured["authorization"], "Bearer secret-media-token")
+            self.assertEqual(captured["accept"], "application/json")
+            self.assertEqual(captured["content_type"], "application/json")
+            self.assertEqual(body["instances"][0]["prompt"], "Swap the private product background token=abc123")
+            self.assertEqual(references[0]["referenceType"], "REFERENCE_TYPE_RAW")
+            self.assertEqual(references[0]["referenceImage"]["bytesBase64Encoded"], source_b64)
+            self.assertEqual(references[1]["referenceType"], "REFERENCE_TYPE_MASK")
+            self.assertNotIn("referenceImage", references[1])
+            self.assertEqual(references[1]["maskImageConfig"], {"dilation": 0.02, "maskMode": "MASK_MODE_BACKGROUND"})
+            self.assertEqual(body["parameters"]["sampleCount"], 1)
+            self.assertEqual(body["parameters"]["editMode"], "EDIT_MODE_BGSWAP")
+            self.assertEqual(body["parameters"]["editConfig"], {"baseSteps": 28})
+            self.assertEqual(body["parameters"]["outputOptions"], {"mimeType": "image/png"})
+            self.assertFalse(body["parameters"]["addWatermark"])
+            self.assertFalse(body["parameters"]["includeRaiReason"])
+            self.assertEqual(edited["provider_receipt"]["provider_adapter"], "google_imagen_product")
+            self.assertEqual(edited["provider_receipt"]["request_format"], "application/json")
+            self.assertEqual(edited["provider_receipt"]["payload_keys"], ["instances", "parameters"])
+            self.assertFalse(edited["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(edited["provider_receipt"]["raw_secret_values_included"])
+            self.assertFalse(edited["provider_receipt"]["raw_response_body_included"])
+            self.assertEqual(edited["sandbox_receipt"]["provider_adapter"], "google_imagen_product")
+            self.assertEqual(edited["sandbox_receipt"]["explicit_workspace_reads"], ["source_image"])
+            self.assertNotIn("Swap the private product background", metadata_text)
+            self.assertNotIn("abc123", metadata_text)
+            self.assertNotIn("product.png", metadata_text)
+            self.assertNotIn(source_b64, metadata_text)
+            self.assertNotIn("secret-media-token", metadata_text)
+
+            wrong_tool_adapter = executor_module._live_media_provider_adapter(
+                name="image_generate",
+                params={"provider_adapter": "google_imagen_product"},
+            )
+            self.assertEqual(wrong_tool_adapter["name"], "google_imagen_product")
+            self.assertIn("supports image_edit only", str(wrong_tool_adapter["error"]))
+
+            with self.assertRaises(executor_module.ToolExecutionError):
+                executor_module._live_media_request_payload(
+                    name="image_edit",
+                    prompt="Swap private product background",
+                    text="",
+                    source_path="product.png",
+                    params={"maskMode": "MASK_MODE_UNSAFE"},
+                    provider_adapter="google_imagen_product",
+                    source_file={
+                        "field": "image",
+                        "filename": "image.png",
+                        "content": png_bytes,
+                        "mime_type": "image/png",
+                        "bytes": len(png_bytes),
+                        "sha256": hashlib.sha256(png_bytes).hexdigest(),
+                    },
+                )
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None):
+                denied = orchestrator.tools.execute(
+                    "image_edit",
+                    {
+                        "prompt": "Swap background",
+                        "source_path": "../outside.png",
+                        "provider_url": "https://media.example.com/v1/projects/demo/locations/us-central1/publishers/google/models/imagen-3.0-capability-001:predict",
+                        "provider_adapter": "google_imagen_product",
+                    },
+                    approved=True,
+                )
+            self.assertFalse(denied["ok"])
+            self.assertEqual(denied["status"], "invalid_source")
+
     def test_openai_style_tts_provider_adapter_uses_redacted_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -2039,6 +3170,463 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertNotIn("read the private roadmap", metadata_text)
             self.assertNotIn("abc123", metadata_text)
             self.assertNotIn("secret-media-token", metadata_text)
+
+    def test_elevenlabs_tts_provider_adapter_uses_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            mp3_bytes = b"ID3\x04\x00\x00\x00\x00\x00\x21Aegis ElevenLabs audio"
+            captured: dict[str, str] = {}
+
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "audio/mpeg"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return mp3_bytes
+
+            def fake_open(request, timeout):
+                captured["url"] = request.full_url
+                captured["authorization"] = request.headers.get("Authorization", "")
+                captured["xi_api_key"] = request.headers.get("Xi-api-key", "") or request.headers.get("xi-api-key", "")
+                captured["body"] = request.data.decode("utf-8")
+                return FakeResponse()
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                speech = orchestrator.tools.execute(
+                    "tts",
+                    {
+                        "text": "read the private roadmap token=abc123",
+                        "provider_url": "https://media.example.com/v1/text-to-speech/voice_123",
+                        "provider_adapter": "elevenlabs_tts",
+                        "model_id": "eleven_multilingual_v2",
+                        "stability": 0.4,
+                        "similarity_boost": 0.7,
+                        "use_speaker_boost": True,
+                    },
+                    approved=True,
+                )
+
+            body = json.loads(captured["body"])
+            metadata_text = Path(speech["metadata_path"]).read_text(encoding="utf-8")
+            self.assertTrue(speech["ok"])
+            self.assertEqual(speech["provider_adapter"], "elevenlabs_tts")
+            self.assertEqual(speech["mode"], "live_provider_mp3")
+            self.assertEqual(speech["mime_type"], "audio/mpeg")
+            self.assertEqual(Path(speech["asset_path"]).read_bytes(), mp3_bytes)
+            self.assertEqual(captured["authorization"], "")
+            self.assertEqual(captured["xi_api_key"], "secret-media-token")
+            self.assertEqual(body["text"], "read the private roadmap token=abc123")
+            self.assertEqual(body["model_id"], "eleven_multilingual_v2")
+            self.assertEqual(body["voice_settings"]["stability"], 0.4)
+            self.assertEqual(body["voice_settings"]["similarity_boost"], 0.7)
+            self.assertTrue(body["voice_settings"]["use_speaker_boost"])
+            self.assertEqual(speech["provider_receipt"]["provider_adapter"], "elevenlabs_tts")
+            self.assertEqual(speech["provider_receipt"]["payload_keys"], ["model_id", "text", "voice_settings"])
+            self.assertFalse(speech["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(speech["provider_receipt"]["raw_secret_values_included"])
+            self.assertFalse(speech["provider_receipt"]["raw_response_body_included"])
+            self.assertEqual(speech["sandbox_receipt"]["provider_adapter"], "elevenlabs_tts")
+            self.assertNotIn("read the private roadmap", metadata_text)
+            self.assertNotIn("abc123", metadata_text)
+            self.assertNotIn("secret-media-token", metadata_text)
+
+            wrong_tool_adapter = executor_module._live_media_provider_adapter(
+                name="image_generate",
+                params={"provider_adapter": "elevenlabs_tts"},
+            )
+            self.assertEqual(wrong_tool_adapter["name"], "elevenlabs_tts")
+            self.assertIn("supports tts only", str(wrong_tool_adapter["error"]))
+
+            with self.assertRaises(executor_module.ToolExecutionError):
+                executor_module._live_media_request_payload(
+                    name="tts",
+                    prompt="",
+                    text="read",
+                    source_path="",
+                    params={"similarity_boost": 2},
+                    provider_adapter="elevenlabs_tts",
+                )
+
+    def test_elevenlabs_speech_to_speech_provider_adapter_uploads_audio_with_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            wav_bytes = b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x40\x1f\x00\x00\x80\x3e\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
+            mp3_bytes = b"ID3\x04\x00\x00\x00\x00\x00\x21Aegis converted audio"
+            (root / "voice.wav").write_bytes(wav_bytes)
+            captured: dict[str, Any] = {}
+
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "audio/mpeg"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return mp3_bytes
+
+            def fake_open(request, timeout):
+                captured["url"] = request.full_url
+                captured["authorization"] = request.headers.get("Authorization", "")
+                captured["xi_api_key"] = request.headers.get("Xi-api-key", "") or request.headers.get("xi-api-key", "")
+                captured["accept"] = request.headers.get("Accept", "")
+                captured["content_type"] = request.get_header("Content-type") or request.get_header("Content-Type") or ""
+                captured["body"] = request.data
+                return FakeResponse()
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                converted = orchestrator.tools.execute(
+                    "tts",
+                    {
+                        "audio_path": "voice.wav",
+                        "provider_url": "https://media.example.com/v1/speech-to-speech/voice_123",
+                        "provider_adapter": "elevenlabs_speech_to_speech",
+                        "model_id": "eleven_english_sts_v2",
+                        "remove_background_noise": False,
+                    },
+                    approved=True,
+                )
+
+            body = captured["body"]
+            metadata_text = Path(converted["metadata_path"]).read_text(encoding="utf-8")
+            self.assertTrue(converted["ok"])
+            self.assertEqual(converted["provider_adapter"], "elevenlabs_speech_to_speech")
+            self.assertEqual(converted["mode"], "live_provider_mp3")
+            self.assertEqual(converted["mime_type"], "audio/mpeg")
+            self.assertEqual(Path(converted["asset_path"]).read_bytes(), mp3_bytes)
+            self.assertEqual(captured["authorization"], "")
+            self.assertEqual(captured["xi_api_key"], "secret-media-token")
+            self.assertEqual(captured["accept"], "audio/mpeg")
+            self.assertIn("multipart/form-data; boundary=", captured["content_type"])
+            self.assertIn(b'name="model_id"', body)
+            self.assertIn(b"eleven_english_sts_v2", body)
+            self.assertIn(b'name="remove_background_noise"', body)
+            self.assertIn(b"false", body)
+            self.assertIn(b'name="audio"; filename="audio.wav"', body)
+            self.assertIn(b"Content-Type: audio/wav", body)
+            self.assertIn(wav_bytes, body)
+            self.assertEqual(converted["provider_receipt"]["provider_adapter"], "elevenlabs_speech_to_speech")
+            self.assertEqual(converted["provider_receipt"]["request_format"], "multipart/form-data")
+            self.assertEqual(
+                converted["provider_receipt"]["payload_keys"],
+                ["audio_bytes", "audio_mime_type", "audio_present", "audio_sha256", "model_id", "remove_background_noise"],
+            )
+            self.assertFalse(converted["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(converted["provider_receipt"]["raw_secret_values_included"])
+            self.assertFalse(converted["provider_receipt"]["raw_response_body_included"])
+            self.assertEqual(converted["sandbox_receipt"]["provider_adapter"], "elevenlabs_speech_to_speech")
+            self.assertEqual(converted["sandbox_receipt"]["explicit_workspace_reads"], ["source_audio"])
+            self.assertNotIn("voice.wav", metadata_text)
+            self.assertNotIn("secret-media-token", metadata_text)
+            self.assertNotIn(wav_bytes.decode("latin1"), metadata_text)
+
+            wrong_tool_adapter = executor_module._live_media_provider_adapter(
+                name="image_generate",
+                params={"provider_adapter": "elevenlabs_speech_to_speech"},
+            )
+            self.assertEqual(wrong_tool_adapter["name"], "elevenlabs_speech_to_speech")
+            self.assertIn("supports tts only", str(wrong_tool_adapter["error"]))
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None):
+                denied = orchestrator.tools.execute(
+                    "tts",
+                    {
+                        "audio_path": "../voice.wav",
+                        "provider_url": "https://media.example.com/v1/speech-to-speech/voice_123",
+                        "provider_adapter": "elevenlabs_speech_to_speech",
+                    },
+                    approved=True,
+                )
+            self.assertFalse(denied["ok"])
+            self.assertEqual(denied["status"], "invalid_source")
+
+    def test_elevenlabs_text_to_dialogue_provider_adapter_uses_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            mp3_bytes = b"ID3\x04\x00\x00\x00\x00\x00\x21Aegis dialogue audio"
+            captured: dict[str, str] = {}
+
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "audio/mpeg"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return mp3_bytes
+
+            def fake_open(request, timeout):
+                captured["url"] = request.full_url
+                captured["authorization"] = request.headers.get("Authorization", "")
+                captured["xi_api_key"] = request.headers.get("Xi-api-key", "") or request.headers.get("xi-api-key", "")
+                captured["accept"] = request.headers.get("Accept", "")
+                captured["body"] = request.data.decode("utf-8")
+                return FakeResponse()
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                dialogue = orchestrator.tools.execute(
+                    "tts",
+                    {
+                        "provider_url": "https://media.example.com/v1/text-to-dialogue",
+                        "provider_adapter": "elevenlabs_text_to_dialogue",
+                        "inputs": [
+                            {"text": "[careful] Ship this only after review token=abc123", "voice_id": "JBFqnCBsd6RMkjVDRZzb"},
+                            {"text": "[clear] Approved receipts stay redacted", "voice_id": "Aw4FAjKCGjjNkVhN1Xmq"},
+                        ],
+                        "model_id": "eleven_v3",
+                        "language_code": "en",
+                        "seed": 7,
+                        "apply_text_normalization": "auto",
+                        "output_format": "mp3_44100_128",
+                    },
+                    approved=True,
+                )
+
+            body = json.loads(captured["body"])
+            metadata_text = Path(dialogue["metadata_path"]).read_text(encoding="utf-8")
+            self.assertTrue(dialogue["ok"])
+            self.assertEqual(dialogue["provider_adapter"], "elevenlabs_text_to_dialogue")
+            self.assertEqual(dialogue["mode"], "live_provider_mp3")
+            self.assertEqual(dialogue["mime_type"], "audio/mpeg")
+            self.assertEqual(Path(dialogue["asset_path"]).read_bytes(), mp3_bytes)
+            self.assertEqual(captured["authorization"], "")
+            self.assertEqual(captured["xi_api_key"], "secret-media-token")
+            self.assertEqual(captured["accept"], "audio/mpeg")
+            self.assertTrue(captured["url"].endswith("?output_format=mp3_44100_128"))
+            self.assertEqual(body["model_id"], "eleven_v3")
+            self.assertEqual(body["language_code"], "en")
+            self.assertEqual(body["seed"], 7)
+            self.assertEqual(body["apply_text_normalization"], "auto")
+            self.assertEqual(body["inputs"][0]["voice_id"], "JBFqnCBsd6RMkjVDRZzb")
+            self.assertEqual(body["inputs"][1]["voice_id"], "Aw4FAjKCGjjNkVhN1Xmq")
+            self.assertNotIn("output_format", body)
+            self.assertEqual(dialogue["provider_receipt"]["provider_adapter"], "elevenlabs_text_to_dialogue")
+            self.assertEqual(dialogue["provider_receipt"]["request_format"], "application/json")
+            self.assertEqual(
+                dialogue["provider_receipt"]["payload_keys"],
+                ["apply_text_normalization", "inputs", "language_code", "model_id", "output_format", "seed"],
+            )
+            self.assertFalse(dialogue["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(dialogue["provider_receipt"]["raw_secret_values_included"])
+            self.assertFalse(dialogue["provider_receipt"]["raw_response_body_included"])
+            self.assertEqual(dialogue["sandbox_receipt"]["provider_adapter"], "elevenlabs_text_to_dialogue")
+            self.assertNotIn("Ship this only after review", metadata_text)
+            self.assertNotIn("abc123", metadata_text)
+            self.assertNotIn("secret-media-token", metadata_text)
+
+            wrong_tool_adapter = executor_module._live_media_provider_adapter(
+                name="image_generate",
+                params={"provider_adapter": "elevenlabs_text_to_dialogue"},
+            )
+            self.assertEqual(wrong_tool_adapter["name"], "elevenlabs_text_to_dialogue")
+            self.assertIn("supports tts only", str(wrong_tool_adapter["error"]))
+
+            with self.assertRaises(executor_module.ToolExecutionError):
+                executor_module._live_media_request_payload(
+                    name="tts",
+                    prompt="",
+                    text="",
+                    source_path="",
+                    params={"inputs": [{"text": "bad", "voice_id": "bad/voice"}]},
+                    provider_adapter="elevenlabs_text_to_dialogue",
+                )
+
+    def test_elevenlabs_voice_clone_provider_adapter_uploads_audio_with_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            wav_bytes = b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x40\x1f\x00\x00\x80\x3e\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
+            mp3_bytes = b"ID3\x04\x00\x00\x00\x00\x00\x21Aegis clone sample"
+            (root / "clone-a.wav").write_bytes(wav_bytes)
+            (root / "clone-b.mp3").write_bytes(mp3_bytes)
+            captured: dict[str, Any] = {}
+
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "application/json"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return json.dumps({"voice_id": "voice_public_01", "requires_verification": False}).encode("utf-8")
+
+            def fake_open(request, timeout):
+                captured["url"] = request.full_url
+                captured["authorization"] = request.headers.get("Authorization", "")
+                captured["xi_api_key"] = request.headers.get("Xi-api-key", "") or request.headers.get("xi-api-key", "")
+                captured["content_type"] = request.get_header("Content-type") or request.get_header("Content-Type") or ""
+                captured["body"] = request.data
+                return FakeResponse()
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                cloned = orchestrator.tools.execute(
+                    "voice_clone",
+                    {
+                        "name": "Private review voice token=abc123",
+                        "description": "Use only for approved local tests",
+                        "labels": {"language": "en", "accent": "neutral"},
+                        "audio_paths": ["clone-a.wav", "clone-b.mp3"],
+                        "provider_url": "https://media.example.com/v1/voices/add",
+                        "provider_adapter": "elevenlabs_voice_clone",
+                        "remove_background_noise": True,
+                    },
+                    approved=True,
+                )
+
+            body = captured["body"]
+            result_text = json.dumps(cloned, sort_keys=True)
+            self.assertTrue(cloned["ok"])
+            self.assertEqual(cloned["provider_adapter"], "elevenlabs_voice_clone")
+            self.assertEqual(cloned["status"], "created")
+            self.assertEqual(cloned["mode"], "live_provider_voice_clone")
+            self.assertEqual(cloned["voice_id"], "voice_public_01")
+            self.assertEqual(cloned["sample_count"], 2)
+            self.assertEqual(captured["authorization"], "")
+            self.assertEqual(captured["xi_api_key"], "secret-media-token")
+            self.assertIn("multipart/form-data; boundary=", captured["content_type"])
+            self.assertIn(b'name="name"', body)
+            self.assertIn(b"Private review voice token=abc123", body)
+            self.assertIn(b'name="remove_background_noise"', body)
+            self.assertIn(b"true", body)
+            self.assertIn(b'name="labels"', body)
+            self.assertIn(b'"language": "en"', body)
+            self.assertIn(b'name="files[]"; filename="audio.wav"', body)
+            self.assertIn(b'name="files[]"; filename="audio.mp3"', body)
+            self.assertIn(b"Content-Type: audio/wav", body)
+            self.assertIn(b"Content-Type: audio/mpeg", body)
+            self.assertIn(wav_bytes, body)
+            self.assertIn(mp3_bytes, body)
+            self.assertEqual(cloned["provider_receipt"]["provider_adapter"], "elevenlabs_voice_clone")
+            self.assertEqual(cloned["provider_receipt"]["request_format"], "multipart/form-data")
+            self.assertEqual(
+                cloned["provider_receipt"]["payload_keys"],
+                ["description", "labels", "name", "remove_background_noise", "sample_bytes", "sample_count", "sample_mime_types", "sample_sha256"],
+            )
+            self.assertFalse(cloned["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(cloned["provider_receipt"]["raw_secret_values_included"])
+            self.assertFalse(cloned["provider_receipt"]["raw_response_body_included"])
+            self.assertEqual(cloned["sandbox_receipt"]["provider_adapter"], "elevenlabs_voice_clone")
+            self.assertEqual(cloned["sandbox_receipt"]["explicit_workspace_reads"], ["source_audio"])
+            self.assertFalse(cloned["sandbox_receipt"]["artifact_write"])
+            self.assertFalse(cloned["audio_receipts"][0]["source_audio_path_included"])
+            self.assertFalse(cloned["audio_receipts"][1]["raw_audio_included"])
+            self.assertNotIn("Private review voice", result_text)
+            self.assertNotIn("abc123", result_text)
+            self.assertNotIn("secret-media-token", result_text)
+            self.assertNotIn(wav_bytes.decode("latin1"), result_text)
+
+            wrong_tool_adapter = executor_module._live_media_provider_adapter(
+                name="tts",
+                params={"provider_adapter": "elevenlabs_voice_clone"},
+            )
+            self.assertEqual(wrong_tool_adapter["name"], "elevenlabs_voice_clone")
+            self.assertIn("supports voice_clone only", str(wrong_tool_adapter["error"]))
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None):
+                denied = orchestrator.tools.execute(
+                    "voice_clone",
+                    {
+                        "name": "Bad",
+                        "audio_paths": ["../clone-a.wav"],
+                        "provider_url": "https://media.example.com/v1/voices/add",
+                        "provider_adapter": "elevenlabs_voice_clone",
+                    },
+                    approved=True,
+                )
+            self.assertFalse(denied["ok"])
+            self.assertEqual(denied["status"], "invalid_source")
 
     def test_openai_style_transcription_provider_adapter_uploads_audio_with_redacted_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2152,6 +3740,115 @@ class PlatformLayerTests(unittest.TestCase):
                 )
             self.assertFalse(denied["ok"])
             self.assertEqual(denied["status"], "invalid_source")
+
+    def test_elevenlabs_transcription_provider_adapter_uploads_audio_with_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            wav_bytes = b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x40\x1f\x00\x00\x80\x3e\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00"
+            (root / "meeting.wav").write_bytes(wav_bytes)
+            captured: dict[str, Any] = {}
+
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "application/json"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return json.dumps({"text": "Discuss roadmap token=abc123", "language_code": "en"}).encode("utf-8")
+
+            def fake_open(request, timeout):
+                captured["url"] = request.full_url
+                captured["authorization"] = request.headers.get("Authorization", "")
+                captured["xi_api_key"] = request.headers.get("Xi-api-key", "") or request.headers.get("xi-api-key", "")
+                captured["content_type"] = request.get_header("Content-type") or request.get_header("Content-Type") or ""
+                captured["body"] = request.data
+                return FakeResponse()
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                transcript = orchestrator.tools.execute(
+                    "voice_transcribe",
+                    {
+                        "audio_path": "meeting.wav",
+                        "provider_url": "https://media.example.com/v1/speech-to-text",
+                        "provider_adapter": "elevenlabs_transcription",
+                        "model_id": "scribe_v2",
+                        "language_code": "en",
+                        "diarize": True,
+                        "tag_audio_events": False,
+                    },
+                    approved=True,
+                )
+
+            body = captured["body"]
+            self.assertTrue(transcript["ok"])
+            self.assertEqual(transcript["provider_adapter"], "elevenlabs_transcription")
+            self.assertEqual(transcript["mode"], "live_provider_transcription")
+            self.assertEqual(transcript["text"], "Discuss roadmap token=abc123")
+            self.assertEqual(captured["authorization"], "")
+            self.assertEqual(captured["xi_api_key"], "secret-media-token")
+            self.assertIn("multipart/form-data; boundary=", captured["content_type"])
+            self.assertIn(b'name="file"; filename="audio.wav"', body)
+            self.assertIn(b"Content-Type: audio/wav", body)
+            self.assertIn(wav_bytes, body)
+            self.assertIn(b'name="model_id"', body)
+            self.assertIn(b"scribe_v2", body)
+            self.assertIn(b'name="language_code"', body)
+            self.assertIn(b"en", body)
+            self.assertIn(b'name="diarize"', body)
+            self.assertIn(b"True", body)
+            self.assertEqual(transcript["provider_receipt"]["provider_adapter"], "elevenlabs_transcription")
+            self.assertEqual(transcript["provider_receipt"]["request_format"], "multipart/form-data")
+            self.assertEqual(transcript["provider_receipt"]["payload_keys"], ["diarize", "language_code", "model_id", "tag_audio_events"])
+            self.assertFalse(transcript["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(transcript["provider_receipt"]["raw_secret_values_included"])
+            self.assertFalse(transcript["provider_receipt"]["raw_response_body_included"])
+            self.assertEqual(transcript["audio_receipt"]["source_audio_mime_type"], "audio/wav")
+            self.assertFalse(transcript["audio_receipt"]["source_audio_path_included"])
+            self.assertFalse(transcript["audio_receipt"]["raw_audio_included"])
+            self.assertEqual(transcript["sandbox_receipt"]["provider_adapter"], "elevenlabs_transcription")
+            self.assertFalse(transcript["sandbox_receipt"]["artifact_write"])
+            self.assertFalse(transcript["raw_response_body_included"])
+
+            wrong_tool_adapter = executor_module._live_media_provider_adapter(
+                name="tts",
+                params={"provider_adapter": "elevenlabs_transcription"},
+            )
+            self.assertEqual(wrong_tool_adapter["name"], "elevenlabs_transcription")
+            self.assertIn("supports voice_transcribe only", str(wrong_tool_adapter["error"]))
+
+            with self.assertRaises(executor_module.ToolExecutionError):
+                executor_module._live_media_request_payload(
+                    name="voice_transcribe",
+                    prompt="",
+                    text="",
+                    source_path="meeting.wav",
+                    params={"diarize": "sometimes"},
+                    provider_adapter="elevenlabs_transcription",
+                )
 
     def test_openai_style_video_provider_adapter_manages_job_lifecycle_with_redacted_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2738,12 +4435,69 @@ class PlatformLayerTests(unittest.TestCase):
             root = Path(temp)
             (root / "SOUL.md").write_text("Be concise.", encoding="utf-8")
             (root / "AGENTS.md").write_text("Developer context.", encoding="utf-8")
+            (root / "CLAUDE.md").write_text("Claude-compatible project context.", encoding="utf-8")
+            (root / ".hermes.md").write_text("Hermes hidden context.", encoding="utf-8")
+            (root / "HERMES.md").write_text("Hermes root context.", encoding="utf-8")
+            (root / ".cursorrules").write_text("Cursor root rule.", encoding="utf-8")
+            (root / ".cursor" / "rules").mkdir(parents=True)
+            (root / ".cursor" / "rules" / "root.mdc").write_text("Cursor root MDC rule.", encoding="utf-8")
+            (root / "config.yaml").write_text("api_key: abc123\nmodel: hermes-test\n", encoding="utf-8")
+            (root / "skills").mkdir()
+            (root / "skills" / "repeat.json").write_text(json.dumps({"name": "Repeat", "description": "Repeat safe workflow"}), encoding="utf-8")
+            (root / "sessions").mkdir()
+            (root / "sessions" / "session.jsonl").write_text(json.dumps({"summary": "Prior session summary"}) + "\n", encoding="utf-8")
+            (root / "jobs").mkdir()
+            (root / "jobs" / "daily.yaml").write_text("schedule: daily\n", encoding="utf-8")
+            package = root / "packages" / "agent"
+            package.mkdir(parents=True)
+            (root / "packages" / "AGENTS.md").write_text("Package developer context.", encoding="utf-8")
+            (package / ".cursor" / "rules").mkdir(parents=True)
+            (package / ".cursor" / "rules" / "agent.mdc").write_text("Cursor package MDC rule.", encoding="utf-8")
+            (package / "TOOLS.md").write_text("Package tool context.", encoding="utf-8")
+            (root / "other").mkdir()
+            (root / "other" / "AGENTS.md").write_text("Unrelated context.", encoding="utf-8")
 
             items = ContextFileLoader(root).load()
-            self.assertEqual(len(items), 2)
-            self.assertTrue(inspect_openclaw_home(root)["exists"])
-            self.assertTrue(inspect_hermes_home(root)["exists"])
-            self.assertEqual(inspect_openclaw_home(root)["secrets_import"], "blocked_by_default_use_secrets_broker")
+            self.assertEqual(len(items), 7)
+            progressive_items = ContextFileLoader(root).load(package / "main.py")
+            progressive_sources = [Path(item.taint.source).relative_to(root).as_posix() for item in progressive_items]
+            self.assertEqual(
+                progressive_sources,
+                [
+                    "SOUL.md",
+                    "AGENTS.md",
+                    "CLAUDE.md",
+                    ".hermes.md",
+                    "HERMES.md",
+                    ".cursorrules",
+                    ".cursor/rules/root.mdc",
+                    "packages/AGENTS.md",
+                    "packages/agent/.cursor/rules/agent.mdc",
+                    "packages/agent/TOOLS.md",
+                ],
+            )
+            self.assertNotIn("other/AGENTS.md", progressive_sources)
+            self.assertEqual(progressive_items[1].taint.trust_class.value, "DEVELOPER_TRUSTED")
+            self.assertEqual(progressive_items[-1].taint.trust_class.value, "USER_DIRECTIVE")
+            manifest = ContextFileLoader(root).manifest(package / "main.py")
+            self.assertEqual([Path(path).relative_to(root).as_posix() for path in manifest["sources"]], progressive_sources)
+            self.assertFalse(manifest["raw_content_included"])
+            openclaw_inspect = inspect_openclaw_home(root)
+            hermes_inspect = inspect_hermes_home(root)
+            self.assertTrue(openclaw_inspect["exists"])
+            self.assertTrue(hermes_inspect["exists"])
+            self.assertEqual(openclaw_inspect["secrets_import"], "blocked_by_default_use_secrets_broker")
+            self.assertEqual(openclaw_inspect["inventory_mode"], "metadata_only_inventory")
+            self.assertEqual(openclaw_inspect["inventory_counts"]["config_files"], 1)
+            self.assertEqual(openclaw_inspect["inventory_counts"]["skill_files"], 1)
+            self.assertEqual(openclaw_inspect["inventory_counts"]["session_files"], 1)
+            self.assertEqual(openclaw_inspect["inventory_counts"]["schedule_files"], 1)
+            self.assertGreaterEqual(openclaw_inspect["inventory_counts"]["context_files"], 7)
+            self.assertFalse(openclaw_inspect["raw_content_included"])
+            self.assertFalse(openclaw_inspect["inventory"]["config_files"][0]["raw_content_included"])
+            self.assertFalse(openclaw_inspect["inventory"]["config_files"][0]["content_hash_included"])
+            self.assertNotIn("abc123", json.dumps(openclaw_inspect, sort_keys=True))
+            self.assertEqual(hermes_inspect["inventory_mode"], "metadata_only_inventory")
 
             (root / "MEMORY.md").write_text(
                 "- Prefer concise progress updates.\n- The workspace uses governed approvals.\n- api_key=abc123 should not import.\n",
@@ -2849,6 +4603,8 @@ class PlatformLayerTests(unittest.TestCase):
         self.assertIn("browser-table", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("Snapshot Note", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("Rendered PNG", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("Live Snapshot", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("Live PNG", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("Record Click", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("Record Fill", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("tool-run-form", (static_root / "index.html").read_text(encoding="utf-8"))
@@ -2986,9 +4742,14 @@ class PlatformLayerTests(unittest.TestCase):
         self.assertIn("/browser/sessions/${encodeURIComponent(closeId)}/close", app_js)
         self.assertIn("/browser/table", app_js)
         self.assertIn("/browser/inspect", app_js)
+        self.assertIn("/browser/live-navigate", app_js)
         self.assertIn("/browser/render-screenshot", app_js)
+        self.assertIn("/browser/live-screenshot", app_js)
         self.assertIn("/browser/click", app_js)
         self.assertIn("/browser/fill", app_js)
+        self.assertIn("/browser/download", app_js)
+        self.assertIn("/browser/upload", app_js)
+        self.assertIn("/browser/evaluate", app_js)
         self.assertIn("data-browser-close", app_js)
         self.assertIn("HTTP-content browser control", app_js)
         self.assertIn("pendingBrowserAction", app_js)
@@ -3095,6 +4856,164 @@ def _fake_chrome_render(*, executable: str, html_path: Path, output_path: Path, 
     del executable, html_path, artifact_dir
     output_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-render")
     return {"ok": True, "width": width, "height": height, "exit_code": 0, "error": None}
+
+
+def _fake_live_chrome_snapshot(
+    *,
+    executable: str,
+    url: str,
+    output_path: Path,
+    artifact_dir: Path,
+    allowlist: tuple[str, ...],
+    width: int = 1280,
+    height: int = 900,
+) -> dict[str, object]:
+    del executable, url, artifact_dir, allowlist
+    output_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-live-render")
+    return {"ok": True, "width": width, "height": height, "exit_code": 0, "error": None}
+
+
+def _fake_live_chrome_mutation(
+    *,
+    executable: str,
+    url: str,
+    action: str,
+    selector: str | None,
+    fields: dict[str, str],
+    output_path: Path,
+    artifact_dir: Path,
+    allowlist: tuple[str, ...],
+    width: int = 1280,
+    height: int = 900,
+) -> dict[str, object]:
+    del executable, artifact_dir, allowlist
+    output_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-live-mutation")
+    action_result: dict[str, object] = {"ok": True, "status": "clicked", "selector": selector or "", "url_after": url}
+    if action == "live_fill":
+        action_result = {
+            "ok": True,
+            "status": "filled",
+            "field_count": len(fields),
+            "filled_count": len(fields),
+            "results": [{"selector": field_selector, "status": "filled", "element": {"tag": "input", "id": field_selector.strip("#")}} for field_selector in sorted(fields)],
+            "url_after": url,
+        }
+    if action == "live_submit":
+        action_result = {"ok": True, "status": "submitted", "selector": selector or "", "url_after": f"{url}?submitted=1"}
+    return {
+        "ok": True,
+        "status": str(action_result["status"]),
+        "width": width,
+        "height": height,
+        "exit_code": 0,
+        "url_after": str(action_result.get("url_after") or url),
+        "title": "Fake live mutation",
+        "action_result": action_result,
+        "download_policy_applied": True,
+        "error": None,
+    }
+
+
+def _fake_live_chrome_download(
+    *,
+    executable: str,
+    url: str,
+    selector: str,
+    output_path: Path,
+    screenshot_path: Path,
+    artifact_dir: Path,
+    allowlist: tuple[str, ...],
+    width: int = 1280,
+    height: int = 900,
+) -> dict[str, object]:
+    del executable, artifact_dir, allowlist
+    download_url = f"{url.rstrip('/')}/report.pdf"
+    output_path.write_bytes(b"fake-download-bytes")
+    screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-live-download")
+    return {
+        "ok": True,
+        "status": "downloaded",
+        "width": width,
+        "height": height,
+        "exit_code": 0,
+        "url_after": url,
+        "title": "Fake live download",
+        "filename": "report.pdf",
+        "mime_type": "application/pdf",
+        "bytes": output_path.stat().st_size,
+        "download_domain": "example.com",
+        "download_url_sha256": hashlib.sha256(download_url.encode("utf-8")).hexdigest(),
+        "action_result": {"ok": True, "status": "clicked_for_download", "selector": selector, "url_after": url},
+        "download_policy_applied": True,
+        "error": None,
+    }
+
+
+def _fake_live_chrome_upload(
+    *,
+    executable: str,
+    url: str,
+    selector: str,
+    source_path: Path,
+    screenshot_path: Path,
+    artifact_dir: Path,
+    allowlist: tuple[str, ...],
+    width: int = 1280,
+    height: int = 900,
+) -> dict[str, object]:
+    del executable, source_path, artifact_dir, allowlist
+    screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-live-upload")
+    return {
+        "ok": True,
+        "status": "uploaded",
+        "width": width,
+        "height": height,
+        "exit_code": 0,
+        "url_after": url,
+        "title": "Fake live upload",
+        "action_result": {"ok": True, "status": "uploaded", "selector": selector, "file_count": 1, "url_after": url},
+        "error": None,
+    }
+
+
+def _fake_live_chrome_evaluate(
+    *,
+    executable: str,
+    url: str,
+    script: str,
+    screenshot_path: Path,
+    artifact_dir: Path,
+    allowlist: tuple[str, ...],
+    width: int = 1280,
+    height: int = 900,
+) -> dict[str, object]:
+    del executable, script, artifact_dir, allowlist
+    screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-live-evaluate")
+    return {
+        "ok": True,
+        "status": "evaluated",
+        "width": width,
+        "height": height,
+        "exit_code": 0,
+        "url_after": url,
+        "title": "Fake live evaluate",
+        "evaluation_result": {
+            "ok": True,
+            "status": "evaluated",
+            "result": {
+                "kind": "object",
+                "keys": ["title", "count"],
+                "value": {
+                    "title": {"kind": "string", "value": "Fake live evaluate", "chars": 18, "truncated": False, "redacted": False},
+                    "count": {"kind": "number", "value": 2},
+                },
+                "truncated": False,
+            },
+            "url_before": url,
+            "url_after": url,
+        },
+        "error": None,
+    }
 
 
 if __name__ == "__main__":

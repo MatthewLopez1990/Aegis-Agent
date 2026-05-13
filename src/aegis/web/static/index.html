@@ -255,20 +255,25 @@
           </form>
           <form id="channel-webhook-send-form" class="inline-form channel-send-form">
             <textarea id="channel-webhook-send-text" rows="4" placeholder="Signed webhook message"></textarea>
-            <label class="checkline"><input id="channel-webhook-send-approved" type="checkbox"> Approved</label>
+            <input id="channel-webhook-send-approval-id" placeholder="Approval id">
             <button type="submit" class="secondary">Send Webhook</button>
           </form>
           <form id="channel-chat-webhook-form" class="inline-form channel-send-form">
             <textarea id="channel-chat-webhook-text" rows="4" placeholder="Chat webhook message"></textarea>
-            <label class="checkline"><input id="channel-chat-webhook-approved" type="checkbox"> Approved</label>
+            <input id="channel-chat-webhook-approval-id" placeholder="Approval id">
             <button type="submit" class="secondary">Send Chat Webhook</button>
           </form>
           <form id="channel-email-send-form" class="inline-form channel-email-form">
             <input id="channel-email-send-subject" placeholder="Email subject">
             <textarea id="channel-email-send-text" rows="4" placeholder="Email body"></textarea>
-            <label class="checkline"><input id="channel-email-send-approved" type="checkbox"> Approved</label>
+            <input id="channel-email-send-approval-id" placeholder="Approval id">
             <button type="submit" class="secondary">Send Email</button>
           </form>
+          <div class="button-row">
+            <button id="channel-live-activation-packet" type="button" class="secondary">Create Activation Packet</button>
+            <button id="channel-verify-activation-packet" type="button" class="secondary">Verify Activation Packet</button>
+            <button id="channel-activate-packet" type="button" class="secondary">Approve Activation</button>
+          </div>
           <div id="channel-render-output" class="evidence-block"></div>
         </section>
 
@@ -309,6 +314,8 @@
               <option value="kilocode">Kilo Code</option>
               <option value="xiaomi">Xiaomi MiMo</option>
               <option value="tencent-tokenhub">Tencent TokenHub</option>
+              <option value="ollama">Ollama Local</option>
+              <option value="lmstudio">LM Studio Local</option>
               <option value="ollama-cloud">Ollama Cloud</option>
               <option value="github-copilot">GitHub Copilot</option>
               <option value="google-gemini-oauth">Google Gemini OAuth</option>
@@ -320,6 +327,7 @@
             </select>
             <select id="model-auth-method">
               <option value="api_key">API key</option>
+              <option value="none">No auth / local</option>
               <option value="subscription">Subscription</option>
               <option value="oauth">OAuth</option>
               <option value="oauth_device">OAuth device</option>
@@ -407,6 +415,31 @@
         <section class="panel span-2" data-section="tools">
           <div class="panel-header">
             <div>
+              <p class="eyebrow">Terminal</p>
+              <h3>Processes</h3>
+            </div>
+          </div>
+          <form id="process-form" class="inline-form two-col">
+            <input id="process-label" placeholder="label">
+            <input id="process-argv" placeholder='["python3","-c","print(\"ok\")"]'>
+            <label class="checkline"><input id="process-pty" type="checkbox">PTY</label>
+            <input id="process-rows" type="number" min="1" max="1000" value="24" aria-label="rows">
+            <input id="process-cols" type="number" min="1" max="1000" value="80" aria-label="columns">
+            <button type="submit">Start</button>
+          </form>
+          <form id="process-input-form" class="inline-form two-col">
+            <input id="process-input-id" placeholder="process id">
+            <input id="process-input-text" placeholder="stdin text">
+            <button type="submit">Input</button>
+            <button id="process-resize-button" type="button" class="secondary">Resize</button>
+          </form>
+          <div id="process-output" class="evidence-block"></div>
+          <div id="processes" class="list compact-list"></div>
+        </section>
+
+        <section class="panel span-2" data-section="tools">
+          <div class="panel-header">
+            <div>
               <p class="eyebrow">Web Control</p>
               <h3>Browser Sandbox</h3>
             </div>
@@ -419,17 +452,27 @@
             <button id="browser-new-session" type="button" class="secondary">New Session</button>
             <button id="browser-extract" type="button" class="secondary">Extract</button>
             <button id="browser-inspect" type="button" class="secondary">Inspect</button>
+            <button id="browser-live-navigate" type="button" class="secondary">Live Snapshot</button>
             <button id="browser-dom-snapshot" type="button" class="secondary">DOM Snapshot</button>
             <button id="browser-table" type="button" class="secondary">Table</button>
             <button id="browser-screenshot" type="button" class="secondary">Snapshot Note</button>
             <button id="browser-render-screenshot" type="button" class="secondary">Rendered PNG</button>
+            <button id="browser-live-screenshot" type="button" class="secondary">Live PNG</button>
           </div>
           <form id="browser-action-form" class="inline-form two-col">
             <input id="browser-selector" placeholder="#selector">
             <button id="browser-click" type="button" class="secondary">Record Click</button>
+            <button id="browser-live-click" type="button" class="secondary">Live Click</button>
             <input id="browser-fill-fields" placeholder='{"#email":"local@example.test"}'>
             <button id="browser-fill" type="button" class="secondary">Record Fill</button>
+            <button id="browser-live-fill" type="button" class="secondary">Live Fill</button>
             <button id="browser-submit" type="button" class="secondary">Submit Form</button>
+            <button id="browser-live-submit" type="button" class="secondary">Live Submit</button>
+            <button id="browser-live-download" type="button" class="secondary">Live Download</button>
+            <input id="browser-upload-path" placeholder="workspace/file.pdf">
+            <button id="browser-live-upload" type="button" class="secondary">Live Upload</button>
+            <input id="browser-evaluate-script" placeholder="return document.title">
+            <button id="browser-live-evaluate" type="button" class="secondary">Live JS</button>
           </form>
           <div id="browser-sessions" class="list compact-list"></div>
           <div id="browser-output" class="evidence-block"></div>
@@ -478,6 +521,13 @@
             <input id="plugin-marketplace-catalog" placeholder="/path/to/catalog.json">
             <button type="submit" class="secondary">Search Marketplace</button>
           </form>
+          <form id="plugin-prepared-update-form" class="inline-form two-col">
+            <input id="plugin-prepared-candidate-id" placeholder="Prepared update candidate id">
+            <label class="checkline"><input id="plugin-prepared-update-approved" type="checkbox"> Approved</label>
+            <label class="checkline"><input id="plugin-prepared-update-enable" type="checkbox"> Enable</label>
+            <label class="checkline"><input id="plugin-prepared-update-disable" type="checkbox"> Disable</label>
+            <button type="submit" class="secondary">Apply Prepared Update</button>
+          </form>
           <div id="installed-plugins" class="list compact-list"></div>
           <p class="section-label">Marketplace</p>
           <div id="plugin-marketplace" class="list compact-list"></div>
@@ -504,6 +554,14 @@
             <input id="mcp-server-tools" placeholder="search,echo">
             <button type="submit">Register</button>
           </form>
+          <form id="mcp-oauth-form" class="inline-form two-col">
+            <input id="mcp-oauth-server" placeholder="server name or id">
+            <input id="mcp-oauth-resource" placeholder="protected resource metadata URL">
+            <input id="mcp-oauth-authorization" placeholder="authorization server URL">
+            <input id="mcp-oauth-token-secret" placeholder="brokered OAuth token secret">
+            <input id="mcp-oauth-scopes" placeholder="tools:read,tools:call">
+            <button type="submit" class="secondary">OAuth</button>
+          </form>
           <form id="mcp-call-form" class="inline-form two-col">
             <input id="mcp-call-server" placeholder="server name or id">
             <input id="mcp-call-tool" placeholder="tool name">
@@ -525,7 +583,7 @@
             <input id="remote-control-label" placeholder="phone or tablet">
             <input id="remote-control-session-id" placeholder="session id">
             <input id="remote-control-task-id" placeholder="task id">
-            <input id="remote-control-actions" placeholder="status,events,pause,cancel" value="status,events,pause,cancel">
+            <input id="remote-control-actions" placeholder="status,events,resume,pause,cancel" value="status,events,resume,pause,cancel">
             <input id="remote-control-ttl" type="number" min="60" max="3600" value="600" placeholder="ttl seconds">
             <button type="submit">Create Pairing</button>
           </form>
@@ -582,7 +640,13 @@
             <input id="schedule-name" placeholder="Daily report">
             <input id="schedule-cron" placeholder="@daily">
             <input id="schedule-task" placeholder="Summarize my project">
+            <input id="schedule-context-from" placeholder="@docs/status.md">
+            <input id="schedule-deliver-to" placeholder="slack, email">
             <button type="submit">Create</button>
+          </form>
+          <form id="schedule-script-form" class="inline-form two-col">
+            <input id="schedule-script-command" placeholder='["python3","-c","print(\"ok\")"]'>
+            <button type="submit" class="secondary">Schedule Script</button>
           </form>
           <button id="schedule-memory-digest" type="button" class="secondary">Schedule Memory Digest</button>
           <button id="schedule-memory-escalation" type="button" class="secondary">Schedule Memory Escalation</button>

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import stat
 import subprocess
+import time
 import unittest
 import tempfile
 import hmac
+from contextlib import redirect_stdout
 from hashlib import sha256
 from pathlib import Path
 from unittest.mock import patch
@@ -14,7 +17,7 @@ from unittest.mock import patch
 import aegis.channels.chat_webhook as chat_webhook_module
 import aegis.channels.email as email_module
 import aegis.channels.webhook as webhook_module
-from aegis.cli.main import _model_auth_provider_choices, create_skill_template, dispatch, build_parser
+from aegis.cli.main import _model_auth_provider_choices, build_completion_script, create_skill_template, dispatch, build_parser
 from aegis.agent.orchestrator import build_orchestrator
 from aegis.models.registry import default_providers
 from aegis.skills.runtime import builtin_project_summary_manifest
@@ -27,6 +30,33 @@ from tests.test_plugins import _write_plugin_catalog, _write_plugin_fixture
 
 
 class CliTests(unittest.TestCase):
+    def test_completion_command_emits_shell_scripts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            for shell, marker in (
+                ("bash", "complete -F _aegis aegis"),
+                ("zsh", "#compdef aegis"),
+                ("fish", "complete -c aegis"),
+            ):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    result = dispatch(parser.parse_args(["--data-dir", str(Path(temp) / ".aegis"), "completion", shell]))
+                script = output.getvalue()
+
+                self.assertIsNone(result)
+                self.assertIn(marker, script)
+                self.assertIn("task", script)
+                self.assertIn("submit", script)
+                self.assertIn("models", script)
+                self.assertIn("auth", script)
+                self.assertIn("bash", script)
+                self.assertIn("zsh", script)
+                self.assertIn("fish", script)
+                self.assertNotIn("secret", script.lower())
+
+            bash_script = build_completion_script("bash", program="aegis-dev")
+            self.assertIn("complete -F _aegis_dev aegis-dev", bash_script)
+
     def test_skill_create_template_is_disabled_and_approval_required(self) -> None:
         manifest = create_skill_template("example.skill", name="Example", description="Example skill")
 
@@ -34,6 +64,89 @@ class CliTests(unittest.TestCase):
         self.assertEqual(manifest["risk_level"], "medium")
         self.assertTrue(manifest["approval_required"])
         self.assertEqual(manifest["sandbox_profile"], "no_tools")
+
+    def test_skill_draft_verify_and_install_candidate_is_review_gated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            data_dir = Path(temp) / ".aegis"
+            observed_task = "operator pasted token=abc123 while explaining repeated workflow"
+
+            drafted = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "skill",
+                        "draft",
+                        "test.cli_curated",
+                        "--name",
+                        "CLI Curated",
+                        "--description",
+                        "CLI reviewed disabled candidate",
+                        "--observed-task",
+                        observed_task,
+                        "--actor",
+                        "cli-test",
+                    ]
+                )
+            )
+
+            self.assertEqual(drafted["status"], "skill_candidate_drafted")
+            candidate_path = Path(drafted["candidate_path"])
+            self.assertTrue(candidate_path.exists())
+            if os.name == "posix":
+                self.assertEqual(stat.S_IMODE(candidate_path.stat().st_mode), 0o600)
+            self.assertNotIn("token=abc123", candidate_path.read_text(encoding="utf-8"))
+
+            verified = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "skill",
+                        "verify-draft",
+                        drafted["candidate_id"],
+                    ]
+                )
+            )
+            gated = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "skill",
+                        "install-draft",
+                        drafted["candidate_id"],
+                    ]
+                )
+            )
+            installed = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "skill",
+                        "install-draft",
+                        drafted["candidate_id"],
+                        "--approved",
+                        "--actor",
+                        "cli-test",
+                    ]
+                )
+            )
+            listed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "skill", "list"]))
+
+            self.assertTrue(verified["ok"])
+            self.assertEqual(gated["status"], "approval_required")
+            self.assertFalse(gated["auto_enable"])
+            self.assertEqual(installed["status"], "skill_candidate_installed_disabled")
+            skill_rows = {row["id"]: row for row in listed["skills"]}
+            self.assertIn("test.cli_curated", skill_rows)
+            self.assertFalse(skill_rows["test.cli_curated"]["enabled"])
+            self.assertEqual(skill_rows["test.cli_curated"]["manifest"]["source"], "curator-draft")
+            audit_text = (data_dir / "audit.jsonl").read_text(encoding="utf-8")
+            self.assertIn("skill.curator_candidate_install_blocked", audit_text)
+            self.assertNotIn("token=abc123", audit_text)
 
     def test_browser_activation_packet_commands_create_and_verify_packet(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -89,6 +202,354 @@ class CliTests(unittest.TestCase):
             self.assertTrue(verified["receipt"]["packet_integrity_ok"])
             self.assertTrue(verified["receipt"]["checksum_matches"])
             self.assertFalse(verified["receipt"]["raw_packet_payload_included"])
+
+    def test_browser_live_readonly_command_is_approval_gated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "[security]",
+                        "live_browser_reads = true",
+                        'network_allowlist = ["example.com"]',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            blocked = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "browser",
+                        "--workspace",
+                        str(root),
+                        "live-navigate",
+                        "https://example.com",
+                    ]
+                )
+            )
+            with (
+                patch("aegis.browser.controller._find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch("aegis.browser.controller._private_network_error", return_value=None),
+                patch("aegis.browser.controller._capture_live_chromium_snapshot", side_effect=_fake_live_chrome_snapshot),
+            ):
+                captured = dispatch(
+                    parser.parse_args(
+                        [
+                            "--data-dir",
+                            str(data_dir),
+                            "browser",
+                            "--workspace",
+                            str(root),
+                            "live-navigate",
+                            "https://example.com",
+                            "--approved",
+                        ]
+                    )
+                )
+
+            self.assertEqual(blocked["status"], "approval_required")
+            self.assertTrue(captured["ok"])
+            self.assertEqual(captured["mode"], "live_chromium_readonly_no_persistent_state")
+            self.assertFalse(captured["raw_browser_content_included"])
+            self.assertTrue(Path(captured["artifact_path"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_browser_live_mutation_command_is_approval_gated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "[security]",
+                        "live_browser_mutations = true",
+                        'network_allowlist = ["example.com"]',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            session = orchestrator.browser.create_session(label="CLI live mutation")
+            with (
+                patch("aegis.browser.controller._find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch("aegis.browser.controller._private_network_error", return_value=None),
+                patch("aegis.browser.controller._capture_live_chromium_snapshot", side_effect=_fake_live_chrome_snapshot),
+            ):
+                orchestrator.browser.live_navigate(session_id=session["id"], url="https://example.com", approved=True)
+
+            blocked = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "browser",
+                        "--workspace",
+                        str(root),
+                        "live-click",
+                        session["id"],
+                        "#submit",
+                    ]
+                )
+            )
+            with (
+                patch("aegis.browser.controller._find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch("aegis.browser.controller._private_network_error", return_value=None),
+                patch("aegis.browser.controller._capture_live_chromium_mutation", side_effect=_fake_live_chrome_mutation),
+            ):
+                captured = dispatch(
+                    parser.parse_args(
+                        [
+                            "--data-dir",
+                            str(data_dir),
+                            "browser",
+                            "--workspace",
+                            str(root),
+                            "live-click",
+                            session["id"],
+                            "#submit",
+                            "--approved",
+                        ]
+                    )
+                )
+
+            self.assertEqual(blocked["status"], "approval_required")
+            self.assertTrue(captured["ok"])
+            self.assertEqual(captured["mode"], "live_chromium_cdp_ephemeral_mutation")
+            self.assertTrue(captured["real_selector_events_dispatched"])
+            self.assertFalse(captured["raw_browser_content_included"])
+            self.assertTrue(Path(captured["artifact_path"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_browser_live_download_command_is_approval_gated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "[security]",
+                        "live_browser_downloads = true",
+                        'network_allowlist = ["example.com"]',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            session = orchestrator.browser.create_session(label="CLI live download")
+            with (
+                patch("aegis.browser.controller._find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch("aegis.browser.controller._private_network_error", return_value=None),
+                patch("aegis.browser.controller._capture_live_chromium_snapshot", side_effect=_fake_live_chrome_snapshot),
+            ):
+                orchestrator.browser.live_navigate(session_id=session["id"], url="https://example.com/downloads", approved=True)
+
+            blocked = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "browser",
+                        "--workspace",
+                        str(root),
+                        "live-download",
+                        session["id"],
+                        "#report",
+                    ]
+                )
+            )
+            with (
+                patch("aegis.browser.controller._find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch("aegis.browser.controller._private_network_error", return_value=None),
+                patch("aegis.browser.controller._capture_live_chromium_download", side_effect=_fake_live_chrome_download),
+            ):
+                captured = dispatch(
+                    parser.parse_args(
+                        [
+                            "--data-dir",
+                            str(data_dir),
+                            "browser",
+                            "--workspace",
+                            str(root),
+                            "live-download",
+                            session["id"],
+                            "#report",
+                            "--approved",
+                        ]
+                    )
+                )
+
+            self.assertEqual(blocked["status"], "approval_required")
+            self.assertTrue(captured["ok"])
+            self.assertEqual(captured["mode"], "live_chromium_cdp_ephemeral_download")
+            self.assertTrue(captured["downloads_allowed"])
+            self.assertFalse(captured["uploads_allowed"])
+            self.assertFalse(captured["raw_browser_content_included"])
+            self.assertEqual(captured["download_domain"], "example.com")
+            self.assertEqual(captured["download_url_sha256"], sha256(b"https://example.com/downloads/report.pdf").hexdigest())
+            self.assertEqual(Path(captured["artifact_path"]).read_bytes(), b"fake-download-bytes")
+            self.assertTrue(Path(captured["metadata_path"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_browser_live_upload_command_is_approval_gated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            root = Path(temp)
+            source = root / "report.pdf"
+            source.write_bytes(b"%PDF-1.7\nfake upload")
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "[security]",
+                        "live_browser_uploads = true",
+                        'network_allowlist = ["example.com"]',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            session = orchestrator.browser.create_session(label="CLI live upload")
+            with (
+                patch("aegis.browser.controller._find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch("aegis.browser.controller._private_network_error", return_value=None),
+                patch("aegis.browser.controller._capture_live_chromium_snapshot", side_effect=_fake_live_chrome_snapshot),
+            ):
+                orchestrator.browser.live_navigate(session_id=session["id"], url="https://example.com/uploads", approved=True)
+
+            blocked = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "browser",
+                        "--workspace",
+                        str(root),
+                        "live-upload",
+                        session["id"],
+                        "#file",
+                        "report.pdf",
+                    ]
+                )
+            )
+            with (
+                patch("aegis.browser.controller._find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch("aegis.browser.controller._private_network_error", return_value=None),
+                patch("aegis.browser.controller._capture_live_chromium_upload", side_effect=_fake_live_chrome_upload),
+            ):
+                captured = dispatch(
+                    parser.parse_args(
+                        [
+                            "--data-dir",
+                            str(data_dir),
+                            "browser",
+                            "--workspace",
+                            str(root),
+                            "live-upload",
+                            session["id"],
+                            "#file",
+                            "report.pdf",
+                            "--approved",
+                        ]
+                    )
+                )
+
+            self.assertEqual(blocked["status"], "approval_required")
+            self.assertTrue(captured["ok"])
+            self.assertEqual(captured["mode"], "live_chromium_cdp_ephemeral_upload")
+            self.assertTrue(captured["uploads_allowed"])
+            self.assertFalse(captured["downloads_allowed"])
+            self.assertFalse(captured["raw_browser_content_included"])
+            self.assertEqual(captured["source_filename"], "report.pdf")
+            self.assertEqual(captured["source_sha256"], sha256(source.read_bytes()).hexdigest())
+            self.assertTrue(Path(captured["artifact_path"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_browser_live_evaluate_command_is_approval_gated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "[security]",
+                        "live_browser_javascript = true",
+                        'network_allowlist = ["example.com"]',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            session = orchestrator.browser.create_session(label="CLI live evaluate")
+            with (
+                patch("aegis.browser.controller._find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch("aegis.browser.controller._private_network_error", return_value=None),
+                patch("aegis.browser.controller._capture_live_chromium_snapshot", side_effect=_fake_live_chrome_snapshot),
+            ):
+                orchestrator.browser.live_navigate(session_id=session["id"], url="https://example.com/app", approved=True)
+            script = "return document.title"
+
+            blocked = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "browser",
+                        "--workspace",
+                        str(root),
+                        "live-evaluate",
+                        session["id"],
+                        script,
+                    ]
+                )
+            )
+            with (
+                patch("aegis.browser.controller._find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch("aegis.browser.controller._private_network_error", return_value=None),
+                patch("aegis.browser.controller._capture_live_chromium_evaluate", side_effect=_fake_live_chrome_evaluate),
+            ):
+                captured = dispatch(
+                    parser.parse_args(
+                        [
+                            "--data-dir",
+                            str(data_dir),
+                            "browser",
+                            "--workspace",
+                            str(root),
+                            "live-evaluate",
+                            session["id"],
+                            script,
+                            "--approved",
+                        ]
+                    )
+                )
+
+            self.assertEqual(blocked["status"], "approval_required")
+            self.assertTrue(captured["ok"])
+            self.assertEqual(captured["mode"], "live_chromium_cdp_ephemeral_evaluate")
+            self.assertTrue(captured["javascript_executed"])
+            self.assertFalse(captured["raw_browser_content_included"])
+            self.assertFalse(captured["raw_network_body_returned"])
+            self.assertEqual(captured["script_sha256"], sha256(script.encode("utf-8")).hexdigest())
+            self.assertEqual(captured["evaluation_result"]["result"]["kind"], "string")
+            self.assertTrue(Path(captured["artifact_path"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
 
     def test_model_auth_readiness_packet_commands_create_and_verify_packet(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -173,6 +634,12 @@ class CliTests(unittest.TestCase):
             self.assertIn("approved PR local patch application", claude_target["covered"])
             self.assertIn("verified plugin marketplace update application", claude_target["covered"])
             self.assertNotIn("PR local patch application", claude_target["live_gap"])
+            openclaw_target = next(target for target in result["competitive_targets"] if target["platform"] == "OpenClaw")
+            self.assertIn("Stability AI v1 image generation", openclaw_target["live_gap"])
+            self.assertIn("Google Vertex Imagen image generation", openclaw_target["live_gap"])
+            self.assertIn("ElevenLabs TTS", openclaw_target["live_gap"])
+            self.assertIn("ElevenLabs speech-to-text", openclaw_target["live_gap"])
+            self.assertIn("provider-specific image", openclaw_target["live_gap"])
             self.assertIn("memory_readiness", result)
             self.assertIn("self_improvement_readiness", result)
             self.assertIn("enterprise_readiness", result)
@@ -210,7 +677,10 @@ class CliTests(unittest.TestCase):
             self.assertIn("subscription_token_bridge", {item["control"] for item in auth_gap["operator_checklist"]})
             provider_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "provider_and_channel_live_connectors")
             self.assertIn("human_approval", provider_gap["required_controls"])
+            self.assertIn("channel_activation_approval_receipt", provider_gap["required_controls"])
+            self.assertIn("channel_activation_approval_receipt", provider_gap["verification_gates"])
             self.assertIn("live_connector_receipts.redacted_write_summary", provider_gap["evaluation_scenarios"])
+            self.assertIn("channel.live_activation_approval", provider_gap["evaluation_scenarios"])
             self.assertIn("generic_rest.live_write_rate_limit", provider_gap["evaluation_scenarios"])
             self.assertIn("github_gitlab.live_write_rate_limit", provider_gap["evaluation_scenarios"])
             self.assertIn("github_gitlab.rollback_offer_receipt", provider_gap["evaluation_scenarios"])
@@ -235,40 +705,111 @@ class CliTests(unittest.TestCase):
             self.assertEqual(checklist["runtime_rate_limits"]["state"], "partial")
             self.assertEqual(checklist["rollback_receipts"]["state"], "partial")
             self.assertEqual(checklist["promotion_scope"]["state"], "not_started")
+            self.assertEqual(checklist["channel_activation_approval_receipt"]["state"], "available")
             browser_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "browser_and_media_depth")
             self.assertIn("activation_packet_verification", browser_gap["required_controls"])
             self.assertIn("live_browser_activation_packet_schema", browser_gap["verification_gates"])
             self.assertIn("live_browser_activation_packet_verification", browser_gap["verification_gates"])
+            self.assertIn("approved_live_browser_readonly_snapshot", browser_gap["verification_gates"])
+            self.assertIn("approved_live_browser_selector_mutation", browser_gap["verification_gates"])
+            self.assertIn("approved_live_browser_download", browser_gap["verification_gates"])
+            self.assertIn("approved_live_browser_upload", browser_gap["verification_gates"])
+            self.assertIn("approved_live_browser_javascript", browser_gap["verification_gates"])
             self.assertIn("playwright_chromium_adapter_preflight", browser_gap["verification_gates"])
             self.assertIn("disabled_live_browser_denial", browser_gap["verification_gates"])
             self.assertIn("browser.live_activation_packet_preflight", browser_gap["evaluation_scenarios"])
             self.assertIn("browser.live_activation_packet_verification", browser_gap["evaluation_scenarios"])
+            self.assertIn("browser.live_readonly_snapshot", browser_gap["evaluation_scenarios"])
+            self.assertIn("browser.live_selector_mutation", browser_gap["evaluation_scenarios"])
+            self.assertIn("browser.live_download", browser_gap["evaluation_scenarios"])
+            self.assertIn("browser.live_upload", browser_gap["evaluation_scenarios"])
+            self.assertIn("browser.live_evaluate", browser_gap["evaluation_scenarios"])
             self.assertIn("browser.live_automation_denied_until_adapter_ready", browser_gap["evaluation_scenarios"])
             browser_controls = {control["control"] for control in browser_gap["implemented_hardening_controls"]}
             self.assertIn("live_browser_activation_packets", browser_controls)
             self.assertIn("playwright_chromium_adapter_preflight", browser_controls)
             self.assertIn("live_browser_activation_packet_verification", browser_controls)
-            self.assertIn("live_browser_automation_adapter", browser_gap["remaining_depth_work"])
+            self.assertIn("approved_live_browser_readonly_adapter", browser_controls)
+            self.assertIn("approved_live_browser_selector_mutation_adapter", browser_controls)
+            self.assertIn("approved_live_browser_download_adapter", browser_controls)
+            self.assertIn("approved_live_browser_upload_adapter", browser_controls)
+            self.assertIn("approved_live_browser_javascript_adapter", browser_controls)
+            self.assertIn("stability_v1_image_provider_adapter", browser_controls)
+            self.assertIn("google_imagen_provider_adapter", browser_controls)
+            self.assertIn("google_imagen_edit_provider_adapter", browser_controls)
+            self.assertIn("google_imagen_upscale_provider_adapter", browser_controls)
+            self.assertIn("google_imagen_product_provider_adapter", browser_controls)
+            self.assertIn("elevenlabs_tts_provider_adapter", browser_controls)
+            self.assertIn("elevenlabs_speech_to_speech_provider_adapter", browser_controls)
+            self.assertIn("elevenlabs_text_to_dialogue_provider_adapter", browser_controls)
+            self.assertIn("elevenlabs_voice_clone_provider_adapter", browser_controls)
+            self.assertIn("elevenlabs_transcription_provider_adapter", browser_controls)
+            provider_media_adapters = browser_gap["provider_media_adapters"]
+            implemented_media_adapters = {adapter["adapter"]: adapter for adapter in provider_media_adapters["implemented"]}
+            self.assertIn("openai_images", implemented_media_adapters)
+            self.assertIn("stability_v1_text_to_image", implemented_media_adapters)
+            self.assertEqual(implemented_media_adapters["stability_v1_text_to_image"]["response_shape"], "artifacts[].base64")
+            self.assertIn("google_imagen", implemented_media_adapters)
+            self.assertEqual(implemented_media_adapters["google_imagen"]["response_shape"], "predictions[].bytesBase64Encoded")
+            self.assertIn("google_imagen_edit", implemented_media_adapters)
+            self.assertEqual(implemented_media_adapters["google_imagen_edit"]["response_shape"], "predictions[].bytesBase64Encoded")
+            self.assertIn("google_imagen_upscale", implemented_media_adapters)
+            self.assertEqual(implemented_media_adapters["google_imagen_upscale"]["response_shape"], "predictions[].bytesBase64Encoded")
+            self.assertIn("google_imagen_product", implemented_media_adapters)
+            self.assertEqual(implemented_media_adapters["google_imagen_product"]["response_shape"], "predictions[].bytesBase64Encoded")
+            self.assertIn("elevenlabs_tts", implemented_media_adapters)
+            self.assertEqual(implemented_media_adapters["elevenlabs_tts"]["response_shape"], "binary_audio")
+            self.assertIn("elevenlabs_speech_to_speech", implemented_media_adapters)
+            self.assertEqual(implemented_media_adapters["elevenlabs_speech_to_speech"]["response_shape"], "binary_audio")
+            self.assertIn("elevenlabs_text_to_dialogue", implemented_media_adapters)
+            self.assertEqual(implemented_media_adapters["elevenlabs_text_to_dialogue"]["response_shape"], "binary_audio")
+            self.assertIn("elevenlabs_voice_clone", implemented_media_adapters)
+            self.assertEqual(implemented_media_adapters["elevenlabs_voice_clone"]["response_shape"], "voice_id")
+            self.assertIn("elevenlabs_transcription", implemented_media_adapters)
+            self.assertEqual(implemented_media_adapters["elevenlabs_transcription"]["response_shape"], "transcript_text")
+            self.assertIn("video", provider_media_adapters["remaining_by_modality"])
+            self.assertFalse(provider_media_adapters["raw_prompt_or_secret_storage"])
+            self.assertFalse(provider_media_adapters["raw_response_body_storage"])
+            self.assertNotIn("live_browser_arbitrary_js_adapter", browser_gap["remaining_depth_work"])
             browser_checklist = {item["control"]: item for item in browser_gap["operator_checklist"]}
             self.assertEqual(browser_checklist["live_browser_activation_packets"]["state"], "available_adapter_blocked")
             self.assertEqual(browser_checklist["playwright_chromium_adapter_preflight"]["state"], "blocked_adapter_candidate")
             self.assertEqual(browser_checklist["live_browser_activation_packet_verification"]["state"], "verified_adapter_blocked")
-            self.assertEqual(browser_checklist["live_browser_automation"]["state"], "blocked_with_preflight")
+            self.assertEqual(browser_checklist["live_browser_readonly_adapter"]["state"], "available_opt_in")
+            self.assertEqual(browser_checklist["live_browser_selector_mutation_adapter"]["state"], "available_opt_in")
+            self.assertEqual(browser_checklist["live_browser_download_adapter"]["state"], "available_opt_in")
+            self.assertEqual(browser_checklist["live_browser_upload_adapter"]["state"], "available_opt_in")
+            self.assertEqual(browser_checklist["live_browser_javascript_adapter"]["state"], "available_opt_in")
+            self.assertEqual(browser_checklist["live_browser_automation"]["state"], "javascript_available_media_depth_remaining")
             subagent_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "subagent_runtime_depth")
             self.assertIn("operator_batch_receipts", subagent_gap["required_controls"])
             self.assertIn("parent_bound_review_receipts", subagent_gap["required_controls"])
             self.assertIn("model_ready_review_packets", subagent_gap["required_controls"])
+            self.assertIn("sanitized_model_review_invocations", subagent_gap["required_controls"])
+            self.assertIn("scoped_autonomy_step_plans", subagent_gap["required_controls"])
+            self.assertIn("autonomous_loop_isolation", subagent_gap["required_controls"])
+            self.assertIn("isolated_autonomy_loop_rehearsals", subagent_gap["required_controls"])
             self.assertIn("autonomy_preflight_receipts", subagent_gap["required_controls"])
             self.assertIn("subagent.parent_bound_review_receipt", subagent_gap["evaluation_scenarios"])
             self.assertIn("subagent.model_ready_review_packet", subagent_gap["evaluation_scenarios"])
+            self.assertIn("subagent.sanitized_model_review", subagent_gap["evaluation_scenarios"])
             self.assertIn("subagent.autonomy_preflight", subagent_gap["evaluation_scenarios"])
             self.assertIn("model_ready_review_packet_sanitization", subagent_gap["verification_gates"])
+            self.assertIn("sanitized_model_review_context", subagent_gap["verification_gates"])
+            self.assertIn("autonomy_step_plan_receipt", subagent_gap["verification_gates"])
+            self.assertIn("isolated_autonomy_loop_receipt", subagent_gap["verification_gates"])
             self.assertIn("autonomy_preflight_receipt", subagent_gap["verification_gates"])
             self.assertIn("subagent.operator_batch_receipts", subagent_gap["evaluation_scenarios"])
+            self.assertIn("subagent.autonomy_step_plan", subagent_gap["evaluation_scenarios"])
+            self.assertIn("subagent.isolated_autonomy_loop", subagent_gap["evaluation_scenarios"])
             subagent_checklist = {item["control"]: item for item in subagent_gap["operator_checklist"]}
             self.assertEqual(subagent_checklist["operator_approved_batch_runtime"]["state"], "enforced")
             self.assertEqual(subagent_checklist["parent_bound_review_receipts"]["state"], "enforced")
             self.assertEqual(subagent_checklist["model_ready_review_packets"]["state"], "enforced")
+            self.assertEqual(subagent_checklist["sanitized_model_review_invocations"]["state"], "enforced")
+            self.assertEqual(subagent_checklist["scoped_autonomy_step_plans"]["state"], "enforced")
+            self.assertEqual(subagent_checklist["autonomous_loop_isolation"]["state"], "enforced")
+            self.assertEqual(subagent_checklist["isolated_autonomy_loop_rehearsals"]["state"], "enforced")
             self.assertEqual(subagent_checklist["autonomy_preflight_receipts"]["state"], "enforced")
             backend_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "remote_backend_activation")
             self.assertEqual(backend_gap["status"], "backend_adapters_available_unconfigured")
@@ -281,6 +822,32 @@ class CliTests(unittest.TestCase):
             self.assertEqual(backend_checklist["scope_limits"]["state"], "enforced")
             self.assertEqual(backend_checklist["rollback_receipts"]["state"], "enforced")
             self.assertEqual(backend_checklist["provider_lifecycle_depth"]["state"], "not_started")
+
+    def test_setup_command_reports_safe_guided_readiness(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            data_dir = Path(temp) / ".aegis"
+
+            result = dispatch(parser.parse_args(["--data-dir", str(data_dir), "setup", "--init"]))
+
+            self.assertEqual(result["status"], "operator_action_required")
+            self.assertTrue(result["config_written"])
+            self.assertTrue(Path(result["config_path"]).exists())
+            self.assertFalse(result["external_action_started"])
+            self.assertFalse(result["send_probe_performed"])
+            self.assertFalse(result["model_invocation_performed"])
+            self.assertFalse(result["raw_secret_values_included"])
+            steps = {step["id"]: step for step in result["setup_steps"]}
+            self.assertIn("initialize", steps)
+            self.assertIn("model_auth", steps)
+            self.assertIn("connectors_channels", steps)
+            self.assertIn("execution_backends", steps)
+            self.assertIn("remote_control", steps)
+            self.assertIn("interfaces", steps)
+            self.assertEqual(steps["model_auth"]["operator_login_required_count"], 11)
+            self.assertTrue(all(command.startswith("aegis ") for command in steps["model_auth"]["next_commands"]))
+            self.assertFalse(any("PYTHONPATH" in command for command in steps["model_auth"]["next_commands"]))
+            self.assertIn("aegis models auth doctor", result["verification_commands"])
 
     def test_connector_and_backend_doctor_commands_surface_activation_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -366,17 +933,44 @@ class CliTests(unittest.TestCase):
                 )
             )
             configured = dispatch(parser.parse_args(["--data-dir", str(data_dir), "mcp", "auth", "token", "remote", "MCP_REMOTE_TOKEN"]))
+            oauth_configured = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "mcp",
+                        "auth",
+                        "oauth",
+                        "remote",
+                        "--resource-metadata",
+                        "http://127.0.0.1:1/.well-known/oauth-protected-resource?access_token=raw-secret",
+                        "--authorization-server",
+                        "http://127.0.0.1:1/oauth/authorize?client_secret=raw-secret",
+                        "--token-secret",
+                        "MCP_OAUTH_TOKEN",
+                        "--scope",
+                        "tools:read",
+                        "--scope",
+                        "tools:call",
+                    ]
+                )
+            )
             listed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "mcp", "list"]))
 
             self.assertEqual(registered["metadata"]["transport"], "streamable_http")
             self.assertEqual(configured["metadata"]["auth"]["token_secret"], "MCP_REMOTE_TOKEN")
-            self.assertEqual(listed["servers"][0]["metadata"]["auth"]["type"], "bearer_token")
+            self.assertEqual(oauth_configured["metadata"]["auth"]["type"], "oauth_bearer_token")
+            self.assertEqual(oauth_configured["metadata"]["oauth"]["requested_scopes"], ["tools:read", "tools:call"])
+            self.assertNotIn("raw-secret", json.dumps(oauth_configured, sort_keys=True))
+            self.assertEqual(listed["servers"][0]["metadata"]["auth"]["type"], "oauth_bearer_token")
 
     def test_remote_control_relay_command_reports_blocked_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             parser = build_parser()
             data_dir = Path(temp) / ".aegis"
             data_dir.mkdir()
+            default_pair_args = parser.parse_args(["--data-dir", str(data_dir), "remote-control", "pair"])
+            self.assertEqual(default_pair_args.allowed_actions, "status,events,resume,pause,cancel")
             (data_dir / "config.toml").write_text(
                 "\n".join(
                     [
@@ -829,7 +1423,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(autonomy["receipt"]["actor"], "cli-reviewer")
             self.assertFalse(autonomy["receipt"]["autonomous_runtime"])
             self.assertFalse(autonomy["receipt"]["model_invocation_performed"])
-            self.assertIn("autonomous_loop_isolation", autonomy["receipt"]["missing_controls"])
+            self.assertIn("autonomous_loop_isolation", autonomy["receipt"]["implemented_controls"])
+            self.assertIn("recursive_model_loop_executor", autonomy["receipt"]["missing_controls"])
             self.assertIn("blocked_autonomous_runtime", autonomy["receipt"]["verification_gates"])
             self.assertNotIn("Compare provider auth gaps", json.dumps(autonomy, sort_keys=True))
 
@@ -981,6 +1576,108 @@ class CliTests(unittest.TestCase):
             self.assertTrue(verified_packet["receipt"]["packet_integrity_ok"])
             self.assertFalse(verified_packet["receipt"]["raw_packet_payload_included"])
             self.assertNotIn("Compare provider auth gaps", json.dumps(verified_packet, sort_keys=True))
+            model_review_gated = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "model-review",
+                        delegated["card_id"],
+                        "--actor",
+                        "cli-verifier",
+                    ]
+                )
+            )
+            self.assertEqual(model_review_gated["status"], "approval_required")
+            self.assertFalse(model_review_gated["model_invocation_performed"])
+            self.assertFalse(model_review_gated["raw_instruction_forwarded_to_model"])
+            self.assertIn("sanitized_model_review_invocations", model_review_gated["subagents"]["implemented_controls"])
+            self.assertNotIn("Compare provider auth gaps", json.dumps(model_review_gated, sort_keys=True))
+            autonomy_step_gated = dispatch(parser.parse_args(["--data-dir", str(data_dir), "agents", "autonomy-step", delegated["card_id"]]))
+            self.assertEqual(autonomy_step_gated["status"], "approval_required")
+            self.assertFalse(autonomy_step_gated["autonomous_runtime"])
+            autonomy_step = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "autonomy-step",
+                        delegated["card_id"],
+                        "--approved",
+                        "--actor",
+                        "cli-planner",
+                        "--max-steps",
+                        "3",
+                    ]
+                )
+            )
+            self.assertTrue(autonomy_step["ok"])
+            self.assertEqual(autonomy_step["status"], "step_plan_created")
+            self.assertEqual(autonomy_step["receipt"]["receipt_schema"], "aegis.subagent.autonomy_step_plan.v1")
+            self.assertEqual(autonomy_step["receipt"]["actor"], "cli-planner")
+            self.assertEqual(autonomy_step["receipt"]["max_steps"], 3)
+            self.assertEqual(autonomy_step["receipt"]["tool_call_sandbox"], "deny_all_until_operator_approved")
+            self.assertTrue(autonomy_step["receipt"]["packet_integrity_ok"])
+            self.assertTrue(autonomy_step["receipt"]["scoped_model_context_builder"])
+            self.assertTrue(autonomy_step["receipt"]["recursive_budget_enforced"])
+            self.assertTrue(autonomy_step["receipt"]["review_gate_after_each_step"])
+            self.assertFalse(autonomy_step["receipt"]["autonomous_runtime"])
+            self.assertFalse(autonomy_step["receipt"]["model_invocation_performed"])
+            self.assertFalse(autonomy_step["receipt"]["tool_execution_performed"])
+            self.assertFalse(autonomy_step["receipt"]["raw_instruction_included"])
+            self.assertEqual(autonomy_step["plan"]["required_next_gate"], "operator_review")
+            self.assertIn("scoped_autonomy_step_plans", autonomy_step["subagents"]["implemented_controls"])
+            self.assertIn("scoped_model_context_builder", autonomy_step["subagents"]["implemented_controls"])
+            self.assertIn("tool_call_sandbox", autonomy_step["subagents"]["implemented_controls"])
+            self.assertEqual(autonomy_step["subagents"]["cards"][0]["autonomy_step_plans_recorded"], 1)
+            self.assertEqual(autonomy_step["subagents"]["cards"][0]["autonomy_status"], "step_plan_review_required")
+            autonomy_plan_path = Path(autonomy_step["receipt"]["artifact"])
+            autonomy_checksum_path = Path(autonomy_step["receipt"]["checksum"])
+            self.assertTrue(autonomy_plan_path.exists())
+            self.assertTrue(autonomy_checksum_path.exists())
+            self.assertEqual(stat.S_IMODE(autonomy_plan_path.stat().st_mode), 0o600)
+            self.assertNotIn("Compare provider auth gaps", autonomy_plan_path.read_text(encoding="utf-8"))
+            self.assertNotIn("Compare provider auth gaps", json.dumps(autonomy_step, sort_keys=True))
+            autonomy_run_gated = dispatch(parser.parse_args(["--data-dir", str(data_dir), "agents", "autonomy-run", delegated["card_id"]]))
+            self.assertEqual(autonomy_run_gated["status"], "approval_required")
+            self.assertFalse(autonomy_run_gated["autonomous_runtime"])
+            autonomy_run = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "autonomy-run",
+                        delegated["card_id"],
+                        "--approved",
+                        "--actor",
+                        "cli-planner",
+                        "--max-steps",
+                        "2",
+                    ]
+                )
+            )
+            self.assertTrue(autonomy_run["ok"])
+            self.assertEqual(autonomy_run["status"], "review_required")
+            self.assertEqual(autonomy_run["receipt"]["receipt_schema"], "aegis.subagent.autonomy_loop.v1")
+            self.assertEqual(autonomy_run["receipt"]["worker_process"], "python_isolated_subprocess")
+            self.assertTrue(autonomy_run["receipt"]["autonomous_loop_isolation"])
+            self.assertTrue(autonomy_run["receipt"]["isolated_loop_process"])
+            self.assertEqual(autonomy_run["receipt"]["required_next_gate"], "operator_review")
+            self.assertFalse(autonomy_run["receipt"]["recursive_model_loop_enabled"])
+            self.assertFalse(autonomy_run["receipt"]["model_invocation_performed"])
+            self.assertFalse(autonomy_run["receipt"]["tool_execution_performed"])
+            self.assertFalse(autonomy_run["receipt"]["raw_instruction_included"])
+            self.assertEqual(autonomy_run["receipt"]["worker_result"]["worker_schema"], "aegis.subagent.autonomy_loop_worker.v1")
+            self.assertEqual(autonomy_run["receipt"]["worker_result"]["network_access"], "disabled")
+            self.assertFalse(autonomy_run["receipt"]["worker_result"]["forbidden_raw_keys_present"])
+            self.assertIn("autonomous_loop_isolation", autonomy_run["subagents"]["implemented_controls"])
+            self.assertIn("isolated_autonomy_loop_rehearsals", autonomy_run["subagents"]["implemented_controls"])
+            self.assertEqual(autonomy_run["subagents"]["cards"][0]["autonomy_loop_runs_recorded"], 1)
+            self.assertEqual(autonomy_run["subagents"]["cards"][0]["autonomy_status"], "loop_review_required")
+            self.assertNotIn("Compare provider auth gaps", json.dumps(autonomy_run, sort_keys=True))
             task_status = dispatch(parser.parse_args(["--data-dir", str(data_dir), "task", "status", parent_task["id"]]))
             self.assertTrue(task_status["checkpoint"]["subagent_review_required"])
             self.assertIn("subagent_review_complete", {hint["action"] for hint in task_status["action_hints"]})
@@ -990,6 +1687,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("subagent.review_binding_recorded", audit_text)
             self.assertIn("subagent.model_review_packet_created", audit_text)
             self.assertIn("subagent.model_review_packet_verified", audit_text)
+            self.assertIn("subagent.autonomy_step_plan_created", audit_text)
+            self.assertIn("subagent.autonomy_loop_completed", audit_text)
             self.assertNotIn("reviewed raw private handoff reason", audit_text)
             disabled_profile = dispatch(parser.parse_args(["--data-dir", str(data_dir), "agents", "profile-disable", "researcher"]))
             self.assertTrue(disabled_profile["ok"])
@@ -1065,6 +1764,133 @@ class CliTests(unittest.TestCase):
             self.assertTrue(all(result["receipt"]["worker_process"] == "python_isolated_subprocess" for result in batch["results"]))
             audit_text = (data_dir / "audit.jsonl").read_text(encoding="utf-8")
             self.assertIn("subagent.batch_completed", audit_text)
+
+    def test_agents_cli_delegate_child_uses_recursive_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            data_dir = Path(temp) / ".aegis"
+
+            profile = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "profile-create",
+                        "Researcher",
+                        "--max-parallel-cards",
+                        "4",
+                        "--recursive-depth-limit",
+                        "2",
+                    ]
+                )
+            )
+            self.assertTrue(profile["ok"])
+            self.assertEqual(profile["profile"]["recursive_depth_limit"], 2)
+
+            parent = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "delegate",
+                        "Researcher",
+                        "Parent recursive work token=abc123.",
+                        "--approved",
+                    ]
+                )
+            )
+            self.assertTrue(parent["ok"])
+            self.assertEqual(parent["subagents"]["cards"][0]["recursive_depth_remaining"], 2)
+
+            gated_child = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "delegate-child",
+                        parent["card_id"],
+                        "Researcher",
+                        "Child recursive work token=abc123.",
+                    ]
+                )
+            )
+            self.assertEqual(gated_child["status"], "approval_required")
+            self.assertFalse(gated_child["recursive_model_loop_enabled"])
+
+            child = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "delegate-child",
+                        parent["card_id"],
+                        "Researcher",
+                        "Child recursive work token=abc123.",
+                        "--approved",
+                        "--actor",
+                        "cli-reviewer",
+                    ]
+                )
+            )
+            self.assertTrue(child["ok"])
+            self.assertEqual(child["status"], "child_delegated")
+            self.assertEqual(child["receipt"]["receipt_schema"], "aegis.subagent.child_delegation.v1")
+            self.assertEqual(child["receipt"]["actor"], "cli-reviewer")
+            self.assertEqual(child["receipt"]["parent_card_id"], parent["card_id"])
+            self.assertEqual(child["receipt"]["child_depth"], 1)
+            self.assertEqual(child["receipt"]["parent_recursive_depth_remaining"], 2)
+            self.assertEqual(child["receipt"]["child_recursive_depth_remaining"], 1)
+            self.assertFalse(child["receipt"]["autonomous_runtime"])
+            self.assertFalse(child["receipt"]["recursive_model_loop_enabled"])
+            self.assertEqual(child["subagents"]["recursive_child_cards"], 1)
+            self.assertIn("review_gated_recursive_child_delegations", child["subagents"]["implemented_controls"])
+            child_card = next(card for card in child["subagents"]["cards"] if card["id"] == child["card_id"])
+            self.assertEqual(child_card["parent_subagent_card_id"], parent["card_id"])
+            self.assertEqual(child_card["recursive_depth_remaining"], 1)
+            self.assertEqual(child_card["budget_snapshot"]["parent_subagent_card_id"], parent["card_id"])
+
+            grandchild = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "delegate-child",
+                        child["card_id"],
+                        "Researcher",
+                        "Grandchild recursive work token=abc123.",
+                        "--approved",
+                    ]
+                )
+            )
+            self.assertTrue(grandchild["ok"])
+            self.assertEqual(grandchild["receipt"]["child_depth"], 2)
+            self.assertEqual(grandchild["receipt"]["child_recursive_depth_remaining"], 0)
+            with self.assertRaisesRegex(ValueError, "recursive depth budget is exhausted"):
+                dispatch(
+                    parser.parse_args(
+                        [
+                            "--data-dir",
+                            str(data_dir),
+                            "agents",
+                            "delegate-child",
+                            grandchild["card_id"],
+                            "Researcher",
+                            "Blocked recursive work token=abc123.",
+                            "--approved",
+                        ]
+                    )
+                )
+
+            preflight = dispatch(parser.parse_args(["--data-dir", str(data_dir), "agents", "autonomy-preflight"]))
+            self.assertFalse(preflight["ok"])
+            self.assertIn("review_gated_recursive_child_delegations", preflight["receipt"]["implemented_controls"])
+            self.assertIn("recursive_model_loop_executor", preflight["receipt"]["missing_controls"])
+            self.assertNotIn("token=abc123", json.dumps(preflight, sort_keys=True))
 
     def test_enterprise_readiness_reports_memory_improvement_and_tui_flags(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1449,6 +2275,34 @@ class CliTests(unittest.TestCase):
 
             status = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "status"]))
             listed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "events", "--limit", "1"]))
+            activation_packet = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "activation-packet", "--actor", "cli-channel"]))
+            verified_packet = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "channel",
+                        "verify-activation-packet",
+                        activation_packet["receipt"]["packet_id"],
+                        "--actor",
+                        "cli-verifier",
+                    ]
+                )
+            )
+            activation_approval = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "channel",
+                        "activate-packet",
+                        activation_packet["receipt"]["packet_id"],
+                        "--actor",
+                        "cli-approver",
+                        "--approved",
+                    ]
+                )
+            )
             events = build_orchestrator(data_dir=data_dir, workspace=root).channels.events(limit=1)
             self.assertEqual(result["status"], "rendered_pending_approval")
             self.assertEqual(inbound["message"]["direction"], "inbound")
@@ -1462,6 +2316,14 @@ class CliTests(unittest.TestCase):
             self.assertEqual(events[0]["direction"], "outbound")
             self.assertEqual(listed["events"][0]["channel"], "slack")
             self.assertEqual(listed["events"][0]["direction"], "outbound")
+            self.assertEqual(activation_packet["receipt"]["receipt_schema"], "aegis.channel.live_activation_packet.v1")
+            self.assertEqual(activation_packet["receipt"]["preflight_status"], "blocked")
+            self.assertEqual(verified_packet["receipt"]["receipt_schema"], "aegis.channel.live_activation_packet_verification.v1")
+            self.assertTrue(verified_packet["receipt"]["packet_integrity_ok"])
+            self.assertEqual(activation_approval["receipt"]["receipt_schema"], "aegis.channel.live_activation_approval.v1")
+            self.assertEqual(activation_approval["status"], "activation_blocked")
+            self.assertEqual(activation_approval["receipt"]["reason"], "preflight_not_ready")
+            self.assertFalse(activation_approval["receipt"]["send_probe_performed"])
             self.assertNotIn("abc123", json.dumps(events, sort_keys=True))
             self.assertNotIn("abc123", json.dumps(listed, sort_keys=True))
 
@@ -1582,13 +2444,16 @@ class CliTests(unittest.TestCase):
             webhook_module._open_without_redirects = lambda request, *, timeout: _FakeWebhookResponse(request, captured)
             try:
                 pending = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "send-webhook", "token=abc123"]))
-                sent = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "send-webhook", "token=abc123", "--approved"]))
+                dispatch(parser.parse_args(["--data-dir", str(data_dir), "approval", "approve", pending["approval_id"]]))
+                sent = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "send-webhook", "token=abc123", "--approval-id", pending["approval_id"]]))
             finally:
                 webhook_module._open_without_redirects = original_open
                 webhook_module._private_network_error = original_private_check
 
             self.assertEqual(pending["status"], "approval_required")
+            self.assertEqual(pending["approval"]["payload"]["receipt_schema"], "aegis.channel.send_approval.v1")
             self.assertEqual(sent["status"], "delivered")
+            self.assertEqual(sent["approval_id"], pending["approval_id"])
             self.assertTrue(captured["signature"].startswith("sha256="))
             self.assertIn("[REDACTED_VALUE]", captured["body"])
             self.assertNotIn("abc123", json.dumps(sent, sort_keys=True))
@@ -1629,13 +2494,15 @@ class CliTests(unittest.TestCase):
             email_module.smtplib.SMTP = lambda host, port, timeout: _FakeSmtp(host, port, timeout, captured)  # type: ignore[assignment]
             try:
                 pending = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "send-email", "Review", "token=abc123"]))
-                sent = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "send-email", "Review", "token=abc123", "--approved"]))
+                dispatch(parser.parse_args(["--data-dir", str(data_dir), "approval", "approve", pending["approval_id"]]))
+                sent = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "send-email", "Review", "token=abc123", "--approval-id", pending["approval_id"]]))
             finally:
                 email_module.smtplib.SMTP = original_smtp  # type: ignore[assignment]
                 email_module._private_network_error = original_private_check
 
             self.assertEqual(pending["status"], "approval_required")
             self.assertEqual(sent["status"], "delivered")
+            self.assertEqual(sent["approval_id"], pending["approval_id"])
             self.assertEqual(captured["login"], ("smtp-user", "smtp-pass"))
             self.assertIn("[REDACTED_VALUE]", captured["body"])
             self.assertNotIn("abc123", json.dumps(sent, sort_keys=True))
@@ -1670,13 +2537,15 @@ class CliTests(unittest.TestCase):
             chat_webhook_module._open_without_redirects = lambda request, *, timeout: _FakeWebhookResponse(request, captured)
             try:
                 pending = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "send-chat-webhook", "token=abc123"]))
-                sent = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "send-chat-webhook", "token=abc123", "--approved"]))
+                dispatch(parser.parse_args(["--data-dir", str(data_dir), "approval", "approve", pending["approval_id"]]))
+                sent = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "send-chat-webhook", "token=abc123", "--approval-id", pending["approval_id"]]))
             finally:
                 chat_webhook_module._open_without_redirects = original_open
                 webhook_module._private_network_error = original_private_check
 
             self.assertEqual(pending["status"], "approval_required")
             self.assertEqual(sent["status"], "delivered")
+            self.assertEqual(sent["approval_id"], pending["approval_id"])
             self.assertEqual(sent["payload_format"], "discord")
             self.assertEqual(json.loads(str(captured["body"])), {"content": "token=[REDACTED_VALUE]"})
             self.assertNotIn("abc123", json.dumps(sent, sort_keys=True))
@@ -2059,7 +2928,13 @@ class CliTests(unittest.TestCase):
                 "- Operator prefers governed migration commits.\n- token=abc123 should never be imported.\n",
                 encoding="utf-8",
             )
+            (openclaw_home / "config.yaml").write_text("api_key: abc123\n", encoding="utf-8")
+            (openclaw_home / "sessions").mkdir()
+            (openclaw_home / "sessions" / "session.jsonl").write_text(json.dumps({"summary": "Migration session metadata"}), encoding="utf-8")
+            (openclaw_home / "skills").mkdir()
+            (openclaw_home / "skills" / "candidate.json").write_text(json.dumps({"name": "Candidate"}), encoding="utf-8")
 
+            inspected = dispatch(parser.parse_args(["--data-dir", str(data_dir), "migrate", "openclaw", str(openclaw_home)]))
             preview = dispatch(
                 parser.parse_args(["--data-dir", str(data_dir), "migrate", "openclaw-memory-preview", str(openclaw_home), "--owner", "operator", "--scope", "repo"])
             )
@@ -2068,9 +2943,15 @@ class CliTests(unittest.TestCase):
             )
             stored = LocalStore(data_dir / "aegis.db").get_memory(committed["memories"][0]["id"])
 
-            self.assertEqual(preview["candidate_count"], 1)
+            self.assertEqual(inspected["inventory_mode"], "metadata_only_inventory")
+            self.assertEqual(inspected["inventory_counts"]["config_files"], 1)
+            self.assertEqual(inspected["inventory_counts"]["session_files"], 1)
+            self.assertEqual(inspected["inventory_counts"]["skill_files"], 1)
+            self.assertFalse(inspected["raw_content_included"])
+            self.assertNotIn("abc123", json.dumps(inspected, sort_keys=True))
+            self.assertEqual(preview["candidate_count"], 2)
             self.assertEqual(committed["mode"], "memory_preview_commit")
-            self.assertEqual(committed["committed_count"], 1)
+            self.assertEqual(committed["committed_count"], 2)
             self.assertEqual(committed["memories"][0]["provenance"]["candidate_id"], preview["candidates"][0]["id"])
             self.assertEqual(committed["memories"][0]["provenance"]["reviewer"], "cli-reviewer")
             self.assertNotIn("abc123", json.dumps(committed, sort_keys=True))
@@ -2511,6 +3392,55 @@ class CliTests(unittest.TestCase):
             self.assertEqual(scheduled["metadata"]["kind"], "memory_review_digest")
             self.assertEqual(scheduled["metadata"]["limit"], 7)
 
+            task_schedule = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "schedule",
+                        "create",
+                        "Context report",
+                        "@daily",
+                        "Summarize context",
+                        "--context-from",
+                        "@docs/status.md",
+                        "--deliver-to",
+                        "slack",
+                    ]
+                )
+            )
+
+            self.assertEqual(task_schedule["metadata"]["context_from"], ["@docs/status.md"])
+            self.assertEqual(task_schedule["metadata"]["delivery_targets"], ["slack"])
+
+            script = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "schedule",
+                        "script",
+                        "Script report",
+                        "@hourly",
+                        "--context-from",
+                        "@AGENTS.md",
+                        "--deliver-to",
+                        "slack",
+                        "--",
+                        "python3",
+                        "-c",
+                        "print('ok')",
+                        "token=abc123",
+                    ]
+                )
+            )
+
+            self.assertEqual(script["metadata"]["kind"], "no_agent_hook")
+            self.assertEqual(script["metadata"]["context_from"], ["@AGENTS.md"])
+            self.assertFalse(script["metadata"]["raw_command_included"])
+            self.assertNotIn("command", script["metadata"])
+            self.assertEqual(script["hook"]["command"][-1], "token=[REDACTED_VALUE]")
+
             escalation = dispatch(
                 parser.parse_args(
                     [
@@ -2815,11 +3745,17 @@ class CliTests(unittest.TestCase):
             self.assertTrue(login["ok"])
             self.assertEqual(doctor["auth_doctor"]["status"], "operator_login_required")
             self.assertEqual(doctor["auth_doctor"]["operator_login_required_count"], 11)
+            self.assertEqual(doctor["auth_doctor"]["checked_login_target_count"], 12)
+            self.assertEqual(doctor["auth_doctor"]["provider_discontinued_count"], 1)
             self.assertFalse(doctor["auth_doctor"]["raw_secret_values_included"])
             doctor_checks = {row["target"]: row for row in doctor["auth_doctor"]["checks"]}
             self.assertIn("config_required", doctor["auth_doctor"]["activation_state_counts"])
             self.assertIn("login_required", doctor["auth_doctor"]["activation_state_counts"])
+            self.assertEqual(doctor["auth_doctor"]["activation_state_counts"]["provider_discontinued"], 1)
             self.assertIn("model auth login openai --subscription --run-external", doctor_checks["OpenAI Codex / ChatGPT subscription"]["login_command"])
+            self.assertEqual(doctor_checks["Qwen OAuth (discontinued)"]["activation_state"], "provider_discontinued")
+            self.assertEqual(doctor_checks["Qwen OAuth (discontinued)"]["login_command"], "")
+            self.assertEqual(doctor_checks["Qwen OAuth (discontinued)"]["verify_command"], "")
             self.assertEqual(doctor_checks["Google Vertex AI / Gemini cloud identity"]["activation_state"], "config_required")
             self.assertIn("models.google_vertex_project", doctor_checks["Google Vertex AI / Gemini cloud identity"]["activation"]["missing_config"])
             self.assertIn("models.google_vertex_location", doctor_checks["Google Vertex AI / Gemini cloud identity"]["activation"]["missing_config"])
@@ -2910,6 +3846,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(target_rows["Google Gemini CLI subscription"]["status"], "official_cli_bridge_available")
             self.assertEqual(target_rows["Google Gemini OAuth / Code Assist"]["status"], "oauth_device_flow_available")
             self.assertEqual(target_rows["Qwen Code Coding Plan subscription"]["status"], "official_cli_bridge_available")
+            self.assertEqual(target_rows["Qwen OAuth (discontinued)"]["status"], "provider_discontinued")
+            self.assertEqual(target_rows["Qwen OAuth (discontinued)"]["bridge_status"], "provider_discontinued")
+            self.assertIn("Qwen OAuth (discontinued)", targets["auth_targets"]["provider_discontinued_targets"])
+            self.assertNotIn("Qwen OAuth (discontinued)", targets["auth_targets"]["operator_login_required_targets"])
             self.assertEqual(target_rows["GitHub Copilot"]["status"], "oauth_device_flow_available")
             self.assertEqual(target_rows["DeepSeek"]["status"], "api_key_ready")
             self.assertNotIn("sk-deepseek-test", json.dumps(deepseek_login, sort_keys=True))
@@ -2934,6 +3874,11 @@ class CliTests(unittest.TestCase):
         self.assertIn("qwen-oauth", choices)
         self.assertNotIn("ollama", choices)
         self.assertNotIn("lmstudio", choices)
+
+        tui_web_docs = (Path(__file__).resolve().parents[1] / "docs" / "tui-web.md").read_text(encoding="utf-8")
+        self.assertIn("models auth login qwen subscription --run-external", tui_web_docs)
+        self.assertIn("models auth login qwen subscription --verify-external", tui_web_docs)
+        self.assertNotIn("models auth login qwen oauth --run-external", tui_web_docs)
 
     def test_hooks_cli_registers_lists_and_runs_governed_hook(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2967,6 +3912,132 @@ class CliTests(unittest.TestCase):
             self.assertEqual(listed["hooks"][0]["id"], "cli_notify")
             self.assertEqual(ran["ran_count"], 1)
             self.assertIn("hello", ran["results"][0]["stdout"])
+
+    def test_processes_cli_controls_governed_background_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            parser = build_parser()
+            process_id = ""
+
+            listed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "processes", "--workspace", str(workspace), "list"]))
+            gated = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "bashes",
+                        "--workspace",
+                        str(workspace),
+                        "start",
+                        "--",
+                        "python3",
+                        "-c",
+                        "print('blocked')",
+                    ]
+                )
+            )
+            started = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "processes",
+                        "--workspace",
+                        str(workspace),
+                        "start",
+                        "--approved",
+                        "--label",
+                        "CLI process",
+                        "--",
+                        "python3",
+                        "-c",
+                        "import time; print('cli process', flush=True); time.sleep(30)",
+                    ]
+                )
+            )
+            process_id = started["process"]["id"]
+            pty_process_id = ""
+            try:
+                logs = dispatch(parser.parse_args(["--data-dir", str(data_dir), "process", "--workspace", str(workspace), "logs", process_id]))
+                stopped = dispatch(parser.parse_args(["--data-dir", str(data_dir), "processes", "--workspace", str(workspace), "stop", process_id]))
+
+                self.assertEqual(listed["status"], "process_registry_ready")
+                self.assertEqual(gated["status"], "approval_required")
+                self.assertTrue(started["ok"])
+                self.assertFalse(started["process"]["raw_command_included"])
+                self.assertIn("private_redacted_logs", started["processes"]["implemented_controls"])
+                self.assertTrue(logs["ok"])
+                self.assertNotIn("time.sleep(30)", json.dumps(started, sort_keys=True))
+                self.assertTrue(stopped["ok"])
+                self.assertEqual(stopped["receipt"]["receipt_schema"], "aegis.process.v1")
+
+                if os.name == "posix":
+                    pty_started = dispatch(
+                        parser.parse_args(
+                            [
+                                "--data-dir",
+                                str(data_dir),
+                                "processes",
+                                "--workspace",
+                                str(workspace),
+                                "start",
+                                "--approved",
+                                "--pty",
+                                "--rows",
+                                "18",
+                                "--cols",
+                                "70",
+                                "--",
+                                "python3",
+                                "-c",
+                                "import sys, time; line=sys.stdin.readline().strip(); print('cli-pty:' + line, flush=True); time.sleep(30)",
+                            ]
+                        )
+                    )
+                    pty_process_id = pty_started["process"]["id"]
+                    resized = dispatch(
+                        parser.parse_args(
+                            [
+                                "--data-dir",
+                                str(data_dir),
+                                "processes",
+                                "--workspace",
+                                str(workspace),
+                                "resize",
+                                pty_process_id,
+                                "--rows",
+                                "30",
+                                "--cols",
+                                "120",
+                            ]
+                        )
+                    )
+                    sent = dispatch(parser.parse_args(["--data-dir", str(data_dir), "process", "--workspace", str(workspace), "input", pty_process_id, "from-cli"]))
+                    pty_logs = {}
+                    for _ in range(100):
+                        pty_logs = dispatch(parser.parse_args(["--data-dir", str(data_dir), "process", "--workspace", str(workspace), "logs", pty_process_id]))
+                        if "cli-pty:from-cli" in pty_logs["log"]:
+                            break
+                        time.sleep(0.05)
+                    self.assertTrue(pty_started["process"]["pty_attached"])
+                    self.assertEqual(resized["receipt"]["event_type"], "process.resized")
+                    self.assertEqual(sent["receipt"]["event_type"], "process.stdin_sent")
+                    self.assertNotIn("from-cli", json.dumps({"sent": sent, "resized": resized}, sort_keys=True))
+                    self.assertIn("cli-pty:from-cli", pty_logs["log"])
+            finally:
+                if pty_process_id:
+                    try:
+                        dispatch(parser.parse_args(["--data-dir", str(data_dir), "processes", "--workspace", str(workspace), "stop", pty_process_id]))
+                    except Exception:
+                        pass
+                if process_id:
+                    try:
+                        dispatch(parser.parse_args(["--data-dir", str(data_dir), "processes", "--workspace", str(workspace), "stop", process_id]))
+                    except Exception:
+                        pass
 
     def test_plugin_cli_installs_and_removes_local_plugin(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -3288,6 +4359,144 @@ class _FakeSmtp:
     def send_message(self, message) -> dict[str, object]:  # noqa: ANN001
         self.captured["body"] = message.get_content()
         return {}
+
+
+def _fake_live_chrome_snapshot(
+    *,
+    executable: str,
+    url: str,
+    output_path: Path,
+    artifact_dir: Path,
+    allowlist: tuple[str, ...],
+    width: int = 1280,
+    height: int = 900,
+) -> dict[str, object]:
+    del executable, url, artifact_dir, allowlist
+    output_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-live-render")
+    return {"ok": True, "width": width, "height": height, "exit_code": 0, "error": None}
+
+
+def _fake_live_chrome_mutation(
+    *,
+    executable: str,
+    url: str,
+    action: str,
+    selector: str | None,
+    fields: dict[str, str],
+    output_path: Path,
+    artifact_dir: Path,
+    allowlist: tuple[str, ...],
+    width: int = 1280,
+    height: int = 900,
+) -> dict[str, object]:
+    del executable, fields, artifact_dir, allowlist
+    output_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-live-mutation")
+    return {
+        "ok": True,
+        "status": "clicked" if action == "live_click" else "mutated",
+        "width": width,
+        "height": height,
+        "exit_code": 0,
+        "url_after": url,
+        "title": "Fake live mutation",
+        "action_result": {"ok": True, "status": "clicked", "selector": selector or "", "url_after": url},
+        "download_policy_applied": True,
+        "error": None,
+    }
+
+
+def _fake_live_chrome_download(
+    *,
+    executable: str,
+    url: str,
+    selector: str,
+    output_path: Path,
+    screenshot_path: Path,
+    artifact_dir: Path,
+    allowlist: tuple[str, ...],
+    width: int = 1280,
+    height: int = 900,
+) -> dict[str, object]:
+    del executable, artifact_dir, allowlist
+    download_url = f"{url.rstrip('/')}/report.pdf"
+    output_path.write_bytes(b"fake-download-bytes")
+    screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-live-download")
+    return {
+        "ok": True,
+        "status": "downloaded",
+        "width": width,
+        "height": height,
+        "exit_code": 0,
+        "url_after": url,
+        "title": "Fake live download",
+        "filename": "report.pdf",
+        "mime_type": "application/pdf",
+        "bytes": output_path.stat().st_size,
+        "download_domain": "example.com",
+        "download_url_sha256": sha256(download_url.encode("utf-8")).hexdigest(),
+        "action_result": {"ok": True, "status": "clicked_for_download", "selector": selector, "url_after": url},
+        "download_policy_applied": True,
+        "error": None,
+    }
+
+
+def _fake_live_chrome_upload(
+    *,
+    executable: str,
+    url: str,
+    selector: str,
+    source_path: Path,
+    screenshot_path: Path,
+    artifact_dir: Path,
+    allowlist: tuple[str, ...],
+    width: int = 1280,
+    height: int = 900,
+) -> dict[str, object]:
+    del executable, source_path, artifact_dir, allowlist
+    screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-live-upload")
+    return {
+        "ok": True,
+        "status": "uploaded",
+        "width": width,
+        "height": height,
+        "exit_code": 0,
+        "url_after": url,
+        "title": "Fake live upload",
+        "action_result": {"ok": True, "status": "uploaded", "selector": selector, "file_count": 1, "url_after": url},
+        "error": None,
+    }
+
+
+def _fake_live_chrome_evaluate(
+    *,
+    executable: str,
+    url: str,
+    script: str,
+    screenshot_path: Path,
+    artifact_dir: Path,
+    allowlist: tuple[str, ...],
+    width: int = 1280,
+    height: int = 900,
+) -> dict[str, object]:
+    del executable, script, artifact_dir, allowlist
+    screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-live-evaluate")
+    return {
+        "ok": True,
+        "status": "evaluated",
+        "width": width,
+        "height": height,
+        "exit_code": 0,
+        "url_after": url,
+        "title": "Fake live evaluate",
+        "evaluation_result": {
+            "ok": True,
+            "status": "evaluated",
+            "result": {"kind": "string", "value": "Fake live evaluate", "chars": 18, "truncated": False, "redacted": False},
+            "url_before": url,
+            "url_after": url,
+        },
+        "error": None,
+    }
 
 
 if __name__ == "__main__":

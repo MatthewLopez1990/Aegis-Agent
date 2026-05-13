@@ -6,6 +6,7 @@ import argparse
 import getpass
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -28,6 +29,7 @@ from aegis.models.registry import ModelRegistry, default_providers
 from aegis.personality.context import ContextFileLoader, PERSONALITY_NAMES
 from aegis.plugins.manager import PluginManager
 from aegis.product.capabilities import build_product_dashboard
+from aegis.product.setup import build_setup_readiness
 from aegis.remote_control import (
     RemoteControlPairingRegistry,
     build_remote_control_directory,
@@ -42,6 +44,7 @@ from aegis.security.secrets_broker import SecretsBroker
 from aegis.security.taint import Sensitivity, TrustClass
 from aegis.sessions.manager import SessionManager
 from aegis.skills.manifest import SkillManifest
+from aegis.skills.builder import create_skill_template as build_skill_template
 from aegis.skills.hub import SkillHubCatalog
 from aegis.skills.registry import SkillRegistry
 from aegis.skills.signing import DEFAULT_SKILL_SIGNING_KEY, ensure_signing_key, sign_manifest, verify_manifest_signature
@@ -81,6 +84,11 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     subcommands.add_parser("init", help="Create default local configuration")
+    setup = subcommands.add_parser("setup", help="Show guided local setup readiness")
+    setup.add_argument("--init", action="store_true", help="Create default local configuration before reporting setup readiness")
+    completion = subcommands.add_parser("completion", help="Emit shell completion script")
+    completion.add_argument("shell", choices=("bash", "zsh", "fish"), help="Shell completion format to emit")
+    completion.add_argument("--program", default="aegis", help="Installed command name")
     subcommands.add_parser("health", help="Show local runtime health")
     subcommands.add_parser("dashboard", help="Show product capability and security posture")
     subcommands.add_parser("capabilities", help="Show capability groups, readiness buckets, and live gaps")
@@ -326,6 +334,18 @@ def build_parser() -> argparse.ArgumentParser:
     skill_create.add_argument("--name", required=True)
     skill_create.add_argument("--description", required=True)
     skill_create.add_argument("--output", help="Optional path to write the manifest JSON")
+    skill_draft = skill_sub.add_parser("draft", help="Draft a private reviewed skill candidate")
+    skill_draft.add_argument("skill_id")
+    skill_draft.add_argument("--name", required=True)
+    skill_draft.add_argument("--description", required=True)
+    skill_draft.add_argument("--observed-task", default="")
+    skill_draft.add_argument("--actor", default="local-user")
+    skill_verify_draft = skill_sub.add_parser("verify-draft", help="Verify a private skill draft candidate")
+    skill_verify_draft.add_argument("candidate_id")
+    skill_install_draft = skill_sub.add_parser("install-draft", help="Install a verified skill draft as disabled")
+    skill_install_draft.add_argument("candidate_id")
+    skill_install_draft.add_argument("--approved", action="store_true")
+    skill_install_draft.add_argument("--actor", default="local-user")
     skill_register = skill_sub.add_parser("register", help="Register a skill manifest JSON file")
     skill_register.add_argument("manifest_path")
     skill_register.add_argument("--enable", action="store_true")
@@ -412,6 +432,15 @@ def build_parser() -> argparse.ArgumentParser:
     channel_sub.add_parser("status", help="Show channel health")
     channel_events = channel_sub.add_parser("events", help="List recent channel events")
     channel_events.add_argument("--limit", type=int, default=20)
+    channel_activation_packet = channel_sub.add_parser("activation-packet", help="Create a live channel activation packet")
+    channel_activation_packet.add_argument("--actor", default="operator")
+    channel_verify_activation_packet = channel_sub.add_parser("verify-activation-packet", help="Verify a private live channel activation packet")
+    channel_verify_activation_packet.add_argument("packet")
+    channel_verify_activation_packet.add_argument("--actor", default="operator")
+    channel_activate_packet = channel_sub.add_parser("activate-packet", help="Approve a verified live channel activation packet without sending a probe")
+    channel_activate_packet.add_argument("packet")
+    channel_activate_packet.add_argument("--actor", default="operator")
+    channel_activate_packet.add_argument("--approved", action="store_true", help="Approve recording the live channel activation receipt")
     channel_receive = channel_sub.add_parser("receive", help="Normalize an inbound channel message")
     channel_receive.add_argument("channel")
     channel_receive.add_argument("text")
@@ -430,15 +459,18 @@ def build_parser() -> argparse.ArgumentParser:
     channel_send_webhook.add_argument("text")
     channel_send_webhook.add_argument("--session-id")
     channel_send_webhook.add_argument("--approved", action="store_true")
+    channel_send_webhook.add_argument("--approval-id")
     channel_send_email = channel_sub.add_parser("send-email", help="Send a live outbound email after approval")
     channel_send_email.add_argument("subject")
     channel_send_email.add_argument("text")
     channel_send_email.add_argument("--session-id")
     channel_send_email.add_argument("--approved", action="store_true")
+    channel_send_email.add_argument("--approval-id")
     channel_send_chat_webhook = channel_sub.add_parser("send-chat-webhook", help="Send a live outbound chat webhook after approval")
     channel_send_chat_webhook.add_argument("text")
     channel_send_chat_webhook.add_argument("--session-id")
     channel_send_chat_webhook.add_argument("--approved", action="store_true")
+    channel_send_chat_webhook.add_argument("--approval-id")
 
     remote_control = subcommands.add_parser(
         "remote-control",
@@ -454,7 +486,7 @@ def build_parser() -> argparse.ArgumentParser:
     remote_control_pair.add_argument("--task-id", help="Optional task scope")
     remote_control_pair.add_argument(
         "--allowed-actions",
-        default="status,events,pause,cancel",
+        default="status,events,resume,pause,cancel",
         help="Comma-separated task actions",
     )
     remote_control_pair.add_argument(
@@ -616,6 +648,38 @@ def build_parser() -> argparse.ArgumentParser:
     browser_verify_activation_packet = browser_sub.add_parser("verify-activation-packet", help="Verify a private live browser activation packet")
     browser_verify_activation_packet.add_argument("packet")
     browser_verify_activation_packet.add_argument("--actor", default="operator")
+    browser_live_navigate = browser_sub.add_parser("live-navigate", help="Run an approved read-only live Chromium navigation snapshot")
+    browser_live_navigate.add_argument("url")
+    browser_live_navigate.add_argument("--session-id")
+    browser_live_navigate.add_argument("--approved", action="store_true")
+    browser_live_screenshot = browser_sub.add_parser("live-screenshot", help="Run an approved read-only live Chromium screenshot for a session")
+    browser_live_screenshot.add_argument("session_id")
+    browser_live_screenshot.add_argument("--approved", action="store_true")
+    browser_live_click = browser_sub.add_parser("live-click", help="Run an approved live Chromium selector click")
+    browser_live_click.add_argument("session_id")
+    browser_live_click.add_argument("selector")
+    browser_live_click.add_argument("--approved", action="store_true")
+    browser_live_fill = browser_sub.add_parser("live-fill", help="Run an approved live Chromium selector fill from a JSON object")
+    browser_live_fill.add_argument("session_id")
+    browser_live_fill.add_argument("fields")
+    browser_live_fill.add_argument("--approved", action="store_true")
+    browser_live_submit = browser_sub.add_parser("live-submit", help="Run an approved live Chromium form submit")
+    browser_live_submit.add_argument("session_id")
+    browser_live_submit.add_argument("selector", nargs="?")
+    browser_live_submit.add_argument("--approved", action="store_true")
+    browser_live_download = browser_sub.add_parser("live-download", help="Run an approved live Chromium selector download")
+    browser_live_download.add_argument("session_id")
+    browser_live_download.add_argument("selector")
+    browser_live_download.add_argument("--approved", action="store_true")
+    browser_live_upload = browser_sub.add_parser("live-upload", help="Run an approved live Chromium file input upload")
+    browser_live_upload.add_argument("session_id")
+    browser_live_upload.add_argument("selector")
+    browser_live_upload.add_argument("file_path")
+    browser_live_upload.add_argument("--approved", action="store_true")
+    browser_live_evaluate = browser_sub.add_parser("live-evaluate", help="Run approved live Chromium JavaScript evaluation")
+    browser_live_evaluate.add_argument("session_id")
+    browser_live_evaluate.add_argument("script")
+    browser_live_evaluate.add_argument("--approved", action="store_true")
 
     evaluation = subcommands.add_parser("evaluation", help="Review local evaluation reports")
     evaluation_sub = evaluation.add_subparsers(dest="evaluation_command", required=True)
@@ -651,6 +715,18 @@ def build_parser() -> argparse.ArgumentParser:
     schedule_create.add_argument("task_request")
     schedule_create.add_argument("--natural-language", default="")
     schedule_create.add_argument("--channel", default="terminal")
+    schedule_create.add_argument("--context-from", action="append", default=[])
+    schedule_create.add_argument("--deliver-to", action="append", default=[])
+    schedule_script = schedule_sub.add_parser("script", aliases=("no-agent",), help="Create a paused no-agent script schedule backed by a governed hook")
+    schedule_script.add_argument("name")
+    schedule_script.add_argument("cron")
+    schedule_script.add_argument("--channel", default="terminal")
+    schedule_script.add_argument("--context-from", action="append", default=[])
+    schedule_script.add_argument("--deliver-to", action="append", default=[])
+    schedule_script.add_argument("--hook-id")
+    schedule_script.add_argument("--timeout", type=int, default=10)
+    schedule_script.add_argument("--max-output-bytes", type=int, default=4096)
+    schedule_script.add_argument("argv", nargs=argparse.REMAINDER)
     schedule_digest = schedule_sub.add_parser("memory-review-digest", help="Create a paused schedule that renders memory review digests")
     schedule_digest.add_argument("name")
     schedule_digest.add_argument("cron")
@@ -714,12 +790,31 @@ def build_parser() -> argparse.ArgumentParser:
     agents_autonomy_preflight = agents_sub.add_parser("autonomy-preflight", help="Show blockers before autonomous recursive subagent runtime can run")
     agents_autonomy_preflight.add_argument("--actor", default="operator")
     agents_autonomy_preflight.add_argument("--limit", type=int, default=20)
+    agents_autonomy_step = agents_sub.add_parser("autonomy-step", help="Create an approved sanitized per-step autonomy plan without executing recursion")
+    agents_autonomy_step.add_argument("card_id")
+    agents_autonomy_step.add_argument("--approved", action="store_true")
+    agents_autonomy_step.add_argument("--actor", default="operator")
+    agents_autonomy_step.add_argument("--max-steps", type=int, default=1)
+    agents_autonomy_step.add_argument("--limit", type=int, default=20)
+    agents_autonomy_run = agents_sub.add_parser("autonomy-run", help="Run an approved isolated autonomy loop rehearsal without model or tool execution")
+    agents_autonomy_run.add_argument("card_id")
+    agents_autonomy_run.add_argument("--approved", action="store_true")
+    agents_autonomy_run.add_argument("--actor", default="operator")
+    agents_autonomy_run.add_argument("--max-steps", type=int, default=1)
+    agents_autonomy_run.add_argument("--limit", type=int, default=20)
     agents_delegate = agents_sub.add_parser("delegate", help="Queue a subagent delegation card through the governed tool path")
     agents_delegate.add_argument("role")
     agents_delegate.add_argument("task")
     agents_delegate.add_argument("--approved", action="store_true")
     agents_delegate.add_argument("--task-id")
     agents_delegate.add_argument("--limit", type=int, default=20)
+    agents_delegate_child = agents_sub.add_parser("delegate-child", help="Queue an approved child subagent card from a parent subagent budget")
+    agents_delegate_child.add_argument("parent_card_id")
+    agents_delegate_child.add_argument("role")
+    agents_delegate_child.add_argument("task")
+    agents_delegate_child.add_argument("--approved", action="store_true")
+    agents_delegate_child.add_argument("--actor", default="operator")
+    agents_delegate_child.add_argument("--limit", type=int, default=20)
     agents_handoff = agents_sub.add_parser("handoff", help="Record an operator handoff by moving a subagent delegation card")
     agents_handoff.add_argument("card_id")
     agents_handoff.add_argument("lane", choices=("backlog", "ready", "in_progress", "review", "blocked", "done"))
@@ -739,6 +834,12 @@ def build_parser() -> argparse.ArgumentParser:
     agents_verify_packet.add_argument("packet")
     agents_verify_packet.add_argument("--actor", default="operator")
     agents_verify_packet.add_argument("--limit", type=int, default=20)
+    agents_model_review = agents_sub.add_parser("model-review", help="Run an approved model review over a sanitized subagent review packet")
+    agents_model_review.add_argument("card_id")
+    agents_model_review.add_argument("--approved", action="store_true")
+    agents_model_review.add_argument("--actor", default="operator")
+    agents_model_review.add_argument("--session-id")
+    agents_model_review.add_argument("--limit", type=int, default=20)
     agents_run_batch = agents_sub.add_parser("run-batch", help="Run approved isolated subagent workers for ready/in-progress cards")
     agents_run_batch.add_argument("--card-id", action="append", default=[])
     agents_run_batch.add_argument("--approved", action="store_true")
@@ -764,6 +865,36 @@ def build_parser() -> argparse.ArgumentParser:
     agents_profile_disable.add_argument("--actor", default="operator")
     agents_profile_disable.add_argument("--limit", type=int, default=20)
 
+    processes = subcommands.add_parser("processes", aliases=("process", "bashes"), help="Manage governed local background processes")
+    processes.add_argument("--workspace", default=".")
+    processes_sub = processes.add_subparsers(dest="processes_command", required=True)
+    processes_list = processes_sub.add_parser("list", help="List governed background processes")
+    processes_list.add_argument("--limit", type=int, default=20)
+    processes_start = processes_sub.add_parser("start", help="Start an approval-gated argv-only background process")
+    processes_start.add_argument("--approved", action="store_true")
+    processes_start.add_argument("--actor", default="operator")
+    processes_start.add_argument("--label", default="")
+    processes_start.add_argument("--pty", action="store_true", help="Attach a governed pseudo-terminal for stdin and resize controls")
+    processes_start.add_argument("--rows", type=int, default=24)
+    processes_start.add_argument("--cols", type=int, default=80)
+    processes_start.add_argument("argv", nargs=argparse.REMAINDER)
+    processes_input = processes_sub.add_parser("input", help="Send redacted stdin to a PTY-backed process")
+    processes_input.add_argument("process_id")
+    processes_input.add_argument("text")
+    processes_input.add_argument("--no-newline", action="store_true")
+    processes_input.add_argument("--actor", default="operator")
+    processes_resize = processes_sub.add_parser("resize", help="Record a terminal resize event for a PTY-backed process")
+    processes_resize.add_argument("process_id")
+    processes_resize.add_argument("--rows", type=int, required=True)
+    processes_resize.add_argument("--cols", type=int, required=True)
+    processes_resize.add_argument("--actor", default="operator")
+    processes_stop = processes_sub.add_parser("stop", help="Request a running background process to stop")
+    processes_stop.add_argument("process_id")
+    processes_stop.add_argument("--actor", default="operator")
+    processes_logs = processes_sub.add_parser("logs", help="Read a redacted tail of private process logs")
+    processes_logs.add_argument("process_id")
+    processes_logs.add_argument("--max-bytes", type=int, default=4096)
+
     mcp = subcommands.add_parser("mcp", help="Manage governed MCP server registrations")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
     mcp_register = mcp_sub.add_parser("register", help="Register an MCP server disabled by default")
@@ -788,6 +919,12 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_auth_token = mcp_auth_sub.add_parser("token", help="Attach a brokered bearer-token secret to a Streamable HTTP MCP server")
     mcp_auth_token.add_argument("server")
     mcp_auth_token.add_argument("token_secret")
+    mcp_auth_oauth = mcp_auth_sub.add_parser("oauth", help="Attach OAuth protected-resource metadata and an optional brokered bearer secret to Streamable HTTP MCP")
+    mcp_auth_oauth.add_argument("server")
+    mcp_auth_oauth.add_argument("--resource-metadata")
+    mcp_auth_oauth.add_argument("--authorization-server")
+    mcp_auth_oauth.add_argument("--token-secret")
+    mcp_auth_oauth.add_argument("--scope", action="append", default=[])
     mcp_sub.add_parser("list", help="List MCP servers")
 
     hooks = subcommands.add_parser("hooks", help="Manage governed local lifecycle hooks")
@@ -810,8 +947,9 @@ def build_parser() -> argparse.ArgumentParser:
     personality = subcommands.add_parser("personality", help="Inspect built-in personalities and context files")
     personality_sub = personality.add_subparsers(dest="personality_command", required=True)
     personality_sub.add_parser("list", help="List built-in personalities")
-    personality_load = personality_sub.add_parser("context", help="Load SOUL/AGENTS/TOOLS context files safely")
+    personality_load = personality_sub.add_parser("context", help="Load governed project context files safely")
     personality_load.add_argument("--workspace", default=".")
+    personality_load.add_argument("--path", help="Optional workspace-relative target path for progressive context loading")
 
     migrate = subcommands.add_parser("migrate", help="Dry-run migration inspections")
     migrate_sub = migrate.add_subparsers(dest="migrate_command", required=True)
@@ -998,14 +1136,200 @@ def _live_connector_flag_status(config: Any) -> list[dict[str, Any]]:
     ]
 
 
+def build_completion_script(shell: str, *, program: str = "aegis") -> str:
+    """Build a dependency-free shell completion script from the argparse tree."""
+    catalog = _completion_catalog(build_parser())
+    if shell == "bash":
+        return _bash_completion_script(catalog, program=program)
+    if shell == "zsh":
+        return _zsh_completion_script(catalog, program=program)
+    if shell == "fish":
+        return _fish_completion_script(catalog, program=program)
+    raise ValueError(f"unsupported shell: {shell}")
+
+
+def _completion_catalog(parser: argparse.ArgumentParser) -> dict[str, dict[str, Any]]:
+    root_choices = _subparser_choices(parser)
+    catalog: dict[str, dict[str, Any]] = {}
+    catalog["__root__"] = {
+        "commands": tuple(sorted(root_choices)),
+        "options": tuple(sorted(_parser_options(parser))),
+        "help": "Aegis Agent local-first runtime",
+    }
+    for command, subparser in sorted(root_choices.items()):
+        subcommands = tuple(sorted({*_subparser_choices(subparser), *_parser_positional_choices(subparser)}))
+        catalog[command] = {
+            "commands": subcommands,
+            "options": tuple(sorted(_parser_options(subparser))),
+            "help": subparser.description or subparser.get_default("help") or "",
+        }
+    return catalog
+
+
+def _subparser_choices(parser: argparse.ArgumentParser) -> dict[str, argparse.ArgumentParser]:
+    for action in parser._actions:  # noqa: SLF001 - argparse exposes no public subparser catalog.
+        if isinstance(action, argparse._SubParsersAction):  # type: ignore[attr-defined]
+            return {name: choice for name, choice in action.choices.items() if isinstance(choice, argparse.ArgumentParser)}
+    return {}
+
+
+def _parser_options(parser: argparse.ArgumentParser) -> tuple[str, ...]:
+    options: list[str] = []
+    for action in parser._actions:  # noqa: SLF001 - argparse exposes option strings on actions.
+        for option in action.option_strings:
+            if option in {"-h", "--help"}:
+                continue
+            options.append(option)
+    return tuple(options)
+
+
+def _cli_option_value(parts: list[str], option: str) -> str | None:
+    if option not in parts:
+        return None
+    index = parts.index(option)
+    if index + 1 >= len(parts):
+        raise ValueError(f"{option} requires a value")
+    return parts[index + 1]
+
+
+def _cli_option_values(parts: list[str], option: str) -> list[str]:
+    values: list[str] = []
+    index = 0
+    while index < len(parts):
+        if parts[index] == option:
+            if index + 1 >= len(parts):
+                raise ValueError(f"{option} requires a value")
+            values.append(parts[index + 1])
+            index += 2
+            continue
+        index += 1
+    return values
+
+
+def _parser_positional_choices(parser: argparse.ArgumentParser) -> tuple[str, ...]:
+    choices: list[str] = []
+    for action in parser._actions:  # noqa: SLF001 - argparse exposes choices on actions.
+        if action.option_strings or isinstance(action, argparse._SubParsersAction):  # type: ignore[attr-defined]
+            continue
+        if action.choices:
+            choices.extend(str(choice) for choice in action.choices)
+    return tuple(choices)
+
+
+def _bash_completion_script(catalog: dict[str, dict[str, Any]], *, program: str) -> str:
+    top_level = _completion_words((*catalog["__root__"]["options"], *catalog["__root__"]["commands"]))
+    cases = []
+    for command, info in sorted(catalog.items()):
+        if command == "__root__":
+            continue
+        candidates = _completion_words((*info["options"], *info["commands"]))
+        if candidates:
+            cases.append(f'    {command}) COMPREPLY=( $(compgen -W "{candidates}" -- "$cur") ) ;;')
+    case_block = "\n".join(cases)
+    function_name = _completion_function_name(program)
+    return "\n".join(
+        [
+            f"# bash completion for {program}",
+            f"_{function_name}() {{",
+            "  local cur command",
+            '  cur="${COMP_WORDS[COMP_CWORD]}"',
+            '  command="${COMP_WORDS[1]}"',
+            "  COMPREPLY=()",
+            "  if [[ ${COMP_CWORD} -eq 1 ]]; then",
+            f'    COMPREPLY=( $(compgen -W "{top_level}" -- "$cur") )',
+            "    return 0",
+            "  fi",
+            '  case "$command" in',
+            case_block,
+            "    *) COMPREPLY=() ;;",
+            "  esac",
+            "}",
+            f"complete -F _{function_name} {program}",
+            "",
+        ]
+    )
+
+
+def _zsh_completion_script(catalog: dict[str, dict[str, Any]], *, program: str) -> str:
+    top_level = _completion_words(catalog["__root__"]["commands"])
+    cases = []
+    for command, info in sorted(catalog.items()):
+        if command == "__root__":
+            continue
+        candidates = _completion_words((*info["options"], *info["commands"]))
+        if candidates:
+            cases.append(f"    {command}) _values '{command}' {candidates} ;;")
+    case_block = "\n".join(cases)
+    function_name = _completion_function_name(program)
+    return "\n".join(
+        [
+            f"#compdef {program}",
+            f"# zsh completion for {program}",
+            f"_{function_name}() {{",
+            "  local context state line",
+            "  _arguments '1:command:->command' '*::arg:->arg'",
+            "  case $state in",
+            f"    command) _values 'command' {top_level} ;;",
+            "    arg)",
+            "      case $words[2] in",
+            case_block,
+            "      esac",
+            "      ;;",
+            "  esac",
+            "}",
+            f"_{function_name} \"$@\"",
+            "",
+        ]
+    )
+
+
+def _fish_completion_script(catalog: dict[str, dict[str, Any]], *, program: str) -> str:
+    lines = [f"# fish completion for {program}"]
+    for option in catalog["__root__"]["options"]:
+        lines.append(f"complete -c {program} -l {option.lstrip('-')} -d 'Aegis global option'")
+    for command in catalog["__root__"]["commands"]:
+        help_text = str(catalog.get(command, {}).get("help") or "Aegis command").replace("'", "\\'")
+        lines.append(f"complete -c {program} -f -n '__fish_use_subcommand' -a {command} -d '{help_text}'")
+    for command, info in sorted(catalog.items()):
+        if command == "__root__":
+            continue
+        candidates = _completion_words((*info["options"], *info["commands"]))
+        if candidates:
+            lines.append(f"complete -c {program} -f -n '__fish_seen_subcommand_from {command}' -a '{candidates}'")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _completion_words(items: tuple[str, ...]) -> str:
+    return " ".join(item for item in items if item)
+
+
+def _completion_function_name(program: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_]", "_", program)
+
+
 def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
     config = load_config(args.data_dir)
+    if args.command == "completion":
+        print(build_completion_script(args.shell, program=args.program))
+        return None
+
     if args.command == "init":
         path = write_default_config(args.data_dir)
         store = LocalStore(config.database_path)
         audit = AuditLogger(config.audit_log_path)
         audit.append("runtime.initialized", {"config": str(path), "database": str(store.database_path)})
         return {"ok": True, "config": str(path), "database": str(store.database_path), "audit_log": str(audit.path)}
+
+    if args.command == "setup":
+        config_path = config.data_dir / "config.toml"
+        config_written = False
+        if args.init:
+            existed = config_path.exists()
+            config_path = write_default_config(args.data_dir)
+            config_written = not existed
+        orchestrator = build_orchestrator(data_dir=args.data_dir)
+        return build_setup_readiness(orchestrator, config_path=config_path, config_written=config_written)
 
     if args.command == "health":
         store = LocalStore(config.database_path)
@@ -1223,6 +1547,21 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 Path(args.output).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
                 return {"ok": True, "path": args.output, "manifest": manifest}
             return {"manifest": manifest}
+        if args.skill_command == "draft":
+            orchestrator = build_orchestrator(data_dir=config.data_dir)
+            return orchestrator.skill_curator.draft_candidate(
+                args.skill_id,
+                name=args.name,
+                description=args.description,
+                observed_task=args.observed_task,
+                actor=args.actor,
+            )
+        if args.skill_command == "verify-draft":
+            orchestrator = build_orchestrator(data_dir=config.data_dir)
+            return orchestrator.skill_curator.verify_candidate(args.candidate_id)
+        if args.skill_command == "install-draft":
+            orchestrator = build_orchestrator(data_dir=config.data_dir)
+            return orchestrator.skill_curator.install_candidate(args.candidate_id, actor=args.actor, approved=args.approved)
         if args.skill_command == "register":
             raw = json.loads(Path(args.manifest_path).read_text(encoding="utf-8"))
             manifest = registry.register(
@@ -1347,6 +1686,12 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return {"channels": registry.status()}
         if args.channel_command == "events":
             return {"events": registry.events(limit=args.limit)}
+        if args.channel_command == "activation-packet":
+            return build_orchestrator(data_dir=config.data_dir).create_channel_live_activation_packet(actor=args.actor)
+        if args.channel_command == "verify-activation-packet":
+            return build_orchestrator(data_dir=config.data_dir).verify_channel_live_activation_packet(args.packet, actor=args.actor)
+        if args.channel_command == "activate-packet":
+            return build_orchestrator(data_dir=config.data_dir).approve_channel_live_activation_packet(args.packet, actor=args.actor, approved=args.approved)
         if args.channel_command == "receive":
             registry.receive(args.channel, {"sender": args.sender, "text": args.text})
             return {"message": registry.events(limit=1)[0]}
@@ -1372,11 +1717,11 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 ),
             }
         if args.channel_command == "send-webhook":
-            return build_orchestrator(data_dir=config.data_dir).send_webhook(text=args.text, approved=args.approved, session_id=args.session_id, metadata={"source": "cli"})
+            return build_orchestrator(data_dir=config.data_dir).send_webhook(text=args.text, approved=args.approved, approval_id=args.approval_id, session_id=args.session_id, metadata={"source": "cli"})
         if args.channel_command == "send-email":
-            return build_orchestrator(data_dir=config.data_dir).send_email(subject=args.subject, text=args.text, approved=args.approved, session_id=args.session_id, metadata={"source": "cli"})
+            return build_orchestrator(data_dir=config.data_dir).send_email(subject=args.subject, text=args.text, approved=args.approved, approval_id=args.approval_id, session_id=args.session_id, metadata={"source": "cli"})
         if args.channel_command == "send-chat-webhook":
-            return build_orchestrator(data_dir=config.data_dir).send_chat_webhook(text=args.text, approved=args.approved, session_id=args.session_id, metadata={"source": "cli"})
+            return build_orchestrator(data_dir=config.data_dir).send_chat_webhook(text=args.text, approved=args.approved, approval_id=args.approval_id, session_id=args.session_id, metadata={"source": "cli"})
 
     if args.command == "remote-control":
         registry = RemoteControlPairingRegistry(config.data_dir / "remote_control_pairings.json")
@@ -1972,6 +2317,25 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return orchestrator.browser.create_live_activation_packet(actor=args.actor)
         if args.browser_command == "verify-activation-packet":
             return orchestrator.browser.verify_live_activation_packet(args.packet, actor=args.actor)
+        if args.browser_command == "live-navigate":
+            return orchestrator.browser.live_navigate(session_id=args.session_id, url=args.url, approved=args.approved)
+        if args.browser_command == "live-screenshot":
+            return orchestrator.browser.live_screenshot(session_id=args.session_id, approved=args.approved)
+        if args.browser_command == "live-click":
+            return orchestrator.browser.live_click(session_id=args.session_id, selector=args.selector, approved=args.approved)
+        if args.browser_command == "live-fill":
+            fields = json.loads(args.fields)
+            if not isinstance(fields, dict):
+                raise ValueError("browser live-fill fields must be a JSON object")
+            return orchestrator.browser.live_fill(session_id=args.session_id, fields=fields, approved=args.approved)
+        if args.browser_command == "live-submit":
+            return orchestrator.browser.live_submit(session_id=args.session_id, selector=args.selector, approved=args.approved)
+        if args.browser_command == "live-download":
+            return orchestrator.browser.live_download(session_id=args.session_id, selector=args.selector, approved=args.approved)
+        if args.browser_command == "live-upload":
+            return orchestrator.browser.live_upload(session_id=args.session_id, selector=args.selector, file_path=args.file_path, approved=args.approved)
+        if args.browser_command == "live-evaluate":
+            return orchestrator.browser.live_evaluate(session_id=args.session_id, script=args.script, approved=args.approved)
 
     if args.command == "evaluation":
         harness = ResearchHarness(data_dir=config.data_dir)
@@ -2012,6 +2376,29 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 cron=args.cron,
                 task_request=args.task_request,
                 channel=args.channel,
+                context_from=tuple(args.context_from),
+                delivery_targets=tuple(args.deliver_to),
+            )
+        if args.schedule_command in {"script", "no-agent"}:
+            raw_argv = list(args.argv)
+            option_parts: list[str] = []
+            if "--" in raw_argv:
+                separator = raw_argv.index("--")
+                option_parts = raw_argv[:separator]
+                command = raw_argv[separator + 1 :]
+            else:
+                command = raw_argv
+            orchestrator = build_orchestrator(data_dir=args.data_dir)
+            return orchestrator.create_script_schedule(
+                name=args.name,
+                cron=args.cron,
+                command=command,
+                channel=_cli_option_value(option_parts, "--channel") or args.channel,
+                hook_id=_cli_option_value(option_parts, "--hook-id") or args.hook_id,
+                context_from=tuple([*args.context_from, *_cli_option_values(option_parts, "--context-from")]),
+                delivery_targets=tuple([*args.deliver_to, *_cli_option_values(option_parts, "--deliver-to")]),
+                timeout_seconds=int(_cli_option_value(option_parts, "--timeout") or args.timeout),
+                max_output_bytes=int(_cli_option_value(option_parts, "--max-output-bytes") or args.max_output_bytes),
             )
         if args.schedule_command == "memory-review-digest":
             return manager.create_memory_review_digest_schedule(
@@ -2083,12 +2470,37 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return orchestrator.kanban.subagent_status(limit=args.limit)
         if args.agents_command == "autonomy-preflight":
             return orchestrator.kanban.subagent_autonomy_preflight(actor=args.actor, limit=args.limit)
+        if args.agents_command == "autonomy-step":
+            result = orchestrator.kanban.plan_subagent_autonomy_step(
+                args.card_id,
+                actor=args.actor,
+                approved=args.approved,
+                max_steps=args.max_steps,
+            )
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit, include_previews=False)}
+        if args.agents_command == "autonomy-run":
+            result = orchestrator.kanban.run_subagent_autonomy_loop(
+                args.card_id,
+                actor=args.actor,
+                approved=args.approved,
+                max_steps=args.max_steps,
+            )
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit, include_previews=False)}
         if args.agents_command == "delegate":
             result = orchestrator.tools.execute(
                 "subagent_delegate",
                 {"role": args.role, "task": args.task},
                 approved=args.approved,
                 task_id=args.task_id,
+            )
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
+        if args.agents_command == "delegate-child":
+            result = orchestrator.kanban.delegate_subagent_child(
+                args.parent_card_id,
+                role=args.role,
+                task=args.task,
+                actor=args.actor,
+                approved=args.approved,
             )
             return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
         if args.agents_command == "handoff":
@@ -2102,6 +2514,14 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit, include_previews=False)}
         if args.agents_command == "verify-packet":
             result = orchestrator.kanban.verify_subagent_review_packet(args.packet, actor=args.actor)
+            return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit, include_previews=False)}
+        if args.agents_command == "model-review":
+            result = orchestrator.model_review_subagent(
+                args.card_id,
+                actor=args.actor,
+                approved=args.approved,
+                session_id=args.session_id,
+            )
             return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit, include_previews=False)}
         if args.agents_command == "run-batch":
             result = orchestrator.kanban.run_subagent_batch(
@@ -2130,6 +2550,21 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
         if args.agents_command == "profile-disable":
             result = orchestrator.kanban.disable_subagent_profile(args.profile_id, actor=args.actor)
             return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
+
+    if args.command in {"processes", "process", "bashes"}:
+        orchestrator = build_orchestrator(data_dir=args.data_dir, workspace=args.workspace)
+        if args.processes_command == "list":
+            return orchestrator.processes.status(limit=args.limit)
+        if args.processes_command == "start":
+            return orchestrator.processes.start(args.argv, approved=args.approved, actor=args.actor, label=args.label, pty=args.pty, rows=args.rows, cols=args.cols)
+        if args.processes_command == "input":
+            return orchestrator.processes.send_input(args.process_id, args.text, append_newline=not args.no_newline, actor=args.actor)
+        if args.processes_command == "resize":
+            return orchestrator.processes.resize(args.process_id, rows=args.rows, cols=args.cols, actor=args.actor)
+        if args.processes_command == "stop":
+            return orchestrator.processes.stop(args.process_id, actor=args.actor)
+        if args.processes_command == "logs":
+            return orchestrator.processes.logs(args.process_id, max_bytes=args.max_bytes)
 
     if args.command == "mcp":
         registry = _mcp_registry(config)
@@ -2164,6 +2599,15 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
         if args.mcp_command == "auth":
             if args.mcp_auth_command == "token":
                 return registry.configure_auth_token(args.server, token_secret=args.token_secret)
+            if args.mcp_auth_command == "oauth":
+                return registry.configure_oauth_authorization(
+                    args.server,
+                    resource_metadata_url=args.resource_metadata,
+                    authorization_server=args.authorization_server,
+                    token_secret=args.token_secret,
+                    scopes=tuple(args.scope),
+                    network_allowlist=config.network_allowlist,
+                )
         if args.mcp_command == "call":
             orchestrator = build_orchestrator(data_dir=args.data_dir)
             return orchestrator.tools.execute(
@@ -2197,7 +2641,7 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return {"personalities": list(PERSONALITY_NAMES)}
         if args.personality_command == "context":
             loader = ContextFileLoader(args.workspace)
-            return {"items": [item.to_dict() for item in loader.load()]}
+            return {"manifest": loader.manifest(args.path), "items": [item.to_dict() for item in loader.load(args.path)]}
 
     if args.command == "migrate":
         if args.migrate_command == "openclaw":
@@ -2656,29 +3100,7 @@ def _comma_separated(value: str) -> list[str]:
 
 
 def create_skill_template(skill_id: str, *, name: str, description: str) -> dict[str, Any]:
-    return {
-        "id": skill_id,
-        "name": name,
-        "description": description,
-        "version": "0.1.0",
-        "author": "local-user",
-        "source": "cli-generated",
-        "permissions": {},
-        "connectors": [],
-        "secrets": [],
-        "network": {},
-        "filesystem": {},
-        "commands": [],
-        "input_schema": {"type": "object"},
-        "output_schema": {"type": "object"},
-        "risk_level": "medium",
-        "approval_required": True,
-        "sandbox_profile": "no_tools",
-        "tests": [],
-        "evals": [],
-        "rollback": "Disable or delete the skill.",
-        "changelog": ["Created disabled template."],
-    }
+    return build_skill_template(skill_id, name=name, description=description)
 
 
 if __name__ == "__main__":

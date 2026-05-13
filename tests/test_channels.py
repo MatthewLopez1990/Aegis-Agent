@@ -66,15 +66,20 @@ class ChannelWebhookTests(unittest.TestCase):
             webhook_module._private_network_error = lambda hostname: None
             webhook_module._open_without_redirects = lambda request, *, timeout: _FakeWebhookResponse(request, captured)
             try:
-                pending = orchestrator.send_webhook(text="token=abc123", approved=False)
-                delivered = orchestrator.send_webhook(text="token=abc123", approved=True, session_id="session-1")
+                pending = orchestrator.send_webhook(text="token=abc123", session_id="session-1")
+                orchestrator.approvals.approve(pending["approval_id"], reason="send reviewed")
+                delivered = orchestrator.send_webhook(text="token=abc123", approval_id=pending["approval_id"], session_id="session-1")
             finally:
                 webhook_module._open_without_redirects = original_open
                 webhook_module._private_network_error = original_private_check
 
             event = orchestrator.channels.events(limit=1)[0]
             self.assertEqual(pending["status"], "approval_required")
+            self.assertEqual(pending["approval"]["payload"]["receipt_schema"], "aegis.channel.send_approval.v1")
+            self.assertFalse(pending["approval"]["payload"]["raw_channel_content_included"])
             self.assertEqual(delivered["status"], "delivered")
+            self.assertEqual(delivered["approval_id"], pending["approval_id"])
+            self.assertIn("rate_limit", delivered)
             self.assertEqual(delivered["http_status"], 202)
             self.assertTrue(captured["signature"].startswith("sha256="))
             self.assertEqual(captured["delivery"], delivered["delivery_id"])
@@ -83,8 +88,16 @@ class ChannelWebhookTests(unittest.TestCase):
             self.assertEqual(event["channel"], "webhook")
             self.assertEqual(event["status"], "delivered")
             self.assertEqual(event["payload"]["delivery_id"], delivered["delivery_id"])
+            self.assertEqual(event["payload"]["approval_id"], pending["approval_id"])
+            self.assertEqual(event["payload"]["approval_binding_sha256"], pending["binding_sha256"])
             self.assertNotIn("shared-secret", json.dumps(event, sort_keys=True))
             self.assertNotIn("abc123", json.dumps(event, sort_keys=True))
+            with self.assertRaises(PermissionError):
+                orchestrator.send_webhook(text="token=abc123", approval_id=pending["approval_id"], session_id="session-1")
+            mismatch = orchestrator.send_webhook(text="first approved payload", session_id="session-1")
+            orchestrator.approvals.approve(mismatch["approval_id"], reason="send reviewed")
+            with self.assertRaises(PermissionError):
+                orchestrator.send_webhook(text="different payload", approval_id=mismatch["approval_id"], session_id="session-1")
 
     def test_smtp_email_outbound_requires_approval_and_uses_brokered_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -96,15 +109,18 @@ class ChannelWebhookTests(unittest.TestCase):
             email_module._private_network_error = lambda hostname: None
             email_module.smtplib.SMTP = lambda host, port, timeout: _FakeSmtp(host, port, timeout, captured)  # type: ignore[assignment]
             try:
-                pending = orchestrator.send_email(subject="Review", text="token=abc123", approved=False)
-                delivered = orchestrator.send_email(subject="Review", text="token=abc123", approved=True, session_id="session-1")
+                pending = orchestrator.send_email(subject="Review", text="token=abc123", session_id="session-1")
+                orchestrator.approvals.approve(pending["approval_id"], reason="send reviewed")
+                delivered = orchestrator.send_email(subject="Review", text="token=abc123", approval_id=pending["approval_id"], session_id="session-1")
             finally:
                 email_module.smtplib.SMTP = original_smtp  # type: ignore[assignment]
                 email_module._private_network_error = original_private_check
 
             event = orchestrator.channels.events(limit=1)[0]
             self.assertEqual(pending["status"], "approval_required")
+            self.assertEqual(pending["approval"]["payload"]["channel"], "email")
             self.assertEqual(delivered["status"], "delivered")
+            self.assertEqual(delivered["approval_id"], pending["approval_id"])
             self.assertEqual(delivered["recipients"], 1)
             self.assertEqual(captured["host"], "smtp.example.com")
             self.assertEqual(captured["login"], ("smtp-user", "smtp-pass"))
@@ -127,15 +143,18 @@ class ChannelWebhookTests(unittest.TestCase):
             webhook_module._private_network_error = lambda hostname: None
             chat_webhook_module._open_without_redirects = lambda request, *, timeout: _FakeWebhookResponse(request, captured)
             try:
-                pending = orchestrator.send_chat_webhook(text="token=abc123", approved=False)
-                delivered = orchestrator.send_chat_webhook(text="token=abc123", approved=True, session_id="session-1")
+                pending = orchestrator.send_chat_webhook(text="token=abc123", session_id="session-1")
+                orchestrator.approvals.approve(pending["approval_id"], reason="send reviewed")
+                delivered = orchestrator.send_chat_webhook(text="token=abc123", approval_id=pending["approval_id"], session_id="session-1")
             finally:
                 chat_webhook_module._open_without_redirects = original_open
                 webhook_module._private_network_error = original_private_check
 
             event = orchestrator.channels.events(limit=1)[0]
             self.assertEqual(pending["status"], "approval_required")
+            self.assertEqual(pending["approval"]["payload"]["channel"], "chat_webhook")
             self.assertEqual(delivered["status"], "delivered")
+            self.assertEqual(delivered["approval_id"], pending["approval_id"])
             self.assertEqual(delivered["payload_format"], "slack")
             self.assertEqual(delivered["domain"], "hooks.example.com")
             self.assertNotIn("https://hooks.example.com", json.dumps(event, sort_keys=True))
@@ -144,6 +163,107 @@ class ChannelWebhookTests(unittest.TestCase):
             self.assertEqual(event["status"], "delivered")
             self.assertEqual(event["payload"]["delivery_id"], delivered["delivery_id"])
             self.assertNotIn("abc123", json.dumps(event, sort_keys=True))
+
+    def test_channel_outbound_rate_limit_blocks_second_approved_send(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            orchestrator = _webhook_orchestrator(root, outbound=True, rate_limit=1)
+            captured: dict[str, object] = {}
+            original_open = webhook_module._open_without_redirects
+            original_private_check = webhook_module._private_network_error
+            webhook_module._private_network_error = lambda hostname: None
+            webhook_module._open_without_redirects = lambda request, *, timeout: _FakeWebhookResponse(request, captured)
+            try:
+                first = orchestrator.send_webhook(text="first", session_id="session-1")
+                second = orchestrator.send_webhook(text="second", session_id="session-1")
+                orchestrator.approvals.approve(first["approval_id"], reason="first reviewed")
+                orchestrator.approvals.approve(second["approval_id"], reason="second reviewed")
+                delivered = orchestrator.send_webhook(text="first", approval_id=first["approval_id"], session_id="session-1")
+                limited = orchestrator.send_webhook(text="second", approval_id=second["approval_id"], session_id="session-1")
+            finally:
+                webhook_module._open_without_redirects = original_open
+                webhook_module._private_network_error = original_private_check
+
+            self.assertEqual(delivered["status"], "delivered")
+            self.assertEqual(limited["status"], "rate_limited")
+            self.assertEqual(limited["approval_id"], second["approval_id"])
+            self.assertFalse(limited["rate_limit"]["allowed"])
+
+    def test_channel_live_activation_packet_is_private_and_verifiable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            orchestrator = build_orchestrator(data_dir=root / ".aegis", workspace=root)
+
+            packet = orchestrator.create_channel_live_activation_packet(actor="channel-reviewer")
+            verified = orchestrator.verify_channel_live_activation_packet(packet["receipt"]["packet_id"], actor="channel-verifier")
+
+            self.assertTrue(packet["ok"])
+            self.assertEqual(packet["packet"]["packet_schema"], "aegis.channel.live_activation_packet.v1")
+            self.assertEqual(packet["receipt"]["receipt_schema"], "aegis.channel.live_activation_packet.v1")
+            self.assertEqual(packet["receipt"]["preflight_status"], "blocked")
+            self.assertGreaterEqual(packet["receipt"]["blocker_count"], 1)
+            self.assertFalse(packet["receipt"]["raw_secret_values_included"])
+            self.assertFalse(packet["packet"]["raw_channel_content_included"])
+            self.assertEqual({row["name"] for row in packet["packet"]["channels"]}, {"webhook", "email", "chat_webhook"})
+            self.assertTrue(Path(packet["receipt"]["artifact"]).exists())
+            self.assertTrue(verified["ok"])
+            self.assertEqual(verified["receipt"]["receipt_schema"], "aegis.channel.live_activation_packet_verification.v1")
+            self.assertTrue(verified["receipt"]["packet_integrity_ok"])
+            self.assertFalse(verified["receipt"]["raw_packet_payload_included"])
+            self.assertNotIn("AEGIS_WEBHOOK_SHARED_SECRET", json.dumps(packet, sort_keys=True))
+
+            approval_required = orchestrator.approve_channel_live_activation_packet(packet["receipt"]["packet_id"], actor="channel-approver")
+            blocked = orchestrator.approve_channel_live_activation_packet(packet["receipt"]["packet_id"], actor="channel-approver", approved=True)
+
+            self.assertEqual(approval_required["status"], "approval_required")
+            self.assertTrue(approval_required["approval_required"])
+            self.assertFalse(approval_required["send_probe_performed"])
+            self.assertFalse(blocked["ok"])
+            self.assertEqual(blocked["status"], "activation_blocked")
+            self.assertEqual(blocked["receipt"]["receipt_schema"], "aegis.channel.live_activation_approval.v1")
+            self.assertEqual(blocked["receipt"]["reason"], "preflight_not_ready")
+            self.assertFalse(blocked["receipt"]["send_probe_performed"])
+            self.assertFalse(blocked["receipt"]["raw_secret_values_included"])
+
+    def test_ready_channel_live_activation_packet_can_be_approved_without_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[security]",
+                        'network_allowlist = ["example.com"]',
+                        "[channels.chat_webhook]",
+                        "outbound_enabled = true",
+                        'url_secret = "AEGIS_CHAT_WEBHOOK_URL"',
+                        'payload_format = "slack"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+
+            packet = orchestrator.create_channel_live_activation_packet(actor="channel-reviewer")
+            verified = orchestrator.verify_channel_live_activation_packet(packet["receipt"]["packet_id"], actor="channel-verifier")
+            approved = orchestrator.approve_channel_live_activation_packet(packet["receipt"]["packet_id"], actor="channel-approver", approved=True)
+
+            self.assertEqual(packet["receipt"]["preflight_status"], "ready_for_approved_send")
+            self.assertEqual(packet["receipt"]["configured_channel_count"], 1)
+            self.assertTrue(verified["ok"])
+            self.assertTrue(approved["ok"])
+            self.assertEqual(approved["status"], "activation_approved")
+            self.assertEqual(approved["receipt"]["receipt_schema"], "aegis.channel.live_activation_approval.v1")
+            self.assertEqual(approved["receipt"]["required_next_gate"], "approved_send")
+            self.assertEqual(approved["receipt"]["reason"], "ready_for_approved_send")
+            self.assertFalse(approved["receipt"]["activation_config_written"])
+            self.assertFalse(approved["receipt"]["send_probe_performed"])
+            self.assertFalse(approved["receipt"]["model_invocation_performed"])
+            self.assertFalse(approved["receipt"]["raw_packet_payload_included"])
+            self.assertFalse(approved["receipt"]["raw_secret_values_included"])
+            self.assertFalse(approved["receipt"]["raw_channel_content_included"])
+            self.assertIn("chat_webhook", approved["receipt"]["channel_names"])
 
     def test_direct_inbound_receive_redacts_stored_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -330,7 +450,7 @@ class ChannelWebhookTests(unittest.TestCase):
             )
 
 
-def _webhook_orchestrator(root: Path, *, outbound: bool = False):
+def _webhook_orchestrator(root: Path, *, outbound: bool = False, rate_limit: int = 30):
     data_dir = root / ".aegis"
     data_dir.mkdir()
     (data_dir / "config.toml").write_text(
@@ -345,6 +465,7 @@ def _webhook_orchestrator(root: Path, *, outbound: bool = False):
                 "max_body_bytes = 1024",
                 "timestamp_tolerance_seconds = 300",
                 f"outbound_enabled = {'true' if outbound else 'false'}",
+                f"outbound_rate_limit_per_minute = {rate_limit}",
                 'outbound_url = "https://example.com/aegis-webhook"',
                 "",
             ]

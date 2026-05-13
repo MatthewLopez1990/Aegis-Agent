@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
+import hashlib
 import json
 
 from aegis.audit.logger import AuditLogger, redact
 from aegis.security.taint import now_utc
+from aegis.skills.builder import create_skill_template
+from aegis.skills.manifest import SkillManifest
 from aegis.skills.registry import SkillRegistry
-from aegis.storage.state import ensure_private_file
+from aegis.skills.static_scan import scan_skill_manifest
+from aegis.storage.state import ensure_private_dir, ensure_private_file
 
 
 PROTECTED_SKILL_SOURCES = {"built-in", "bundled", "hub"}
@@ -26,6 +31,7 @@ class SkillCurator:
     def status(self) -> dict[str, Any]:
         state = self._read_state()
         records = self._skill_records(state)
+        candidates = self._candidate_records()
         return {
             "status": "curator_status",
             "mode": "local_skill_maintenance",
@@ -34,6 +40,7 @@ class SkillCurator:
             "last_run_at": str(state["last_run_at"]),
             "skill_count": len(records),
             "managed_skill_count": sum(1 for record in records if record["managed_by_curator"]),
+            "candidate_count": len(candidates),
             "pinned": sorted(state["pinned"].keys()),
             "archived": sorted(state["archived"].keys()),
             "counts": _counts(records),
@@ -50,6 +57,7 @@ class SkillCurator:
                 key=lambda record: (record["updated_at"], record["id"]),
             )[:5],
             "skills": records,
+            "candidates": candidates[:20],
             "raw_secret_values_included": False,
             "blocked_operations": _blocked_operations(),
         }
@@ -85,6 +93,148 @@ class SkillCurator:
             "llm_review": "not_enabled_for_dependency_light_runtime",
             "raw_secret_values_included": False,
             "blocked_operations": _blocked_operations(),
+        }
+
+    def draft_candidate(
+        self,
+        skill_id: str,
+        *,
+        name: str,
+        description: str,
+        actor: str = "operator",
+        observed_task: str = "",
+    ) -> dict[str, Any]:
+        manifest = create_skill_template(skill_id, name=name, description=description, source="curator-draft")
+        if observed_task.strip():
+            manifest["changelog"] = ["Created disabled template from reviewed task observation."]
+        validated = SkillManifest.from_dict(manifest).validate()
+        static_scan = scan_skill_manifest(validated)
+        if not static_scan["ok"]:
+            self.audit_logger.append("skill.curator_draft_rejected", {"skill_id": skill_id, "scan": static_scan})
+            raise PermissionError("skill draft static scan failed")
+        candidate_id = uuid4().hex
+        created_at = now_utc()
+        payload = {
+            "candidate_schema": "aegis.skill.curator_candidate.v1",
+            "candidate_id": candidate_id,
+            "created_at": created_at,
+            "actor": _safe_actor(actor),
+            "skill_id": validated.id,
+            "manifest": validated.to_dict(),
+            "manifest_sha256": _stable_json_sha256(validated.to_dict()),
+            "observed_task_sha256": hashlib.sha256(observed_task.strip().encode("utf-8")).hexdigest() if observed_task.strip() else None,
+            "observed_task_character_count": len(observed_task.strip()),
+            "observed_task_included": False,
+            "static_scan": static_scan,
+            "status": "drafted_for_review",
+            "approved_for_install": False,
+            "raw_secret_values_included": False,
+            "blocked_operations": _blocked_operations(),
+        }
+        path = self._candidate_path(candidate_id)
+        _write_private_json(path, payload)
+        receipt = _candidate_receipt(payload, path)
+        self.audit_logger.append("skill.curator_candidate_drafted", redact(receipt))
+        return {
+            "ok": True,
+            "status": "skill_candidate_drafted",
+            "candidate_id": candidate_id,
+            "skill_id": validated.id,
+            "candidate_path": str(path),
+            "manifest_sha256": payload["manifest_sha256"],
+            "static_scan": static_scan,
+            "receipt": receipt,
+            "install_command": f"curator install-draft {candidate_id} --approved",
+            "raw_secret_values_included": False,
+        }
+
+    def verify_candidate(self, candidate_id: str) -> dict[str, Any]:
+        path = self._candidate_path(candidate_id)
+        payload = self._read_candidate(candidate_id)
+        manifest = SkillManifest.from_dict(payload.get("manifest") if isinstance(payload.get("manifest"), dict) else {}).validate()
+        expected = str(payload.get("manifest_sha256") or "")
+        actual = _stable_json_sha256(manifest.to_dict())
+        static_scan = scan_skill_manifest(manifest)
+        artifact_sha256 = hashlib.sha256(path.read_bytes()).hexdigest()
+        ok = (
+            payload.get("candidate_schema") == "aegis.skill.curator_candidate.v1"
+            and expected == actual
+            and static_scan["ok"]
+            and payload.get("observed_task_included") is False
+            and payload.get("raw_secret_values_included") is False
+        )
+        receipt = {
+            "receipt_schema": "aegis.skill.curator_candidate_verification.v1",
+            "event_type": "skill.curator_candidate_verified",
+            "candidate_id": candidate_id,
+            "skill_id": manifest.id,
+            "artifact": str(path),
+            "artifact_sha256": artifact_sha256,
+            "manifest_sha256": actual,
+            "manifest_checksum_matches": expected == actual,
+            "static_scan_ok": static_scan["ok"],
+            "candidate_integrity_ok": ok,
+            "raw_candidate_payload_included": False,
+            "raw_secret_values_included": False,
+            "verified_at": now_utc(),
+        }
+        self.audit_logger.append("skill.curator_candidate_verified", redact(receipt))
+        return {
+            "ok": ok,
+            "status": "skill_candidate_verified" if ok else "skill_candidate_verification_failed",
+            "candidate_id": candidate_id,
+            "skill_id": manifest.id,
+            "receipt": receipt,
+            "static_scan": static_scan,
+            "raw_secret_values_included": False,
+        }
+
+    def install_candidate(self, candidate_id: str, *, actor: str = "operator", approved: bool = False) -> dict[str, Any]:
+        if not approved:
+            result = {
+                "status": "approval_required",
+                "candidate_id": candidate_id,
+                "reason": "skill draft installation requires explicit approval",
+                "approval_required": True,
+                "auto_enable": False,
+                "raw_secret_values_included": False,
+            }
+            self.audit_logger.append("skill.curator_candidate_install_blocked", redact(result))
+            return result
+        verified = self.verify_candidate(candidate_id)
+        if not verified["ok"]:
+            raise ValueError("skill candidate verification failed")
+        payload = self._read_candidate(candidate_id)
+        manifest = SkillManifest.from_dict(payload.get("manifest") if isinstance(payload.get("manifest"), dict) else {}).validate()
+        registered = self.skills.register(manifest, enable=False, require_signature=False)
+        payload["status"] = "installed_disabled"
+        payload["approved_for_install"] = True
+        payload["installed_at"] = now_utc()
+        payload["installed_by"] = _safe_actor(actor)
+        _write_private_json(self._candidate_path(candidate_id), payload)
+        receipt = {
+            "receipt_schema": "aegis.skill.curator_candidate_install.v1",
+            "event_type": "skill.curator_candidate_installed",
+            "candidate_id": candidate_id,
+            "skill_id": registered.id,
+            "actor": _safe_actor(actor),
+            "installed_enabled": False,
+            "manifest_sha256": _stable_json_sha256(registered.to_dict()),
+            "verification_receipt_sha256": _stable_json_sha256(verified["receipt"]),
+            "raw_candidate_payload_included": False,
+            "raw_secret_values_included": False,
+            "installed_at": payload["installed_at"],
+        }
+        self.audit_logger.append("skill.curator_candidate_installed", redact(receipt))
+        return {
+            "ok": True,
+            "status": "skill_candidate_installed_disabled",
+            "candidate_id": candidate_id,
+            "skill_id": registered.id,
+            "receipt": receipt,
+            "enable_command": f"skills enable {registered.id}",
+            "auto_enable": False,
+            "raw_secret_values_included": False,
         }
 
     def pin(self, skill_id: str) -> dict[str, Any]:
@@ -200,6 +350,32 @@ class SkillCurator:
             )
         return sorted(records, key=lambda record: record["id"])
 
+    def _candidate_records(self) -> list[dict[str, Any]]:
+        directory = self.path.parent / "skill-candidates"
+        if not directory.exists():
+            return []
+        records: list[dict[str, Any]] = []
+        for path in sorted(directory.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict) or payload.get("candidate_schema") != "aegis.skill.curator_candidate.v1":
+                continue
+            records.append(
+                {
+                    "candidate_id": str(payload.get("candidate_id") or path.stem),
+                    "skill_id": str(payload.get("skill_id") or ""),
+                    "status": str(payload.get("status") or "unknown"),
+                    "created_at": str(payload.get("created_at") or ""),
+                    "manifest_sha256": str(payload.get("manifest_sha256") or ""),
+                    "approved_for_install": bool(payload.get("approved_for_install", False)),
+                    "observed_task_included": payload.get("observed_task_included") is True,
+                    "raw_secret_values_included": False,
+                }
+            )
+        return sorted(records, key=lambda record: (record["created_at"], record["candidate_id"]), reverse=True)
+
     def _read_state(self) -> dict[str, Any]:
         if not self.path.exists():
             return _empty_state()
@@ -223,6 +399,25 @@ class SkillCurator:
         ensure_private_file(self.path)
         self.path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         ensure_private_file(self.path)
+
+    def _candidate_dir(self) -> Path:
+        return ensure_private_dir(self.path.parent / "skill-candidates")
+
+    def _candidate_path(self, candidate_id: str) -> Path:
+        normalized = str(candidate_id or "").strip()
+        if not normalized or not all(char.isalnum() or char in {"-", "_"} for char in normalized):
+            raise ValueError("invalid skill candidate id")
+        return ensure_private_file(self._candidate_dir() / f"{normalized}.json")
+
+    def _read_candidate(self, candidate_id: str) -> dict[str, Any]:
+        path = self._candidate_path(candidate_id)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError("skill candidate must be valid JSON") from exc
+        if not isinstance(raw, dict):
+            raise ValueError("skill candidate must be a JSON object")
+        return raw
 
 
 def _empty_state() -> dict[str, Any]:
@@ -261,6 +456,41 @@ def _blocked_operations() -> list[str]:
     return [
         "unattended_skill_deletion",
         "unapproved_skill_enablement",
+        "unapproved_skill_install",
         "raw_secret_capture",
         "unbounded_llm_self_mutation",
     ]
+
+
+def _safe_actor(value: str, *, limit: int = 80) -> str:
+    normalized = " ".join(str(value or "operator").split())
+    return (normalized or "operator")[:limit]
+
+
+def _stable_json_sha256(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
+    ensure_private_file(path)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    ensure_private_file(path)
+
+
+def _candidate_receipt(payload: dict[str, Any], path: Path) -> dict[str, Any]:
+    return {
+        "receipt_schema": "aegis.skill.curator_candidate.v1",
+        "event_type": "skill.curator_candidate_drafted",
+        "candidate_id": payload["candidate_id"],
+        "skill_id": payload["skill_id"],
+        "actor": payload["actor"],
+        "artifact": str(path),
+        "artifact_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "manifest_sha256": payload["manifest_sha256"],
+        "static_scan_ok": bool(payload.get("static_scan", {}).get("ok")),
+        "observed_task_included": False,
+        "raw_candidate_payload_included": False,
+        "raw_secret_values_included": False,
+        "created_at": payload["created_at"],
+    }
