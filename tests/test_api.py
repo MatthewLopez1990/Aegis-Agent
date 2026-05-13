@@ -821,7 +821,8 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(subagent_autonomy_preflight["receipt"]["receipt_schema"], "aegis.subagent.autonomy_preflight.v1")
                 self.assertEqual(subagent_autonomy_preflight["receipt"]["actor"], "api-reviewer")
                 self.assertFalse(subagent_autonomy_preflight["receipt"]["autonomous_runtime"])
-                self.assertIn("autonomous_loop_isolation", subagent_autonomy_preflight["receipt"]["missing_controls"])
+                self.assertIn("autonomous_loop_isolation", subagent_autonomy_preflight["receipt"]["implemented_controls"])
+                self.assertIn("recursive_model_loop_executor", subagent_autonomy_preflight["receipt"]["missing_controls"])
                 subagent_profile = _json_post(
                     port,
                     "/subagents/profiles",
@@ -962,6 +963,24 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertIn("scoped_autonomy_step_plans", subagent_autonomy_step["subagents"]["implemented_controls"])
                 self.assertEqual(subagent_autonomy_step["subagents"]["cards"][0]["autonomy_status"], "step_plan_review_required")
                 self.assertNotIn("Compare provider auth gaps", json.dumps(subagent_autonomy_step, sort_keys=True))
+                subagent_autonomy_run_gated = _json_post(port, "/subagents/autonomy-run", {"card_id": subagent_replayed["card_id"]}, token=token)
+                self.assertEqual(subagent_autonomy_run_gated["status"], "approval_required")
+                self.assertFalse(subagent_autonomy_run_gated["autonomous_runtime"])
+                subagent_autonomy_run = _json_post(
+                    port,
+                    "/subagents/autonomy-run",
+                    {"card_id": subagent_replayed["card_id"], "actor": "api-planner", "approved": True, "max_steps": 2},
+                    token=token,
+                )
+                self.assertTrue(subagent_autonomy_run["ok"])
+                self.assertEqual(subagent_autonomy_run["receipt"]["receipt_schema"], "aegis.subagent.autonomy_loop.v1")
+                self.assertTrue(subagent_autonomy_run["receipt"]["autonomous_loop_isolation"])
+                self.assertTrue(subagent_autonomy_run["receipt"]["isolated_loop_process"])
+                self.assertFalse(subagent_autonomy_run["receipt"]["model_invocation_performed"])
+                self.assertFalse(subagent_autonomy_run["receipt"]["tool_execution_performed"])
+                self.assertIn("isolated_autonomy_loop_rehearsals", subagent_autonomy_run["subagents"]["implemented_controls"])
+                self.assertEqual(subagent_autonomy_run["subagents"]["cards"][0]["autonomy_status"], "loop_review_required")
+                self.assertNotIn("Compare provider auth gaps", json.dumps(subagent_autonomy_run, sort_keys=True))
                 subagent_parent_task = _json_get(port, f"/tasks/{task['id']}", token=token)
                 self.assertTrue(subagent_parent_task["checkpoint"]["subagent_review_required"])
                 self.assertIn("subagent_review_complete", {hint["action"] for hint in subagent_parent_task["action_hints"]})

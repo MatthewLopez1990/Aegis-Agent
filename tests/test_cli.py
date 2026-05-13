@@ -670,6 +670,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("model_ready_review_packets", subagent_gap["required_controls"])
             self.assertIn("sanitized_model_review_invocations", subagent_gap["required_controls"])
             self.assertIn("scoped_autonomy_step_plans", subagent_gap["required_controls"])
+            self.assertIn("autonomous_loop_isolation", subagent_gap["required_controls"])
+            self.assertIn("isolated_autonomy_loop_rehearsals", subagent_gap["required_controls"])
             self.assertIn("autonomy_preflight_receipts", subagent_gap["required_controls"])
             self.assertIn("subagent.parent_bound_review_receipt", subagent_gap["evaluation_scenarios"])
             self.assertIn("subagent.model_ready_review_packet", subagent_gap["evaluation_scenarios"])
@@ -678,15 +680,19 @@ class CliTests(unittest.TestCase):
             self.assertIn("model_ready_review_packet_sanitization", subagent_gap["verification_gates"])
             self.assertIn("sanitized_model_review_context", subagent_gap["verification_gates"])
             self.assertIn("autonomy_step_plan_receipt", subagent_gap["verification_gates"])
+            self.assertIn("isolated_autonomy_loop_receipt", subagent_gap["verification_gates"])
             self.assertIn("autonomy_preflight_receipt", subagent_gap["verification_gates"])
             self.assertIn("subagent.operator_batch_receipts", subagent_gap["evaluation_scenarios"])
             self.assertIn("subagent.autonomy_step_plan", subagent_gap["evaluation_scenarios"])
+            self.assertIn("subagent.isolated_autonomy_loop", subagent_gap["evaluation_scenarios"])
             subagent_checklist = {item["control"]: item for item in subagent_gap["operator_checklist"]}
             self.assertEqual(subagent_checklist["operator_approved_batch_runtime"]["state"], "enforced")
             self.assertEqual(subagent_checklist["parent_bound_review_receipts"]["state"], "enforced")
             self.assertEqual(subagent_checklist["model_ready_review_packets"]["state"], "enforced")
             self.assertEqual(subagent_checklist["sanitized_model_review_invocations"]["state"], "enforced")
             self.assertEqual(subagent_checklist["scoped_autonomy_step_plans"]["state"], "enforced")
+            self.assertEqual(subagent_checklist["autonomous_loop_isolation"]["state"], "enforced")
+            self.assertEqual(subagent_checklist["isolated_autonomy_loop_rehearsals"]["state"], "enforced")
             self.assertEqual(subagent_checklist["autonomy_preflight_receipts"]["state"], "enforced")
             backend_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "remote_backend_activation")
             self.assertEqual(backend_gap["status"], "backend_adapters_available_unconfigured")
@@ -1275,7 +1281,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(autonomy["receipt"]["actor"], "cli-reviewer")
             self.assertFalse(autonomy["receipt"]["autonomous_runtime"])
             self.assertFalse(autonomy["receipt"]["model_invocation_performed"])
-            self.assertIn("autonomous_loop_isolation", autonomy["receipt"]["missing_controls"])
+            self.assertIn("autonomous_loop_isolation", autonomy["receipt"]["implemented_controls"])
+            self.assertIn("recursive_model_loop_executor", autonomy["receipt"]["missing_controls"])
             self.assertIn("blocked_autonomous_runtime", autonomy["receipt"]["verification_gates"])
             self.assertNotIn("Compare provider auth gaps", json.dumps(autonomy, sort_keys=True))
 
@@ -1491,6 +1498,44 @@ class CliTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(autonomy_plan_path.stat().st_mode), 0o600)
             self.assertNotIn("Compare provider auth gaps", autonomy_plan_path.read_text(encoding="utf-8"))
             self.assertNotIn("Compare provider auth gaps", json.dumps(autonomy_step, sort_keys=True))
+            autonomy_run_gated = dispatch(parser.parse_args(["--data-dir", str(data_dir), "agents", "autonomy-run", delegated["card_id"]]))
+            self.assertEqual(autonomy_run_gated["status"], "approval_required")
+            self.assertFalse(autonomy_run_gated["autonomous_runtime"])
+            autonomy_run = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "autonomy-run",
+                        delegated["card_id"],
+                        "--approved",
+                        "--actor",
+                        "cli-planner",
+                        "--max-steps",
+                        "2",
+                    ]
+                )
+            )
+            self.assertTrue(autonomy_run["ok"])
+            self.assertEqual(autonomy_run["status"], "review_required")
+            self.assertEqual(autonomy_run["receipt"]["receipt_schema"], "aegis.subagent.autonomy_loop.v1")
+            self.assertEqual(autonomy_run["receipt"]["worker_process"], "python_isolated_subprocess")
+            self.assertTrue(autonomy_run["receipt"]["autonomous_loop_isolation"])
+            self.assertTrue(autonomy_run["receipt"]["isolated_loop_process"])
+            self.assertEqual(autonomy_run["receipt"]["required_next_gate"], "operator_review")
+            self.assertFalse(autonomy_run["receipt"]["recursive_model_loop_enabled"])
+            self.assertFalse(autonomy_run["receipt"]["model_invocation_performed"])
+            self.assertFalse(autonomy_run["receipt"]["tool_execution_performed"])
+            self.assertFalse(autonomy_run["receipt"]["raw_instruction_included"])
+            self.assertEqual(autonomy_run["receipt"]["worker_result"]["worker_schema"], "aegis.subagent.autonomy_loop_worker.v1")
+            self.assertEqual(autonomy_run["receipt"]["worker_result"]["network_access"], "disabled")
+            self.assertFalse(autonomy_run["receipt"]["worker_result"]["forbidden_raw_keys_present"])
+            self.assertIn("autonomous_loop_isolation", autonomy_run["subagents"]["implemented_controls"])
+            self.assertIn("isolated_autonomy_loop_rehearsals", autonomy_run["subagents"]["implemented_controls"])
+            self.assertEqual(autonomy_run["subagents"]["cards"][0]["autonomy_loop_runs_recorded"], 1)
+            self.assertEqual(autonomy_run["subagents"]["cards"][0]["autonomy_status"], "loop_review_required")
+            self.assertNotIn("Compare provider auth gaps", json.dumps(autonomy_run, sort_keys=True))
             task_status = dispatch(parser.parse_args(["--data-dir", str(data_dir), "task", "status", parent_task["id"]]))
             self.assertTrue(task_status["checkpoint"]["subagent_review_required"])
             self.assertIn("subagent_review_complete", {hint["action"] for hint in task_status["action_hints"]})
@@ -1501,6 +1546,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("subagent.model_review_packet_created", audit_text)
             self.assertIn("subagent.model_review_packet_verified", audit_text)
             self.assertIn("subagent.autonomy_step_plan_created", audit_text)
+            self.assertIn("subagent.autonomy_loop_completed", audit_text)
             self.assertNotIn("reviewed raw private handoff reason", audit_text)
             disabled_profile = dispatch(parser.parse_args(["--data-dir", str(data_dir), "agents", "profile-disable", "researcher"]))
             self.assertTrue(disabled_profile["ok"])

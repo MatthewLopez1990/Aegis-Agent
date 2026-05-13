@@ -48,6 +48,82 @@ result = {
 }
 print(json.dumps(result, sort_keys=True))
 """
+SUBAGENT_AUTONOMY_LOOP_WORKER_CODE = r"""
+import hashlib
+import json
+import sys
+
+FORBIDDEN_KEYS = {
+    "raw_instruction",
+    "raw_delegation_instruction",
+    "raw_worker_output",
+    "raw_worker_stdout",
+    "raw_worker_stderr",
+    "raw_worker_result_payload",
+    "raw_prompt",
+    "secret_value",
+    "access_token",
+    "refresh_token",
+}
+
+def forbidden_keys_present(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key) in FORBIDDEN_KEYS or forbidden_keys_present(item):
+                return True
+    if isinstance(value, list):
+        return any(forbidden_keys_present(item) for item in value)
+    return False
+
+payload = json.loads(sys.stdin.read() or "{}")
+plan = payload.get("plan", {}) if isinstance(payload.get("plan"), dict) else {}
+context = plan.get("scoped_model_context", {}) if isinstance(plan.get("scoped_model_context"), dict) else {}
+controls = plan.get("controls", {}) if isinstance(plan.get("controls"), dict) else {}
+step_plan = plan.get("step_plan", {}) if isinstance(plan.get("step_plan"), dict) else {}
+review = context.get("review", {}) if isinstance(context.get("review"), dict) else {}
+budget = context.get("budget", {}) if isinstance(context.get("budget"), dict) else {}
+valid = (
+    plan.get("plan_schema") == "aegis.subagent.autonomy_step_plan.v1"
+    and controls.get("operator_review_required") is True
+    and controls.get("model_invocation_performed") is False
+    and controls.get("tool_execution_performed") is False
+    and controls.get("raw_instruction_included") is False
+    and controls.get("raw_instruction_forwarded_to_model") is False
+    and controls.get("raw_worker_output_included") is False
+    and controls.get("raw_secret_values_included") is False
+    and not forbidden_keys_present(plan)
+)
+plan_bytes = json.dumps(plan, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+context_bytes = json.dumps(context, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+result = {
+    "worker_schema": "aegis.subagent.autonomy_loop_worker.v1",
+    "status": "review_required" if valid else "blocked",
+    "plan_id": plan.get("plan_id"),
+    "packet_id": review.get("packet_id"),
+    "plan_sha256": hashlib.sha256(plan_bytes).hexdigest(),
+    "scoped_context_sha256": hashlib.sha256(context_bytes).hexdigest(),
+    "step_index": step_plan.get("step_index"),
+    "max_steps": step_plan.get("max_steps"),
+    "recursive_depth_remaining": budget.get("recursive_depth_remaining"),
+    "tool_calls_used": 0,
+    "model_invocation": False,
+    "tool_execution": False,
+    "network_access": "disabled",
+    "operator_review_required": True,
+    "required_next_gate": "operator_review",
+    "autonomous_loop_isolation": True,
+    "isolated_loop_process": True,
+    "recursive_model_loop_enabled": False,
+    "raw_instruction_included": False,
+    "raw_instruction_forwarded_to_model": False,
+    "raw_worker_output_included": False,
+    "raw_worker_result_included": False,
+    "raw_prompt_for_model_included": False,
+    "raw_secret_values_included": False,
+    "forbidden_raw_keys_present": forbidden_keys_present(plan),
+}
+print(json.dumps(result, sort_keys=True))
+"""
 ALLOWED_SUBAGENT_WORKER_RESULT_KEYS = {
     "worker_schema",
     "status",
@@ -62,6 +138,36 @@ ALLOWED_SUBAGENT_WORKER_RESULT_KEYS = {
     "model_invocation",
     "raw_instruction_included",
     "raw_instruction_forwarded_to_model",
+    "returncode",
+    "stderr_sha256",
+    "stdout_sha256",
+}
+ALLOWED_SUBAGENT_AUTONOMY_LOOP_RESULT_KEYS = {
+    "worker_schema",
+    "status",
+    "plan_id",
+    "packet_id",
+    "plan_sha256",
+    "scoped_context_sha256",
+    "step_index",
+    "max_steps",
+    "recursive_depth_remaining",
+    "tool_calls_used",
+    "model_invocation",
+    "tool_execution",
+    "network_access",
+    "operator_review_required",
+    "required_next_gate",
+    "autonomous_loop_isolation",
+    "isolated_loop_process",
+    "recursive_model_loop_enabled",
+    "raw_instruction_included",
+    "raw_instruction_forwarded_to_model",
+    "raw_worker_output_included",
+    "raw_worker_result_included",
+    "raw_prompt_for_model_included",
+    "raw_secret_values_included",
+    "forbidden_raw_keys_present",
     "returncode",
     "stderr_sha256",
     "stdout_sha256",
@@ -593,6 +699,153 @@ class KanbanManager:
             "tool_execution_performed": False,
         }
 
+    def run_subagent_autonomy_loop(
+        self,
+        card_id: str,
+        *,
+        actor: str = "operator",
+        approved: bool = False,
+        max_steps: int = 1,
+    ) -> dict[str, Any]:
+        card, board, metadata = self._require_subagent_card(card_id)
+        if not approved:
+            return {
+                "status": "approval_required",
+                "card_id": card_id,
+                "reason": "isolated subagent autonomy loop rehearsals require explicit approval",
+                "approval_required": True,
+                "autonomous_runtime": False,
+                "model_invocation_performed": False,
+                "tool_execution_performed": False,
+            }
+        if card.get("lane") == "done":
+            raise ValueError("done subagent cards cannot run autonomy loops")
+        plan_result = self.plan_subagent_autonomy_step(
+            card_id,
+            actor=actor,
+            approved=True,
+            max_steps=max_steps,
+        )
+        plan_receipt = plan_result["receipt"]
+        plan_path = Path(str(plan_receipt["artifact"]))
+        plan_bytes = plan_path.read_bytes()
+        artifact_sha256 = hashlib.sha256(plan_bytes).hexdigest()
+        checksum_path = Path(str(plan_receipt["checksum"]))
+        checksum_value = checksum_path.read_text(encoding="utf-8").strip() if checksum_path.exists() else ""
+        try:
+            plan = json.loads(plan_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("autonomy step plan artifact is not valid JSON") from exc
+        if not isinstance(plan, dict):
+            raise ValueError("autonomy step plan artifact must be a JSON object")
+        controls = plan.get("controls") if isinstance(plan.get("controls"), dict) else {}
+        if (
+            plan.get("plan_schema") != "aegis.subagent.autonomy_step_plan.v1"
+            or checksum_value != artifact_sha256
+            or controls.get("operator_review_required") is not True
+            or controls.get("model_invocation_performed") is not False
+            or controls.get("tool_execution_performed") is not False
+            or controls.get("raw_instruction_included") is not False
+            or controls.get("raw_instruction_forwarded_to_model") is not False
+            or controls.get("raw_worker_output_included") is not False
+            or controls.get("raw_secret_values_included") is not False
+            or _subagent_packet_forbidden_keys_present(plan)
+        ):
+            raise ValueError("autonomy step plan failed isolation verification")
+        run_id = str(uuid4())
+        started_at = now_utc()
+        start_receipt = {
+            "receipt_schema": "aegis.subagent.autonomy_loop.v1",
+            "event_type": "subagent.autonomy_loop_started",
+            "run_id": run_id,
+            "plan_id": plan_receipt["plan_id"],
+            "card_id": card_id,
+            "board_id": board["id"],
+            "actor": _safe_actor(actor),
+            "worker_process": "python_isolated_subprocess",
+            "python_isolated_mode": True,
+            "minimal_environment": True,
+            "network_access": "disabled",
+            "autonomous_loop_isolation": True,
+            "isolated_loop_process": True,
+            "recursive_model_loop_enabled": False,
+            "model_invocation_performed": False,
+            "tool_execution_performed": False,
+            "tool_calls_allowed": 0,
+            "tool_calls_used": 0,
+            "operator_review_required": True,
+            "required_next_gate": "operator_review",
+            "autonomous_runtime": False,
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+            "raw_worker_output_included": False,
+            "raw_worker_result_included": False,
+            "raw_prompt_for_model_included": False,
+            "raw_secret_values_included": False,
+            "started_at": started_at,
+        }
+        self.audit_logger.append("subagent.autonomy_loop_started", start_receipt, task_id=str(card.get("task_id")) if card.get("task_id") else None)
+        timeout_seconds = _worker_timeout_seconds(metadata.get("budget_snapshot") if isinstance(metadata.get("budget_snapshot"), dict) else {})
+        completed = _run_subagent_autonomy_loop_worker({"plan": plan}, timeout_seconds=timeout_seconds)
+        completed_at = now_utc()
+        worker_result = _decode_autonomy_loop_result(completed.stdout)
+        if completed.returncode != 0:
+            worker_result = {
+                "worker_schema": "aegis.subagent.autonomy_loop_worker.v1",
+                "status": "failed",
+                "returncode": completed.returncode,
+                "stderr_sha256": hashlib.sha256((completed.stderr or "").encode("utf-8")).hexdigest(),
+                "raw_instruction_included": False,
+                "raw_instruction_forwarded_to_model": False,
+                "raw_worker_output_included": False,
+                "raw_secret_values_included": False,
+            }
+        result_status = "review_required" if worker_result.get("status") == "review_required" and completed.returncode == 0 else "blocked"
+        loop_count = _subagent_autonomy_loop_count(metadata) + 1
+        result_receipt = {
+            **start_receipt,
+            "event_type": "subagent.autonomy_loop_completed",
+            "status": result_status,
+            "returncode": completed.returncode,
+            "timeout_seconds": timeout_seconds,
+            "completed_at": completed_at,
+            "stdout_bytes": len(completed.stdout.encode("utf-8")) if completed.stdout else 0,
+            "stderr_bytes": len(completed.stderr.encode("utf-8")) if completed.stderr else 0,
+            "raw_stdout_included": False,
+            "raw_stderr_included": False,
+            "plan_artifact_sha256": artifact_sha256,
+            "plan_checksum_matches": checksum_value == artifact_sha256,
+            "worker_result": worker_result,
+        }
+        self.store.update_kanban_card_metadata(
+            card_id,
+            {
+                "isolated_autonomy_loop": True,
+                "autonomy_loop_runs_recorded": loop_count,
+                "last_autonomy_loop_receipt": result_receipt,
+                "last_autonomy_loop_result": worker_result,
+                "autonomy_status": "loop_review_required" if result_status == "review_required" else "loop_blocked",
+                "raw_instruction_forwarded_to_model": False,
+                "raw_worker_output_included": False,
+            },
+        )
+        audit_entry = self.audit_logger.append("subagent.autonomy_loop_completed", result_receipt, task_id=str(card.get("task_id")) if card.get("task_id") else None)
+        updated_card = self._require_card(card_id)
+        return {
+            "ok": result_status == "review_required",
+            "status": result_status,
+            "card_id": card_id,
+            "run_id": run_id,
+            "plan": plan_result["plan"],
+            "plan_receipt": plan_receipt,
+            "receipt": result_receipt,
+            "audit_event_hash": audit_entry["event_hash"],
+            "card": _subagent_card_summary(updated_card, include_preview=False),
+            "autonomous_runtime": False,
+            "model_invocation_performed": False,
+            "tool_execution_performed": False,
+        }
+
     def create_subagent_review_packet(self, card_id: str, *, actor: str = "operator") -> dict[str, Any]:
         card, board, metadata = self._require_subagent_card(card_id)
         packet_id = str(uuid4())
@@ -1013,6 +1266,8 @@ class KanbanManager:
                 "sanitized_model_review_invocations",
                 "autonomy_preflight_receipts",
                 "scoped_autonomy_step_plans",
+                "autonomous_loop_isolation",
+                "isolated_autonomy_loop_rehearsals",
                 "scoped_model_context_builder",
                 "recursive_budget_enforcer",
                 "tool_call_sandbox",
@@ -1030,6 +1285,7 @@ class KanbanManager:
         status = self.subagent_status(limit=limit, include_previews=False)
         required_controls = [
             "autonomous_loop_isolation",
+            "recursive_model_loop_executor",
             "scoped_model_context_builder",
             "recursive_budget_enforcer",
             "tool_call_sandbox",
@@ -1042,9 +1298,9 @@ class KanbanManager:
         missing_controls = [control for control in required_controls if control not in implemented_controls]
         candidate_blockers = [
             {
-                "control": "autonomous_loop_isolation",
+                "control": "recursive_model_loop_executor",
                 "state": "missing",
-                "detail": "Recursive autonomous model-loop workers are not implemented or enabled.",
+                "detail": "An isolated loop rehearsal worker exists, but recursive autonomous model-loop execution is not implemented or enabled.",
             },
             {
                 "control": "scoped_model_context_builder",
@@ -1103,7 +1359,8 @@ class KanbanManager:
             "next_steps": [
                 "Use agents delegate/run/review-packet for operator-approved isolated subagent work today.",
                 "Use agents autonomy-step <card-id> --approved to create a sanitized per-step plan from verified review metadata.",
-                "Add isolated autonomous model-loop workers before recursive subagents can execute.",
+                "Use agents autonomy-run <card-id> --approved to exercise the isolated loop boundary without model or tool execution.",
+                "Add the recursive model-loop executor before recursive subagents can execute.",
             ],
             "checked_at": now_utc(),
         }
@@ -1185,6 +1442,13 @@ def _subagent_model_review_count(metadata: dict[str, Any]) -> int:
 def _subagent_autonomy_step_plan_count(metadata: dict[str, Any]) -> int:
     try:
         return int(metadata.get("autonomy_step_plans_recorded", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _subagent_autonomy_loop_count(metadata: dict[str, Any]) -> int:
+    try:
+        return int(metadata.get("autonomy_loop_runs_recorded", 0))
     except (TypeError, ValueError):
         return 0
 
@@ -1735,6 +1999,24 @@ def _run_subagent_worker(payload: dict[str, Any], *, timeout_seconds: float) -> 
         return subprocess.CompletedProcess(args=args, returncode=124, stdout=stdout, stderr=stderr or "timeout")
 
 
+def _run_subagent_autonomy_loop_worker(payload: dict[str, Any], *, timeout_seconds: float) -> subprocess.CompletedProcess[str]:
+    args = (sys.executable, "-I", "-c", SUBAGENT_AUTONOMY_LOOP_WORKER_CODE)
+    try:
+        return subprocess.run(  # noqa: S603 - argv is fixed to the current Python in isolated mode.
+            args,
+            input=json.dumps(payload, sort_keys=True),
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+            env={"PYTHONIOENCODING": "utf-8"},
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode("utf-8", errors="replace") if isinstance(exc.stdout, bytes) else str(exc.stdout or "")
+        stderr = exc.stderr.decode("utf-8", errors="replace") if isinstance(exc.stderr, bytes) else str(exc.stderr or "")
+        return subprocess.CompletedProcess(args=args, returncode=124, stdout=stdout, stderr=stderr or "timeout")
+
+
 def _decode_worker_result(stdout: str) -> dict[str, Any]:
     try:
         decoded = json.loads(stdout or "{}")
@@ -1758,6 +2040,38 @@ def _decode_worker_result(stdout: str) -> dict[str, Any]:
     sanitized["raw_instruction_included"] = False
     sanitized["raw_instruction_forwarded_to_model"] = False
     sanitized["raw_worker_output_included"] = False
+    return sanitized
+
+
+def _decode_autonomy_loop_result(stdout: str) -> dict[str, Any]:
+    try:
+        decoded = json.loads(stdout or "{}")
+    except json.JSONDecodeError:
+        return {
+            "worker_schema": "aegis.subagent.autonomy_loop_worker.v1",
+            "status": "failed",
+            "stdout_sha256": hashlib.sha256((stdout or "").encode("utf-8")).hexdigest(),
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+            "raw_worker_output_included": False,
+            "raw_secret_values_included": False,
+        }
+    if not isinstance(decoded, dict):
+        return {
+            "worker_schema": "aegis.subagent.autonomy_loop_worker.v1",
+            "status": "failed",
+            "raw_instruction_included": False,
+            "raw_instruction_forwarded_to_model": False,
+            "raw_worker_output_included": False,
+            "raw_secret_values_included": False,
+        }
+    sanitized = {key: decoded[key] for key in ALLOWED_SUBAGENT_AUTONOMY_LOOP_RESULT_KEYS if key in decoded}
+    sanitized["worker_schema"] = str(sanitized.get("worker_schema") or "aegis.subagent.autonomy_loop_worker.v1")
+    sanitized["raw_instruction_included"] = False
+    sanitized["raw_instruction_forwarded_to_model"] = False
+    sanitized["raw_worker_output_included"] = False
+    sanitized["raw_worker_result_included"] = False
+    sanitized["raw_secret_values_included"] = False
     return sanitized
 
 
@@ -1982,6 +2296,10 @@ def _subagent_card_summary(card: dict[str, Any], *, include_preview: bool = True
         "model_review_performed": bool(metadata.get("model_review_performed", False)),
         "autonomy_step_plan": metadata.get("autonomy_step_plan") or metadata.get("last_autonomy_step_plan"),
         "autonomy_step_plans_recorded": _subagent_autonomy_step_plan_count(metadata),
+        "isolated_autonomy_loop": bool(metadata.get("isolated_autonomy_loop", False)),
+        "autonomy_loop_runs_recorded": _subagent_autonomy_loop_count(metadata),
+        "last_autonomy_loop_receipt": metadata.get("last_autonomy_loop_receipt"),
+        "last_autonomy_loop_result": metadata.get("last_autonomy_loop_result"),
         "autonomy_status": metadata.get("autonomy_status"),
         "scoped_model_context_available": bool(metadata.get("scoped_model_context_available", False)),
         "tool_call_sandbox": metadata.get("tool_call_sandbox"),

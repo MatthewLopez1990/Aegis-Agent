@@ -727,21 +727,21 @@ def _live_gap_backlog(
         {
             "area": "subagent_runtime_depth",
             "platforms": ["Hermes Agent", "Claude Code"],
-            "status": "isolated_worker_ready_autonomous_recursion_blocked",
+            "status": "isolated_loop_ready_autonomous_recursion_blocked",
             "detail": (
                 f"Approved subagent work is tracked through a durable, auditable delegation queue with "
-                f"{subagent_delegations['open_cards']} open card(s), {subagent_delegations.get('enabled_profile_count', 0)} enabled profile(s), enforced queue budgets, sanitized handoff receipts, approved isolated worker-run receipts, parent-bound review receipts, model-ready review packets, approved sanitized model-review invocations, operator-approved batch-run receipts, scoped autonomy step-plan receipts, and explicit autonomy preflight receipts; recursive autonomous model-loop execution remains blocked."
+                f"{subagent_delegations['open_cards']} open card(s), {subagent_delegations.get('enabled_profile_count', 0)} enabled profile(s), enforced queue budgets, sanitized handoff receipts, approved isolated worker-run receipts, parent-bound review receipts, model-ready review packets, approved sanitized model-review invocations, operator-approved batch-run receipts, scoped autonomy step-plan receipts, isolated autonomy loop rehearsal receipts, and explicit autonomy preflight receipts; recursive autonomous model-loop execution remains blocked."
             ),
             "sample_tools": ["subagent_delegate"],
             "operator_checklist": _subagent_operator_checklist(subagent_delegations),
             "next_steps": [
-                "Use approved autonomy-step plans to build scoped model context from verified review metadata without executing tools or recursion.",
+                "Use approved autonomy-step plans and autonomy-run rehearsals to build and exercise scoped isolated loop boundaries without model or tool execution.",
                 "Use approved model-review invocations to review packet integrity without raw instruction or worker output forwarding.",
-                "Only consider recursive autonomous model loops after isolated loop execution lands.",
+                "Only consider recursive autonomous model loops after the recursive model-loop executor lands.",
             ],
-            "required_controls": ["human_approval", "tainted_instruction_metadata", "durable_queue", "recursive_budget_limits", "handoff_receipts", "isolated_worker_receipts", "parent_bound_review_receipts", "model_ready_review_packets", "sanitized_model_review_invocations", "operator_batch_receipts", "scoped_autonomy_step_plans", "autonomy_preflight_receipts"],
-            "verification_gates": ["approval_required_delegation", "status_queue_visibility", "raw_instruction_redaction", "isolated_worker_receipts", "parent_bound_review_receipt", "parent_task_review_binding", "model_ready_review_packet_sanitization", "sanitized_model_review_context", "operator_batch_receipts", "autonomy_step_plan_receipt", "autonomy_preflight_receipt", "blocked_autonomous_runtime"],
-            "evaluation_scenarios": ["subagent.delegation_queue_visibility", "subagent.isolated_worker_receipts", "subagent.parent_bound_review_receipt", "subagent.model_ready_review_packet", "subagent.sanitized_model_review", "subagent.operator_batch_receipts", "subagent.autonomy_step_plan", "subagent.autonomy_preflight", "subagent.autonomous_runtime_blocked"],
+            "required_controls": ["human_approval", "tainted_instruction_metadata", "durable_queue", "recursive_budget_limits", "handoff_receipts", "isolated_worker_receipts", "parent_bound_review_receipts", "model_ready_review_packets", "sanitized_model_review_invocations", "operator_batch_receipts", "scoped_autonomy_step_plans", "autonomous_loop_isolation", "isolated_autonomy_loop_rehearsals", "autonomy_preflight_receipts"],
+            "verification_gates": ["approval_required_delegation", "status_queue_visibility", "raw_instruction_redaction", "isolated_worker_receipts", "parent_bound_review_receipt", "parent_task_review_binding", "model_ready_review_packet_sanitization", "sanitized_model_review_context", "operator_batch_receipts", "autonomy_step_plan_receipt", "isolated_autonomy_loop_receipt", "autonomy_preflight_receipt", "blocked_autonomous_runtime"],
+            "evaluation_scenarios": ["subagent.delegation_queue_visibility", "subagent.isolated_worker_receipts", "subagent.parent_bound_review_receipt", "subagent.model_ready_review_packet", "subagent.sanitized_model_review", "subagent.operator_batch_receipts", "subagent.autonomy_step_plan", "subagent.isolated_autonomy_loop", "subagent.autonomy_preflight", "subagent.autonomous_runtime_blocked"],
             "configured_provider_count": len(configured_providers),
         },
         {
@@ -847,6 +847,16 @@ def _subagent_operator_checklist(subagent_delegations: dict[str, Any]) -> list[d
             "control": "scoped_autonomy_step_plans",
             "state": "enforced" if "scoped_autonomy_step_plans" in subagent_delegations.get("implemented_controls", []) else "pending",
             "detail": "Approved autonomy-step plans write private checksum-backed scoped context from verified review metadata, deny tool execution, and require operator review.",
+        },
+        {
+            "control": "autonomous_loop_isolation",
+            "state": "enforced" if "autonomous_loop_isolation" in subagent_delegations.get("implemented_controls", []) else "pending",
+            "detail": "Approved autonomy-run rehearsals execute sanitized step plans inside an isolated subprocess with no model, tool, network, or raw instruction access.",
+        },
+        {
+            "control": "isolated_autonomy_loop_rehearsals",
+            "state": "enforced" if "isolated_autonomy_loop_rehearsals" in subagent_delegations.get("implemented_controls", []) else "pending",
+            "detail": "The isolated loop rehearsal records private plan integrity, subprocess isolation, review-gate, and tool-sandbox receipts while keeping recursive model loops disabled.",
         },
         {
             "control": "autonomy_preflight_receipts",
