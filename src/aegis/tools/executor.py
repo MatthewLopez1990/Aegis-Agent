@@ -2126,6 +2126,10 @@ class BuiltinToolExecutor:
             if session_id is None:
                 raise ToolExecutionError("live browser submit requires session_id")
             return self.browser.live_submit(session_id=session_id, selector=str(params["selector"]) if params.get("selector") else None, approved=approved)
+        if action == "live_download" or (bool(params.get("live")) and action == "download"):
+            if session_id is None:
+                raise ToolExecutionError("live browser download requires session_id")
+            return self.browser.live_download(session_id=session_id, selector=str(params["selector"]), approved=approved)
         live_actions = {"live_evaluate"}
         if action in live_actions or bool(params.get("live")):
             selector = str(params["selector"]) if params.get("selector") else None

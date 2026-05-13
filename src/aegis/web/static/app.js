@@ -3587,6 +3587,22 @@ document.getElementById("browser-live-submit").addEventListener("click", async (
   await refresh();
 });
 
+document.getElementById("browser-live-download").addEventListener("click", async () => {
+  if (!state.browserSessionId) {
+    renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
+    return;
+  }
+  const selector = document.getElementById("browser-selector").value || "a";
+  state.pendingBrowserAction = { action: "live_download", session_id: state.browserSessionId, selector };
+  renderBrowserOutput(
+    await api("/browser/download", {
+      method: "POST",
+      body: JSON.stringify({ session_id: state.browserSessionId, selector }),
+    })
+  );
+  await refresh();
+});
+
 document.getElementById("browser-output").addEventListener("click", async (event) => {
   const createActivationPacket = event.target.closest("[data-browser-live-activation-packet]");
   if (createActivationPacket) {
@@ -3623,6 +3639,8 @@ document.getElementById("browser-output").addEventListener("click", async (event
       ? "/browser/fill"
       : action.action === "submit" || action.action === "live_submit"
         ? "/browser/submit"
+        : action.action === "live_download"
+          ? "/browser/download"
         : action.action === "live_navigate"
           ? "/browser/live-navigate"
           : action.action === "live_screenshot"
@@ -3633,6 +3651,8 @@ document.getElementById("browser-output").addEventListener("click", async (event
       ? { session_id: action.session_id, fields: action.fields, approval_id: approvalId, live: action.action === "live_fill" }
       : action.action === "submit" || action.action === "live_submit"
         ? { session_id: action.session_id, selector: action.selector, approval_id: approvalId, live: action.action === "live_submit" }
+        : action.action === "live_download"
+          ? { session_id: action.session_id, selector: action.selector, approval_id: approvalId }
         : action.action === "live_navigate"
           ? { session_id: action.session_id, url: action.url, approval_id: approvalId }
           : action.action === "live_screenshot"

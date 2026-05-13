@@ -1464,6 +1464,22 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 result = orchestrator.browser.live_submit(session_id=session_id, selector=selector, approved=True) if live else orchestrator.browser.submit(session_id=session_id, selector=selector, approved=True)
                 self._json(_with_browser_artifact_urls(orchestrator, result) if live else result)
                 return
+            if path == "/browser/download":
+                payload = self._read_json()
+                session_id = str(_required(payload, "session_id"))
+                selector = str(_required(payload, "selector"))
+                approval = _browser_action_approval(
+                    orchestrator,
+                    action="live_download",
+                    session_id=session_id,
+                    selector=selector,
+                    approval_id=payload.get("approval_id"),
+                )
+                if not approval["approved"]:
+                    self._json(approval["response"])
+                    return
+                self._json(_with_browser_artifact_urls(orchestrator, orchestrator.browser.live_download(session_id=session_id, selector=selector, approved=True)))
+                return
             if path == "/channels/render":
                 payload = self._read_json()
                 hints = payload.get("channel_hints", {})

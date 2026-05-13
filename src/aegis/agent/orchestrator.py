@@ -119,6 +119,7 @@ class AgentOrchestrator:
             config.data_dir / "browser",
             live_browser_reads=config.live_browser_reads,
             live_browser_mutations=config.live_browser_mutations,
+            live_browser_downloads=config.live_browser_downloads,
             network_allowlist=config.network_allowlist,
         )
         self.models = ModelRegistry(

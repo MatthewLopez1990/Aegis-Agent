@@ -640,6 +640,10 @@ def build_parser() -> argparse.ArgumentParser:
     browser_live_submit.add_argument("session_id")
     browser_live_submit.add_argument("selector", nargs="?")
     browser_live_submit.add_argument("--approved", action="store_true")
+    browser_live_download = browser_sub.add_parser("live-download", help="Run an approved live Chromium selector download")
+    browser_live_download.add_argument("session_id")
+    browser_live_download.add_argument("selector")
+    browser_live_download.add_argument("--approved", action="store_true")
 
     evaluation = subcommands.add_parser("evaluation", help="Review local evaluation reports")
     evaluation_sub = evaluation.add_subparsers(dest="evaluation_command", required=True)
@@ -2013,6 +2017,8 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return orchestrator.browser.live_fill(session_id=args.session_id, fields=fields, approved=args.approved)
         if args.browser_command == "live-submit":
             return orchestrator.browser.live_submit(session_id=args.session_id, selector=args.selector, approved=args.approved)
+        if args.browser_command == "live-download":
+            return orchestrator.browser.live_download(session_id=args.session_id, selector=args.selector, approved=args.approved)
 
     if args.command == "evaluation":
         harness = ResearchHarness(data_dir=config.data_dir)
