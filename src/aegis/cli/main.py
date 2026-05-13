@@ -399,6 +399,7 @@ def build_parser() -> argparse.ArgumentParser:
     connector_sub = connector.add_subparsers(dest="connector_command", required=True)
     connector_sub.add_parser("list", help="List connectors")
     connector_sub.add_parser("status", help="Show connector health")
+    connector_sub.add_parser("doctor", help="Show live connector activation preflight")
 
     channels = subcommands.add_parser("channel", help="Inspect and test channel adapters")
     channel_sub = channels.add_subparsers(dest="channel_command", required=True)
@@ -591,6 +592,7 @@ def build_parser() -> argparse.ArgumentParser:
     backend = subcommands.add_parser("backend", help="List execution backends")
     backend_sub = backend.add_subparsers(dest="backend_command", required=True)
     backend_sub.add_parser("list", help="List execution backends")
+    backend_sub.add_parser("doctor", help="Show remote backend activation preflight")
 
     evaluation = subcommands.add_parser("evaluation", help="Review local evaluation reports")
     evaluation_sub = evaluation.add_subparsers(dest="evaluation_command", required=True)
@@ -893,6 +895,73 @@ def _capabilities_view(dashboard: dict[str, Any]) -> dict[str, Any]:
         "model_provider_auth_parity": dashboard.get("model_provider_auth_parity", {}),
         "competitive_targets": dashboard.get("competitive_targets", []),
     }
+
+
+def _live_gap_doctor(orchestrator: Any, area: str) -> dict[str, Any]:
+    dashboard = build_product_dashboard(orchestrator)
+    gap = next((item for item in dashboard.get("live_gap_backlog", []) if item.get("area") == area), None)
+    if gap is None:
+        raise KeyError(f"live gap area {area!r} is not available")
+    payload = {
+        "area": gap.get("area"),
+        "status": gap.get("status"),
+        "detail": gap.get("detail"),
+        "required_controls": gap.get("required_controls", []),
+        "verification_gates": gap.get("verification_gates", []),
+        "evaluation_scenarios": gap.get("evaluation_scenarios", []),
+        "operator_checklist": gap.get("operator_checklist", []),
+        "next_steps": gap.get("next_steps", []),
+        "raw_secret_values_included": False,
+    }
+    for key in (
+        "implemented_live_adapters",
+        "available_live_adapters",
+        "implemented_backend_adapters",
+        "available_backend_adapters",
+    ):
+        if key in gap:
+            payload[key] = gap[key]
+    if area == "provider_and_channel_live_connectors":
+        payload["live_write_flags"] = _live_connector_flag_status(orchestrator.config)
+    if area == "remote_backend_activation":
+        payload["enabled_backends"] = list(orchestrator.config.execution.enabled_backends)
+        payload["config_keys"] = [
+            "execution.enabled_backends",
+            "execution.docker_executable",
+            "execution.container_timeout_seconds",
+            "execution.container_memory",
+            "execution.container_cpus",
+            "execution.container_network",
+            "execution.ssh_allowed_hosts",
+            "execution.ssh_key_secret",
+            "execution.hosted_sandbox_api_url",
+            "execution.hosted_sandbox_allowed_hosts",
+            "execution.hosted_sandbox_token_secret",
+        ]
+    return payload
+
+
+def _live_connector_flag_status(config: Any) -> list[dict[str, Any]]:
+    flags = (
+        ("github", "live_github_writes"),
+        ("gitlab", "live_gitlab_writes"),
+        ("generic_rest", "live_rest_writes"),
+        ("mock_graph_calendar", "live_graph_calendar_writes"),
+        ("mock_graph_email", "live_graph_email_writes"),
+        ("mock_graph_contact", "live_graph_contact_writes"),
+        ("mock_servicenow", "live_service_desk_writes"),
+        ("mock_messaging", "live_messaging_writes"),
+    )
+    return [
+        {
+            "adapter": adapter,
+            "config_key": f"security.{flag}",
+            "enabled": bool(getattr(config, flag, False)),
+            "example": f"{flag} = true",
+            "raw_secret_values_included": False,
+        }
+        for adapter, flag in flags
+    ]
 
 
 def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
@@ -1224,12 +1293,17 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             )
 
     if args.command == "connector":
-        audit = AuditLogger(config.audit_log_path)
-        connectors = build_default_registry(config, audit)
         if args.connector_command == "list":
+            audit = AuditLogger(config.audit_log_path)
+            connectors = build_default_registry(config, audit)
             return {"connectors": connectors.list()}
         if args.connector_command == "status":
+            audit = AuditLogger(config.audit_log_path)
+            connectors = build_default_registry(config, audit)
             return {"connectors": connectors.status()}
+        if args.connector_command == "doctor":
+            orchestrator = build_orchestrator(data_dir=args.data_dir)
+            return {"connector_doctor": _live_gap_doctor(orchestrator, "provider_and_channel_live_connectors")}
 
     if args.command == "channel":
         registry = _channel_registry(config)
@@ -1845,6 +1919,9 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
     if args.command == "backend":
         if args.backend_command == "list":
             return {"backends": ExecutionBackendRegistry().list()}
+        if args.backend_command == "doctor":
+            orchestrator = build_orchestrator(data_dir=args.data_dir)
+            return {"backend_doctor": _live_gap_doctor(orchestrator, "remote_backend_activation")}
 
     if args.command == "evaluation":
         harness = ResearchHarness(data_dir=config.data_dir)

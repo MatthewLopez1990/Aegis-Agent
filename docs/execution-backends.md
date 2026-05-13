@@ -10,6 +10,13 @@ Aegis models execution backends as policy-visible capabilities:
 - `daytona`
 - `vercel_sandbox`
 
+Inspect backend activation preflight from the CLI:
+
+```bash
+PYTHONPATH=src python3 -m aegis.cli.main backend list
+PYTHONPATH=src python3 -m aegis.cli.main backend doctor
+```
+
 Only `local` is marked enabled by default, and even local execution still flows through shell allowlists, policy gates, and approvals. Approved `terminal_backend` tool calls can select an enabled backend and expose the active backend in runtime listings.
 
 Docker can be activated explicitly with `[execution].enabled_backends = ["local", "docker"]`. The Docker adapter resolves the configured executable, injects container resource limits for `container_run`, blocks privileged mode, host networking, mounts, and volume flags, and returns activation, execution, and cleanup receipts. Execution receipts hash the command vector instead of logging raw command text.
@@ -21,3 +28,5 @@ Hosted sandbox backends can be activated explicitly for `modal`, `daytona`, or `
 Provider-specific hosted lifecycle APIs remain staged behind future adapter work, but the generic lifecycle contract now covers status, bounded log retrieval, cancellation, artifact download, and rollback requests through the configured HTTPS provider endpoint. Backend listings and backend-gated tool receipts include the required controls and verification gates, so operators can see the exact activation work before enabling broader remote execution surfaces. Backend listings and denied backend-gated tool calls also include an activation preflight with configured controls and blockers: Docker checks container network/resource posture, SSH checks allowlisted hosts plus brokered key handles, and hosted sandboxes check HTTPS API URL, allowed hosts, and brokered token handles.
 
 The product dashboard reports enabled nonlocal adapters as redacted `implemented_backend_adapters` evidence and disabled implemented adapters as redacted `available_backend_adapters` evidence. Singularity remains listed as a policy-visible backend definition, but it is not reported as an available adapter until a concrete execution implementation exists.
+
+`backend doctor` returns the same remote backend activation backlog item used by the dashboard, including enabled backend names, config keys, implemented/available backend adapters, preflight blockers, operator checklist controls, and verification gates. The TUI mirrors this with `backends doctor`.

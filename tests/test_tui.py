@@ -51,6 +51,8 @@ class TuiTests(unittest.TestCase):
             with redirect_stdout(output):
                 tui.onecmd("dashboard")
                 tui.onecmd("capabilities")
+                tui.onecmd("connectors doctor")
+                tui.onecmd("backends doctor")
 
             rendered = output.getvalue()
             self.assertIn("Aegis Shield Identity", rendered)
@@ -128,6 +130,10 @@ class TuiTests(unittest.TestCase):
             self.assertIn("Remote Backend Activation Preflight", rendered)
             self.assertIn("ready_for_enablement", rendered)
             self.assertIn("allowlisted_hosts", rendered)
+            self.assertIn("Connector Activation Doctor", rendered)
+            self.assertIn("Backend Activation Doctor", rendered)
+            self.assertIn("github", rendered)
+            self.assertIn("docker", rendered)
             self.assertIn("explicit_backend_enablement", rendered)
             self.assertIn("brokered_backend_auth", rendered)
             self.assertIn("resource_limits", rendered)

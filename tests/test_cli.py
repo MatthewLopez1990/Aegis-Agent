@@ -129,7 +129,6 @@ class CliTests(unittest.TestCase):
             self.assertEqual(checklist["receipt_redaction"]["state"], "enforced")
             self.assertEqual(checklist["runtime_rate_limits"]["state"], "partial")
             self.assertEqual(checklist["rollback_receipts"]["state"], "partial")
-
             self.assertEqual(checklist["promotion_scope"]["state"], "not_started")
             browser_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "browser_and_media_depth")
             self.assertIn("disabled_live_browser_denial", browser_gap["verification_gates"])
@@ -154,6 +153,30 @@ class CliTests(unittest.TestCase):
             self.assertEqual(backend_checklist["scope_limits"]["state"], "enforced")
             self.assertEqual(backend_checklist["rollback_receipts"]["state"], "enforced")
             self.assertEqual(backend_checklist["provider_lifecycle_depth"]["state"], "not_started")
+
+    def test_connector_and_backend_doctor_commands_surface_activation_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            data_dir = Path(temp) / ".aegis"
+
+            connector = dispatch(parser.parse_args(["--data-dir", str(data_dir), "connector", "doctor"]))["connector_doctor"]
+            backend = dispatch(parser.parse_args(["--data-dir", str(data_dir), "backend", "doctor"]))["backend_doctor"]
+
+            self.assertEqual(connector["area"], "provider_and_channel_live_connectors")
+            self.assertEqual(connector["status"], "live_connectors_available_unconfigured")
+            self.assertFalse(connector["raw_secret_values_included"])
+            self.assertIn("github", {adapter["name"] for adapter in connector["available_live_adapters"]})
+            flag_rows = {row["adapter"]: row for row in connector["live_write_flags"]}
+            self.assertEqual(flag_rows["github"]["config_key"], "security.live_github_writes")
+            self.assertFalse(flag_rows["github"]["enabled"])
+            self.assertEqual(flag_rows["generic_rest"]["config_key"], "security.live_rest_writes")
+
+            self.assertEqual(backend["area"], "remote_backend_activation")
+            self.assertEqual(backend["status"], "backend_adapters_available_unconfigured")
+            self.assertFalse(backend["raw_secret_values_included"])
+            self.assertEqual(backend["enabled_backends"], ["local"])
+            self.assertIn("execution.enabled_backends", backend["config_keys"])
+            self.assertIn("docker", {adapter["name"] for adapter in backend["available_backend_adapters"]})
 
     def test_mcp_cli_registers_streamable_http_with_brokered_token_secret(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

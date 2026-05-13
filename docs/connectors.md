@@ -5,6 +5,7 @@ List connectors:
 ```bash
 PYTHONPATH=src python3 -m aegis.cli.main connector list
 PYTHONPATH=src python3 -m aegis.cli.main connector status
+PYTHONPATH=src python3 -m aegis.cli.main connector doctor
 ```
 
 Reference connectors are intentionally conservative. Real credential-backed integrations should use the secrets broker, scoped permissions, mock/test modes, dry runs, audit logging, and approval gates for writes. The CLI, API, and browser GUI expose connector policy metadata, including required and optional scopes, per-operation scopes, risk labels, and declared data sensitivity.
@@ -14,6 +15,8 @@ The current runtime includes mock/stub connectors for messaging, shell, and loca
 HTTP reads can run live only when `live_http_reads = true` is set and the target domain is allowlisted; unsafe schemes, credentials embedded in URLs, DNS targets that cannot be verified, and local/private network targets are blocked. The governed HTTP connector does not follow redirects, and off-allowlist redirect targets are rejected before response bodies are read.
 
 Generic REST writes and `webhook_call` remain mock summaries by default. When `live_rest_writes = true` is set, approved writes can make HTTPS calls to allowlisted public domains. Live REST writes reject non-HTTPS URLs, redirects, local/private network targets, and missing approval, and still return only payload hashes, keys, byte counts, status, and rollback guidance instead of raw payload values.
+
+`connector doctor` returns the live connector backlog item with redacted implemented/available adapter evidence, operator checklist controls, verification gates, and the exact `[security]` live-write flags such as `live_github_writes`, `live_graph_calendar_writes`, and `live_messaging_writes`. The TUI mirrors this with `connectors doctor`.
 
 GitHub issue creation and pull-request comments use the same explicit write posture. Without `api_url` or `provider_url`, the connector returns the mock summary used for offline tests. With a GitHub-compatible HTTPS API URL, `live_github_writes = true`, an allowlisted host, approval, and a brokered `GITHUB_TOKEN` or requested `token_secret`, Aegis sends the write and returns only status plus sanitized request metadata.
 

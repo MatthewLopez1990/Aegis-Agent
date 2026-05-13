@@ -872,7 +872,18 @@ class AegisTui(cmd.Cmd):
             print(f"approval not found: {approval_id}")
 
     def do_connectors(self, arg: str) -> None:
-        """connectors -- list connector status."""
+        """connectors [doctor] -- list connector status or live activation preflight."""
+        parts = shlex.split(arg)
+        if parts and parts[0] == "doctor":
+            dashboard = build_product_dashboard(self.orchestrator)
+            gap = next((item for item in dashboard.get("live_gap_backlog", []) if item.get("area") == "provider_and_channel_live_connectors"), None)
+            if not gap:
+                print("connector doctor unavailable")
+                return
+            print(_paint("Connector Activation Doctor", "36;1"))
+            print(f"status: {gap.get('status', 'unknown')}")
+            print(_table(_live_adapter_preflight_rows(gap), (("adapter", "adapter", 22), ("kind", "kind", 10), ("preflight", "preflight", 24), ("blockers", "blockers", 70))))
+            return
         print(
             _table(
                 self.orchestrator.connectors.list(),
@@ -2127,7 +2138,18 @@ class AegisTui(cmd.Cmd):
                 print(_table(cards, (("lane", "lane", 14), ("risk", "risk_level", 10), ("title", "title", 52))))
 
     def do_backends(self, arg: str) -> None:
-        """backends -- list execution backends."""
+        """backends [doctor] -- list execution backends or activation preflight."""
+        parts = shlex.split(arg)
+        if parts and parts[0] == "doctor":
+            dashboard = build_product_dashboard(self.orchestrator)
+            gap = next((item for item in dashboard.get("live_gap_backlog", []) if item.get("area") == "remote_backend_activation"), None)
+            if not gap:
+                print("backend doctor unavailable")
+                return
+            print(_paint("Backend Activation Doctor", "36;1"))
+            print(f"status: {gap.get('status', 'unknown')}")
+            print(_table(_backend_preflight_rows(gap), (("backend", "backend", 18), ("preflight", "preflight", 24), ("blockers", "blockers", 70))))
+            return
         print(
             _table(
                 self.orchestrator.execution_backends.list(),
@@ -7023,6 +7045,25 @@ def _backend_preflight_rows(gap: dict[str, Any]) -> list[dict[str, str]]:
             {
                 "backend": str(backend.get("name", "unknown")) if isinstance(backend, dict) else "unknown",
                 "preflight": str(activation.get("preflight_status") or activation.get("status") or "unknown") if isinstance(activation, dict) else "unknown",
+                "blockers": ", ".join(str(blocker.get("control", "unknown")) for blocker in blockers[:4]) if blockers else "none",
+            }
+        )
+    return rows
+
+
+def _live_adapter_preflight_rows(gap: dict[str, Any]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for adapter in list(gap.get("implemented_live_adapters", [])) + list(gap.get("available_live_adapters", [])):
+        activation_raw = adapter.get("activation", {}) if isinstance(adapter, dict) else {}
+        activation = activation_raw if isinstance(activation_raw, dict) else {}
+        blockers = activation.get("blockers", []) if isinstance(activation, dict) else []
+        rows.append(
+            {
+                "adapter": str(adapter.get("name", "unknown")) if isinstance(adapter, dict) else "unknown",
+                "kind": str(adapter.get("kind", "unknown")) if isinstance(adapter, dict) else "unknown",
+                "preflight": str(activation.get("preflight_status") or activation.get("status") or adapter.get("status") or "unknown")
+                if isinstance(adapter, dict)
+                else "unknown",
                 "blockers": ", ".join(str(blocker.get("control", "unknown")) for blocker in blockers[:4]) if blockers else "none",
             }
         )
