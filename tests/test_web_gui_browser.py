@@ -245,6 +245,7 @@ if (frames.length !== 2 || frames[1].event !== "task" || frames[1].data.status !
         self.assertIn('api("/commands")', script)
         self.assertIn("mergeWebSlashCommands", script)
         self.assertIn("privacy-settings", script)
+        self.assertIn('"setup"', script)
         self.assertIn("setup-bedrock", script)
         self.assertIn("setup-vertex", script)
         self.assertIn("autofix-pr", script)
@@ -337,8 +338,8 @@ if (!privacy.includes("approvals")) {
   throw new Error(`/privacy-settings alias did not resolve to approvals: ${JSON.stringify(privacy)}`);
 }
 const setup = api.matches("setup").map((entry) => entry.command);
-if (!setup.includes("models")) {
-  throw new Error(`/setup-* aliases did not resolve to models: ${JSON.stringify(setup)}`);
+if (!setup.includes("settings") || !setup.includes("models")) {
+  throw new Error(`/setup aliases did not resolve to settings and model setup: ${JSON.stringify(setup)}`);
 }
 const claudeApi = api.matches("claude").map((entry) => entry.command);
 if (!claudeApi.includes("commands")) {

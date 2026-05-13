@@ -662,6 +662,32 @@ class CliTests(unittest.TestCase):
             self.assertEqual(backend_checklist["rollback_receipts"]["state"], "enforced")
             self.assertEqual(backend_checklist["provider_lifecycle_depth"]["state"], "not_started")
 
+    def test_setup_command_reports_safe_guided_readiness(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            data_dir = Path(temp) / ".aegis"
+
+            result = dispatch(parser.parse_args(["--data-dir", str(data_dir), "setup", "--init"]))
+
+            self.assertEqual(result["status"], "operator_action_required")
+            self.assertTrue(result["config_written"])
+            self.assertTrue(Path(result["config_path"]).exists())
+            self.assertFalse(result["external_action_started"])
+            self.assertFalse(result["send_probe_performed"])
+            self.assertFalse(result["model_invocation_performed"])
+            self.assertFalse(result["raw_secret_values_included"])
+            steps = {step["id"]: step for step in result["setup_steps"]}
+            self.assertIn("initialize", steps)
+            self.assertIn("model_auth", steps)
+            self.assertIn("connectors_channels", steps)
+            self.assertIn("execution_backends", steps)
+            self.assertIn("remote_control", steps)
+            self.assertIn("interfaces", steps)
+            self.assertEqual(steps["model_auth"]["operator_login_required_count"], 11)
+            self.assertTrue(all(command.startswith("aegis ") for command in steps["model_auth"]["next_commands"]))
+            self.assertFalse(any("PYTHONPATH" in command for command in steps["model_auth"]["next_commands"]))
+            self.assertIn("aegis models auth doctor", result["verification_commands"])
+
     def test_connector_and_backend_doctor_commands_surface_activation_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             parser = build_parser()

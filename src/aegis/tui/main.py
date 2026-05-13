@@ -24,6 +24,7 @@ from aegis.hooks.manager import HOOK_EVENTS
 from aegis.memory.models import MemoryType
 from aegis.migration.openclaw import inspect_hermes_home, inspect_openclaw_home, preview_hermes_memory_import, preview_openclaw_memory_import
 from aegis.product.capabilities import build_product_dashboard
+from aegis.product.setup import build_setup_readiness
 from aegis.remote_control import (
     RemoteControlPairingRegistry,
     build_remote_control_directory,
@@ -185,6 +186,7 @@ TOP_LEVEL_COMMANDS = (
     "security-review",
     "session",
     "sessions",
+    "setup",
     "setup-bedrock",
     "setup-vertex",
     "settings",
@@ -3663,6 +3665,10 @@ class AegisTui(cmd.Cmd):
             return
         self.do_models(f"auth logout {shlex.quote(provider)}")
 
+    def do_setup(self, arg: str) -> None:
+        """setup -- show guided local setup readiness."""
+        _print_json(build_setup_readiness(self.orchestrator, config_path=self.orchestrator.config.data_dir / "config.toml"))
+
     def do_setup_bedrock(self, arg: str) -> None:
         """setup_bedrock -- show AWS Bedrock cloud-identity setup bridge."""
         _print_json(
@@ -6490,6 +6496,7 @@ def _command_reference() -> str:
             "privacy-settings       Local privacy, redaction, and telemetry posture",
             "whoami|yolo            Identity posture and approval-bypass refusal",
             "security-review        Security review posture alias",
+            "setup                 Guided local setup readiness",
             "doctor|debug|config|settings|heapdump Runtime diagnosis, safe debug, and config paths",
             "bug|feedback <summary> Capture a local-only bug report",
             "hooks list|add|run     Governed local lifecycle hooks",
@@ -6507,7 +6514,7 @@ def _command_reference() -> str:
             "channel events [limit]  Recent channel activity",
             "models|model           Model providers",
             "login|logout <provider> Model auth aliases",
-            "setup-bedrock|setup-vertex Cloud identity setup bridges",
+            "setup|setup-bedrock|setup-vertex Guided setup and cloud identity setup bridges",
             "upgrade|extra-usage|passes Provider account and usage boundaries",
             "usage|stats|insights   Model usage and local analytics",
             "effort [level]         Guarded reasoning-effort status",
@@ -6635,6 +6642,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("fewer-permission-prompts", "permission prompt review readiness"),
             ("privacy-settings", "local privacy, redaction, and telemetry posture"),
             ("whoami|yolo", "identity posture and approval-bypass refusal"),
+            ("setup", "guided local setup readiness"),
             ("doctor|debug|config|settings|init|heapdump", "runtime diagnostics, local paths, and initialization status"),
             ("bug|feedback <summary>", "local-only bug report capture"),
             ("hooks", "governed local lifecycle hooks"),
@@ -6648,7 +6656,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("insights [days]", "sanitized local usage analytics"),
             ("gquota [model]", "Google Gemini Code Assist quota metadata"),
             ("login|logout <provider>", "model auth login/logout aliases"),
-            ("setup-bedrock|setup-vertex|upgrade|extra-usage|passes", "cloud identity setup and account boundary"),
+            ("setup|setup-bedrock|setup-vertex|upgrade|extra-usage|passes", "guided setup, cloud identity setup, and account boundary"),
             ("effort|cost", "guarded reasoning-effort metadata and usage cost"),
             ("statusbar|statusline|sb|theme|skin|color|verbose", "UI preference and status metadata"),
             ("commands|keybindings|powerup|focus|ide", "slash command, feature discovery, and terminal integration surfaces"),
@@ -6978,6 +6986,7 @@ def _next_command_hint(command: str) -> str:
         "audit": "/evidence <id>",
         "model": "/models auth targets",
         "models": "/models route <id>",
+        "setup": "/models auth doctor",
         "setup-bedrock": "/models auth doctor",
         "setup-vertex": "/models auth doctor",
         "gquota": "/models auth google-gemini-oauth",

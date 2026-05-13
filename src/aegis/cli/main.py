@@ -28,6 +28,7 @@ from aegis.models.registry import ModelRegistry, default_providers
 from aegis.personality.context import ContextFileLoader, PERSONALITY_NAMES
 from aegis.plugins.manager import PluginManager
 from aegis.product.capabilities import build_product_dashboard
+from aegis.product.setup import build_setup_readiness
 from aegis.remote_control import (
     RemoteControlPairingRegistry,
     build_remote_control_directory,
@@ -81,6 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     subcommands.add_parser("init", help="Create default local configuration")
+    setup = subcommands.add_parser("setup", help="Show guided local setup readiness")
+    setup.add_argument("--init", action="store_true", help="Create default local configuration before reporting setup readiness")
     subcommands.add_parser("health", help="Show local runtime health")
     subcommands.add_parser("dashboard", help="Show product capability and security posture")
     subcommands.add_parser("capabilities", help="Show capability groups, readiness buckets, and live gaps")
@@ -1043,6 +1046,16 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
         audit = AuditLogger(config.audit_log_path)
         audit.append("runtime.initialized", {"config": str(path), "database": str(store.database_path)})
         return {"ok": True, "config": str(path), "database": str(store.database_path), "audit_log": str(audit.path)}
+
+    if args.command == "setup":
+        config_path = config.data_dir / "config.toml"
+        config_written = False
+        if args.init:
+            existed = config_path.exists()
+            config_path = write_default_config(args.data_dir)
+            config_written = not existed
+        orchestrator = build_orchestrator(data_dir=args.data_dir)
+        return build_setup_readiness(orchestrator, config_path=config_path, config_written=config_written)
 
     if args.command == "health":
         store = LocalStore(config.database_path)

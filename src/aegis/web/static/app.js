@@ -69,7 +69,7 @@ const WEB_SLASH_COMMANDS = [
   { command: "events", label: "/events [task_id]", detail: "Stream grouped run events for an id or the selected task", kind: "task-inspection", taskView: "events" },
   { command: "timeline", label: "/timeline [task_id]", detail: "Open ordered plan, receipt, and audit events", kind: "task-inspection", taskView: "timeline" },
   { command: "evidence", aliases: ["audit"], label: "/evidence [task_id]", detail: "Open receipts and audit evidence for an id or the selected task", kind: "task-inspection", taskView: "evidence" },
-  { command: "settings", aliases: ["dashboard", "controls", "recap", "release-notes", "tui", "scroll-speed", "radio", "stickers", "focus", "heapdump", "ide"], label: "/settings", detail: "Open runtime posture and UI controls", kind: "section", section: "security" },
+  { command: "settings", aliases: ["dashboard", "controls", "setup", "recap", "release-notes", "tui", "scroll-speed", "radio", "stickers", "focus", "heapdump", "ide"], label: "/settings", detail: "Open runtime posture and UI controls", kind: "section", section: "security" },
   { command: "commands", aliases: ["help", "keybindings", "autofix-pr", "simplify", "ultraplan", "ultrareview", "claude-api", "fewer-permission-prompts", "powerup", "team-onboarding", "install-github-app", "install-slack-app"], label: "/commands", detail: "Show slash command suggestions", kind: "palette" },
 ];
 

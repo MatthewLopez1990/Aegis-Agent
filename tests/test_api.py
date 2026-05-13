@@ -1154,6 +1154,7 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(command_catalog["mode"], "read_only_navigation")
                 self.assertFalse(command_catalog["generic_command_execution_enabled"])
                 self.assertIn("debug", command_names)
+                self.assertIn("setup", command_names)
                 self.assertIn("remote-control", command_names)
                 self.assertIn("claude-api", command_names)
                 self.assertIn("fewer-permission-prompts", command_names)
