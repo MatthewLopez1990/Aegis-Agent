@@ -220,6 +220,8 @@ class ApiServerSecurityTests(unittest.TestCase):
                 marketplace = _json_get(port, f"/plugins/marketplace?q=test&catalog_path={quote(str(catalog_path))}", token=token)
                 updates = _json_get(port, f"/plugins/updates?catalog_path={quote(str(catalog_path))}", token=token)
                 enabled = _json_post(port, "/plugins/test.plugin/enable", {}, token=token)
+                with self.assertRaises(HTTPError) as invalid_manifest_fetch:
+                    _json_post(port, "/plugins/marketplace/fetch-manifest", {"plugin_id": "test.plugin", "catalog_path": str(catalog_path)}, token=token)
                 with self.assertRaises(HTTPError) as unapproved_update:
                     _json_post(port, "/plugins/marketplace/update", {"plugin_id": "test.plugin", "catalog_path": str(catalog_path)}, token=token)
                 removed = _json_post(port, "/plugins/test.plugin/remove", {}, token=token)
@@ -230,6 +232,7 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(marketplace["entries"][0]["id"], "test.plugin")
                 self.assertEqual(updates["updates"][0]["status"], "update_available")
                 self.assertTrue(enabled["plugin"]["enabled"])
+                self.assertEqual(invalid_manifest_fetch.exception.code, 400)
                 self.assertEqual(unapproved_update.exception.code, 403)
                 self.assertTrue(removed["removed"])
             finally:

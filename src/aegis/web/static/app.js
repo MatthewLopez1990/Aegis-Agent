@@ -22,6 +22,7 @@ const state = {
   skillHubQuery: "",
   pluginMarketplaceQuery: "",
   pluginMarketplaceCatalogPath: "",
+  pluginPreparedUpdateCandidateId: "",
   pendingSubagentDelegation: null,
   pendingSkillEnable: {},
   slashSelectionIndex: 0,
@@ -576,14 +577,14 @@ const refresh = async () => {
       detail: `${x.description || "Marketplace metadata"} Resources: ${(x.resource_kinds || []).join(", ") || "none"}`,
       meta: `${x.installed ? `installed ${x.installed_version || "unknown"}` : "not installed"} · catalog v${x.version || "0.0.0"} · ${x.install_mode || "manual"} · verified manifest ${formatBool(x.marketplace_install_supported)} · signed bundle ${formatBool(x.marketplace_bundle_install_supported)}`,
       tone: x.update_available ? "attention" : x.installed ? "ready" : "",
-      actions: `${x.bundle_fetch_supported ? `<button type="button" class="secondary" data-plugin-marketplace-fetch-bundle="${escapeHtml(x.id)}">Fetch Bundle</button>` : ""}${x.marketplace_bundle_install_supported ? `<button type="button" class="secondary" data-plugin-marketplace-install-bundle="${escapeHtml(x.id)}">Install Bundle</button>` : ""}${x.marketplace_install_supported ? `<button type="button" class="secondary" data-plugin-marketplace-install="${escapeHtml(x.id)}">Install</button>` : ""}`,
+      actions: `${x["manifest_fetch_supported"] ? `<button type="button" class="secondary" data-plugin-marketplace-fetch-manifest="${escapeHtml(x.id)}">Fetch Manifest</button>` : ""}${x.bundle_fetch_supported ? `<button type="button" class="secondary" data-plugin-marketplace-fetch-bundle="${escapeHtml(x.id)}">Fetch Bundle</button>` : ""}${x.marketplace_bundle_install_supported ? `<button type="button" class="secondary" data-plugin-marketplace-install-bundle="${escapeHtml(x.id)}">Install Bundle</button>` : ""}${x.marketplace_install_supported ? `<button type="button" class="secondary" data-plugin-marketplace-install="${escapeHtml(x.id)}">Install</button>` : ""}`,
     }), "No marketplace plugin metadata");
     setList("plugin-updates", pluginUpdates.updates || [], (x) => ({
       title: x.name || x.id,
       detail: `${x.installed_version} -> ${x.available_version}. ${(x.next_actions || []).join(" ")}`,
       meta: `${x.status} · ${x.install_mode || "manual_manifest_review"} · review ${formatBool(x.requires_review)}`,
       tone: "attention",
-      actions: `<button type="button" class="secondary" data-plugin-marketplace-update="${escapeHtml(x.id)}">Apply Update</button>`,
+      actions: `<button type="button" class="secondary" data-plugin-marketplace-prepare-update="${escapeHtml(x.id)}">Prepare</button><button type="button" class="secondary" data-plugin-marketplace-update="${escapeHtml(x.id)}">Apply Direct</button>`,
     }), "No plugin updates");
     setList("mcp-servers", mcpServers.servers, (x) => ({
       title: x.name,
@@ -1942,6 +1943,11 @@ const renderMcpCallOutput = (payload) => {
 };
 
 const renderPluginOutput = (payload) => {
+  if (payload.candidate_id) {
+    state.pluginPreparedUpdateCandidateId = payload.candidate_id;
+    const candidateInput = document.getElementById("plugin-prepared-candidate-id");
+    if (candidateInput) candidateInput.value = payload.candidate_id;
+  }
   const node = document.getElementById("plugin-output");
   node.innerHTML = `
     <strong>${text(payload.plugin?.name || payload.plugin?.id || payload.status || "Plugin")}</strong>
@@ -3159,10 +3165,23 @@ document.getElementById("plugin-marketplace-form").addEventListener("submit", as
 });
 
 document.getElementById("plugin-marketplace").addEventListener("click", async (event) => {
+  const manifestPluginId = event.target.dataset.pluginMarketplaceFetchManifest;
   const bundlePluginId = event.target.dataset.pluginMarketplaceFetchBundle;
   const bundleInstallPluginId = event.target.dataset.pluginMarketplaceInstallBundle;
-  const pluginId = bundlePluginId || bundleInstallPluginId || event.target.dataset.pluginMarketplaceInstall;
+  const pluginId = manifestPluginId || bundlePluginId || bundleInstallPluginId || event.target.dataset.pluginMarketplaceInstall;
   if (!pluginId) return;
+  if (manifestPluginId) {
+    const result = await api("/plugins/marketplace/fetch-manifest", {
+      method: "POST",
+      body: JSON.stringify({
+        plugin_id: manifestPluginId,
+        catalog_path: state.pluginMarketplaceCatalogPath || undefined,
+      }),
+    });
+    renderPluginOutput(result);
+    await refresh();
+    return;
+  }
   if (bundlePluginId) {
     const result = await api("/plugins/marketplace/fetch-bundle", {
       method: "POST",
@@ -3199,14 +3218,44 @@ document.getElementById("plugin-marketplace").addEventListener("click", async (e
 });
 
 document.getElementById("plugin-updates").addEventListener("click", async (event) => {
-  const pluginId = event.target.dataset.pluginMarketplaceUpdate;
+  const preparePluginId = event.target.dataset.pluginMarketplacePrepareUpdate;
+  const pluginId = preparePluginId || event.target.dataset.pluginMarketplaceUpdate;
   if (!pluginId) return;
+  if (preparePluginId) {
+    const result = await api("/plugins/marketplace/prepare-update", {
+      method: "POST",
+      body: JSON.stringify({
+        plugin_id: preparePluginId,
+        catalog_path: state.pluginMarketplaceCatalogPath || undefined,
+      }),
+    });
+    renderPluginOutput(result);
+    await refresh();
+    return;
+  }
   const result = await api("/plugins/marketplace/update", {
     method: "POST",
     body: JSON.stringify({
       plugin_id: pluginId,
       approved: true,
       catalog_path: state.pluginMarketplaceCatalogPath || undefined,
+    }),
+  });
+  renderPluginOutput(result);
+  await refresh();
+});
+
+document.getElementById("plugin-prepared-update-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const candidateId = document.getElementById("plugin-prepared-candidate-id").value || state.pluginPreparedUpdateCandidateId;
+  const disable = document.getElementById("plugin-prepared-update-disable").checked;
+  const enable = document.getElementById("plugin-prepared-update-enable").checked && !disable;
+  const result = await api("/plugins/marketplace/apply-prepared-update", {
+    method: "POST",
+    body: JSON.stringify({
+      candidate_id: candidateId,
+      approved: document.getElementById("plugin-prepared-update-approved").checked,
+      enable: disable ? false : enable ? true : undefined,
     }),
   });
   renderPluginOutput(result);

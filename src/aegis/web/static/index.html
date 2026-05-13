@@ -478,6 +478,13 @@
             <input id="plugin-marketplace-catalog" placeholder="/path/to/catalog.json">
             <button type="submit" class="secondary">Search Marketplace</button>
           </form>
+          <form id="plugin-prepared-update-form" class="inline-form two-col">
+            <input id="plugin-prepared-candidate-id" placeholder="Prepared update candidate id">
+            <label class="checkline"><input id="plugin-prepared-update-approved" type="checkbox"> Approved</label>
+            <label class="checkline"><input id="plugin-prepared-update-enable" type="checkbox"> Enable</label>
+            <label class="checkline"><input id="plugin-prepared-update-disable" type="checkbox"> Disable</label>
+            <button type="submit" class="secondary">Apply Prepared Update</button>
+          </form>
           <div id="installed-plugins" class="list compact-list"></div>
           <p class="section-label">Marketplace</p>
           <div id="plugin-marketplace" class="list compact-list"></div>
