@@ -1155,6 +1155,9 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertFalse(command_catalog["generic_command_execution_enabled"])
                 self.assertIn("debug", command_names)
                 self.assertIn("remote-control", command_names)
+                self.assertIn("claude-api", command_names)
+                self.assertIn("fewer-permission-prompts", command_names)
+                self.assertIn("team-onboarding", command_names)
                 self.assertIn("aegis-project-summary", command_names)
                 command_rows = {row["command"]: row for row in command_catalog["commands"]}
                 self.assertEqual(command_rows["remote-control"]["kind"], "remote-control")

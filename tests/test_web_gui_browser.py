@@ -248,6 +248,10 @@ if (frames.length !== 2 || frames[1].event !== "task" || frames[1].data.status !
         self.assertIn("setup-bedrock", script)
         self.assertIn("setup-vertex", script)
         self.assertIn("autofix-pr", script)
+        self.assertIn("claude-api", script)
+        self.assertIn("fewer-permission-prompts", script)
+        self.assertIn("install-github-app", script)
+        self.assertIn("team-onboarding", script)
         self.assertIn("ultraplan", script)
         self.assertIn("ultrareview", script)
         self.assertIn("release-notes", script)
@@ -335,6 +339,14 @@ if (!privacy.includes("approvals")) {
 const setup = api.matches("setup").map((entry) => entry.command);
 if (!setup.includes("models")) {
   throw new Error(`/setup-* aliases did not resolve to models: ${JSON.stringify(setup)}`);
+}
+const claudeApi = api.matches("claude").map((entry) => entry.command);
+if (!claudeApi.includes("commands")) {
+  throw new Error(`/claude-api alias did not resolve to commands: ${JSON.stringify(claudeApi)}`);
+}
+const mobile = api.matches("ios").map((entry) => entry.command);
+if (!mobile.includes("remote-control")) {
+  throw new Error(`/ios alias did not resolve to remote control: ${JSON.stringify(mobile)}`);
 }
 const chrome = api.matches("chrome").map((entry) => entry.command);
 if (!chrome.includes("browser")) {

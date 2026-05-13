@@ -47,6 +47,7 @@ TOP_LEVEL_COMMANDS = (
     "add-dir",
     "agents",
     "allowed-tools",
+    "android",
     "autofix-pr",
     "backends",
     "batch",
@@ -64,6 +65,7 @@ TOP_LEVEL_COMMANDS = (
     "channel",
     "channels",
     "chrome",
+    "claude-api",
     "clear",
     "checkpoint",
     "compact",
@@ -90,8 +92,11 @@ TOP_LEVEL_COMMANDS = (
     "exit",
     "effort",
     "export",
+    "extra-usage",
     "fast",
     "feedback",
+    "fewer-permission-prompts",
+    "focus",
     "footer",
     "fork",
     "gateway",
@@ -100,10 +105,15 @@ TOP_LEVEL_COMMANDS = (
     "handoff",
     "help",
     "hooks",
+    "heapdump",
     "image",
+    "ide",
     "indicator",
     "insights",
     "init",
+    "install-github-app",
+    "install-slack-app",
+    "ios",
     "kanban",
     "keybindings",
     "login",
@@ -125,14 +135,18 @@ TOP_LEVEL_COMMANDS = (
     "platforms",
     "permissions",
     "personality",
+    "passes",
     "profile",
     "plugin",
     "plugins",
+    "powerup",
+    "proactive",
     "pr_comments",
     "privacy-settings",
     "provider",
     "prompt",
     "q",
+    "quit",
     "queue",
     "radio",
     "rc",
@@ -159,6 +173,7 @@ TOP_LEVEL_COMMANDS = (
     "rollback",
     "routines",
     "save",
+    "sandbox",
     "schedule",
     "schedules",
     "scroll-speed",
@@ -188,6 +203,7 @@ TOP_LEVEL_COMMANDS = (
     "tasks",
     "teleport",
     "terminal-setup",
+    "team-onboarding",
     "theme",
     "timeline",
     "title",
@@ -278,10 +294,18 @@ SLASH_COMMAND_ALIASES = {
     "add-dir": "add_dir",
     "allowed-tools": "allowed_tools",
     "app": "desktop",
+    "android": "mobile",
     "bg": "background",
     "btw": "background",
+    "claude-api": "claude_api",
+    "extra-usage": "extra_usage",
+    "fewer-permission-prompts": "fewer_permission_prompts",
     "feedback": "bug",
+    "install-github-app": "install_github_app",
+    "install-slack-app": "install_slack_app",
+    "ios": "mobile",
     "pr-comments": "pr_comments",
+    "proactive": "loop",
     "q": "queue",
     "rc": "remote_control",
     "remote-control": "remote_control",
@@ -296,6 +320,7 @@ SLASH_COMMAND_ALIASES = {
     "snap": "rollback",
     "snapshot": "rollback",
     "terminal-setup": "terminal_setup",
+    "team-onboarding": "team_onboarding",
     "tp": "teleport",
     "web-setup": "web_setup",
     "set-home": "sethome",
@@ -4435,6 +4460,120 @@ class AegisTui(cmd.Cmd):
             }
         )
 
+    def _print_claude_style_readiness(self, *, command: str, feature: str, next_actions: list[str], status: str = "metadata_only") -> None:
+        _print_json(
+            {
+                "status": status,
+                "command": command,
+                "feature": feature,
+                "external_action_started": False,
+                "local_controls_only": True,
+                "raw_message_content_included": False,
+                "raw_secret_values_included": False,
+                "next_actions": next_actions,
+            }
+        )
+
+    def do_claude_api(self, arg: str) -> None:
+        """claude_api [migrate|managed-agents-onboard] -- show API migration readiness."""
+        mode = shlex.split(arg)[0] if arg.strip() else "reference"
+        self._print_claude_style_readiness(
+            command="claude-api",
+            feature=f"claude_api_{mode}_readiness",
+            status="claude_api_readiness",
+            next_actions=["models auth targets", "capabilities", "mcp list", "skills hub"],
+        )
+
+    def do_extra_usage(self, arg: str) -> None:
+        """extra_usage -- show account/usage boundary metadata."""
+        self._print_claude_style_readiness(
+            command="extra-usage",
+            feature="account_extra_usage_boundary",
+            status="account_boundary_metadata",
+            next_actions=["usage", "models auth targets", "upgrade"],
+        )
+
+    def do_fewer_permission_prompts(self, arg: str) -> None:
+        """fewer_permission_prompts -- show permission-hardening readiness."""
+        self._print_claude_style_readiness(
+            command="fewer-permission-prompts",
+            feature="permission_prompt_reduction_review",
+            status="permission_review_readiness",
+            next_actions=["permissions", "allowed-tools", "security evaluate"],
+        )
+
+    def do_focus(self, arg: str) -> None:
+        """focus -- show focused-view readiness."""
+        self._print_claude_style_readiness(
+            command="focus",
+            feature="focused_view_metadata",
+            status="focus_view_readiness",
+            next_actions=["tui fullscreen", "details", "statusbar"],
+        )
+
+    def do_heapdump(self, arg: str) -> None:
+        """heapdump -- show diagnostics boundary metadata."""
+        self._print_claude_style_readiness(
+            command="heapdump",
+            feature="diagnostic_heap_snapshot_boundary",
+            status="diagnostic_boundary_metadata",
+            next_actions=["debug", "doctor", "audit export-siem"],
+        )
+
+    def do_ide(self, arg: str) -> None:
+        """ide -- show IDE integration readiness."""
+        self._print_claude_style_readiness(
+            command="ide",
+            feature="ide_integration_readiness",
+            status="ide_readiness",
+            next_actions=["terminal-setup", "web-setup", "capabilities"],
+        )
+
+    def do_install_github_app(self, arg: str) -> None:
+        """install_github_app -- show governed GitHub app setup boundary."""
+        self._print_claude_style_readiness(
+            command="install-github-app",
+            feature="github_app_setup_boundary",
+            status="external_install_boundary",
+            next_actions=["connectors", "web-setup", "autofix-pr"],
+        )
+
+    def do_install_slack_app(self, arg: str) -> None:
+        """install_slack_app -- show governed Slack app setup boundary."""
+        self._print_claude_style_readiness(
+            command="install-slack-app",
+            feature="slack_app_setup_boundary",
+            status="external_install_boundary",
+            next_actions=["channels", "handoff slack", "web-setup"],
+        )
+
+    def do_passes(self, arg: str) -> None:
+        """passes -- show subscription/account boundary metadata."""
+        self._print_claude_style_readiness(
+            command="passes",
+            feature="subscription_share_boundary",
+            status="account_boundary_metadata",
+            next_actions=["usage", "upgrade", "models auth targets"],
+        )
+
+    def do_powerup(self, arg: str) -> None:
+        """powerup -- show local feature discovery surfaces."""
+        self._print_claude_style_readiness(
+            command="powerup",
+            feature="feature_discovery",
+            status="feature_discovery_ready",
+            next_actions=["commands", "capabilities", "menu"],
+        )
+
+    def do_team_onboarding(self, arg: str) -> None:
+        """team_onboarding -- show sanitized onboarding export readiness."""
+        self._print_claude_style_readiness(
+            command="team-onboarding",
+            feature="team_onboarding_report_readiness",
+            status="onboarding_report_readiness",
+            next_actions=["insights 30", "commands", "memory export"],
+        )
+
     def do_desktop(self, arg: str) -> None:
         """desktop -- show desktop wrapper readiness."""
         self.do_remote_control(arg)
@@ -6330,10 +6469,10 @@ def _command_reference() -> str:
             "retry|undo             Resubmit or remove the latest session exchange",
             "background|bg|btw <req>  Submit a governed task from the deck",
             "fast [request]         Inspect fast route or submit a quick governed task",
-            "goal|batch|queue|q|loop Goal, queue, and self-improvement readiness",
+            "goal|batch|queue|q|loop|proactive Goal, queue, and self-improvement readiness",
             "remote-control|rc      Local-first remote-control readiness",
             "handoff|remote-env|teleport|tp Guarded remote environment handoff readiness",
-            "mobile|desktop|app     Mobile/desktop control-plane readiness",
+            "mobile|ios|android|desktop|app Mobile/desktop control-plane readiness",
             "evidence [task_id]     Show receipt and audit evidence",
             "timeline [task_id]     Show plan, receipt, and audit sequence",
             "events [task_id]       Show grouped run-event progress",
@@ -6342,10 +6481,11 @@ def _command_reference() -> str:
             "approve <id> [--admin] Approve a gated action",
             "deny <id> [--admin]    Deny a gated action",
             "permissions            Claude-style policy posture alias",
+            "fewer-permission-prompts Permission prompt review readiness",
             "privacy-settings       Local privacy, redaction, and telemetry posture",
             "whoami|yolo            Identity posture and approval-bypass refusal",
             "security-review        Security review posture alias",
-            "doctor|debug|config|settings Runtime diagnosis, safe debug, and config paths",
+            "doctor|debug|config|settings|heapdump Runtime diagnosis, safe debug, and config paths",
             "bug|feedback <summary> Capture a local-only bug report",
             "hooks list|add|run     Governed local lifecycle hooks",
             "dashboard              Runtime command deck",
@@ -6363,13 +6503,14 @@ def _command_reference() -> str:
             "models|model           Model providers",
             "login|logout <provider> Model auth aliases",
             "setup-bedrock|setup-vertex Cloud identity setup bridges",
-            "upgrade                Provider account-upgrade boundary",
+            "upgrade|extra-usage|passes Provider account and usage boundaries",
             "usage|stats|insights   Model usage and local analytics",
             "effort [level]         Guarded reasoning-effort status",
             "cost                   Model usage and estimated cost",
             "statusbar|statusline   UI status metadata",
             "theme|skin|color       UI preference metadata",
-            "commands|keybindings   Slash command and terminal keybinding surfaces",
+            "commands|keybindings|powerup|focus|ide Slash command and integration surfaces",
+            "claude-api             Claude API migration and managed-agent reference readiness",
             "provider|usage         Model provider and usage aliases",
             "gquota [model]         Google Gemini Code Assist quota metadata",
             "models auth methods|targets|doctor|readiness-packet|verify-readiness-packet|login|logout <provider>",
@@ -6415,6 +6556,8 @@ def _command_reference() -> str:
             "redraw                 Refresh compact home surface",
             "snapshot|snap|rollback Guarded snapshot and rollback status",
             "sethome|set-home       Home workspace/channel readiness",
+            "install-github-app|install-slack-app External app setup boundaries",
+            "team-onboarding        Sanitized onboarding report readiness",
             "diff|review|simplify   Guarded diff, review, and simplify surfaces",
             "ultraplan|ultrareview  Governed plan and deep-review readiness",
             "release-notes          Local release metadata",
@@ -6484,9 +6627,10 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("approve|deny <id>", "decide gated work"),
             ("security", "policy posture"),
             ("permissions|security-review", "Claude-style policy and security review aliases"),
+            ("fewer-permission-prompts", "permission prompt review readiness"),
             ("privacy-settings", "local privacy, redaction, and telemetry posture"),
             ("whoami|yolo", "identity posture and approval-bypass refusal"),
-            ("doctor|debug|config|settings|init", "runtime diagnostics, local paths, and initialization status"),
+            ("doctor|debug|config|settings|init|heapdump", "runtime diagnostics, local paths, and initialization status"),
             ("bug|feedback <summary>", "local-only bug report capture"),
             ("hooks", "governed local lifecycle hooks"),
             ("audit|evidence|timeline|events", "receipts and replay"),
@@ -6499,10 +6643,11 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("insights [days]", "sanitized local usage analytics"),
             ("gquota [model]", "Google Gemini Code Assist quota metadata"),
             ("login|logout <provider>", "model auth login/logout aliases"),
-            ("setup-bedrock|setup-vertex|upgrade", "cloud identity setup and account boundary"),
+            ("setup-bedrock|setup-vertex|upgrade|extra-usage|passes", "cloud identity setup and account boundary"),
             ("effort|cost", "guarded reasoning-effort metadata and usage cost"),
             ("statusbar|statusline|sb|theme|skin|color|verbose", "UI preference and status metadata"),
-            ("commands|keybindings", "slash command and terminal keybinding surfaces"),
+            ("commands|keybindings|powerup|focus|ide", "slash command, feature discovery, and terminal integration surfaces"),
+            ("claude-api", "Claude API migration and managed-agent reference readiness"),
             ("allowed-tools|bashes", "policy-visible tools and shell posture"),
             ("tools list|run|enable|disable", "safe tool execution and policy-owned preferences"),
             ("toolsets", "tool catalog grouped by permission and risk"),
@@ -6519,7 +6664,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         (
             ("capabilities", "parity and readiness"),
             ("agents status|autonomy-preflight|delegate|review-packet|verify-packet|run", "multi-agent coordination and runtime preflight"),
-            ("remote-control|rc|handoff|remote-env|teleport|tp|mobile|desktop|app", "local-first remote-control readiness"),
+            ("remote-control|rc|handoff|remote-env|teleport|tp|mobile|ios|android|desktop|app", "local-first remote-control readiness"),
             ("web-setup", "local web control-plane setup"),
             ("connectors|channels|platforms", "integration surfaces"),
             ("pr_comments|autofix-pr", "pull request comment and autofix readiness"),
@@ -6530,6 +6675,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("rollback|snapshot|snap|diff|review|simplify", "guarded rollback, snapshot, diff, and review status"),
             ("ultraplan|ultrareview", "governed plan and deep-review readiness"),
             ("sethome|set-home", "home workspace/channel readiness"),
+            ("install-github-app|install-slack-app|team-onboarding", "external app setup and onboarding readiness"),
             ("release-notes|update|restart", "operator-controlled update and release readiness"),
         ),
     ),

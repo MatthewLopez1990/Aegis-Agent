@@ -59,18 +59,18 @@ const WEB_SLASH_COMMANDS = [
   { command: "approve", label: "/approve <approval_id>", detail: "Approve a pending approval", kind: "approval-control", approvalAction: "approve" },
   { command: "deny", label: "/deny <approval_id>", detail: "Deny a pending approval", kind: "approval-control", approvalAction: "deny" },
   { command: "approvals", aliases: ["permissions", "privacy-settings", "whoami", "yolo"], label: "/approvals", detail: "Open pending approval and privacy gates", kind: "section", section: "security" },
-  { command: "models", aliases: ["model", "login", "logout", "setup-bedrock", "setup-vertex", "upgrade"], label: "/models", detail: "Open provider login and model routing controls", kind: "section", section: "models" },
+  { command: "models", aliases: ["model", "login", "logout", "setup-bedrock", "setup-vertex", "upgrade", "extra-usage", "passes"], label: "/models", detail: "Open provider login and model routing controls", kind: "section", section: "models" },
   { command: "tools", aliases: ["tool", "allowed-tools"], label: "/tools", detail: "Open governed tool and MCP controls", kind: "section", section: "tools" },
   { command: "browser", aliases: ["chrome"], label: "/browser|/chrome", detail: "Open guarded browser controls", kind: "section", section: "tools" },
   { command: "memory", aliases: ["mem"], label: "/memory", detail: "Open governed memory controls", kind: "section", section: "memory" },
-  { command: "remote-control", aliases: ["rc", "remote"], label: "/remote-control", detail: "Open remote pairing and relay controls", kind: "section", section: "automation" },
+  { command: "remote-control", aliases: ["rc", "remote", "mobile", "ios", "android"], label: "/remote-control", detail: "Open remote pairing and relay controls", kind: "section", section: "automation" },
   { command: "schedules", aliases: ["schedule", "hooks"], label: "/schedules", detail: "Open automation, hooks, and scheduled runs", kind: "section", section: "automation" },
   { command: "status", label: "/status [task_id]", detail: "Show task status for an id or the selected task", kind: "task-inspection", taskView: "status" },
   { command: "events", label: "/events [task_id]", detail: "Stream grouped run events for an id or the selected task", kind: "task-inspection", taskView: "events" },
   { command: "timeline", label: "/timeline [task_id]", detail: "Open ordered plan, receipt, and audit events", kind: "task-inspection", taskView: "timeline" },
   { command: "evidence", aliases: ["audit"], label: "/evidence [task_id]", detail: "Open receipts and audit evidence for an id or the selected task", kind: "task-inspection", taskView: "evidence" },
-  { command: "settings", aliases: ["dashboard", "controls", "recap", "release-notes", "tui", "scroll-speed", "radio", "stickers"], label: "/settings", detail: "Open runtime posture and UI controls", kind: "section", section: "security" },
-  { command: "commands", aliases: ["help", "keybindings", "autofix-pr", "simplify", "ultraplan", "ultrareview"], label: "/commands", detail: "Show slash command suggestions", kind: "palette" },
+  { command: "settings", aliases: ["dashboard", "controls", "recap", "release-notes", "tui", "scroll-speed", "radio", "stickers", "focus", "heapdump", "ide"], label: "/settings", detail: "Open runtime posture and UI controls", kind: "section", section: "security" },
+  { command: "commands", aliases: ["help", "keybindings", "autofix-pr", "simplify", "ultraplan", "ultrareview", "claude-api", "fewer-permission-prompts", "powerup", "team-onboarding", "install-github-app", "install-slack-app"], label: "/commands", detail: "Show slash command suggestions", kind: "palette" },
 ];
 
 let webSlashCommands = WEB_SLASH_COMMANDS.slice();
