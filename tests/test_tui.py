@@ -161,6 +161,10 @@ class TuiTests(unittest.TestCase):
     def test_tui_completes_commands_and_common_subcommands(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
+            (root / "src" / "aegis").mkdir(parents=True)
+            (root / "docs").mkdir()
+            (root / "docs" / "tui-web.md").write_text("tui docs", encoding="utf-8")
+            (root / ".aegis").mkdir()
             tui = AegisTui(data_dir=root / ".aegis", workspace=root)
 
             self.assertIn("memory", tui.completenames("mem"))
@@ -241,6 +245,16 @@ class TuiTests(unittest.TestCase):
             self.assertIn("/submit", slash_su)
             self.assertIn("/resume", slash_su)
             self.assertNotIn("/status", slash_su)
+            context_ref = tui.completedefault("@src/ae", "review @src/ae", len("review "), len("review @src/ae"))
+            self.assertIn("@src/aegis/", context_ref)
+            self.assertNotIn("@.aegis/", tui.completedefault("@", "review @", len("review "), len("review @")))
+            slash_context_ref = tui.completedefault("@docs/tu", "/submit review @docs/tu", len("/submit review "), len("/submit review @docs/tu"))
+            self.assertIn("@docs/tui-web.md", slash_context_ref)
+            path_arg = tui.completedefault("src/ae", "/task submit --path src/ae", len("/task submit --path "), len("/task submit --path src/ae"))
+            self.assertIn("src/aegis/", path_arg)
+            live_context, _height = _live_input_block(tui.prompt, "review @docs/tu", 100, workspace=root)
+            self.assertIn("context", live_context)
+            self.assertIn("@docs/tui-web.md", live_context)
             self.assertIn("tasks [all|session <id>]", tui._render_dashboard())
             output = io.StringIO()
             with redirect_stdout(output):

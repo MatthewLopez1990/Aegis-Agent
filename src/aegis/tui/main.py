@@ -515,6 +515,9 @@ class AegisTui(cmd.Cmd):
         return _complete_options(labels, text)
 
     def completedefault(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        path_labels = _complete_context_paths(text, line, begidx, self.workspace)
+        if path_labels:
+            return path_labels
         labels = _complete_slash(text, line, begidx, endidx)
         stripped = line.lstrip()
         if stripped.startswith("/") and " " not in stripped[:endidx].strip():
@@ -5704,7 +5707,7 @@ class AegisTui(cmd.Cmd):
         def redraw() -> None:
             nonlocal rendered_height
             width = min(max(shutil.get_terminal_size((100, 24)).columns, 60), 140)
-            block, height = _live_input_block(self.prompt, buffer, width)
+            block, height = _live_input_block(self.prompt, buffer, width, workspace=self.workspace)
             if rendered_height:
                 sys.stdout.write("\r")
                 if rendered_height > 1:
@@ -5763,10 +5766,15 @@ class AegisTui(cmd.Cmd):
                 if char == "\t":
                     if buffer.startswith("/"):
                         completion_text, begidx, endidx = _live_completion_context(buffer)
-                        completions = _complete_slash(completion_text, buffer, begidx, endidx)
+                        completions = _complete_context_paths(completion_text, buffer, begidx, self.workspace)
+                        if not completions:
+                            completions = _complete_slash(completion_text, buffer, begidx, endidx)
                     else:
-                        completion_text, begidx, endidx = buffer, 0, len(buffer)
-                        completions = self.completenames(buffer)
+                        completion_text, begidx, endidx = _word_completion_context(buffer)
+                        completions = _complete_context_paths(completion_text, buffer, begidx, self.workspace)
+                        if not completions:
+                            completion_text, begidx, endidx = buffer, 0, len(buffer)
+                            completions = self.completenames(buffer)
                     if len(completions) == 1:
                         buffer = _apply_live_completion(buffer, completions[0], begidx, endidx)
                     elif completions:
@@ -7176,6 +7184,20 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("rc", "relay-action"): ("--pairing-id", "--task-id", "--action", "--relay-auth-secret", "--session-id", "--reason"),
 }
 
+PATH_COMPLETION_FLAGS = {
+    "--catalog-path",
+    "--config",
+    "--path",
+    "--patch-file",
+    "--synthesis-file",
+    "--workspace",
+}
+
+PATH_COMPLETION_ROOTS = {
+    "add-dir",
+    "image",
+}
+
 
 def _complete_slash(text: str, line: str, begidx: int, endidx: int) -> list[str]:
     stripped = line.lstrip()
@@ -7214,6 +7236,15 @@ def _live_completion_context(buffer: str) -> tuple[str, int, int]:
     return buffer[begidx:endidx], begidx, endidx
 
 
+def _word_completion_context(buffer: str) -> tuple[str, int, int]:
+    endidx = len(buffer)
+    if not buffer or buffer[-1].isspace():
+        return "", endidx, endidx
+    last_break = max(buffer.rfind(" "), buffer.rfind("\t"), buffer.rfind("\n"))
+    begidx = last_break + 1 if last_break >= 0 else 0
+    return buffer[begidx:endidx], begidx, endidx
+
+
 def _apply_live_completion(buffer: str, completion: str, begidx: int, endidx: int) -> str:
     if buffer.startswith("/") and completion.startswith("/"):
         return completion
@@ -7222,6 +7253,81 @@ def _apply_live_completion(buffer: str, completion: str, begidx: int, endidx: in
 
 def _complete_options(options: tuple[str, ...], text: str) -> list[str]:
     return [option for option in options if option.startswith(text)]
+
+
+def _complete_context_paths(text: str, line: str, begidx: int, workspace: str | Path) -> list[str]:
+    token = text.strip()
+    if not token:
+        return []
+    if token.startswith("@"):
+        return _complete_workspace_paths(token, workspace)
+    if _expects_path_completion(line, begidx):
+        return _complete_workspace_paths(token, workspace, context_marker=False)
+    return []
+
+
+def _expects_path_completion(line: str, begidx: int) -> bool:
+    before = line[:begidx]
+    try:
+        parts = shlex.split(before)
+    except ValueError:
+        parts = before.split()
+    if not parts:
+        return False
+    if parts[-1] in PATH_COMPLETION_FLAGS:
+        return True
+    root = parts[0].lstrip("/").replace("_", "-")
+    return root in PATH_COMPLETION_ROOTS and len(parts) == 1
+
+
+def _complete_workspace_paths(text: str, workspace: str | Path, *, context_marker: bool | None = None) -> list[str]:
+    raw = text[1:] if text.startswith("@") else text
+    marker = "@" if (context_marker if context_marker is not None else text.startswith("@")) else ""
+    if raw.startswith(("~", "/")):
+        return []
+    raw = raw.replace("\\", "/")
+    parent_raw, _, fragment = raw.rpartition("/")
+    if not raw.endswith("/") and not parent_raw:
+        parent_raw = "."
+    elif raw.endswith("/"):
+        parent_raw = raw.rstrip("/") or "."
+        fragment = ""
+    root = Path(workspace).expanduser().resolve()
+    try:
+        parent = (root / parent_raw).resolve()
+        parent.relative_to(root)
+    except (OSError, ValueError):
+        return []
+    if not parent.exists() or not parent.is_dir():
+        return []
+    fragment_lower = fragment.lower()
+    rows: list[Path] = []
+    try:
+        candidates = list(parent.iterdir())
+    except OSError:
+        return []
+    for child in candidates:
+        name = child.name
+        if name.startswith(".") and not fragment.startswith("."):
+            continue
+        name_lower = name.lower()
+        if fragment_lower and not (name_lower.startswith(fragment_lower) or fragment_lower in name_lower):
+            continue
+        try:
+            child.resolve().relative_to(root)
+        except (OSError, ValueError):
+            continue
+        rows.append(child)
+    rows.sort(key=lambda path: (not path.is_dir(), path.name.lower()))
+    labels: list[str] = []
+    for child in rows[:20]:
+        try:
+            rel = child.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        suffix = "/" if child.is_dir() else ""
+        labels.append(f"{marker}{rel}{suffix}")
+    return labels
 
 
 def _skill_slash_labels(skill_id: str) -> tuple[str, ...]:
@@ -7271,9 +7377,11 @@ def _complete_subcommand(options: tuple[str, ...], text: str, line: str, begidx:
     return []
 
 
-def _live_input_block(prompt: str, buffer: str, width: int) -> tuple[str, int]:
+def _live_input_block(prompt: str, buffer: str, width: int, *, workspace: str | Path | None = None) -> tuple[str, int]:
     prompt = _strip_readline_markers(prompt)
-    suggestion_lines = _live_key_hint_lines(buffer, width) + _live_slash_hint_lines(buffer, width)
+    context_lines = _live_context_hint_lines(buffer, width, workspace=workspace)
+    slash_lines = [] if context_lines else _live_slash_hint_lines(buffer, width)
+    suggestion_lines = _live_key_hint_lines(buffer, width) + context_lines + slash_lines
     input_lines = _wrapped_prompt_lines(prompt, buffer, width)
     return "\n".join([*suggestion_lines, *input_lines]), len(suggestion_lines) + len(input_lines)
 
@@ -7292,6 +7400,21 @@ def _live_slash_hint_lines(buffer: str, width: int) -> list[str]:
     if not labels:
         return [_paint("suggest  no slash matches", "2;33")]
     label = _live_completion_hint_label(labels, begidx)
+    line = f"{label:<7} " + "  ".join(labels)
+    return [_paint(_shorten_preserve_spaces(line, width=max(20, width)), "2;36")]
+
+
+def _live_context_hint_lines(buffer: str, width: int, *, workspace: str | Path | None = None) -> list[str]:
+    if not buffer:
+        return []
+    if buffer.startswith("/"):
+        completion_text, begidx, _endidx = _live_completion_context(buffer)
+    else:
+        completion_text, begidx, _endidx = _word_completion_context(buffer)
+    labels = _complete_context_paths(completion_text, buffer, begidx, workspace or Path.cwd())
+    if not labels:
+        return []
+    label = "context" if completion_text.strip().startswith("@") else "path"
     line = f"{label:<7} " + "  ".join(labels)
     return [_paint(_shorten_preserve_spaces(line, width=max(20, width)), "2;36")]
 
