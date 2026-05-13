@@ -23,7 +23,14 @@ from aegis.memory.models import MemoryType
 from aegis.migration.openclaw import preview_hermes_memory_import, preview_openclaw_memory_import
 from aegis.product.capabilities import build_product_dashboard
 from aegis.research.harness import ResearchHarness
-from aegis.remote_control import REMOTE_CONTROL_TOKEN_HEADER, RemoteControlPairingRegistry, build_remote_control_directory, build_remote_control_notification
+from aegis.remote_control import (
+    REMOTE_CONTROL_TOKEN_HEADER,
+    RemoteControlPairingRegistry,
+    build_remote_control_directory,
+    build_remote_control_notification,
+    build_remote_control_task_events,
+    build_remote_control_task_status,
+)
 from aegis.scheduler.worker import ScheduleWorker
 from aegis.security.policy_engine import PolicyDecision, PolicyRequest
 from aegis.security.policy_profile import activate_due_policy_rollouts, apply_policy_bundle, apply_policy_bundle_text, diff_policy_bundle, diff_policy_bundle_text, import_policy_bundle_text, list_policy_bundles, list_policy_promotions, list_policy_rollouts, policy_profile_to_dict, promote_policy_bundle, rollback_policy_bundle, schedule_policy_bundle
@@ -308,13 +315,13 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
             if match_remote_task:
                 task_id = match_remote_task.group(1)
                 self._authorize_remote_control_action("status", task_id)
-                self._json(orchestrator.status(task_id))
+                self._json(build_remote_control_task_status(orchestrator.status(task_id)))
                 return
             match_remote_task_events = re.fullmatch(r"/remote-control/tasks/([^/]+)/events", path)
             if match_remote_task_events:
                 task_id = match_remote_task_events.group(1)
                 self._authorize_remote_control_action("events", task_id)
-                self._json(orchestrator.evidence.run_events(task_id))
+                self._json(build_remote_control_task_events(orchestrator.evidence.run_events(task_id)))
                 return
             self._authorize_read()
             if path.startswith("/tool-artifacts/"):
@@ -1086,15 +1093,18 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     raise PermissionError("missing or invalid remote-control relay authorization")
                 actor = f"remote-control-relay:{relay_auth['pairing'].get('label') or relay_auth['pairing']['id']}"
                 if action == "status":
-                    result = orchestrator.status(task_id)
+                    result = build_remote_control_task_status(orchestrator.status(task_id))
                 elif action == "events":
-                    result = orchestrator.evidence.run_events(task_id)
+                    result = build_remote_control_task_events(orchestrator.evidence.run_events(task_id))
                 elif action == "resume":
-                    result = orchestrator.resume_task(task_id, session_id=payload.get("session_id"), actor=actor)
+                    orchestrator.resume_task(task_id, session_id=payload.get("session_id"), actor=actor)
+                    result = build_remote_control_task_status(orchestrator.status(task_id))
                 elif action == "pause":
-                    result = orchestrator.pause_task(task_id, session_id=payload.get("session_id"), actor=actor, reason=str(payload.get("reason", "remote control relay pause")))
+                    orchestrator.pause_task(task_id, session_id=payload.get("session_id"), actor=actor, reason=str(payload.get("reason", "remote control relay pause")))
+                    result = build_remote_control_task_status(orchestrator.status(task_id))
                 elif action == "cancel":
-                    result = orchestrator.cancel_task(task_id, session_id=payload.get("session_id"), actor=actor, reason=str(payload.get("reason", "remote control relay cancel")))
+                    orchestrator.cancel_task(task_id, session_id=payload.get("session_id"), actor=actor, reason=str(payload.get("reason", "remote control relay cancel")))
+                    result = build_remote_control_task_status(orchestrator.status(task_id))
                 else:
                     raise PermissionError("remote-control relay action is not allowed")
                 orchestrator.audit_logger.append(
@@ -1134,11 +1144,12 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 payload = self._read_json()
                 actor = f"remote-control:{auth['pairing'].get('label') or auth['pairing']['id']}"
                 if action == "resume":
-                    result = orchestrator.resume_task(task_id, session_id=payload.get("session_id"), actor=actor)
+                    orchestrator.resume_task(task_id, session_id=payload.get("session_id"), actor=actor)
                 elif action == "pause":
-                    result = orchestrator.pause_task(task_id, session_id=payload.get("session_id"), actor=actor, reason=str(payload.get("reason", "remote control pause")))
+                    orchestrator.pause_task(task_id, session_id=payload.get("session_id"), actor=actor, reason=str(payload.get("reason", "remote control pause")))
                 else:
-                    result = orchestrator.cancel_task(task_id, session_id=payload.get("session_id"), actor=actor, reason=str(payload.get("reason", "remote control cancel")))
+                    orchestrator.cancel_task(task_id, session_id=payload.get("session_id"), actor=actor, reason=str(payload.get("reason", "remote control cancel")))
+                result = build_remote_control_task_status(orchestrator.status(task_id))
                 orchestrator.audit_logger.append(
                     "remote_control.task_action",
                     {
@@ -2891,15 +2902,18 @@ def _execute_remote_control_action(orchestrator: Any, action_row: dict[str, Any]
     session_id = action_row.get("session_id")
     reason = str(action_row.get("reason") or "")
     if action == "status":
-        return orchestrator.status(task_id)
+        return build_remote_control_task_status(orchestrator.status(task_id))
     if action == "events":
-        return orchestrator.evidence.run_events(task_id)
+        return build_remote_control_task_events(orchestrator.evidence.run_events(task_id))
     if action == "resume":
-        return orchestrator.resume_task(task_id, session_id=session_id, actor=actor)
+        orchestrator.resume_task(task_id, session_id=session_id, actor=actor)
+        return build_remote_control_task_status(orchestrator.status(task_id))
     if action == "pause":
-        return orchestrator.pause_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay pause")
+        orchestrator.pause_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay pause")
+        return build_remote_control_task_status(orchestrator.status(task_id))
     if action == "cancel":
-        return orchestrator.cancel_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay cancel")
+        orchestrator.cancel_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay cancel")
+        return build_remote_control_task_status(orchestrator.status(task_id))
     raise PermissionError("remote-control relay action is not allowed")
 
 

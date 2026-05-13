@@ -28,7 +28,13 @@ from aegis.models.registry import ModelRegistry, default_providers
 from aegis.personality.context import ContextFileLoader, PERSONALITY_NAMES
 from aegis.plugins.manager import PluginManager
 from aegis.product.capabilities import build_product_dashboard
-from aegis.remote_control import RemoteControlPairingRegistry, build_remote_control_directory, build_remote_control_notification
+from aegis.remote_control import (
+    RemoteControlPairingRegistry,
+    build_remote_control_directory,
+    build_remote_control_notification,
+    build_remote_control_task_events,
+    build_remote_control_task_status,
+)
 from aegis.research.harness import ResearchHarness
 from aegis.scheduler.manager import ScheduleManager
 from aegis.security.policy_profile import activate_due_policy_rollouts, apply_policy_bundle, diff_policy_bundle, export_policy_bundle, import_policy_bundle, list_policy_bundles, list_policy_promotions, list_policy_rollouts, promote_policy_bundle, rollback_policy_bundle, schedule_policy_bundle
@@ -1834,25 +1840,28 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             orchestrator = build_orchestrator(data_dir=config.data_dir)
             actor = f"remote-control-relay:{relay_auth['pairing'].get('label') or relay_auth['pairing']['id']}"
             if args.action == "status":
-                action_result = orchestrator.status(args.task_id)
+                action_result = build_remote_control_task_status(orchestrator.status(args.task_id))
             elif args.action == "events":
-                action_result = orchestrator.evidence.run_events(args.task_id)
+                action_result = build_remote_control_task_events(orchestrator.evidence.run_events(args.task_id))
             elif args.action == "resume":
-                action_result = orchestrator.resume_task(args.task_id, session_id=args.session_id, actor=actor)
+                orchestrator.resume_task(args.task_id, session_id=args.session_id, actor=actor)
+                action_result = build_remote_control_task_status(orchestrator.status(args.task_id))
             elif args.action == "pause":
-                action_result = orchestrator.pause_task(
+                orchestrator.pause_task(
                     args.task_id,
                     session_id=args.session_id,
                     actor=actor,
                     reason=args.reason or "remote control relay pause",
                 )
+                action_result = build_remote_control_task_status(orchestrator.status(args.task_id))
             else:
-                action_result = orchestrator.cancel_task(
+                orchestrator.cancel_task(
                     args.task_id,
                     session_id=args.session_id,
                     actor=actor,
                     reason=args.reason or "remote control relay cancel",
                 )
+                action_result = build_remote_control_task_status(orchestrator.status(args.task_id))
             orchestrator.audit_logger.append(
                 "remote_control.relay_action",
                 {
@@ -2488,15 +2497,18 @@ def _execute_remote_control_action(orchestrator: Any, action_row: dict[str, Any]
     session_id = action_row.get("session_id")
     reason = str(action_row.get("reason") or "")
     if action == "status":
-        return orchestrator.status(task_id)
+        return build_remote_control_task_status(orchestrator.status(task_id))
     if action == "events":
-        return orchestrator.evidence.run_events(task_id)
+        return build_remote_control_task_events(orchestrator.evidence.run_events(task_id))
     if action == "resume":
-        return orchestrator.resume_task(task_id, session_id=session_id, actor=actor)
+        orchestrator.resume_task(task_id, session_id=session_id, actor=actor)
+        return build_remote_control_task_status(orchestrator.status(task_id))
     if action == "pause":
-        return orchestrator.pause_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay pause")
+        orchestrator.pause_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay pause")
+        return build_remote_control_task_status(orchestrator.status(task_id))
     if action == "cancel":
-        return orchestrator.cancel_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay cancel")
+        orchestrator.cancel_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay cancel")
+        return build_remote_control_task_status(orchestrator.status(task_id))
     raise PermissionError("remote-control relay action is not allowed")
 
 

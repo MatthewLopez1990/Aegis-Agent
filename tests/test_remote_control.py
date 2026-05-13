@@ -9,7 +9,12 @@ import unittest
 from urllib.error import URLError
 from unittest.mock import patch
 
-from aegis.remote_control import RemoteControlPairingRegistry, build_remote_control_directory
+from aegis.remote_control import (
+    RemoteControlPairingRegistry,
+    build_remote_control_directory,
+    build_remote_control_task_events,
+    build_remote_control_task_status,
+)
 
 
 class RemoteControlPairingTests(unittest.TestCase):
@@ -85,6 +90,65 @@ class RemoteControlPairingTests(unittest.TestCase):
         self.assertNotIn(created["token"], rendered)
         self.assertNotIn("token=secret", rendered)
         self.assertNotIn("hidden", rendered)
+
+    def test_remote_task_status_and_events_are_metadata_only(self) -> None:
+        task_status = build_remote_control_task_status(
+            {
+                "id": "task-1",
+                "status": "waiting_approval",
+                "risk_level": "high",
+                "session_id": "session-1",
+                "session": {"id": "session-1", "title": "Ops", "status": "active", "channel": "web", "messages": ["secret"]},
+                "action_hints": [{"action": "pause", "command": "task pause task-1", "payload": "hidden"}],
+                "interpretation": "send message token=secret",
+                "plan": [{"params": {"token": "secret"}}],
+                "checkpoint": {"approval_id": "approval-1"},
+                "receipt": {"token": "secret"},
+            }
+        )
+        task_events = build_remote_control_task_events(
+            {
+                "task_id": "task-1",
+                "status": "waiting_approval",
+                "session_id": "session-1",
+                "session": {"id": "session-1", "title": "Ops", "status": "active", "channel": "web", "history": "secret"},
+                "action_hints": [{"action": "events", "command": "task events task-1", "raw": "hidden"}],
+                "progress": {"status": "waiting_approval", "completed_steps": 0, "total_steps": 1, "latest_sequence": 7, "secret": "hidden"},
+                "step_groups": [{"status": "waiting", "step_id": "step-1", "connector": "mock_messaging", "operation": "send_email", "details": {"token": "secret"}}],
+                "provider_substeps": [{"identifier": "provider-1", "provider": "mock", "kind": "tool", "status": "waiting", "summary": "token=secret"}],
+                "events": [
+                    {
+                        "sequence": 1,
+                        "kind": "approval",
+                        "title": "send message token=secret",
+                        "status": "waiting",
+                        "timestamp": "2026-05-12T12:00:00+00:00",
+                        "tool": "mock_messaging",
+                        "operation": "send_email",
+                        "summary": "token=secret",
+                        "details": {"payload": "secret"},
+                        "hash": "abc123",
+                    }
+                ],
+            }
+        )
+        rendered = json.dumps({"status": task_status, "events": task_events}, sort_keys=True)
+
+        self.assertEqual(task_status["id"], "task-1")
+        self.assertEqual(task_status["status"], "waiting_approval")
+        self.assertTrue(task_status["metadata_only"])
+        self.assertFalse(task_status["user_request_included"])
+        self.assertFalse(task_status["plan_receipt_included"])
+        self.assertTrue(task_events["metadata_only"])
+        self.assertEqual(task_events["event_count"], 1)
+        self.assertFalse(task_events["events"][0]["details_included"])
+        self.assertFalse(task_events["events"][0]["summary_included"])
+        self.assertNotIn("token=secret", rendered)
+        self.assertNotIn("payload", rendered)
+        self.assertNotIn('"receipt":', rendered)
+        self.assertNotIn("checkpoint", rendered)
+        self.assertNotIn("interpretation", rendered)
+        self.assertNotIn("history", rendered)
 
     def test_relay_preflight_redacts_url_secrets_and_blocks_transport(self) -> None:
         registry = RemoteControlPairingRegistry()

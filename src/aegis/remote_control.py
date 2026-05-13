@@ -1637,6 +1637,65 @@ def build_remote_control_notification(
     }
 
 
+def build_remote_control_task_status(task: dict[str, Any]) -> dict[str, Any]:
+    """Return metadata-only task status for scoped remote-control views."""
+
+    task_id = str(task.get("id") or "")
+    return {
+        "id": task_id,
+        "status": str(task.get("status") or "unknown")[:80],
+        "risk_level": str(task.get("risk_level") or "unknown")[:80],
+        "session_id": _optional_clean_string(task.get("session_id")),
+        "session": _sanitize_remote_control_session(task.get("session")),
+        "action_hints": _sanitize_remote_control_action_hints(task.get("action_hints")),
+        "metadata_only": True,
+        "full_task_evidence_included": False,
+        "user_request_included": False,
+        "plan_receipt_included": False,
+        "run_event_details_included": False,
+        "raw_secret_values_included": False,
+        "remote_control_controls": [
+            "active_pairing_required",
+            "scoped_task_authorization",
+            "metadata_only_status",
+            "no_user_request_plan_or_receipt",
+        ],
+    }
+
+
+def build_remote_control_task_events(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Return metadata-only run event progress for scoped remote-control views."""
+
+    events = snapshot.get("events") if isinstance(snapshot.get("events"), list) else []
+    step_groups = snapshot.get("step_groups") if isinstance(snapshot.get("step_groups"), list) else []
+    provider_substeps = snapshot.get("provider_substeps") if isinstance(snapshot.get("provider_substeps"), list) else []
+    return {
+        "task_id": str(snapshot.get("task_id") or ""),
+        "status": str(snapshot.get("status") or "unknown")[:80],
+        "session_id": _optional_clean_string(snapshot.get("session_id")),
+        "session": _sanitize_remote_control_session(snapshot.get("session")),
+        "action_hints": _sanitize_remote_control_action_hints(snapshot.get("action_hints")),
+        "progress": _sanitize_remote_control_progress(snapshot.get("progress")),
+        "step_groups": [_sanitize_remote_control_step_group(item) for item in step_groups[:25] if isinstance(item, dict)],
+        "provider_substeps": [_sanitize_remote_control_provider_substep(item) for item in provider_substeps[:25] if isinstance(item, dict)],
+        "events": [_sanitize_remote_control_event(item) for item in events[:50] if isinstance(item, dict)],
+        "event_count": len(events),
+        "metadata_only": True,
+        "full_task_evidence_included": False,
+        "user_request_included": False,
+        "plan_receipt_included": False,
+        "run_event_details_included": False,
+        "raw_secret_values_included": False,
+        "remote_control_controls": [
+            "active_pairing_required",
+            "scoped_task_authorization",
+            "metadata_only_events",
+            "no_run_event_details",
+            "no_user_request_plan_or_receipt",
+        ],
+    }
+
+
 def _sanitize_remote_directory_for_relay(directory: dict[str, Any], *, pairing: dict[str, Any]) -> dict[str, Any]:
     scope_source = directory.get("scope") if isinstance(directory.get("scope"), dict) else {}
     scope = {
@@ -1706,6 +1765,98 @@ def _sanitize_remote_notification_for_relay(notification: dict[str, Any], *, pai
             "scoped_remote_notification",
             "no_user_request_plan_or_receipt",
         ],
+    }
+
+
+def _sanitize_remote_control_session(session: Any) -> dict[str, Any] | None:
+    if not isinstance(session, dict):
+        return None
+    return {
+        "id": _optional_clean_string(session.get("id")),
+        "status": str(session.get("status") or "unknown")[:80],
+        "channel": str(session.get("channel") or "")[:80],
+    }
+
+
+def _sanitize_remote_control_action_hints(hints: Any) -> list[dict[str, str]]:
+    if not isinstance(hints, list):
+        return []
+    sanitized: list[dict[str, str]] = []
+    for hint in hints[:12]:
+        if not isinstance(hint, dict):
+            continue
+        row: dict[str, str] = {}
+        for key in ("action", "label", "command", "task_id", "session_id"):
+            value = hint.get(key)
+            if value is not None:
+                row[key] = str(value)[:240]
+        if row:
+            sanitized.append(row)
+    return sanitized
+
+
+def _sanitize_remote_control_progress(progress: Any) -> dict[str, Any]:
+    if not isinstance(progress, dict):
+        return {}
+    allowed = (
+        "status",
+        "completed_steps",
+        "total_steps",
+        "total_events",
+        "waiting_steps",
+        "failed_steps",
+        "provider_substeps",
+        "latest_sequence",
+        "step_completion_ratio",
+    )
+    sanitized: dict[str, Any] = {}
+    for key in allowed:
+        if key not in progress:
+            continue
+        value = progress[key]
+        if isinstance(value, (int, float, bool)):
+            sanitized[key] = value
+        elif value is not None:
+            sanitized[key] = str(value)[:120]
+    return sanitized
+
+
+def _sanitize_remote_control_step_group(group: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": str(group.get("status") or "unknown")[:80],
+        "step_id": str(group.get("step_id") or "")[:120],
+        "tool": str(group.get("connector") or group.get("tool") or "runtime")[:80],
+        "operation": str(group.get("operation") or "")[:120],
+        "event_count": _safe_int(group.get("event_count"), default=0),
+        "latest_sequence": _safe_int(group.get("latest_sequence") or group.get("sequence"), default=0),
+        "metadata_only": True,
+    }
+
+
+def _sanitize_remote_control_provider_substep(substep: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "identifier": str(substep.get("identifier") or substep.get("provider") or "substep")[:120],
+        "provider": str(substep.get("provider") or "")[:80],
+        "kind": str(substep.get("kind") or "")[:80],
+        "status": str(substep.get("status") or "recorded")[:80],
+        "operation": str(substep.get("operation") or "")[:120],
+        "event_count": _safe_int(substep.get("event_count") or substep.get("events"), default=0),
+        "metadata_only": True,
+    }
+
+
+def _sanitize_remote_control_event(event: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "sequence": _safe_int(event.get("sequence"), default=0),
+        "kind": str(event.get("kind") or "event")[:80],
+        "status": str(event.get("status") or "recorded")[:80],
+        "timestamp": str(event.get("timestamp") or "")[:80],
+        "tool": str(event.get("tool") or "runtime")[:80],
+        "operation": str(event.get("operation") or "")[:120],
+        "hash": str(event.get("hash") or "")[:128],
+        "details_included": False,
+        "summary_included": False,
+        "metadata_only": True,
     }
 
 

@@ -24,7 +24,13 @@ from aegis.hooks.manager import HOOK_EVENTS
 from aegis.memory.models import MemoryType
 from aegis.migration.openclaw import inspect_hermes_home, inspect_openclaw_home, preview_hermes_memory_import, preview_openclaw_memory_import
 from aegis.product.capabilities import build_product_dashboard
-from aegis.remote_control import RemoteControlPairingRegistry, build_remote_control_directory, build_remote_control_notification
+from aegis.remote_control import (
+    RemoteControlPairingRegistry,
+    build_remote_control_directory,
+    build_remote_control_notification,
+    build_remote_control_task_events,
+    build_remote_control_task_status,
+)
 from aegis.research.harness import ResearchHarness
 from aegis.security.policy_engine import PolicyRequest
 from aegis.security.policy_profile import activate_due_policy_rollouts, apply_policy_bundle, diff_policy_bundle, import_policy_bundle, list_policy_bundles, list_policy_promotions, list_policy_rollouts, policy_profile_to_dict, promote_policy_bundle, rollback_policy_bundle, schedule_policy_bundle
@@ -3149,25 +3155,28 @@ class AegisTui(cmd.Cmd):
                 return
             actor = f"remote-control-relay:{relay_auth['pairing'].get('label') or relay_auth['pairing']['id']}"
             if action == "status":
-                action_result = self.orchestrator.status(task_id)
+                action_result = build_remote_control_task_status(self.orchestrator.status(task_id))
             elif action == "events":
-                action_result = self.orchestrator.evidence.run_events(task_id)
+                action_result = build_remote_control_task_events(self.orchestrator.evidence.run_events(task_id))
             elif action == "resume":
-                action_result = self.orchestrator.resume_task(task_id, session_id=_option_value(parts, "--session-id"), actor=actor)
+                self.orchestrator.resume_task(task_id, session_id=_option_value(parts, "--session-id"), actor=actor)
+                action_result = build_remote_control_task_status(self.orchestrator.status(task_id))
             elif action == "pause":
-                action_result = self.orchestrator.pause_task(
+                self.orchestrator.pause_task(
                     task_id,
                     session_id=_option_value(parts, "--session-id"),
                     actor=actor,
                     reason=_option_value(parts, "--reason") or "remote control relay pause",
                 )
+                action_result = build_remote_control_task_status(self.orchestrator.status(task_id))
             else:
-                action_result = self.orchestrator.cancel_task(
+                self.orchestrator.cancel_task(
                     task_id,
                     session_id=_option_value(parts, "--session-id"),
                     actor=actor,
                     reason=_option_value(parts, "--reason") or "remote control relay cancel",
                 )
+                action_result = build_remote_control_task_status(self.orchestrator.status(task_id))
             self.orchestrator.audit_logger.append(
                 "remote_control.relay_action",
                 {
@@ -3343,15 +3352,18 @@ class AegisTui(cmd.Cmd):
         session_id = action_row.get("session_id")
         reason = str(action_row.get("reason") or "")
         if action == "status":
-            return self.orchestrator.status(task_id)
+            return build_remote_control_task_status(self.orchestrator.status(task_id))
         if action == "events":
-            return self.orchestrator.evidence.run_events(task_id)
+            return build_remote_control_task_events(self.orchestrator.evidence.run_events(task_id))
         if action == "resume":
-            return self.orchestrator.resume_task(task_id, session_id=session_id, actor=actor)
+            self.orchestrator.resume_task(task_id, session_id=session_id, actor=actor)
+            return build_remote_control_task_status(self.orchestrator.status(task_id))
         if action == "pause":
-            return self.orchestrator.pause_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay pause")
+            self.orchestrator.pause_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay pause")
+            return build_remote_control_task_status(self.orchestrator.status(task_id))
         if action == "cancel":
-            return self.orchestrator.cancel_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay cancel")
+            self.orchestrator.cancel_task(task_id, session_id=session_id, actor=actor, reason=reason or "remote control relay cancel")
+            return build_remote_control_task_status(self.orchestrator.status(task_id))
         raise PermissionError("remote-control relay action is not allowed")
 
     def do_mobile(self, arg: str) -> None:
