@@ -235,6 +235,7 @@ BROWSER_COMMANDS = (
     "live-submit",
     "live-download",
     "live-upload",
+    "live-evaluate",
     "extract",
     "inspect",
     "dom",
@@ -2053,7 +2054,7 @@ class AegisTui(cmd.Cmd):
             print(f"evaluation review failed: {exc}")
 
     def do_browser(self, arg: str) -> None:
-        """browser status|connect|disconnect|session|sessions|close|navigate|live-navigate|live-screenshot|live-click|live-fill|live-submit|live-download|live-upload|extract|inspect|activation-packet|verify-activation-packet|dom|table|screenshot|render|click|fill|submit -- operate the governed browser sandbox."""
+        """browser status|connect|disconnect|session|sessions|close|navigate|live-navigate|live-screenshot|live-click|live-fill|live-submit|live-download|live-upload|live-evaluate|extract|inspect|activation-packet|verify-activation-packet|dom|table|screenshot|render|click|fill|submit -- operate the governed browser sandbox."""
         raw_parts = arg.strip().split(maxsplit=1)
         raw_command = raw_parts[0] if raw_parts else "session"
         parts = [raw_command, raw_parts[1]] if raw_command == "fill" and len(raw_parts) > 1 else shlex.split(arg)
@@ -2065,7 +2066,7 @@ class AegisTui(cmd.Cmd):
                         "status": "local_browser_sandbox_ready",
                         "active_session_id": self.browser_session_id,
                         "sessions": self.orchestrator.browser.list_sessions(),
-                        "live_browser_automation": "read_only_mutation_download_or_upload_available_if_configured",
+                        "live_browser_automation": "read_only_mutation_download_upload_or_javascript_available_if_configured",
                         "activation": self.orchestrator.browser.live_activation_status()["activation"],
                         "raw_secret_values_included": False,
                     }
@@ -2087,7 +2088,7 @@ class AegisTui(cmd.Cmd):
                     {
                         "status": "local_browser_session_connected",
                         "session": session,
-                        "live_browser_automation": "read_only_mutation_download_or_upload_available_if_configured",
+                        "live_browser_automation": "read_only_mutation_download_upload_or_javascript_available_if_configured",
                         "raw_secret_values_included": False,
                     }
                 )
@@ -2201,6 +2202,17 @@ class AegisTui(cmd.Cmd):
                     _print_json(approval["response"])
                     return
                 _print_json(self.orchestrator.browser.live_upload(session_id=self.browser_session_id, selector=parts[1], file_path=parts[2], approved=True))
+                return
+            if command == "live-evaluate":
+                if len(parts) < 2:
+                    print("usage: browser live-evaluate <javascript-with-return>")
+                    return
+                script, approval_id = _split_approval_arg(" ".join(parts[1:]))
+                approval = _browser_action_approval(self.orchestrator, action="live_evaluate", session_id=self.browser_session_id, script=script, approval_id=approval_id)
+                if not approval.get("approved"):
+                    _print_json(approval["response"])
+                    return
+                _print_json(self.orchestrator.browser.live_evaluate(session_id=self.browser_session_id, script=script, approved=True))
                 return
             if command == "extract":
                 _print_json(self.orchestrator.browser.extract_text(session_id=self.browser_session_id))
@@ -4416,8 +4428,8 @@ class AegisTui(cmd.Cmd):
                 "status": "browser_integration_readiness",
                 "chrome_extension_connected": False,
                 "static_browser_sandbox": "available",
-                "live_browser_automation": "read_only_mutation_download_or_upload_available_if_configured",
-                "next_actions": ["browser status", "browser inspect", "browser render", "browser live-navigate https://example.com", "browser live-click <selector>", "browser live-download <selector>", "browser live-upload <selector> <path>", "capabilities"],
+                "live_browser_automation": "read_only_mutation_download_upload_or_javascript_available_if_configured",
+                "next_actions": ["browser status", "browser inspect", "browser render", "browser live-navigate https://example.com", "browser live-click <selector>", "browser live-download <selector>", "browser live-upload <selector> <path>", "browser live-evaluate <script>", "capabilities"],
                 "raw_browser_content_included": False,
                 "raw_secret_values_included": False,
             }
@@ -6387,7 +6399,7 @@ def _command_reference() -> str:
             "cron                   Alias for scheduled automation",
             "voice|radio            Guarded voice and external media readiness",
             "stickers               Non-runtime merchandise boundary",
-            "browser status|connect|disconnect|session|sessions|close|navigate <url>|live-navigate <url>|live-screenshot|live-click|live-fill|live-submit|live-download|live-upload",
+            "browser status|connect|disconnect|session|sessions|close|navigate <url>|live-navigate <url>|live-screenshot|live-click|live-fill|live-submit|live-download|live-upload|live-evaluate",
             "browser activation-packet|verify-activation-packet <packet>  Live adapter activation receipts",
             "browser extract|inspect|dom [selector]|screenshot|render|click <selector>|fill <json>|submit [selector]",
             "boards                 Work boards and cards",
@@ -6506,7 +6518,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("web-setup", "local web control-plane setup"),
             ("connectors|channels|platforms", "integration surfaces"),
             ("pr_comments|autofix-pr", "pull request comment and autofix readiness"),
-            ("browser status|connect|disconnect|render|live-navigate|live-screenshot|live-click|live-fill|live-submit|live-download|live-upload|activation-packet|verify-activation-packet|chrome", "sandboxed browser work"),
+            ("browser status|connect|disconnect|render|live-navigate|live-screenshot|live-click|live-fill|live-submit|live-download|live-upload|live-evaluate|activation-packet|verify-activation-packet|chrome", "sandboxed browser work"),
             ("boards|backends|sandbox", "work and execution planes"),
             ("voice|radio|terminal-setup|vim|mouse|tui|scroll-speed", "optional interaction and terminal readiness"),
             ("footer|busy|indicator|details|redraw", "runtime UI indicators and safe details"),
@@ -7587,6 +7599,14 @@ def _split_json_approval_arg(value: str) -> tuple[str, str | None]:
     return json_text.strip(), approval_id.strip() or None
 
 
+def _split_approval_arg(value: str) -> tuple[str, str | None]:
+    marker = " --approval-id "
+    if marker not in value:
+        return value, None
+    text, approval_id = value.rsplit(marker, 1)
+    return text.strip(), approval_id.strip() or None
+
+
 def _browser_action_approval(
     orchestrator: Any,
     *,
@@ -7596,9 +7616,10 @@ def _browser_action_approval(
     fields: dict[str, Any] | None = None,
     url: str | None = None,
     file_path: str | None = None,
+    script: str | None = None,
     approval_id: str | None = None,
 ) -> dict[str, Any]:
-    payload = orchestrator.browser.action_approval_payload(action=action, session_id=session_id, selector=selector, fields=fields, url=url, file_path=file_path)
+    payload = orchestrator.browser.action_approval_payload(action=action, session_id=session_id, selector=selector, fields=fields, url=url, file_path=file_path, script=script)
     if approval_id:
         approval = orchestrator.approvals.get(approval_id)
         if _approved_payload(approval) != payload:

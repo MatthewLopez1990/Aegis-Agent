@@ -509,19 +509,19 @@ def _live_gap_backlog(
         {
             "area": "browser_and_media_depth",
             "platforms": ["OpenClaw"],
-            "status": "live_upload_and_facade_hardening_required",
-            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, approved static-anchor navigation, private Playwright/Chromium live-browser activation packet review artifacts, an opt-in approved headless Chromium read-only snapshot adapter, an opt-in approved Chromium CDP selector mutation adapter, an opt-in approved private live download adapter, and an opt-in approved workspace-scoped live upload adapter are available; provider-backed media artifacts, transcription, and video jobs can run through allowlisted HTTPS adapters with media_sandbox_profile_v1 receipts, including OpenAI-style image JSON, multipart image edit, TTS, audio transcription, and video generation adapters, while arbitrary JavaScript evaluation, persistent browser state, raw DOM capture, and broader provider-specific media depth still require expansion.",
+            "status": "live_javascript_available_media_depth_remaining",
+            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, approved static-anchor navigation, private Playwright/Chromium live-browser activation packet review artifacts, opt-in approved headless Chromium read-only snapshots, opt-in approved Chromium CDP selector mutation, opt-in approved private live downloads, opt-in approved workspace-scoped live uploads, and opt-in approved bounded live JavaScript evaluation are available; provider-backed media artifacts, transcription, and video jobs can run through allowlisted HTTPS adapters with media_sandbox_profile_v1 receipts, including OpenAI-style image JSON, multipart image edit, TTS, audio transcription, and video generation adapters, while persistent browser state, raw DOM capture, raw network body capture, and broader provider-specific media depth still require expansion.",
             "sample_tools": facade_tools[:8],
             "next_steps": [
                 "Use the live-browser read-only adapter only for approved allowlisted screenshot evidence with ephemeral state.",
                 "Use the live selector mutation adapter only for approved allowlisted click/fill/submit operations with ephemeral state.",
                 "Use the live download adapter only for approved allowlisted selector downloads with private artifact hashes and size limits.",
                 "Use the live upload adapter only for approved allowlisted file input selectors with workspace-scoped source files, private evidence hashes, and size/type limits.",
-                "Extend browser automation toward arbitrary JavaScript evaluation only after raw DOM, network body, cookie, and storage boundaries are enforceable.",
+                "Use the live JavaScript adapter only for approved allowlisted pages with script-hash approval, bounded redacted results, and private evidence hashes.",
                 "Extend provider-backed media execution toward provider-specific image, audio, and video adapters after redacted receipt coverage is proven.",
                 "Gate any page mutation, recording, or generated media write behind approval.",
             ],
-            "required_controls": ["sandbox_isolation", "taint_preservation", "artifact_hashing", "human_approval", "activation_packet_verification", "live_browser_readonly_approval", "live_browser_selector_mutation_approval", "live_browser_download_approval", "live_browser_upload_approval"],
+            "required_controls": ["sandbox_isolation", "taint_preservation", "artifact_hashing", "human_approval", "activation_packet_verification", "live_browser_readonly_approval", "live_browser_selector_mutation_approval", "live_browser_download_approval", "live_browser_upload_approval", "live_browser_javascript_approval"],
             "verification_gates": [
                 "unsupported_selector_truthfulness",
                 "artifact_hash_stability",
@@ -533,6 +533,7 @@ def _live_gap_backlog(
                 "approved_live_browser_selector_mutation",
                 "approved_live_browser_download",
                 "approved_live_browser_upload",
+                "approved_live_browser_javascript",
                 "playwright_chromium_adapter_preflight",
                 "disabled_live_browser_denial",
             ],
@@ -598,6 +599,10 @@ def _live_gap_backlog(
                     "evidence": "approved live_upload actions can attach one workspace-scoped allowlisted source file to an allowlisted page file input through a Chromium CDP ephemeral profile with private screenshot/evidence hashes, no persistent cookies/storage, and no raw file/DOM/cookie/storage return",
                 },
                 {
+                    "control": "approved_live_browser_javascript_adapter",
+                    "evidence": "approved live_evaluate actions can run bounded JavaScript on an allowlisted page through a Chromium CDP ephemeral profile with script-hash approvals, private screenshot/evidence hashes, redacted result summaries, no persistent cookies/storage, and no raw DOM/cookie/storage/network-body return",
+                },
+                {
                     "control": "platform_media_sandbox_profiles_v1",
                     "evidence": "local and provider-backed media paths return media_sandbox_profile_v1 receipts covering execution, network, filesystem, device, secret, content, and artifact boundaries",
                 },
@@ -643,7 +648,6 @@ def _live_gap_backlog(
                 },
             ],
             "remaining_depth_work": [
-                "live_browser_arbitrary_js_adapter",
                 "provider_specific_media_adapter_expansion",
             ],
             "evaluation_scenarios": [
@@ -654,6 +658,7 @@ def _live_gap_backlog(
                 "browser.live_selector_mutation",
                 "browser.live_download",
                 "browser.live_upload",
+                "browser.live_evaluate",
                 "browser.live_automation_denied_until_adapter_ready",
             ],
             "operator_checklist": _browser_media_operator_checklist(
@@ -674,6 +679,7 @@ def _live_gap_backlog(
                     "approved_live_browser_selector_mutation_adapter",
                     "approved_live_browser_download_adapter",
                     "approved_live_browser_upload_adapter",
+                    "approved_live_browser_javascript_adapter",
                     "openai_style_image_provider_adapter",
                     "openai_style_image_edit_provider_adapter",
                     "openai_style_tts_provider_adapter",
@@ -685,7 +691,6 @@ def _live_gap_backlog(
                     "disabled_live_browser_denial",
                 ],
                 remaining_depth_work=[
-                    "live_browser_arbitrary_js_adapter",
                     "provider_specific_media_adapter_expansion",
                 ],
             ),
@@ -1000,14 +1005,19 @@ def _browser_media_operator_checklist(implemented_controls: list[str], remaining
             "detail": "Approved live_upload can attach one workspace-scoped allowlisted source file to an allowlisted page file input with Chromium CDP while persistent state, raw DOM capture, and raw source content return stay blocked.",
         },
         {
+            "control": "live_browser_javascript_adapter",
+            "state": "available_opt_in" if "approved_live_browser_javascript_adapter" in implemented else "pending",
+            "detail": "Approved live_evaluate can run bounded JavaScript on allowlisted pages with Chromium CDP while raw DOM, cookie/storage values, network bodies, and persistent state stay blocked.",
+        },
+        {
             "control": "media_worker_sandbox",
             "state": "available" if {"sandboxed_media_worker_process", "os_level_media_worker_limits"}.issubset(implemented) else "partial",
             "detail": "Local media artifacts run in an isolated subprocess with OS limits where supported.",
         },
         {
             "control": "live_browser_automation",
-            "state": "upload_available_depth_remaining" if "approved_live_browser_upload_adapter" in implemented and "live_browser_arbitrary_js_adapter" in remaining else "download_available_depth_remaining" if "approved_live_browser_download_adapter" in implemented else "selector_mutation_available_depth_remaining" if "approved_live_browser_selector_mutation_adapter" in implemented else "read_only_available_mutation_blocked" if "approved_live_browser_readonly_adapter" in implemented else "blocked_with_preflight" if "disabled_live_browser_denial" in implemented else "not_started",
-            "detail": "Read-only live screenshot capture, approved selector click/fill/submit mutation, approved private selector downloads, and approved workspace-scoped selector uploads are available when explicitly configured; persistent browser state, raw DOM capture, and arbitrary JavaScript evaluation remain blocked.",
+            "state": "javascript_available_media_depth_remaining" if "approved_live_browser_javascript_adapter" in implemented else "upload_available_depth_remaining" if "approved_live_browser_upload_adapter" in implemented else "download_available_depth_remaining" if "approved_live_browser_download_adapter" in implemented else "selector_mutation_available_depth_remaining" if "approved_live_browser_selector_mutation_adapter" in implemented else "read_only_available_mutation_blocked" if "approved_live_browser_readonly_adapter" in implemented else "blocked_with_preflight" if "disabled_live_browser_denial" in implemented else "not_started",
+            "detail": "Read-only live screenshot capture, approved selector click/fill/submit mutation, approved private selector downloads, approved workspace-scoped selector uploads, and approved bounded JavaScript evaluation are available when explicitly configured; persistent browser state, raw DOM capture, and raw network body capture remain blocked.",
         },
         {
             "control": "provider_media_depth",

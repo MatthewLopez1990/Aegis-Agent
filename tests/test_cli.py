@@ -365,6 +365,79 @@ class CliTests(unittest.TestCase):
             self.assertEqual(captured["source_sha256"], sha256(source.read_bytes()).hexdigest())
             self.assertTrue(Path(captured["artifact_path"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
 
+    def test_browser_live_evaluate_command_is_approval_gated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "[security]",
+                        "live_browser_javascript = true",
+                        'network_allowlist = ["example.com"]',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            session = orchestrator.browser.create_session(label="CLI live evaluate")
+            with (
+                patch("aegis.browser.controller._find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch("aegis.browser.controller._private_network_error", return_value=None),
+                patch("aegis.browser.controller._capture_live_chromium_snapshot", side_effect=_fake_live_chrome_snapshot),
+            ):
+                orchestrator.browser.live_navigate(session_id=session["id"], url="https://example.com/app", approved=True)
+            script = "return document.title"
+
+            blocked = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "browser",
+                        "--workspace",
+                        str(root),
+                        "live-evaluate",
+                        session["id"],
+                        script,
+                    ]
+                )
+            )
+            with (
+                patch("aegis.browser.controller._find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch("aegis.browser.controller._private_network_error", return_value=None),
+                patch("aegis.browser.controller._capture_live_chromium_evaluate", side_effect=_fake_live_chrome_evaluate),
+            ):
+                captured = dispatch(
+                    parser.parse_args(
+                        [
+                            "--data-dir",
+                            str(data_dir),
+                            "browser",
+                            "--workspace",
+                            str(root),
+                            "live-evaluate",
+                            session["id"],
+                            script,
+                            "--approved",
+                        ]
+                    )
+                )
+
+            self.assertEqual(blocked["status"], "approval_required")
+            self.assertTrue(captured["ok"])
+            self.assertEqual(captured["mode"], "live_chromium_cdp_ephemeral_evaluate")
+            self.assertTrue(captured["javascript_executed"])
+            self.assertFalse(captured["raw_browser_content_included"])
+            self.assertFalse(captured["raw_network_body_returned"])
+            self.assertEqual(captured["script_sha256"], sha256(script.encode("utf-8")).hexdigest())
+            self.assertEqual(captured["evaluation_result"]["result"]["kind"], "string")
+            self.assertTrue(Path(captured["artifact_path"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+
     def test_model_auth_readiness_packet_commands_create_and_verify_packet(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             parser = build_parser()
@@ -518,6 +591,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("approved_live_browser_selector_mutation", browser_gap["verification_gates"])
             self.assertIn("approved_live_browser_download", browser_gap["verification_gates"])
             self.assertIn("approved_live_browser_upload", browser_gap["verification_gates"])
+            self.assertIn("approved_live_browser_javascript", browser_gap["verification_gates"])
             self.assertIn("playwright_chromium_adapter_preflight", browser_gap["verification_gates"])
             self.assertIn("disabled_live_browser_denial", browser_gap["verification_gates"])
             self.assertIn("browser.live_activation_packet_preflight", browser_gap["evaluation_scenarios"])
@@ -526,6 +600,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("browser.live_selector_mutation", browser_gap["evaluation_scenarios"])
             self.assertIn("browser.live_download", browser_gap["evaluation_scenarios"])
             self.assertIn("browser.live_upload", browser_gap["evaluation_scenarios"])
+            self.assertIn("browser.live_evaluate", browser_gap["evaluation_scenarios"])
             self.assertIn("browser.live_automation_denied_until_adapter_ready", browser_gap["evaluation_scenarios"])
             browser_controls = {control["control"] for control in browser_gap["implemented_hardening_controls"]}
             self.assertIn("live_browser_activation_packets", browser_controls)
@@ -535,7 +610,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("approved_live_browser_selector_mutation_adapter", browser_controls)
             self.assertIn("approved_live_browser_download_adapter", browser_controls)
             self.assertIn("approved_live_browser_upload_adapter", browser_controls)
-            self.assertIn("live_browser_arbitrary_js_adapter", browser_gap["remaining_depth_work"])
+            self.assertIn("approved_live_browser_javascript_adapter", browser_controls)
+            self.assertNotIn("live_browser_arbitrary_js_adapter", browser_gap["remaining_depth_work"])
             browser_checklist = {item["control"]: item for item in browser_gap["operator_checklist"]}
             self.assertEqual(browser_checklist["live_browser_activation_packets"]["state"], "available_adapter_blocked")
             self.assertEqual(browser_checklist["playwright_chromium_adapter_preflight"]["state"], "blocked_adapter_candidate")
@@ -544,7 +620,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(browser_checklist["live_browser_selector_mutation_adapter"]["state"], "available_opt_in")
             self.assertEqual(browser_checklist["live_browser_download_adapter"]["state"], "available_opt_in")
             self.assertEqual(browser_checklist["live_browser_upload_adapter"]["state"], "available_opt_in")
-            self.assertEqual(browser_checklist["live_browser_automation"]["state"], "upload_available_depth_remaining")
+            self.assertEqual(browser_checklist["live_browser_javascript_adapter"]["state"], "available_opt_in")
+            self.assertEqual(browser_checklist["live_browser_automation"]["state"], "javascript_available_media_depth_remaining")
             subagent_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "subagent_runtime_depth")
             self.assertIn("operator_batch_receipts", subagent_gap["required_controls"])
             self.assertIn("parent_bound_review_receipts", subagent_gap["required_controls"])
@@ -3701,6 +3778,38 @@ def _fake_live_chrome_upload(
         "url_after": url,
         "title": "Fake live upload",
         "action_result": {"ok": True, "status": "uploaded", "selector": selector, "file_count": 1, "url_after": url},
+        "error": None,
+    }
+
+
+def _fake_live_chrome_evaluate(
+    *,
+    executable: str,
+    url: str,
+    script: str,
+    screenshot_path: Path,
+    artifact_dir: Path,
+    allowlist: tuple[str, ...],
+    width: int = 1280,
+    height: int = 900,
+) -> dict[str, object]:
+    del executable, script, artifact_dir, allowlist
+    screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-live-evaluate")
+    return {
+        "ok": True,
+        "status": "evaluated",
+        "width": width,
+        "height": height,
+        "exit_code": 0,
+        "url_after": url,
+        "title": "Fake live evaluate",
+        "evaluation_result": {
+            "ok": True,
+            "status": "evaluated",
+            "result": {"kind": "string", "value": "Fake live evaluate", "chars": 18, "truncated": False, "redacted": False},
+            "url_before": url,
+            "url_after": url,
+        },
         "error": None,
     }
 

@@ -2134,8 +2134,11 @@ class BuiltinToolExecutor:
             if session_id is None:
                 raise ToolExecutionError("live browser upload requires session_id")
             return self.browser.live_upload(session_id=session_id, selector=str(params["selector"]), file_path=str(params["file_path"]), approved=approved)
-        live_actions = {"live_evaluate"}
-        if action in live_actions or bool(params.get("live")):
+        if action == "live_evaluate" or (bool(params.get("live")) and action == "evaluate"):
+            if session_id is None:
+                raise ToolExecutionError("live browser evaluate requires session_id")
+            return self.browser.live_evaluate(session_id=session_id, script=str(params["script"]), approved=approved)
+        if bool(params.get("live")):
             selector = str(params["selector"]) if params.get("selector") else None
             return self.browser.deny_live_automation(action=action, session_id=session_id, selector=selector)
         if action == "session":

@@ -3620,6 +3620,22 @@ document.getElementById("browser-live-upload").addEventListener("click", async (
   await refresh();
 });
 
+document.getElementById("browser-live-evaluate").addEventListener("click", async () => {
+  if (!state.browserSessionId) {
+    renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
+    return;
+  }
+  const script = document.getElementById("browser-evaluate-script").value || "return document.title";
+  state.pendingBrowserAction = { action: "live_evaluate", session_id: state.browserSessionId, script };
+  renderBrowserOutput(
+    await api("/browser/evaluate", {
+      method: "POST",
+      body: JSON.stringify({ session_id: state.browserSessionId, script }),
+    })
+  );
+  await refresh();
+});
+
 document.getElementById("browser-output").addEventListener("click", async (event) => {
   const createActivationPacket = event.target.closest("[data-browser-live-activation-packet]");
   if (createActivationPacket) {
@@ -3660,6 +3676,8 @@ document.getElementById("browser-output").addEventListener("click", async (event
           ? "/browser/download"
         : action.action === "live_upload"
           ? "/browser/upload"
+        : action.action === "live_evaluate"
+          ? "/browser/evaluate"
         : action.action === "live_navigate"
           ? "/browser/live-navigate"
           : action.action === "live_screenshot"
@@ -3674,6 +3692,8 @@ document.getElementById("browser-output").addEventListener("click", async (event
           ? { session_id: action.session_id, selector: action.selector, approval_id: approvalId }
         : action.action === "live_upload"
           ? { session_id: action.session_id, selector: action.selector, file_path: action.file_path, approval_id: approvalId }
+        : action.action === "live_evaluate"
+          ? { session_id: action.session_id, script: action.script, approval_id: approvalId }
         : action.action === "live_navigate"
           ? { session_id: action.session_id, url: action.url, approval_id: approvalId }
           : action.action === "live_screenshot"

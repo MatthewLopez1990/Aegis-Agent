@@ -1498,6 +1498,22 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     return
                 self._json(_with_browser_artifact_urls(orchestrator, orchestrator.browser.live_upload(session_id=session_id, selector=selector, file_path=file_path, approved=True)))
                 return
+            if path == "/browser/evaluate":
+                payload = self._read_json()
+                session_id = str(_required(payload, "session_id"))
+                script = str(_required(payload, "script"))
+                approval = _browser_action_approval(
+                    orchestrator,
+                    action="live_evaluate",
+                    session_id=session_id,
+                    script=script,
+                    approval_id=payload.get("approval_id"),
+                )
+                if not approval["approved"]:
+                    self._json(approval["response"])
+                    return
+                self._json(_with_browser_artifact_urls(orchestrator, orchestrator.browser.live_evaluate(session_id=session_id, script=script, approved=True)))
+                return
             if path == "/channels/render":
                 payload = self._read_json()
                 hints = payload.get("channel_hints", {})
@@ -2917,9 +2933,10 @@ def _browser_action_approval(
     fields: dict[str, Any] | None = None,
     url: str | None = None,
     file_path: str | None = None,
+    script: str | None = None,
     approval_id: Any = None,
 ) -> dict[str, Any]:
-    payload = orchestrator.browser.action_approval_payload(action=action, session_id=session_id, selector=selector, fields=fields, url=url, file_path=file_path)
+    payload = orchestrator.browser.action_approval_payload(action=action, session_id=session_id, selector=selector, fields=fields, url=url, file_path=file_path, script=script)
     if approval_id:
         approval = orchestrator.approvals.get(str(approval_id))
         if _approved_payload(approval) != payload:
