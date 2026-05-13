@@ -638,6 +638,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("Stability AI v1 image generation", openclaw_target["live_gap"])
             self.assertIn("Google Vertex Imagen image generation", openclaw_target["live_gap"])
             self.assertIn("ElevenLabs TTS", openclaw_target["live_gap"])
+            self.assertIn("ElevenLabs speech-to-text", openclaw_target["live_gap"])
             self.assertIn("provider-specific image", openclaw_target["live_gap"])
             self.assertIn("memory_readiness", result)
             self.assertIn("self_improvement_readiness", result)
@@ -736,6 +737,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("stability_v1_image_provider_adapter", browser_controls)
             self.assertIn("google_imagen_provider_adapter", browser_controls)
             self.assertIn("elevenlabs_tts_provider_adapter", browser_controls)
+            self.assertIn("elevenlabs_transcription_provider_adapter", browser_controls)
             provider_media_adapters = browser_gap["provider_media_adapters"]
             implemented_media_adapters = {adapter["adapter"]: adapter for adapter in provider_media_adapters["implemented"]}
             self.assertIn("openai_images", implemented_media_adapters)
@@ -745,6 +747,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(implemented_media_adapters["google_imagen"]["response_shape"], "predictions[].bytesBase64Encoded")
             self.assertIn("elevenlabs_tts", implemented_media_adapters)
             self.assertEqual(implemented_media_adapters["elevenlabs_tts"]["response_shape"], "binary_audio")
+            self.assertIn("elevenlabs_transcription", implemented_media_adapters)
+            self.assertEqual(implemented_media_adapters["elevenlabs_transcription"]["response_shape"], "transcript_text")
             self.assertIn("video", provider_media_adapters["remaining_by_modality"])
             self.assertFalse(provider_media_adapters["raw_prompt_or_secret_storage"])
             self.assertFalse(provider_media_adapters["raw_response_body_storage"])

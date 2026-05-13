@@ -347,7 +347,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "session-bound run visibility",
             ],
             "security_delta": "Aegis defaults to mock or dry-run mode for broad-access capabilities until credentials, scopes, rollback, and approvals are explicit.",
-            "live_gap": "Mobile nodes, native desktop wrappers, and live third-party channel implementations remain staged; generic/OpenAI-style media plus Stability AI v1 image generation, Google Vertex Imagen image generation, and ElevenLabs TTS are implemented, while additional provider-specific image, audio, and video adapters remain staged behind secure adapter work.",
+            "live_gap": "Mobile nodes, native desktop wrappers, and live third-party channel implementations remain staged; generic/OpenAI-style media plus Stability AI v1 image generation, Google Vertex Imagen image generation, ElevenLabs TTS, and ElevenLabs speech-to-text are implemented, while additional provider-specific image, audio, and video adapters remain staged behind secure adapter work.",
             "target_requirements": [
                 "native_shell_depth",
                 "live_browser_automation",
@@ -522,7 +522,7 @@ def _live_gap_backlog(
             "area": "browser_and_media_depth",
             "platforms": ["OpenClaw"],
             "status": "live_javascript_available_media_depth_remaining",
-            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, approved static-anchor navigation, private Playwright/Chromium live-browser activation packet review artifacts, opt-in approved headless Chromium read-only snapshots, opt-in approved Chromium CDP selector mutation, opt-in approved private live downloads, opt-in approved workspace-scoped live uploads, and opt-in approved bounded live JavaScript evaluation are available; provider-backed media artifacts, transcription, and video jobs can run through allowlisted HTTPS adapters with media_sandbox_profile_v1 receipts, including OpenAI-style image JSON, Stability AI v1 text-to-image JSON, Google Vertex Imagen predict JSON, multipart image edit, OpenAI-style TTS, ElevenLabs TTS, audio transcription, and video generation adapters, while persistent browser state, raw DOM capture, and raw network body capture remain blocked by design; broader provider-specific media depth still requires expansion.",
+            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, approved static-anchor navigation, private Playwright/Chromium live-browser activation packet review artifacts, opt-in approved headless Chromium read-only snapshots, opt-in approved Chromium CDP selector mutation, opt-in approved private live downloads, opt-in approved workspace-scoped live uploads, and opt-in approved bounded live JavaScript evaluation are available; provider-backed media artifacts, transcription, and video jobs can run through allowlisted HTTPS adapters with media_sandbox_profile_v1 receipts, including OpenAI-style image JSON, Stability AI v1 text-to-image JSON, Google Vertex Imagen predict JSON, multipart image edit, OpenAI-style TTS, ElevenLabs TTS, OpenAI-style audio transcription, ElevenLabs speech-to-text, and video generation adapters, while persistent browser state, raw DOM capture, and raw network body capture remain blocked by design; broader provider-specific media depth still requires expansion.",
             "sample_tools": facade_tools[:8],
             "next_steps": [
                 "Use the live-browser read-only adapter only for approved allowlisted screenshot evidence with ephemeral state.",
@@ -647,6 +647,10 @@ def _live_gap_backlog(
                     "evidence": "approved provider-backed audio transcription can upload one workspace-scoped audio file through an OpenAI-style multipart request and return transcript text without storing raw audio, raw response bodies, or secret values",
                 },
                 {
+                    "control": "elevenlabs_transcription_provider_adapter",
+                    "evidence": "approved provider-backed audio transcription can upload one workspace-scoped audio file through an ElevenLabs speech-to-text multipart request with a brokered xi-api-key header and return transcript text without storing raw audio, raw response bodies, or secret values",
+                },
+                {
                     "control": "openai_style_video_provider_adapter",
                     "evidence": "approved provider-backed video generation can submit, poll, download, and delete OpenAI-style video jobs while storing only bounded artifacts and redacted job receipts",
                 },
@@ -680,11 +684,12 @@ def _live_gap_backlog(
                     {"adapter": "openai_tts", "tool": "tts", "response_shape": "binary_audio"},
                     {"adapter": "elevenlabs_tts", "tool": "tts", "response_shape": "binary_audio"},
                     {"adapter": "openai_transcription", "tool": "voice_transcribe", "response_shape": "transcript_text"},
+                    {"adapter": "elevenlabs_transcription", "tool": "voice_transcribe", "response_shape": "transcript_text"},
                     {"adapter": "openai_video", "tool": "video_generate", "response_shape": "job_lifecycle_and_bounded_artifacts"},
                 ],
                 "remaining_by_modality": {
                     "image": ["additional provider-native image edit, upscale, and product-image adapters"],
-                    "audio": ["additional provider-native transcription, speech-to-speech, and voice-cloning adapters"],
+                    "audio": ["additional provider-native speech-to-speech, voice-cloning, and dialogue adapters"],
                     "video": ["additional provider-native video lifecycle adapters"],
                 },
                 "raw_prompt_or_secret_storage": False,
@@ -730,6 +735,7 @@ def _live_gap_backlog(
                     "openai_style_tts_provider_adapter",
                     "elevenlabs_tts_provider_adapter",
                     "openai_style_transcription_provider_adapter",
+                    "elevenlabs_transcription_provider_adapter",
                     "openai_style_video_provider_adapter",
                     "static_dom_snapshot_no_js",
                     "approved_static_form_fill",
@@ -1103,7 +1109,7 @@ def _browser_media_operator_checklist(implemented_controls: list[str], remaining
         {
             "control": "provider_media_depth",
             "state": "partial" if "provider_backed_media_artifacts" in implemented else "not_started",
-            "detail": "Provider-backed image, TTS, transcription, and video job paths exist, including OpenAI-style image JSON, Stability AI v1 text-to-image JSON, Google Vertex Imagen predict JSON, multipart image edit, OpenAI-style TTS, ElevenLabs TTS, audio transcription, and video generation adapters; additional provider-specific image/audio/video adapters still need expansion.",
+            "detail": "Provider-backed image, TTS, transcription, and video job paths exist, including OpenAI-style image JSON, Stability AI v1 text-to-image JSON, Google Vertex Imagen predict JSON, multipart image edit, OpenAI-style TTS, ElevenLabs TTS, OpenAI-style audio transcription, ElevenLabs speech-to-text, and video generation adapters; additional provider-specific image/audio/video adapters still need expansion.",
         },
         {
             "control": "platform_media_sandbox_profiles",

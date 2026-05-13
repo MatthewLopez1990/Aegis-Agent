@@ -857,7 +857,7 @@ class BuiltinToolExecutor:
                 "required_controls": _live_media_required_controls(),
             }
         adapter_name = str(provider_adapter["name"] or "generic")
-        if adapter_name != "openai_transcription":
+        if adapter_name not in {"openai_transcription", "elevenlabs_transcription"}:
             return {
                 "ok": False,
                 "tool": "voice_transcribe",
@@ -3264,6 +3264,10 @@ def _live_media_provider_adapter(*, name: str, params: dict[str, Any]) -> dict[s
         if name != "voice_transcribe":
             return {"name": raw, "error": "openai_transcription provider adapter currently supports voice_transcribe only"}
         return {"name": "openai_transcription", "error": None}
+    if raw in {"elevenlabs_transcription", "elevenlabs_stt", "elevenlabs_speech_to_text", "eleven_labs_transcription", "eleven_labs_stt"}:
+        if name != "voice_transcribe":
+            return {"name": raw, "error": "elevenlabs_transcription provider adapter currently supports voice_transcribe only"}
+        return {"name": "elevenlabs_transcription", "error": None}
     if raw in {"openai_video", "openai_videos", "openai_sora", "sora", "openai_compatible_video"}:
         if name != "video_generate":
             return {"name": raw, "error": "openai_video provider adapter currently supports video_generate only"}
@@ -3538,6 +3542,18 @@ def _live_media_request_payload(
         if temperature is not None:
             payload["temperature"] = _bounded_float(temperature, minimum=0.0, maximum=1.0, label="temperature")
         return payload
+    if provider_adapter == "elevenlabs_transcription":
+        payload = {
+            "model_id": str(params.get("model_id") or params.get("model") or "scribe_v2")[:200],
+        }
+        language_code = str(params.get("language_code") or params.get("language") or "").strip()
+        if language_code:
+            payload["language_code"] = language_code[:40]
+        for key in ("diarize", "tag_audio_events"):
+            value = params.get(key)
+            if value is not None:
+                payload[key] = _as_bool(value, label=key)
+        return payload
     payload: dict[str, Any] = {"tool": name}
     if name in {"image_generate", "image_edit"}:
         payload["prompt"] = prompt
@@ -3552,7 +3568,7 @@ def _live_media_request_payload(
 def _live_media_provider_receipt(*, domain: str, http_status: int, request_payload: dict[str, Any], handle_present: bool, provider_adapter: str = "generic") -> dict[str, Any]:
     encoded = json.dumps(request_payload, sort_keys=True, default=str).encode("utf-8")
     request_format = "application/json"
-    if provider_adapter in {"openai_image_edit", "openai_transcription"}:
+    if provider_adapter in {"openai_image_edit", "openai_transcription", "elevenlabs_transcription"}:
         request_format = "multipart/form-data"
     elif provider_adapter == "openai_video" and "action" in request_payload:
         request_format = "path_operation"
@@ -3777,18 +3793,22 @@ def _send_live_transcription_provider_request(
     provider_adapter: str,
     audio_file: dict[str, Any],
 ) -> dict[str, Any]:
-    if provider_adapter != "openai_transcription":
+    if provider_adapter not in {"openai_transcription", "elevenlabs_transcription"}:
         return {"ok": False, "http_status": 0, "error": f"unsupported transcription provider adapter: {provider_adapter}"}
     body, content_type = _encode_openai_transcription_multipart(payload=payload, audio_file=audio_file)
+    headers = {
+        "Content-Type": content_type,
+        "User-Agent": "Aegis-Agent/0.1",
+    }
+    if provider_adapter == "elevenlabs_transcription":
+        headers["xi-api-key"] = token
+    else:
+        headers["Authorization"] = f"Bearer {token}"
     request = Request(
         url,
         data=body,
         method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": content_type,
-            "User-Agent": "Aegis-Agent/0.1",
-        },
+        headers=headers,
     )
     try:
         response_context = _open_without_redirects(request, timeout=30)
