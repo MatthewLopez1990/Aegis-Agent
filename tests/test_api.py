@@ -15,7 +15,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 from unittest.mock import patch
 
-from aegis.api.server import _allowed_hosts, _allowed_origins, authorize_local_request, require_allowed_host
+from aegis.api.server import _allowed_hosts, _allowed_origins, _is_loopback_bind_host, authorize_local_request, require_allowed_host
 from aegis.remote_control import RemoteControlPairingRegistry
 from aegis.research.harness import ResearchHarness
 from aegis.security.taint import TrustClass
@@ -57,6 +57,12 @@ class ApiServerSecurityTests(unittest.TestCase):
                 allowed_hosts=hosts,
                 allowed_origins=origins,
             )
+
+    def test_local_token_bootstrap_is_loopback_only(self) -> None:
+        self.assertTrue(_is_loopback_bind_host("127.0.0.1"))
+        self.assertTrue(_is_loopback_bind_host("localhost"))
+        self.assertFalse(_is_loopback_bind_host("0.0.0.0"))
+        self.assertFalse(_is_loopback_bind_host("::"))
 
     def test_skill_enable_api_requires_approval_for_high_risk_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -233,19 +239,24 @@ class ApiServerSecurityTests(unittest.TestCase):
                 process_gated = _json_post(port, "/processes/start", {"argv": ["python3", "-c", "print('blocked')"]}, token=token)
                 process_started = None
                 if os.name == "posix":
+                    process_payload = {
+                        "argv": [
+                            "python3",
+                            "-c",
+                            "import sys, time; line=sys.stdin.readline().strip(); print('api-pty:' + line, flush=True); time.sleep(30)",
+                        ],
+                        "pty": True,
+                        "rows": 22,
+                        "cols": 88,
+                    }
+                    process_approval = _json_post(port, "/processes/start", {**process_payload, "approved": True}, token=token)
+                    _json_post(port, f"/approvals/{process_approval['approval_id']}/approve", {"actor": "api-process-admin", "reason": "reviewed process start"}, token=token)
                     process_started = _json_post(
                         port,
                         "/processes/start",
                         {
-                            "argv": [
-                                "python3",
-                                "-c",
-                                "import sys, time; line=sys.stdin.readline().strip(); print('api-pty:' + line, flush=True); time.sleep(30)",
-                            ],
-                            "approved": True,
-                            "pty": True,
-                            "rows": 22,
-                            "cols": 88,
+                            **process_payload,
+                            "approval_id": process_approval["approval_id"],
                         },
                         token=token,
                     )
@@ -274,9 +285,25 @@ class ApiServerSecurityTests(unittest.TestCase):
                 )
                 listed = _json_get(port, "/hooks", token=token)
                 ran = _json_post(port, "/hooks/run", {"event": "manual", "context": {"message": "api hello"}}, token=token)
+                secure_added = _json_post(
+                    port,
+                    "/hooks",
+                    {
+                        "id": "api_secure",
+                        "event": "manual",
+                        "command": ["python3", "-c", "import json, sys; data=json.load(sys.stdin); print('secure:' + data['context']['message'])"],
+                        "enabled": True,
+                        "approval_required": True,
+                    },
+                    token=token,
+                )
+                secure_gated = _json_post(port, "/hooks/run", {"event": "manual", "context": {"message": "api secure"}, "approved": True}, token=token)
+                _json_post(port, f"/approvals/{secure_gated['approval_id']}/approve", {"actor": "api-hook-admin", "reason": "reviewed hook run"}, token=token)
+                secure_ran = _json_post(port, "/hooks/run", {"event": "manual", "context": {"message": "api secure"}, "approval_id": secure_gated["approval_id"]}, token=token)
 
                 self.assertEqual(process_status["status"], "process_registry_ready")
                 self.assertEqual(process_gated["status"], "approval_required")
+                self.assertIn("approval_id", process_gated)
                 self.assertFalse(process_gated["raw_command_included"])
                 if process_started is not None:
                     self.assertTrue(process_started["process"]["pty_attached"])
@@ -289,6 +316,11 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(listed["hooks"][0]["id"], "api_notify")
                 self.assertEqual(ran["ran_count"], 1)
                 self.assertIn("api hello", ran["results"][0]["stdout"])
+                self.assertEqual(secure_added["hook"]["id"], "api_secure")
+                self.assertEqual(secure_gated["status"], "approval_required")
+                self.assertIn("approval_id", secure_gated)
+                self.assertEqual(secure_ran["ran_count"], 2)
+                self.assertTrue(any("secure:api secure" in result.get("stdout", "") for result in secure_ran["results"]))
 
                 scheduled = _json_post(
                     port,

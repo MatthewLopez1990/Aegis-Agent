@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 import hashlib
+import ipaddress
 import json
 import mimetypes
 import re
@@ -388,6 +389,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
     api_token = secrets.token_urlsafe(32)
     allowed_hosts = _allowed_hosts(host, port)
     allowed_origins = _allowed_origins(host, port)
+    loopback_token_bootstrap = _is_loopback_bind_host(host)
     remote_control = RemoteControlPairingRegistry(orchestrator.config.data_dir / "remote_control_pairings.json")
 
     class Handler(BaseHTTPRequestHandler):
@@ -432,6 +434,8 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 return
             if path == "/auth":
                 self._require_allowed_host()
+                if not loopback_token_bootstrap:
+                    raise PermissionError("local token bootstrap is only available on loopback hosts")
                 self._json({"token": api_token})
                 return
             if path == "/remote-control/status":
@@ -2087,28 +2091,53 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 context = payload.get("context", {})
                 if not isinstance(context, dict):
                     raise ValueError("context must be a JSON object")
-                self._json(orchestrator.hooks.run_event(str(_required(payload, "event")), context=context, approved=bool(payload.get("approved", False))))
+                event = _api_hook_event(str(_required(payload, "event")))
+                if _hook_run_needs_approval(orchestrator, event=event):
+                    approval = _payload_bound_approval(
+                        orchestrator,
+                        payload=_hook_run_payload(event=event, context=context),
+                        approval_id=payload.get("approval_id"),
+                        reason=f"hook event {event} requires approval",
+                        action="hook_run",
+                    )
+                    if not approval["approved"]:
+                        self._json({**approval["response"], "event": event})
+                        return
+                    approved = True
+                else:
+                    approved = False
+                self._json(orchestrator.hooks.run_event(event, context=context, approved=approved))
                 return
             if path == "/processes/start":
                 payload = self._read_json()
                 argv = payload.get("argv")
                 if not isinstance(argv, list):
                     raise ValueError("argv must be a JSON array")
-                approved = payload.get("approved", False)
-                if not isinstance(approved, bool):
-                    raise ValueError("approved must be a JSON boolean")
                 pty_requested = payload.get("pty", False)
                 if not isinstance(pty_requested, bool):
                     raise ValueError("pty must be a JSON boolean")
+                rows = int(payload.get("rows", 24))
+                cols = int(payload.get("cols", 80))
+                clean_argv = [str(part) for part in argv]
+                approval = _payload_bound_approval(
+                    orchestrator,
+                    payload=_process_start_payload(argv=clean_argv, pty=pty_requested, rows=rows, cols=cols),
+                    approval_id=payload.get("approval_id"),
+                    reason="background process start requires approval",
+                    action="process_start",
+                )
+                if not approval["approved"]:
+                    self._json({**approval["response"], "argv_only": True, "pty_requested": pty_requested, "raw_command_included": False, "raw_secret_values_included": False})
+                    return
                 self._json(
                     orchestrator.processes.start(
-                        [str(part) for part in argv],
-                        approved=approved,
+                        clean_argv,
+                        approved=True,
                         actor=str(payload.get("actor") or "web-operator"),
                         label=str(payload.get("label") or ""),
                         pty=pty_requested,
-                        rows=int(payload.get("rows", 24)),
-                        cols=int(payload.get("cols", 80)),
+                        rows=rows,
+                        cols=cols,
                     )
                 )
                 return
@@ -3245,6 +3274,72 @@ def _approved_payload(approval: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _payload_bound_approval(orchestrator: Any, *, payload: dict[str, Any], approval_id: Any = None, reason: str, action: str) -> dict[str, Any]:
+    if approval_id:
+        approval = orchestrator.approvals.get(str(approval_id))
+        if _approved_payload(approval) != payload:
+            raise PermissionError(f"{action} approval does not match requested action")
+        if approval["status"] == "denied":
+            return {"approved": False, "response": {"status": "approval_denied", "approval_id": approval["id"], "action": action}}
+        if approval["status"] != "approved":
+            return {"approved": False, "response": {"status": "approval_required", "approval_id": approval["id"], "action": action, "reason": reason}}
+        decision = approval.get("decision") or {}
+        return {"approved": True, "admin_approved": bool(decision.get("admin"))}
+
+    approval = orchestrator.approvals.request_approval(
+        ApprovalRequest(
+            task_id=None,
+            reason=reason,
+            risk_level=RiskLevel.HIGH,
+            payload=payload,
+        )
+    )
+    return {
+        "approved": False,
+        "response": {
+            "status": "approval_required",
+            "approval_id": approval.id,
+            "action": action,
+            "reason": reason,
+        },
+    }
+
+
+def _payload_digest(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
+
+
+def _process_start_payload(*, argv: list[str], pty: bool, rows: int, cols: int) -> dict[str, Any]:
+    return {
+        "kind": "process_start",
+        "argv_count": len(argv),
+        "argv_sha256": hashlib.sha256(json.dumps(argv, separators=(",", ":"), default=str).encode("utf-8")).hexdigest(),
+        "pty": bool(pty),
+        "rows": int(rows),
+        "cols": int(cols),
+    }
+
+
+def _api_hook_event(event: str) -> str:
+    normalized = event.strip().lower().replace("_", ".")
+    if normalized not in HOOK_EVENTS:
+        raise ValueError(f"unsupported hook event: {event}")
+    return normalized
+
+
+def _hook_run_payload(*, event: str, context: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "kind": "hook_run",
+        "event": event,
+        "context_keys": sorted(str(key) for key in context),
+        "context_sha256": _payload_digest(context),
+    }
+
+
+def _hook_run_needs_approval(orchestrator: Any, *, event: str) -> bool:
+    return any(bool(row.get("enabled")) and bool(row.get("approval_required", True)) and row.get("event") == event for row in orchestrator.hooks.list_hooks())
+
+
 def _tool_run_approval(orchestrator: Any, *, name: str, params: dict[str, Any], approval_id: Any = None) -> dict[str, Any]:
     payload = _tool_run_payload(name=name, params=params)
     if approval_id:
@@ -3431,6 +3526,16 @@ def _allowed_hosts(host: str, port: int) -> set[str]:
     if host in {"127.0.0.1", "localhost", "::1"}:
         hosts.update({f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"})
     return hosts
+
+
+def _is_loopback_bind_host(host: str) -> bool:
+    normalized = host.strip().lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 def _allowed_origins(host: str, port: int) -> set[str]:

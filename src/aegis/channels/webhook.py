@@ -5,9 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import hmac
-import ipaddress
 import json
-import socket
 import time
 from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
@@ -15,6 +13,7 @@ from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from aegis.channels.base import ChannelMessage
+from aegis.security.network import private_network_error, response_private_network_error
 from aegis.security.taint import now_utc
 
 
@@ -122,6 +121,9 @@ def deliver_signed_webhook(
     except URLError as exc:
         raise RuntimeError(f"webhook delivery failed: {exc.reason}") from exc
     with response_context as response:
+        peer_error = response_private_network_error(response, target="webhook delivery")
+        if peer_error:
+            raise ValueError(peer_error)
         status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
         response.read(4096)
     return {
@@ -180,17 +182,7 @@ def _validate_delivery_url(parsed, *, allowlist: tuple[str, ...]) -> str | None:
 
 
 def _private_network_error(hostname: str) -> str | None:
-    try:
-        addresses = [ipaddress.ip_address(hostname)]
-    except ValueError:
-        try:
-            addresses = [ipaddress.ip_address(info[4][0]) for info in socket.getaddrinfo(hostname, None)]
-        except OSError:
-            return "could not verify that webhook target resolves outside local/private networks"
-    for address in addresses:
-        if address.is_private or address.is_loopback or address.is_link_local or address.is_multicast or address.is_reserved:
-            return "webhook delivery to local/private network hosts is disabled"
-    return None
+    return private_network_error(hostname, target="webhook delivery")
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):

@@ -4319,7 +4319,7 @@ def _channel_live_activation_packet_paths(data_dir: Path, packet: str) -> tuple[
     if not candidate.is_absolute():
         candidate = packet_dir / candidate
     resolved = candidate.resolve()
-    if packet_dir not in (resolved, *resolved.parents):
+    if packet_dir.resolve() not in (resolved, *resolved.parents):
         raise PermissionError("channel activation packet must stay in private packet storage")
     if not resolved.exists():
         raise FileNotFoundError(str(resolved))

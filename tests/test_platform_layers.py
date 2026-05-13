@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import stat
 import tempfile
 import subprocess
@@ -466,6 +467,14 @@ class PlatformLayerTests(unittest.TestCase):
             approved_code = orchestrator.tools.execute("code_execute", {"language": "python", "code": "print(6 * 7)"}, approved=True)
             self.assertTrue(approved_code["ok"])
             self.assertEqual(approved_code["stdout"].strip(), "42")
+            os.environ["AEGIS_SNIPPET_SECRET_TEST"] = "secret-from-parent-env"
+            try:
+                env_probe = orchestrator.tools.execute("code_execute", {"language": "python", "code": "import os; print(os.environ.get('AEGIS_SNIPPET_SECRET_TEST', 'missing'))"}, approved=True)
+            finally:
+                os.environ.pop("AEGIS_SNIPPET_SECRET_TEST", None)
+            self.assertEqual(env_probe["stdout"].strip(), "missing")
+            self.assertTrue(env_probe["isolation"]["minimal_environment"])
+            self.assertFalse(env_probe["isolation"]["network_disabled"])
             repl = orchestrator.tools.execute("python_repl", {"code": "print('isolated')"}, approved=True)
             self.assertEqual(repl["stdout"].strip(), "isolated")
             subprocess.run(("git", "init"), cwd=root, text=True, capture_output=True, check=True)

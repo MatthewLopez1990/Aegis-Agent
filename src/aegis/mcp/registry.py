@@ -676,7 +676,20 @@ def _parse_allowed_command(command: str, allowed_executables: tuple[str, ...]) -
         raise PermissionError("no MCP executable allowlist is configured")
     if executable not in allowed_executables:
         raise PermissionError(f"MCP server command {executable!r} is not allowlisted")
+    _validate_mcp_interpreter_args(executable, argv)
     return argv
+
+
+def _validate_mcp_interpreter_args(executable: str, argv: list[str]) -> None:
+    if executable not in {"python", "python3"}:
+        return
+    if len(argv) < 2:
+        raise PermissionError("MCP Python server command must name a script file")
+    script = argv[1]
+    if script == "-" or script.startswith("-"):
+        raise PermissionError("MCP Python server command must use a script path, not interpreter flags")
+    if Path(script).suffix != ".py":
+        raise PermissionError("MCP Python server command must use a .py script path")
 
 
 def mcp_virtual_tool_name(server_name: str, tool_name: str) -> str:

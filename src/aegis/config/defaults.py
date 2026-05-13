@@ -27,4 +27,4 @@ SECRET_FIELD_NAMES = (
 
 def resolve_data_dir(data_dir: str | Path | None = None) -> Path:
     """Return the configured data directory as an absolute path."""
-    return Path(data_dir or DEFAULT_DATA_DIR).expanduser().resolve()
+    return Path(data_dir or DEFAULT_DATA_DIR).expanduser().absolute()

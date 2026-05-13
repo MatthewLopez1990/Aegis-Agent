@@ -406,7 +406,8 @@ class ProcessRegistry:
     def logs(self, process_id: str, *, max_bytes: int = 4096) -> dict[str, Any]:
         row = self._require_row(process_id)
         path = Path(str(row.get("log_path") or ""))
-        if self.log_dir not in (path.resolve(), *path.resolve().parents):
+        resolved = path.resolve()
+        if self.log_dir.resolve() not in (resolved, *resolved.parents):
             raise PermissionError("process log path escapes private log directory")
         byte_limit = max(1, min(int(max_bytes), 65536))
         content = ""
@@ -475,7 +476,7 @@ class ProcessRegistry:
     def _append_control_event(self, row: dict[str, Any], event: dict[str, Any]) -> None:
         path = Path(str(row.get("control_path") or ""))
         resolved = path.resolve()
-        if self.log_dir not in (resolved, *resolved.parents):
+        if self.log_dir.resolve() not in (resolved, *resolved.parents):
             raise PermissionError("process control path escapes private log directory")
         ensure_private_file(resolved)
         with resolved.open("a", encoding="utf-8") as handle:

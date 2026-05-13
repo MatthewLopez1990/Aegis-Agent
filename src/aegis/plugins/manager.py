@@ -599,7 +599,7 @@ class PluginManager:
         enable: bool = False,
         unsigned_local: bool = False,
     ) -> dict[str, Any]:
-        path = Path(manifest_path).expanduser().resolve()
+        path = Path(manifest_path).expanduser().absolute()
         raw = _read_plugin_manifest(path)
         plugin_id = str(raw.get("id") or "").strip()
         if not _PLUGIN_ID_RE.fullmatch(plugin_id):
@@ -880,7 +880,8 @@ def _safe_plugin_child(root: Path, relative_path: str) -> Path:
     if candidate.is_absolute():
         raise ValueError("plugin resource paths must be relative to the plugin manifest")
     resolved = (root / candidate).resolve()
-    if root not in (resolved, *resolved.parents):
+    resolved_root = root.resolve()
+    if resolved_root not in (resolved, *resolved.parents):
         raise ValueError("plugin resource path escapes the plugin directory")
     return resolved
 

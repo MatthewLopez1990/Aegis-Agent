@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import ipaddress
-import socket
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from aegis.connectors.base import ConnectorRequest, ConnectorResult, ConnectorSpec, require_scope
+from aegis.security.network import private_network_error, response_private_network_error
 from aegis.security.taint import RiskLevel, Sensitivity
 
 
@@ -73,6 +72,9 @@ class HttpConnector:
         except URLError as exc:
             return ConnectorResult(self.spec.name, "read", False, {}, error=f"HTTP request failed: {exc.reason}")
         with response_context as response:
+            peer_error = response_private_network_error(response, target="live HTTP reads")
+            if peer_error:
+                return ConnectorResult(self.spec.name, "read", False, {}, error=peer_error)
             final_url = response.geturl() if hasattr(response, "geturl") else url
             final_domain = urlparse(final_url).hostname or ""
             if final_domain and not self._allowed(final_domain):
@@ -115,19 +117,7 @@ def _validate_url(parsed) -> str | None:
 
 
 def _private_network_error(hostname: str) -> str | None:
-    if hostname.lower() == "localhost":
-        return "live HTTP reads to local/private network hosts are disabled"
-    try:
-        addresses = [ipaddress.ip_address(hostname)]
-    except ValueError:
-        try:
-            addresses = [ipaddress.ip_address(info[4][0]) for info in socket.getaddrinfo(hostname, None)]
-        except OSError:
-            return "could not verify that HTTP target resolves outside local/private networks"
-    for address in addresses:
-        if address.is_private or address.is_loopback or address.is_link_local or address.is_multicast or address.is_reserved:
-            return "live HTTP reads to local/private network hosts are disabled"
-    return None
+    return private_network_error(hostname, target="live HTTP reads")
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):

@@ -41,7 +41,8 @@ CURSOR_RULES_PATTERN = "*.mdc"
 
 class ContextFileLoader:
     def __init__(self, workspace: str | Path, *, max_files: int = 12, max_bytes_per_file: int = 32_000) -> None:
-        self.workspace = Path(workspace).expanduser().resolve()
+        self.workspace = Path(workspace).expanduser().absolute()
+        self._resolved_workspace = self.workspace.resolve()
         self.firewall = ContextFirewall()
         self.max_files = max_files
         self.max_bytes_per_file = max_bytes_per_file
@@ -93,7 +94,7 @@ class ContextFileLoader:
             return False
         try:
             resolved = path.resolve()
-            resolved.relative_to(self.workspace)
+            resolved.relative_to(self._resolved_workspace)
         except (OSError, ValueError):
             return False
         paths.append(path)
@@ -125,9 +126,9 @@ class ContextFileLoader:
         if target_path is None:
             return self.workspace
         raw = Path(target_path).expanduser()
-        candidate = raw.resolve() if raw.is_absolute() else (self.workspace / raw).resolve()
+        candidate = raw.absolute() if raw.is_absolute() else (self.workspace / raw).absolute()
         try:
-            candidate.relative_to(self.workspace)
+            candidate.resolve().relative_to(self._resolved_workspace)
         except ValueError:
             return self.workspace
         if candidate.exists() and candidate.is_file():

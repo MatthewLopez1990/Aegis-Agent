@@ -11,7 +11,7 @@ from aegis.channels.base import ChannelResponse
 import aegis.channels.chat_webhook as chat_webhook_module
 import aegis.channels.email as email_module
 import aegis.channels.webhook as webhook_module
-from aegis.channels.webhook import sign_webhook_body, verify_signed_webhook
+from aegis.channels.webhook import deliver_signed_webhook, sign_webhook_body, verify_signed_webhook
 from aegis.config.loader import load_config
 from aegis.security.secrets_broker import SecretsBroker
 
@@ -98,6 +98,38 @@ class ChannelWebhookTests(unittest.TestCase):
             orchestrator.approvals.approve(mismatch["approval_id"], reason="send reviewed")
             with self.assertRaises(PermissionError):
                 orchestrator.send_webhook(text="different payload", approval_id=mismatch["approval_id"], session_id="session-1")
+
+    def test_signed_webhook_delivery_rechecks_connected_peer_address(self) -> None:
+        class FakeSock:
+            def getpeername(self):
+                return ("127.0.0.1", 443)
+
+        class FakeRaw:
+            _sock = FakeSock()
+
+        class FakeFp:
+            raw = FakeRaw()
+
+        class FakeResponse:
+            status = 202
+            fp = FakeFp()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+        original_open = webhook_module._open_without_redirects
+        original_private_check = webhook_module._private_network_error
+        webhook_module._private_network_error = lambda hostname: None
+        webhook_module._open_without_redirects = lambda request, *, timeout: FakeResponse()
+        try:
+            with self.assertRaisesRegex(ValueError, "local/private network"):
+                deliver_signed_webhook(url="https://example.com/aegis-webhook", secret="secret", payload={"text": "hello"}, delivery_id="delivery-1", allowlist=("example.com",))
+        finally:
+            webhook_module._open_without_redirects = original_open
+            webhook_module._private_network_error = original_private_check
 
     def test_smtp_email_outbound_requires_approval_and_uses_brokered_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

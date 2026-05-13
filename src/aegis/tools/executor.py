@@ -12,6 +12,7 @@ import re
 import operator
 import os
 from pathlib import Path
+import signal
 import shutil
 import shlex
 import struct
@@ -1322,23 +1323,24 @@ class BuiltinToolExecutor:
         run_dir.mkdir(parents=True, exist_ok=True)
         script = run_dir / "snippet.py"
         script.write_text(str(params["code"]), encoding="utf-8")
-        completed = subprocess.run(
-            (sys.executable, "-I", str(script)),
-            cwd=run_dir,
-            text=True,
-            capture_output=True,
-            timeout=float(params.get("timeout", 5)),
-            check=False,
-        )
+        completed = _run_approved_python_snippet(script, run_dir=run_dir, timeout=float(params.get("timeout", 5)))
         return {
             "ok": completed.returncode == 0,
-            "status": "completed" if completed.returncode == 0 else "failed",
+            "status": completed.status,
             "language": "python",
             "stdout": completed.stdout[:5000],
             "stderr": completed.stderr[:5000],
             "returncode": completed.returncode,
             "artifact_dir": str(run_dir),
-            "mode": "local_isolated_python",
+            "mode": "approved_local_python",
+            "isolation": {
+                "python_isolated_mode": True,
+                "minimal_environment": True,
+                "cwd_private_artifact_dir": True,
+                "process_session_isolated": os.name == "posix",
+                "descendant_processes_killed_on_timeout": os.name == "posix",
+                "network_disabled": False,
+            },
             "taint": "CODE_OUTPUT",
         }
 
@@ -3258,10 +3260,17 @@ def _media_worker_preexec() -> None:
         import resource
     except ImportError:  # pragma: no cover - platform fallback
         return
-    resource.setrlimit(resource.RLIMIT_CPU, (5, 5))
-    resource.setrlimit(resource.RLIMIT_FSIZE, (10 * 1024 * 1024, 10 * 1024 * 1024))
-    resource.setrlimit(resource.RLIMIT_NOFILE, (16, 16))
-    resource.setrlimit(resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
+    _safe_setrlimit(resource, resource.RLIMIT_CPU, (5, 5))
+    _safe_setrlimit(resource, resource.RLIMIT_FSIZE, (10 * 1024 * 1024, 10 * 1024 * 1024))
+    _safe_setrlimit(resource, resource.RLIMIT_NOFILE, (16, 16))
+    _safe_setrlimit(resource, resource.RLIMIT_AS, (256 * 1024 * 1024, 256 * 1024 * 1024))
+
+
+def _safe_setrlimit(resource_module: Any, limit: int, values: tuple[int, int]) -> None:
+    try:
+        resource_module.setrlimit(limit, values)
+    except (OSError, ValueError):
+        return
 
 
 def _write_tool_artifact_metadata(
@@ -5251,6 +5260,59 @@ def _changed_files_from_patch(patch: str) -> list[str]:
 
 def _run_git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(("git", "-C", str(root), *args), text=True, capture_output=True, timeout=10, check=False)
+
+
+class _SnippetResult:
+    def __init__(self, *, returncode: int | None, stdout: str, stderr: str, status: str) -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.status = status
+
+
+def _run_approved_python_snippet(script: Path, *, run_dir: Path, timeout: float) -> _SnippetResult:
+    process = subprocess.Popen(  # noqa: S603 - Python executable and generated snippet path are fixed by the tool.
+        (sys.executable, "-I", str(script)),
+        cwd=run_dir,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=os.name == "posix",
+        env=_python_snippet_env(run_dir),
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(process)
+        stdout, stderr = process.communicate()
+        return _SnippetResult(returncode=process.returncode, stdout=stdout, stderr=(stderr + "\nexecution timed out").strip(), status="timeout")
+    return _SnippetResult(returncode=process.returncode, stdout=stdout, stderr=stderr, status="completed" if process.returncode == 0 else "failed")
+
+
+def _python_snippet_env(run_dir: Path) -> dict[str, str]:
+    env: dict[str, str] = {
+        "HOME": str(run_dir),
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONNOUSERSITE": "1",
+    }
+    if os.name == "nt":
+        env["USERPROFILE"] = str(run_dir)
+    if "PATH" in os.environ:
+        env["PATH"] = os.environ["PATH"]
+    return env
+
+
+def _terminate_process_tree(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            return
+        except OSError:
+            pass
+    process.kill()
 
 
 def _operation_for_tool(name: str, permission: str) -> str:

@@ -476,6 +476,15 @@ class McpTests(unittest.TestCase):
             with self.assertRaisesRegex(PermissionError, "not allowlisted"):
                 registry.call_tool(server="fake", tool="echo", arguments={}, approved=True, allowed_executables=("python3",))
 
+    def test_mcp_python_stdio_rejects_inline_interpreter_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            registry = McpRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"))
+            registry.register_server(name="inline", command="python3 -c 'print(123)'", allowed_tools=("echo",), enabled=True)
+
+            with self.assertRaisesRegex(PermissionError, "script path"):
+                registry.call_tool(server="inline", tool="echo", arguments={}, approved=True, allowed_executables=("python3",))
+
 class _HttpMcpFixture:
     def __init__(self, *, expected_bearer: str | None = None, auth_challenge: str | None = None) -> None:
         self.expected_bearer = expected_bearer

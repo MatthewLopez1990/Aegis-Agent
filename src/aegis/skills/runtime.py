@@ -389,10 +389,19 @@ def _resource_limiter(limits: dict[str, int | bool]) -> Any:
             return
         cpu_seconds = int(limits.get("cpu_seconds") or 1)
         memory_bytes = int(limits.get("memory_mb") or 128) * 1024 * 1024
-        resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
-        resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+        _safe_setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
+        _safe_setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
 
     return apply_limits
+
+
+def _safe_setrlimit(limit: int, values: tuple[int, int]) -> None:
+    if resource is None:
+        return
+    try:
+        resource.setrlimit(limit, values)
+    except (OSError, ValueError):
+        return
 
 
 def _minimal_process_env() -> dict[str, str]:

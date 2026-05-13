@@ -1325,6 +1325,34 @@ class ConnectorTests(unittest.TestCase):
         mock_result = mock_connector.read(ConnectorRequest(operation="read", params={"url": "http://localhost:8000"}, scopes=("read",)))
         self.assertTrue(mock_result.ok)
 
+    def test_http_live_read_rechecks_connected_peer_address(self) -> None:
+        connector = HttpConnector(allowlist=("example.com",), live_network=True)
+
+        class FakeSock:
+            def getpeername(self):
+                return ("127.0.0.1", 443)
+
+        class FakeRaw:
+            _sock = FakeSock()
+
+        class FakeFp:
+            raw = FakeRaw()
+
+        class FakeResponse:
+            fp = FakeFp()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+        with patch("aegis.connectors.http._private_network_error", return_value=None), patch("aegis.connectors.http._open_without_redirects", lambda request, timeout: FakeResponse()):
+            result = connector.read(ConnectorRequest(operation="read", params={"url": "https://example.com/docs"}, scopes=("read",)))
+
+        self.assertFalse(result.ok)
+        self.assertIn("local/private network", result.error or "")
+
     def test_http_live_read_fails_closed_when_dns_cannot_be_verified(self) -> None:
         connector = HttpConnector(allowlist=("example.com",), live_network=True)
 

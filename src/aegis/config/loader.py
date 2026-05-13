@@ -149,7 +149,7 @@ def load_config(data_dir: str | Path | None = None, config_path: str | Path | No
     if not configured_data_dir.is_absolute():
         configured_base = path.parent if config_path else base_dir
         configured_data_dir = configured_base / configured_data_dir
-    configured_data_dir = configured_data_dir.resolve()
+    configured_data_dir = configured_data_dir.absolute()
     database_path = configured_data_dir / str(runtime.get("database", DEFAULT_DB_NAME))
     audit_log_path = configured_data_dir / str(runtime.get("audit_log", DEFAULT_AUDIT_LOG))
     secrets_path = configured_data_dir / str(runtime.get("secrets", DEFAULT_SECRETS_FILE))
