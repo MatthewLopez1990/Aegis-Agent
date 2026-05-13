@@ -38,9 +38,12 @@ _LIVE_STREAM_TIMEOUT_MAX_SECONDS = 300.0
 _SAFE_ARTIFACT_CONTENT_TYPES = {
     ".csv": "text/csv; charset=utf-8",
     ".json": "application/json",
+    ".jpg": "image/jpeg",
+    ".mp4": "video/mp4",
     ".png": "image/png",
     ".txt": "text/plain; charset=utf-8",
     ".wav": "audio/wav",
+    ".webp": "image/webp",
 }
 
 

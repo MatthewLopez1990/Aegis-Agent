@@ -156,7 +156,7 @@ class BuiltinToolExecutor:
             result = self._execute_web_search(params=params)
         elif name in {"vision_analyze", "voice_transcribe", "video_analyze"}:
             result = self._execute_media_read(name=name, params=params, approved=approved)
-        elif name in {"image_generate", "image_edit", "tts", "voice_record"}:
+        elif name in {"image_generate", "image_edit", "tts", "voice_record", "video_generate"}:
             result = self._execute_media_artifact(name=name, params=params)
         elif name == "http_request":
             result = self._execute_http_request(params=params, approved=approved)
@@ -388,6 +388,8 @@ class BuiltinToolExecutor:
         artifact_dir = root / ".aegis" / "tool-artifacts"
         artifact_dir.mkdir(parents=True, exist_ok=True)
         artifact_dir.chmod(0o700)
+        if name == "video_generate":
+            return self._execute_live_video_provider(params=params, artifact_dir=artifact_dir)
         if params.get("provider_url"):
             return self._execute_live_media_provider(name=name, params=params, artifact_dir=artifact_dir)
         if name == "tts":
@@ -509,6 +511,162 @@ class BuiltinToolExecutor:
             details={"text_artifact": True},
         )
         return {"ok": True, key: str(path), "artifact_path": str(path), "metadata_path": str(metadata_path), **artifact_receipt, "sandbox_receipt": sandbox_receipt, "mode": "local_placeholder_artifact"}
+
+    def _execute_live_video_provider(self, *, params: dict[str, Any], artifact_dir: Path) -> dict[str, Any]:
+        rest = self.connectors.get("generic_rest")
+        if not bool(getattr(rest, "live_writes", False)):
+            return {
+                "ok": False,
+                "tool": "video_generate",
+                "mode": "live_video_provider",
+                "status": "not_configured",
+                "reason": "live_rest_writes must be enabled before provider-backed video generation",
+                "required_controls": _live_media_required_controls(),
+            }
+        if not params.get("provider_url"):
+            return {
+                "ok": False,
+                "tool": "video_generate",
+                "mode": "live_video_provider",
+                "status": "not_configured",
+                "reason": "provider_url is required for provider-backed video generation",
+                "required_controls": _live_media_required_controls(),
+            }
+        provider_url = str(params["provider_url"])
+        parsed = urlparse(provider_url)
+        domain = parsed.hostname or ""
+        validation_error = _validate_url(parsed) or (None if parsed.scheme == "https" else "video provider execution requires https")
+        if validation_error:
+            return {"ok": False, "tool": "video_generate", "mode": "live_video_provider", "status": "scope_rejected", "reason": validation_error, "required_controls": _live_media_required_controls()}
+        http = self.connectors.get("http")
+        allowlist = tuple(str(item) for item in getattr(http, "allowlist", ()))
+        if not _host_allowed(domain, allowlist):
+            return {"ok": False, "tool": "video_generate", "mode": "live_video_provider", "status": "scope_rejected", "reason": f"video provider host {domain!r} is not allowlisted", "required_controls": _live_media_required_controls()}
+        private_error = _private_network_error(domain)
+        if private_error:
+            return {"ok": False, "tool": "video_generate", "mode": "live_video_provider", "status": "scope_rejected", "reason": private_error, "required_controls": _live_media_required_controls()}
+        provider_adapter = _live_media_provider_adapter(name="video_generate", params=params)
+        if provider_adapter["error"]:
+            return {
+                "ok": False,
+                "tool": "video_generate",
+                "mode": "live_video_provider",
+                "status": "unsupported_provider_adapter",
+                "reason": provider_adapter["error"],
+                "required_controls": _live_media_required_controls(),
+            }
+        adapter_name = str(provider_adapter["name"] or "generic")
+        if adapter_name != "openai_video":
+            return {
+                "ok": False,
+                "tool": "video_generate",
+                "mode": "live_video_provider",
+                "status": "unsupported_provider_adapter",
+                "reason": f"{adapter_name} provider adapter does not support provider-backed video generation",
+                "required_controls": _live_media_required_controls(),
+            }
+        action = _live_video_action(params)
+        try:
+            video_id = _safe_live_video_id(params.get("video_id") or params.get("job_id") or params.get("id")) if action != "submit" else ""
+            variant = _live_video_variant(params.get("variant", "video"))
+            action_url = _live_video_action_url(provider_url=provider_url, action=action, video_id=video_id, variant=variant)
+        except ToolExecutionError as exc:
+            return {
+                "ok": False,
+                "tool": "video_generate",
+                "mode": "live_video_provider",
+                "status": "scope_rejected",
+                "reason": str(redact(str(exc))),
+                "required_controls": _live_media_required_controls(),
+            }
+        token_secret = str(params.get("token_secret") or "AEGIS_MEDIA_PROVIDER_TOKEN")
+        handle = self.secrets_broker.request_handle(name=token_secret, requester="media_provider", reason=f"video_generate {action} provider-backed video job", scopes=("media:execute",))
+        if not handle.present:
+            return {"ok": False, "tool": "video_generate", "mode": "live_video_provider", "status": "not_configured", "reason": f"secret {token_secret!r} is not configured", "required_controls": _live_media_required_controls()}
+        token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="media_provider")
+        request_payload = _live_video_request_payload(params=params, action=action, video_id=video_id, variant=variant)
+        live_result = _send_live_video_provider_request(url=action_url, token=token, action=action, payload=request_payload)
+        provider_receipt = _live_media_provider_receipt(domain=domain, http_status=live_result["http_status"], request_payload=request_payload, handle_present=handle.present, provider_adapter=adapter_name)
+        if not live_result["ok"]:
+            return {
+                "ok": False,
+                "tool": "video_generate",
+                "mode": "live_video_provider",
+                "status": "failed",
+                "action": action,
+                "domain": domain,
+                "http_status": live_result["http_status"],
+                "error": live_result.get("error"),
+                "provider_adapter": adapter_name,
+                "provider_receipt": provider_receipt,
+            }
+        if action == "download":
+            video_bytes = live_result["content"]
+            extension, mime_type = _live_video_extension_and_mime(declared_mime=str(live_result.get("mime_type", "")), content=video_bytes, variant=variant)
+            path = artifact_dir / f"video_generate-{uuid4()}.{extension}"
+            path.write_bytes(video_bytes)
+            path.chmod(0o600)
+            artifact_receipt = _artifact_receipt(path)
+            sandbox_receipt = _media_sandbox_receipt(tool="video_generate", mode=f"live_provider_{extension}", worker_result={"provider_domain": domain, "provider_adapter": adapter_name})
+            details = {
+                "mime_type": mime_type,
+                "provider_adapter": adapter_name,
+                "provider_receipt": provider_receipt,
+                "provider_job_id_sha256": hashlib.sha256(video_id.encode("utf-8")).hexdigest(),
+                "variant": variant,
+            }
+            metadata_path = _write_tool_artifact_metadata(
+                artifact_dir=artifact_dir,
+                tool="video_generate",
+                artifact_path=path,
+                mode=f"live_provider_{extension}",
+                artifact_receipt=artifact_receipt,
+                sandbox_receipt=sandbox_receipt,
+                details=details,
+            )
+            return {
+                "ok": True,
+                "tool": "video_generate",
+                "action": action,
+                "asset_path": str(path),
+                "artifact_path": str(path),
+                "metadata_path": str(metadata_path),
+                **artifact_receipt,
+                "sandbox_receipt": sandbox_receipt,
+                "provider_receipt": provider_receipt,
+                "provider_adapter": adapter_name,
+                "mode": f"live_provider_{extension}",
+                "mime_type": mime_type,
+                "domain": domain,
+                "variant": variant,
+                "provider_job_id": video_id,
+                "provider_job_id_sha256": hashlib.sha256(video_id.encode("utf-8")).hexdigest(),
+                "raw_response_body_included": False,
+                "raw_secret_values_included": False,
+            }
+        job = _live_video_job_summary(live_result.get("json"), fallback_video_id=video_id)
+        result_status = {
+            "submit": "submitted",
+            "status": str(job.get("status") or "status"),
+            "delete": "deleted" if bool(job.get("deleted")) else str(job.get("status") or "delete_requested"),
+        }[action]
+        return {
+            "ok": True,
+            "tool": "video_generate",
+            "action": action,
+            "status": result_status,
+            "mode": "live_provider_video_job",
+            "domain": domain,
+            "http_status": live_result["http_status"],
+            "provider_adapter": adapter_name,
+            "provider_receipt": provider_receipt,
+            "job": job,
+            "provider_job_id": job.get("id") or video_id,
+            "provider_job_id_sha256": hashlib.sha256(str(job.get("id") or video_id).encode("utf-8")).hexdigest() if (job.get("id") or video_id) else None,
+            "raw_prompt_or_text_included": False,
+            "raw_response_body_included": False,
+            "raw_secret_values_included": False,
+        }
 
     def _execute_live_media_provider(self, *, name: str, params: dict[str, Any], artifact_dir: Path) -> dict[str, Any]:
         if name not in {"image_generate", "image_edit", "tts"}:
@@ -2941,7 +3099,88 @@ def _live_media_provider_adapter(*, name: str, params: dict[str, Any]) -> dict[s
         if name != "voice_transcribe":
             return {"name": raw, "error": "openai_transcription provider adapter currently supports voice_transcribe only"}
         return {"name": "openai_transcription", "error": None}
+    if raw in {"openai_video", "openai_videos", "openai_sora", "sora", "openai_compatible_video"}:
+        if name != "video_generate":
+            return {"name": raw, "error": "openai_video provider adapter currently supports video_generate only"}
+        return {"name": "openai_video", "error": None}
     return {"name": raw[:80], "error": f"unsupported media provider adapter: {raw[:80]}"}
+
+
+def _live_video_action(params: dict[str, Any]) -> str:
+    raw = str(params.get("action") or params.get("operation") or "submit").strip().lower().replace("-", "_")
+    if raw in {"", "create", "submit", "run", "start", "generate"}:
+        return "submit"
+    if raw in {"status", "poll", "retrieve", "get"}:
+        return "status"
+    if raw in {"download", "content", "artifact", "fetch"}:
+        return "download"
+    if raw in {"delete", "remove", "cleanup"}:
+        return "delete"
+    raise ToolExecutionError(f"unsupported video provider action: {raw[:80]}")
+
+
+def _safe_live_video_id(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ToolExecutionError("video provider action requires video_id")
+    if len(text) > 200 or not re.fullmatch(r"[A-Za-z0-9._:@+-]+", text):
+        raise ToolExecutionError("video_id contains unsupported characters")
+    return text
+
+
+def _live_video_variant(value: Any) -> str:
+    variant = str(value or "video").strip().lower().replace("-", "_")
+    if variant in {"", "video", "mp4"}:
+        return "video"
+    if variant in {"thumbnail", "thumb", "preview"}:
+        return "thumbnail"
+    if variant in {"spritesheet", "sprite_sheet", "scrubber"}:
+        return "spritesheet"
+    raise ToolExecutionError("video download variant must be video, thumbnail, or spritesheet")
+
+
+def _live_video_action_url(*, provider_url: str, action: str, video_id: str, variant: str) -> str:
+    if action == "submit":
+        return provider_url
+    base = provider_url.rstrip("/")
+    if not base:
+        raise ToolExecutionError("provider_url is required")
+    if not base.endswith(f"/{video_id}"):
+        base = f"{base}/{video_id}"
+    if action == "download":
+        suffix = "/content"
+        url = base if base.endswith(suffix) else f"{base}{suffix}"
+        if variant != "video":
+            separator = "&" if "?" in url else "?"
+            url = f"{url}{separator}variant={variant}"
+        return url
+    return base
+
+
+def _live_video_request_payload(*, params: dict[str, Any], action: str, video_id: str, variant: str) -> dict[str, Any]:
+    if action == "submit":
+        payload: dict[str, Any] = {
+            "model": str(params.get("model") or "sora-2")[:200],
+            "prompt": str(params.get("prompt") or "")[:8000],
+        }
+        seconds = str(params.get("seconds") or params.get("duration") or "").strip()
+        if seconds:
+            if seconds not in {"4", "8", "12"}:
+                raise ToolExecutionError("video seconds must be 4, 8, or 12")
+            payload["seconds"] = seconds
+        size = str(params.get("size") or "").strip()
+        if size:
+            if size not in {"720x1280", "1280x720", "1024x1792", "1792x1024"}:
+                raise ToolExecutionError("video size must be one of the supported OpenAI video sizes")
+            payload["size"] = size
+        return payload
+    payload = {
+        "action": action,
+        "provider_job_id_sha256": hashlib.sha256(video_id.encode("utf-8")).hexdigest(),
+    }
+    if action == "download":
+        payload["variant"] = variant
+    return payload
 
 
 def _live_media_request_payload(
@@ -3040,10 +3279,15 @@ def _live_media_request_payload(
 
 def _live_media_provider_receipt(*, domain: str, http_status: int, request_payload: dict[str, Any], handle_present: bool, provider_adapter: str = "generic") -> dict[str, Any]:
     encoded = json.dumps(request_payload, sort_keys=True, default=str).encode("utf-8")
+    request_format = "application/json"
+    if provider_adapter in {"openai_image_edit", "openai_transcription"}:
+        request_format = "multipart/form-data"
+    elif provider_adapter == "openai_video" and "action" in request_payload:
+        request_format = "path_operation"
     return {
         "receipt_schema": "redacted_media_provider_receipt_v1",
         "provider_adapter": provider_adapter,
-        "request_format": "multipart/form-data" if provider_adapter in {"openai_image_edit", "openai_transcription"} else "application/json",
+        "request_format": request_format,
         "domain": domain,
         "http_status": http_status,
         "payload_sha256": hashlib.sha256(encoded).hexdigest(),
@@ -3300,6 +3544,92 @@ def _send_live_transcription_provider_request(
     if not text:
         return {"ok": False, "http_status": status, "error": "transcription provider returned an empty transcript"}
     return {"ok": True, "http_status": status, "text": text}
+
+
+def _send_live_video_provider_request(*, url: str, token: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+    body: bytes | None = None
+    method = "GET"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "Aegis-Agent/0.1",
+    }
+    if action == "submit":
+        method = "POST"
+        body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    elif action == "delete":
+        method = "DELETE"
+    request = Request(url, data=body, method=method, headers=headers)
+    try:
+        response_context = _open_without_redirects(request, timeout=30)
+    except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            return {"ok": False, "http_status": exc.code, "error": "HTTP redirects are not followed by the governed video provider adapter"}
+        return {"ok": False, "http_status": exc.code, "error": f"video provider failed with status {exc.code}"}
+    except URLError as exc:
+        return {"ok": False, "http_status": 0, "error": f"video provider request failed: {exc.reason}"}
+    with response_context as response:
+        status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+        max_bytes = 25 * 1024 * 1024 if action == "download" else 2 * 1024 * 1024
+        raw = response.read(max_bytes + 1)
+        content_type = str(getattr(response, "headers", {}).get("Content-Type", ""))
+    if not 200 <= status < 300:
+        return {"ok": False, "http_status": status, "error": f"video provider failed with status {status}"}
+    if action == "download":
+        if not raw:
+            return {"ok": False, "http_status": status, "error": "video provider returned an empty artifact"}
+        if len(raw) > 25 * 1024 * 1024:
+            return {"ok": False, "http_status": status, "error": "video provider artifact exceeds the 25 MiB local artifact limit"}
+        return {"ok": True, "http_status": status, "content": raw, "mime_type": content_type}
+    try:
+        decoded = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {"ok": False, "http_status": status, "error": "video provider JSON response could not be decoded"}
+    if not isinstance(decoded, dict):
+        return {"ok": False, "http_status": status, "error": "video provider JSON response must be an object"}
+    return {"ok": True, "http_status": status, "json": decoded}
+
+
+def _live_video_job_summary(decoded: Any, *, fallback_video_id: str = "") -> dict[str, Any]:
+    source = decoded if isinstance(decoded, dict) else {}
+    video_id = str(source.get("id") or source.get("video_id") or fallback_video_id or "")[:200]
+    status = str(source.get("status") or source.get("state") or "")[:80]
+    summary: dict[str, Any] = {
+        "id": video_id,
+        "status": status,
+        "raw_response_body_included": False,
+    }
+    for key in ("object", "model", "seconds", "size"):
+        if source.get(key) is not None:
+            summary[key] = str(source.get(key))[:200]
+    for key in ("progress", "created_at"):
+        if source.get(key) is not None:
+            summary[key] = source.get(key)
+    if source.get("deleted") is not None:
+        summary["deleted"] = bool(source.get("deleted"))
+    error = source.get("error")
+    if isinstance(error, dict):
+        message = str(error.get("message") or error.get("code") or "")[:500]
+        if message:
+            summary["error"] = str(redact(message))
+    elif isinstance(error, str) and error:
+        summary["error"] = str(redact(error[:500]))
+    return summary
+
+
+def _live_video_extension_and_mime(*, declared_mime: str, content: bytes, variant: str) -> tuple[str, str]:
+    normalized = declared_mime.split(";", 1)[0].strip().lower()
+    if content[4:8] == b"ftyp" or normalized == "video/mp4":
+        return "mp4", "video/mp4"
+    if content.startswith(b"\xff\xd8") or normalized in {"image/jpeg", "image/jpg"}:
+        return "jpg", "image/jpeg"
+    if content.startswith(b"RIFF") and content[8:12] == b"WEBP" or normalized == "image/webp":
+        return "webp", "image/webp"
+    if variant == "thumbnail":
+        raise ToolExecutionError("video thumbnail response must be JPEG or WEBP")
+    if variant == "spritesheet":
+        raise ToolExecutionError("video spritesheet response must be JPEG or WEBP")
+    raise ToolExecutionError("video provider download response must be MP4, JPEG, or WEBP")
 
 
 def _media_base64_from_provider_json(decoded: dict[str, Any], *, tool: str) -> str:

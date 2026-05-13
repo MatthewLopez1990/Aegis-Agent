@@ -71,6 +71,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(implementation_statuses["vision_analyze"], "local_metadata")
             self.assertEqual(implementation_statuses["image_generate"], "allowlisted_live_or_local")
             self.assertEqual(implementation_statuses["video_analyze"], "local_metadata")
+            self.assertEqual(implementation_statuses["video_generate"], "allowlisted_live_or_local")
             self.assertEqual(implementation_statuses["voice_transcribe"], "allowlisted_live_or_local")
             self.assertEqual(implementation_statuses["browser_screenshot"], "local_png_snapshot")
             self.assertEqual(implementation_statuses["tts"], "allowlisted_live_or_local")
@@ -104,6 +105,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertTrue(implemented["service_ticket_read"])
             self.assertTrue(implemented["service_ticket_write"])
             self.assertTrue(implemented["image_generate"])
+            self.assertTrue(implemented["video_generate"])
             self.assertTrue(implemented["tts"])
             self.assertFalse(implemented["package_install"])
             self.assertTrue(implemented["voice_record"])
@@ -1240,6 +1242,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("openai_style_image_edit_provider_adapter", browser_hardening_controls)
             self.assertIn("openai_style_tts_provider_adapter", browser_hardening_controls)
             self.assertIn("openai_style_transcription_provider_adapter", browser_hardening_controls)
+            self.assertIn("openai_style_video_provider_adapter", browser_hardening_controls)
             self.assertIn("browser_automation_boundary_receipts", browser_hardening_controls)
             self.assertIn("static_dom_snapshot_no_js", browser_hardening_controls)
             self.assertIn("approved_static_form_fill", browser_hardening_controls)
@@ -1926,6 +1929,162 @@ class PlatformLayerTests(unittest.TestCase):
                 )
             self.assertFalse(denied["ok"])
             self.assertEqual(denied["status"], "invalid_source")
+
+    def test_openai_style_video_provider_adapter_manages_job_lifecycle_with_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            mp4_bytes = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom\x00\x00\x00\x08free"
+            captured: dict[str, Any] = {"requests": []}
+
+            class FakeResponse:
+                def __init__(self, *, status: int = 200, headers: dict[str, str] | None = None, body: bytes = b"") -> None:
+                    self.status = status
+                    self.headers = headers or {"Content-Type": "application/json"}
+                    self._body = body
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return self._body
+
+            def fake_open(request, timeout):
+                method = request.get_method()
+                body = request.data or b""
+                captured["requests"].append(
+                    {
+                        "url": request.full_url,
+                        "method": method,
+                        "authorization": request.headers.get("Authorization", ""),
+                        "content_type": request.get_header("Content-type") or request.get_header("Content-Type") or "",
+                        "body": body,
+                    }
+                )
+                if method == "POST":
+                    return FakeResponse(body=json.dumps({"id": "video_123", "status": "queued", "progress": 0, "model": "sora-2"}).encode("utf-8"))
+                if method == "DELETE":
+                    return FakeResponse(body=json.dumps({"id": "video_123", "deleted": True}).encode("utf-8"))
+                if request.full_url.endswith("/content"):
+                    return FakeResponse(headers={"Content-Type": "video/mp4"}, body=mp4_bytes)
+                return FakeResponse(body=json.dumps({"id": "video_123", "status": "completed", "progress": 100}).encode("utf-8"))
+
+            gated = orchestrator.tools.execute(
+                "video_generate",
+                {
+                    "prompt": "make a private storyboard token=abc123",
+                    "provider_url": "https://media.example.com/v1/videos",
+                    "provider_adapter": "openai_video",
+                },
+            )
+            self.assertEqual(gated["status"], "approval_required")
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                submitted = orchestrator.tools.execute(
+                    "video_generate",
+                    {
+                        "prompt": "make a private storyboard token=abc123",
+                        "provider_url": "https://media.example.com/v1/videos",
+                        "provider_adapter": "openai_video",
+                        "model": "sora-2",
+                        "seconds": "4",
+                        "size": "1280x720",
+                    },
+                    approved=True,
+                )
+                status = orchestrator.tools.execute(
+                    "video_generate",
+                    {
+                        "action": "status",
+                        "video_id": "video_123",
+                        "provider_url": "https://media.example.com/v1/videos",
+                        "provider_adapter": "openai_video",
+                    },
+                    approved=True,
+                )
+                downloaded = orchestrator.tools.execute(
+                    "video_generate",
+                    {
+                        "action": "download",
+                        "video_id": "video_123",
+                        "provider_url": "https://media.example.com/v1/videos",
+                        "provider_adapter": "openai_video",
+                    },
+                    approved=True,
+                )
+                deleted = orchestrator.tools.execute(
+                    "video_generate",
+                    {
+                        "action": "delete",
+                        "video_id": "video_123",
+                        "provider_url": "https://media.example.com/v1/videos",
+                        "provider_adapter": "openai_video",
+                    },
+                    approved=True,
+                )
+
+            request_bodies = [request["body"] for request in captured["requests"]]
+            submitted_body = json.loads(request_bodies[0].decode("utf-8"))
+            self.assertTrue(submitted["ok"])
+            self.assertEqual(submitted["status"], "submitted")
+            self.assertEqual(submitted["mode"], "live_provider_video_job")
+            self.assertEqual(submitted["provider_adapter"], "openai_video")
+            self.assertEqual(submitted["provider_job_id"], "video_123")
+            self.assertEqual(submitted_body["prompt"], "make a private storyboard token=abc123")
+            self.assertEqual(submitted_body["model"], "sora-2")
+            self.assertEqual(submitted_body["seconds"], "4")
+            self.assertEqual(submitted_body["size"], "1280x720")
+            self.assertEqual(submitted["provider_receipt"]["payload_keys"], ["model", "prompt", "seconds", "size"])
+            self.assertFalse(submitted["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(submitted["provider_receipt"]["raw_secret_values_included"])
+            self.assertFalse(submitted["provider_receipt"]["raw_response_body_included"])
+            self.assertNotIn("private storyboard", json.dumps(submitted))
+            self.assertNotIn("abc123", json.dumps(submitted))
+
+            self.assertEqual(status["status"], "completed")
+            self.assertEqual(status["provider_receipt"]["payload_keys"], ["action", "provider_job_id_sha256"])
+            self.assertEqual(deleted["status"], "deleted")
+            self.assertEqual(captured["requests"][0]["method"], "POST")
+            self.assertEqual(captured["requests"][1]["method"], "GET")
+            self.assertEqual(captured["requests"][1]["url"], "https://media.example.com/v1/videos/video_123")
+            self.assertEqual(captured["requests"][2]["url"], "https://media.example.com/v1/videos/video_123/content")
+            self.assertEqual(captured["requests"][3]["method"], "DELETE")
+            self.assertTrue(all(request["authorization"] == "Bearer secret-media-token" for request in captured["requests"]))
+
+            self.assertTrue(downloaded["ok"])
+            self.assertEqual(downloaded["mode"], "live_provider_mp4")
+            self.assertEqual(downloaded["mime_type"], "video/mp4")
+            self.assertEqual(Path(downloaded["asset_path"]).read_bytes(), mp4_bytes)
+            self.assertEqual(stat.S_IMODE(Path(downloaded["asset_path"]).stat().st_mode), 0o600)
+            self.assertEqual(downloaded["provider_receipt"]["payload_keys"], ["action", "provider_job_id_sha256", "variant"])
+            self.assertEqual(downloaded["sandbox_receipt"]["provider_adapter"], "openai_video")
+            self.assertEqual(downloaded["sandbox_receipt"]["ambient_network"], "allowlisted_https_provider_only")
+            metadata_text = Path(downloaded["metadata_path"]).read_text(encoding="utf-8")
+            self.assertNotIn("private storyboard", metadata_text)
+            self.assertNotIn("abc123", metadata_text)
+            self.assertNotIn("secret-media-token", metadata_text)
+            self.assertNotIn("video_123", metadata_text)
 
     def test_product_dashboard_surfaces_configured_live_connector_adapters_without_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
