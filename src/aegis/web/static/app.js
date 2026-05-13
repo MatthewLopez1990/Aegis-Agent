@@ -128,6 +128,9 @@ const escapeHtml = (value) =>
 
 const text = (value) => escapeHtml(Array.isArray(value) ? value.join(", ") : value);
 
+const copyButton = (label, value) =>
+  value ? `<button type="button" class="secondary" data-copy-command="${escapeHtml(value)}">${text(label)}</button>` : "";
+
 const slashCommandTerms = (entry) => [entry.command, ...(entry.aliases || [])].map((term) => String(term).toLowerCase());
 
 const slashMatchRank = (prefix, entry) => {
@@ -504,9 +507,10 @@ const refresh = async () => {
     }), "No provider auth targets");
     setList("model-auth-doctor", modelAuthDoctor.checks || [], (x) => ({
       title: x.target,
-      detail: `${x.login_command}${x.activation?.missing_config?.length ? ` · config ${x.activation.missing_config.join(", ")}` : ""}${x.setup_required ? ` · setup ${x.setup_required}` : ""}`,
+      detail: modelAuthDoctorDetail(x),
       meta: `${x.activation_state || (x.verified ? "verified" : "login_required")} · ${x.method} · command ${x.external_command_available ? "available" : "missing"} · provider ${x.provider}`,
       tone: x.activation_state === "verified_ready" ? "ready" : "attention",
+      actions: modelAuthDoctorActions(x),
     }), "No provider login checks");
     setList("models", models.models.slice(0, 24), (x) => ({
       title: x.identifier,
@@ -1630,6 +1634,68 @@ const renderEvaluationOutput = (payload) => {
   `;
 };
 
+const modelAuthDoctorDetail = (check = {}) => {
+  const missingConfig = check.activation?.missing_config || [];
+  return [
+    check.external_command ? `provider ${check.external_command}` : "",
+    check.login_command ? `login ${check.login_command}` : "",
+    check.verify_command ? `verify ${check.verify_command}` : "",
+    missingConfig.length ? `config ${missingConfig.join(", ")}` : "",
+    check.setup_required ? `setup ${check.setup_required}` : "",
+  ].filter(Boolean).join(" · ");
+};
+
+const modelAuthDoctorActions = (check = {}) =>
+  [
+    copyButton("Copy Login", check.login_command),
+    copyButton("Copy Verify", check.verify_command),
+  ].filter(Boolean).join("");
+
+const modelAuthCommandActions = (auth = {}) =>
+  [
+    copyButton("Copy Login", auth.login_command || auth.external_command),
+    copyButton("Copy Verify", auth.verify_command || auth.external_status_command),
+  ].filter(Boolean).join("");
+
+const modelAuthDoctorSummary = (doctor = {}) => {
+  const counts = Object.entries(doctor.activation_state_counts || {})
+    .map(([stateName, count]) => `${stateName}:${count}`)
+    .join(" · ");
+  const nextSteps = (doctor.next_steps || []).slice(0, 3);
+  return `
+    <dl class="task-facts">
+      <div><dt>Status</dt><dd>${text(doctor.status || "unknown")}</dd></div>
+      <div><dt>Login Needed</dt><dd>${text(doctor.operator_login_required_count || 0)}</dd></div>
+      <div><dt>Verified</dt><dd>${text(doctor.verified_external_auth_count || 0)}</dd></div>
+      <div><dt>Missing CLI</dt><dd>${text((doctor.missing_external_commands || []).join(", ") || "none")}</dd></div>
+      <div><dt>States</dt><dd>${text(counts || "none")}</dd></div>
+    </dl>
+    <div class="next-action">Web requests never execute interactive provider login. Copy login and verify commands, run them in a local terminal, then verify the readiness packet.</div>
+    ${nextSteps.length ? `<div class="evidence-block"><strong>Next Steps</strong>${nextSteps.map((step) => `<code>${text(step)}</code>`).join("")}</div>` : ""}
+  `;
+};
+
+const modelAuthOutputSummary = (payload = {}) => {
+  const doctor = payload.auth_doctor || (Array.isArray(payload.checks) ? payload : null);
+  if (doctor) {
+    return modelAuthDoctorSummary(doctor);
+  }
+  const auth = payload.auth || payload;
+  if (!auth || !["subscription", "oauth", "oauth_device", "cloud_identity"].includes(auth.method)) {
+    return "";
+  }
+  const stateLabel = auth.status === "external_login_requires_local_terminal" ? "Terminal handoff required" : auth.status || "External login";
+  return `
+    <dl class="task-facts">
+      <div><dt>Provider</dt><dd>${text(auth.provider || "unknown")}</dd></div>
+      <div><dt>Method</dt><dd>${text(auth.method)}</dd></div>
+      <div><dt>State</dt><dd>${text(stateLabel)}</dd></div>
+      <div><dt>Token Capture</dt><dd>${text(auth.token_capture_supported === false ? "denied" : "not used")}</dd></div>
+    </dl>
+    <div class="next-action">Run provider-owned login commands from a local terminal. The web console can show and copy commands, but it does not execute interactive provider login or accept browser/session tokens.</div>
+  `;
+};
+
 const renderModelRouteOutput = (payload) => {
   const node = document.getElementById("model-route-output");
   node.innerHTML = `
@@ -1643,9 +1709,10 @@ const renderModelAuthOutput = (payload) => {
   const packet = payload.packet && typeof payload.packet === "object" ? payload.packet : {};
   const receipt = payload.receipt && typeof payload.receipt === "object" ? payload.receipt : {};
   const readinessPacketRef = packet.packet_id || receipt.packet_id || payload.packet_id || "";
+  const commandActions = modelAuthCommandActions(auth);
   const label = auth.external_command
     ? `${auth.status || "auth"} · ${auth.external_command}`
-    : auth.provider || auth.status || "Model auth";
+    : auth.provider || auth.status || payload.auth_doctor?.status || "Model auth";
   const readinessActions = `
     <div class="item-actions">
       <button type="button" class="secondary" data-model-auth-readiness-packet="1">Create Readiness Packet</button>
@@ -1655,6 +1722,8 @@ const renderModelAuthOutput = (payload) => {
   const node = document.getElementById("model-auth-output");
   node.innerHTML = `
     <strong>${text(label)}</strong>
+    ${modelAuthOutputSummary(payload)}
+    ${commandActions ? `<div class="item-actions">${commandActions}</div>` : ""}
     ${readinessActions}
     <code>${text(JSON.stringify(payload, null, 2))}</code>
   `;
@@ -2559,7 +2628,28 @@ document.getElementById("model-auth-readiness-packet").addEventListener("click",
   await refresh();
 });
 
+const copyModelAuthCommand = async (target) => {
+  const command = target.closest("[data-copy-command]")?.dataset.copyCommand;
+  if (!command) return false;
+  if (navigator.clipboard) {
+    await navigator.clipboard.writeText(command);
+  }
+  renderModelAuthOutput({
+    status: "command_copied",
+    command,
+    note: "Run this command from a local terminal. The web console did not execute provider login.",
+  });
+  return true;
+};
+
+document.getElementById("model-auth-doctor").addEventListener("click", async (event) => {
+  await copyModelAuthCommand(event.target);
+});
+
 document.getElementById("model-auth-output").addEventListener("click", async (event) => {
+  if (await copyModelAuthCommand(event.target)) {
+    return;
+  }
   const createPacket = event.target.closest("[data-model-auth-readiness-packet]");
   if (createPacket) {
     renderModelAuthOutput(await api("/models/auth/readiness-packet", { method: "POST", body: JSON.stringify({ actor: "web-operator" }) }));

@@ -98,11 +98,83 @@ class WebGuiBrowserSmokeTests(unittest.TestCase):
         self.assertIn('document.getElementById("model-auth-doctor-run").addEventListener("click"', app_js)
         self.assertIn('document.getElementById("model-auth-readiness-packet").addEventListener("click"', app_js)
         self.assertIn('document.getElementById("model-auth-output").addEventListener("click"', app_js)
+        self.assertIn('document.getElementById("model-auth-doctor").addEventListener("click"', app_js)
         self.assertIn("modelAuthTargets.targets", app_js)
+        self.assertIn("modelAuthDoctorActions", app_js)
+        self.assertIn("modelAuthOutputSummary", app_js)
+        self.assertIn("data-copy-command", app_js)
+        self.assertIn("Web requests never execute interactive provider login", app_js)
+        self.assertIn("The web console did not execute provider login.", app_js)
         self.assertIn("--shield:", styles)
         self.assertIn("--shield-glow:", styles)
         self.assertIn(".brand-shield::before", styles)
         self.assertIn("@keyframes shield-pulse", styles)
+
+    def test_web_model_auth_output_renders_terminal_only_command_actions(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is not installed")
+        app_js = Path(__file__).resolve().parents[1] / "src" / "aegis" / "web" / "static" / "app.js"
+        node_script = r"""
+const fs = require("fs");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const start = source.indexOf("const modelAuthDoctorDetail =");
+const end = source.indexOf("\n\nconst renderModelUsage =", start);
+if (start < 0 || end < 0) {
+  throw new Error("model auth render helpers not found");
+}
+const node = { innerHTML: "" };
+const document = { getElementById: (id) => {
+  if (id !== "model-auth-output") throw new Error(`unexpected node ${id}`);
+  return node;
+}};
+const escapeHtml = (value) => String(value ?? "")
+  .replaceAll("&", "&amp;")
+  .replaceAll("<", "&lt;")
+  .replaceAll(">", "&gt;")
+  .replaceAll('"', "&quot;")
+  .replaceAll("'", "&#039;");
+const text = (value) => escapeHtml(Array.isArray(value) ? value.join(", ") : value);
+const copyButton = (label, value) =>
+  value ? `<button type="button" class="secondary" data-copy-command="${escapeHtml(value)}">${text(label)}</button>` : "";
+eval(`${source.slice(start, end)}\nglobalThis.renderModelAuthOutput = renderModelAuthOutput;\nglobalThis.modelAuthDoctorActions = modelAuthDoctorActions;`);
+const actions = modelAuthDoctorActions({
+  login_command: "PYTHONPATH=src python3 -m aegis.cli.main model auth login openai --subscription --run-external",
+  verify_command: "PYTHONPATH=src python3 -m aegis.cli.main model auth login openai --subscription --verify-external",
+});
+if (!actions.includes("data-copy-command") || !actions.includes("Copy Login") || !actions.includes("Copy Verify")) {
+  throw new Error(`copyable doctor actions missing: ${actions}`);
+}
+renderModelAuthOutput({
+  auth_doctor: {
+    status: "operator_login_required",
+    operator_login_required_count: 2,
+    verified_external_auth_count: 0,
+    missing_external_commands: ["claude"],
+    activation_state_counts: { login_required: 2 },
+    next_steps: ["Run the listed login commands from a local terminal."],
+  },
+});
+if (!node.innerHTML.includes("Web requests never execute interactive provider login") || !node.innerHTML.includes("operator_login_required") || !node.innerHTML.includes("Create Readiness Packet")) {
+  throw new Error(`doctor summary missing terminal-only readiness content: ${node.innerHTML}`);
+}
+renderModelAuthOutput({
+  auth: {
+    provider: "openai",
+    method: "subscription",
+    status: "external_login_requires_local_terminal",
+    external_command: "codex login",
+    external_status_command: "codex login status",
+    token_capture_supported: false,
+  },
+});
+if (!node.innerHTML.includes("Terminal handoff required") || !node.innerHTML.includes("Copy Login") || !node.innerHTML.includes("Copy Verify") || !node.innerHTML.includes("does not execute interactive provider login")) {
+  throw new Error(`external login output missing copyable terminal handoff: ${node.innerHTML}`);
+}
+"""
+        result = subprocess.run((node, "-e", node_script, str(app_js)), capture_output=True, text=True, timeout=5, check=False)
+        if result.returncode != 0:
+            raise AssertionError(result.stderr.strip() or result.stdout.strip())
 
     def test_web_event_stream_parser_handles_chunk_boundaries(self) -> None:
         node = shutil.which("node")
