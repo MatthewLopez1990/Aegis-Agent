@@ -2047,12 +2047,45 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 approved = payload.get("approved", False)
                 if not isinstance(approved, bool):
                     raise ValueError("approved must be a JSON boolean")
+                pty_requested = payload.get("pty", False)
+                if not isinstance(pty_requested, bool):
+                    raise ValueError("pty must be a JSON boolean")
                 self._json(
                     orchestrator.processes.start(
                         [str(part) for part in argv],
                         approved=approved,
                         actor=str(payload.get("actor") or "web-operator"),
                         label=str(payload.get("label") or ""),
+                        pty=pty_requested,
+                        rows=int(payload.get("rows", 24)),
+                        cols=int(payload.get("cols", 80)),
+                    )
+                )
+                return
+            match_process_input = re.fullmatch(r"/processes/([^/]+)/input", path)
+            if match_process_input:
+                payload = self._read_json()
+                append_newline = payload.get("append_newline", True)
+                if not isinstance(append_newline, bool):
+                    raise ValueError("append_newline must be a JSON boolean")
+                self._json(
+                    orchestrator.processes.send_input(
+                        unquote(match_process_input.group(1)),
+                        str(payload.get("text") or ""),
+                        append_newline=append_newline,
+                        actor=str(payload.get("actor") or "web-operator"),
+                    )
+                )
+                return
+            match_process_resize = re.fullmatch(r"/processes/([^/]+)/resize", path)
+            if match_process_resize:
+                payload = self._read_json()
+                self._json(
+                    orchestrator.processes.resize(
+                        unquote(match_process_resize.group(1)),
+                        rows=int(payload.get("rows", 24)),
+                        cols=int(payload.get("cols", 80)),
+                        actor=str(payload.get("actor") or "web-operator"),
                     )
                 )
                 return

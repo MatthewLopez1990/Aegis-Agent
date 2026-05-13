@@ -698,10 +698,11 @@ const refresh = async () => {
     }));
     setList("processes", processes.processes || [], (x) => ({
       title: x.label || shortId(x.id),
-      detail: `${x.executable || "process"} · argv ${x.argv_count || 0} · ${x.pty_attached ? "pty attached" : "background log"}`,
+      detail: `${x.executable || "process"} · argv ${x.argv_count || 0} · ${x.pty_attached ? `pty ${x.terminal_rows || 24}x${x.terminal_cols || 80}` : "background log"}`,
       meta: `${x.status || "unknown"} · ${shortId(x.id)} · raw command ${formatBool(x.raw_command_included)}`,
       tone: x.status === "running" ? "ready" : x.status === "stop_requested" ? "attention" : "",
       actions: `
+        <button type="button" class="secondary" data-process-select="${escapeHtml(x.id)}">Use</button>
         <button type="button" class="secondary" data-process-logs="${escapeHtml(x.id)}">Logs</button>
         ${
           ["running", "stop_requested"].includes(x.status)
@@ -3760,6 +3761,46 @@ document.getElementById("process-form").addEventListener("submit", async (event)
       label: document.getElementById("process-label").value || "",
       actor: "web-operator",
       approved: true,
+      pty: Boolean(document.getElementById("process-pty")?.checked),
+      rows: Number(document.getElementById("process-rows")?.value || 24),
+      cols: Number(document.getElementById("process-cols")?.value || 80),
+    }),
+  });
+  renderProcessOutput(result);
+  await refresh();
+});
+
+document.getElementById("process-input-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const processId = String(document.getElementById("process-input-id")?.value || "").trim();
+  if (!processId) {
+    renderProcessOutput({ status: "missing_process_id" });
+    return;
+  }
+  const result = await api(`/processes/${encodeURIComponent(processId)}/input`, {
+    method: "POST",
+    body: JSON.stringify({
+      text: document.getElementById("process-input-text").value || "",
+      append_newline: true,
+      actor: "web-operator",
+    }),
+  });
+  renderProcessOutput(result);
+  await refresh();
+});
+
+document.getElementById("process-resize-button").addEventListener("click", async () => {
+  const processId = String(document.getElementById("process-input-id")?.value || "").trim();
+  if (!processId) {
+    renderProcessOutput({ status: "missing_process_id" });
+    return;
+  }
+  const result = await api(`/processes/${encodeURIComponent(processId)}/resize`, {
+    method: "POST",
+    body: JSON.stringify({
+      rows: Number(document.getElementById("process-rows")?.value || 24),
+      cols: Number(document.getElementById("process-cols")?.value || 80),
+      actor: "web-operator",
     }),
   });
   renderProcessOutput(result);
@@ -3767,6 +3808,11 @@ document.getElementById("process-form").addEventListener("submit", async (event)
 });
 
 document.getElementById("processes").addEventListener("click", async (event) => {
+  const selectId = event.target.dataset.processSelect;
+  if (selectId) {
+    document.getElementById("process-input-id").value = selectId;
+    return;
+  }
   const logId = event.target.dataset.processLogs;
   if (logId) {
     const result = await api(`/processes/${encodeURIComponent(logId)}/logs?max_bytes=4096`);

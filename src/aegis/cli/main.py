@@ -835,7 +835,20 @@ def build_parser() -> argparse.ArgumentParser:
     processes_start.add_argument("--approved", action="store_true")
     processes_start.add_argument("--actor", default="operator")
     processes_start.add_argument("--label", default="")
+    processes_start.add_argument("--pty", action="store_true", help="Attach a governed pseudo-terminal for stdin and resize controls")
+    processes_start.add_argument("--rows", type=int, default=24)
+    processes_start.add_argument("--cols", type=int, default=80)
     processes_start.add_argument("argv", nargs=argparse.REMAINDER)
+    processes_input = processes_sub.add_parser("input", help="Send redacted stdin to a PTY-backed process")
+    processes_input.add_argument("process_id")
+    processes_input.add_argument("text")
+    processes_input.add_argument("--no-newline", action="store_true")
+    processes_input.add_argument("--actor", default="operator")
+    processes_resize = processes_sub.add_parser("resize", help="Record a terminal resize event for a PTY-backed process")
+    processes_resize.add_argument("process_id")
+    processes_resize.add_argument("--rows", type=int, required=True)
+    processes_resize.add_argument("--cols", type=int, required=True)
+    processes_resize.add_argument("--actor", default="operator")
     processes_stop = processes_sub.add_parser("stop", help="Request a running background process to stop")
     processes_stop.add_argument("process_id")
     processes_stop.add_argument("--actor", default="operator")
@@ -2456,7 +2469,11 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
         if args.processes_command == "list":
             return orchestrator.processes.status(limit=args.limit)
         if args.processes_command == "start":
-            return orchestrator.processes.start(args.argv, approved=args.approved, actor=args.actor, label=args.label)
+            return orchestrator.processes.start(args.argv, approved=args.approved, actor=args.actor, label=args.label, pty=args.pty, rows=args.rows, cols=args.cols)
+        if args.processes_command == "input":
+            return orchestrator.processes.send_input(args.process_id, args.text, append_newline=not args.no_newline, actor=args.actor)
+        if args.processes_command == "resize":
+            return orchestrator.processes.resize(args.process_id, rows=args.rows, cols=args.cols, actor=args.actor)
         if args.processes_command == "stop":
             return orchestrator.processes.stop(args.process_id, actor=args.actor)
         if args.processes_command == "logs":

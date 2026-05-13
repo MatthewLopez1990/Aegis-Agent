@@ -277,7 +277,7 @@ BROWSER_COMMANDS = (
 MCP_COMMANDS = ("list", "register", "auth", "call")
 HOOK_COMMANDS = ("list", "add", "enable", "disable", "remove", "run")
 AGENTS_COMMANDS = ("status", "autonomy-preflight", "profiles", "profile-create", "profile-disable", "delegate", "handoff", "review-packet", "verify-packet", "model-review", "run", "run-batch")
-PROCESS_COMMANDS = ("list", "start", "stop", "logs")
+PROCESS_COMMANDS = ("list", "start", "input", "resize", "stop", "logs")
 REMOTE_CONTROL_COMMANDS = ("pair", "directory", "revoke", "relay", "relay-directory", "relay-notify", "push-targets", "push-register", "push-disable", "push-rotate", "push", "relay-outbox", "relay-retry", "relay-confirm", "relay-pull", "relay-action")
 SESSION_COMMANDS = ("new", "open", "rename", "set-model", "set-personality", "activate", "archive", "pause", "append", "history", "tasks", "compact")
 TASK_COMMANDS = ("status", "resume", "pause", "cancel", "events", "timeline", "submit", "list", "all", "session")
@@ -4897,7 +4897,7 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_bashes(self, arg: str) -> None:
-        """bashes [list|start|stop|logs] -- manage governed background processes."""
+        """bashes [list|start|input|resize|stop|logs] -- manage governed background processes."""
         try:
             parts = shlex.split(arg)
         except ValueError as exc:
@@ -4913,6 +4913,9 @@ class AegisTui(cmd.Cmd):
                 approved = False
                 actor = "operator"
                 label = ""
+                pty = False
+                rows = 24
+                cols = 80
                 argv: list[str] = []
                 index = 0
                 while index < len(rest):
@@ -4932,9 +4935,50 @@ class AegisTui(cmd.Cmd):
                         label = _next_required(rest, index, "--label")
                         index += 2
                         continue
+                    if part == "--pty":
+                        pty = True
+                        index += 1
+                        continue
+                    if part == "--rows":
+                        rows = int(_next_required(rest, index, "--rows"))
+                        index += 2
+                        continue
+                    if part == "--cols":
+                        cols = int(_next_required(rest, index, "--cols"))
+                        index += 2
+                        continue
                     argv = rest[index:]
                     break
-                _print_json(self.orchestrator.processes.start(argv, approved=approved, actor=actor, label=label))
+                _print_json(self.orchestrator.processes.start(argv, approved=approved, actor=actor, label=label, pty=pty, rows=rows, cols=cols))
+                return
+            if command == "input":
+                if len(rest) < 2:
+                    _print_json({"ok": False, "error": "usage: bashes input <process-id> <text> [--no-newline]"})
+                    return
+                process_id = rest[0]
+                append_newline = "--no-newline" not in rest[2:]
+                text_parts = [part for part in rest[1:] if part != "--no-newline"]
+                _print_json(self.orchestrator.processes.send_input(process_id, " ".join(text_parts), append_newline=append_newline))
+                return
+            if command == "resize":
+                if not rest:
+                    _print_json({"ok": False, "error": "usage: bashes resize <process-id> --rows N --cols N"})
+                    return
+                process_id = rest[0]
+                rows = 24
+                cols = 80
+                index = 1
+                while index < len(rest):
+                    if rest[index] == "--rows":
+                        rows = int(_next_required(rest, index, "--rows"))
+                        index += 2
+                        continue
+                    if rest[index] == "--cols":
+                        cols = int(_next_required(rest, index, "--cols"))
+                        index += 2
+                        continue
+                    index += 1
+                _print_json(self.orchestrator.processes.resize(process_id, rows=rows, cols=cols))
                 return
             if command == "stop":
                 if not rest:
@@ -4954,7 +4998,7 @@ class AegisTui(cmd.Cmd):
         except Exception as exc:  # noqa: BLE001 - TUI command should report structured local errors.
             _print_json({"ok": False, "error": str(exc), "raw_secret_values_included": False})
             return
-        _print_json({"ok": False, "error": "usage: bashes [list|start|stop|logs]", "raw_secret_values_included": False})
+        _print_json({"ok": False, "error": "usage: bashes [list|start|input|resize|stop|logs]", "raw_secret_values_included": False})
 
     def do_processes(self, arg: str) -> None:
         """processes -- alias for bashes."""
@@ -7106,7 +7150,7 @@ def _next_command_hint(command: str) -> str:
         "commands": "/commands all",
         "keybindings": "/terminal-setup",
         "allowed-tools": "/toolsets",
-        "bashes": "/bashes start --approved --",
+        "bashes": "/bashes start --approved --pty --",
         "processes": "/processes list",
         "tools": "/tools run <name> <json>",
         "skills": "/skills hub <query>",
@@ -7224,12 +7268,18 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("agents", "model-review"): ("--approved",),
     ("agents", "run"): ("--approved",),
     ("agents", "run-batch"): ("--approved", "--limit", "--card-id"),
-    ("bashes", "start"): ("--approved", "--actor", "--label"),
+    ("bashes", "start"): ("--approved", "--actor", "--label", "--pty", "--rows", "--cols"),
     ("bashes", "logs"): ("--max-bytes",),
-    ("process", "start"): ("--approved", "--actor", "--label"),
+    ("bashes", "input"): ("--no-newline",),
+    ("bashes", "resize"): ("--rows", "--cols"),
+    ("process", "start"): ("--approved", "--actor", "--label", "--pty", "--rows", "--cols"),
     ("process", "logs"): ("--max-bytes",),
-    ("processes", "start"): ("--approved", "--actor", "--label"),
+    ("process", "input"): ("--no-newline",),
+    ("process", "resize"): ("--rows", "--cols"),
+    ("processes", "start"): ("--approved", "--actor", "--label", "--pty", "--rows", "--cols"),
     ("processes", "logs"): ("--max-bytes",),
+    ("processes", "input"): ("--no-newline",),
+    ("processes", "resize"): ("--rows", "--cols"),
     ("mcp", "call"): ("--approved",),
     ("mcp", "register"): ("--discover", "--transport", "--token-secret", "--tool", "--exclude-tool", "--no-resources", "--no-prompts", "--enable", "--no-approval"),
     ("plugins", "fetch-manifest"): ("--catalog-path",),

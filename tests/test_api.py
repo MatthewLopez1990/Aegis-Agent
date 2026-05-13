@@ -155,6 +155,34 @@ class ApiServerSecurityTests(unittest.TestCase):
                 token = _json_get(port, "/auth")["token"]
                 process_status = _json_get(port, "/processes", token=token)
                 process_gated = _json_post(port, "/processes/start", {"argv": ["python3", "-c", "print('blocked')"]}, token=token)
+                process_started = None
+                if os.name == "posix":
+                    process_started = _json_post(
+                        port,
+                        "/processes/start",
+                        {
+                            "argv": [
+                                "python3",
+                                "-c",
+                                "import sys, time; line=sys.stdin.readline().strip(); print('api-pty:' + line, flush=True); time.sleep(30)",
+                            ],
+                            "approved": True,
+                            "pty": True,
+                            "rows": 22,
+                            "cols": 88,
+                        },
+                        token=token,
+                    )
+                    process_id = process_started["process"]["id"]
+                    process_resize = _json_post(port, f"/processes/{quote(process_id)}/resize", {"rows": 40, "cols": 100}, token=token)
+                    process_input = _json_post(port, f"/processes/{quote(process_id)}/input", {"text": "from-api"}, token=token)
+                    process_logs = {}
+                    for _ in range(100):
+                        process_logs = _json_get(port, f"/processes/{quote(process_id)}/logs", token=token)
+                        if "api-pty:from-api" in process_logs["log"]:
+                            break
+                        time.sleep(0.05)
+                    process_stop = _json_post(port, f"/processes/{quote(process_id)}/stop", {}, token=token)
 
                 added = _json_post(
                     port,
@@ -174,6 +202,12 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(process_status["status"], "process_registry_ready")
                 self.assertEqual(process_gated["status"], "approval_required")
                 self.assertFalse(process_gated["raw_command_included"])
+                if process_started is not None:
+                    self.assertTrue(process_started["process"]["pty_attached"])
+                    self.assertEqual(process_resize["receipt"]["event_type"], "process.resized")
+                    self.assertEqual(process_input["receipt"]["event_type"], "process.stdin_sent")
+                    self.assertIn("api-pty:from-api", process_logs["log"])
+                    self.assertEqual(process_stop["receipt"]["receipt_schema"], "aegis.process.v1")
                 self.assertEqual(added["hook"]["id"], "api_notify")
                 self.assertEqual(listed["status"], "governed_local_ready")
                 self.assertEqual(listed["hooks"][0]["id"], "api_notify")

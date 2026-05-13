@@ -5,6 +5,7 @@ import json
 import os
 import stat
 import subprocess
+import time
 import unittest
 import tempfile
 import hmac
@@ -3555,6 +3556,7 @@ class CliTests(unittest.TestCase):
                 )
             )
             process_id = started["process"]["id"]
+            pty_process_id = ""
             try:
                 logs = dispatch(parser.parse_args(["--data-dir", str(data_dir), "process", "--workspace", str(workspace), "logs", process_id]))
                 stopped = dispatch(parser.parse_args(["--data-dir", str(data_dir), "processes", "--workspace", str(workspace), "stop", process_id]))
@@ -3568,7 +3570,66 @@ class CliTests(unittest.TestCase):
                 self.assertNotIn("time.sleep(30)", json.dumps(started, sort_keys=True))
                 self.assertTrue(stopped["ok"])
                 self.assertEqual(stopped["receipt"]["receipt_schema"], "aegis.process.v1")
+
+                if os.name == "posix":
+                    pty_started = dispatch(
+                        parser.parse_args(
+                            [
+                                "--data-dir",
+                                str(data_dir),
+                                "processes",
+                                "--workspace",
+                                str(workspace),
+                                "start",
+                                "--approved",
+                                "--pty",
+                                "--rows",
+                                "18",
+                                "--cols",
+                                "70",
+                                "--",
+                                "python3",
+                                "-c",
+                                "import sys, time; line=sys.stdin.readline().strip(); print('cli-pty:' + line, flush=True); time.sleep(30)",
+                            ]
+                        )
+                    )
+                    pty_process_id = pty_started["process"]["id"]
+                    resized = dispatch(
+                        parser.parse_args(
+                            [
+                                "--data-dir",
+                                str(data_dir),
+                                "processes",
+                                "--workspace",
+                                str(workspace),
+                                "resize",
+                                pty_process_id,
+                                "--rows",
+                                "30",
+                                "--cols",
+                                "120",
+                            ]
+                        )
+                    )
+                    sent = dispatch(parser.parse_args(["--data-dir", str(data_dir), "process", "--workspace", str(workspace), "input", pty_process_id, "from-cli"]))
+                    pty_logs = {}
+                    for _ in range(100):
+                        pty_logs = dispatch(parser.parse_args(["--data-dir", str(data_dir), "process", "--workspace", str(workspace), "logs", pty_process_id]))
+                        if "cli-pty:from-cli" in pty_logs["log"]:
+                            break
+                        time.sleep(0.05)
+                    self.assertTrue(pty_started["process"]["pty_attached"])
+                    self.assertEqual(resized["receipt"]["event_type"], "process.resized")
+                    self.assertEqual(sent["receipt"]["event_type"], "process.stdin_sent")
+                    self.assertNotIn("from-cli", json.dumps({"sent": sent, "resized": resized}, sort_keys=True))
+                    self.assertIn("cli-pty:from-cli", pty_logs["log"])
             finally:
+                if pty_process_id:
+                    try:
+                        dispatch(parser.parse_args(["--data-dir", str(data_dir), "processes", "--workspace", str(workspace), "stop", pty_process_id]))
+                    except Exception:
+                        pass
                 if process_id:
                     try:
                         dispatch(parser.parse_args(["--data-dir", str(data_dir), "processes", "--workspace", str(workspace), "stop", process_id]))

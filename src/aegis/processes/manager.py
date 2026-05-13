@@ -13,6 +13,7 @@ import sys
 import time
 from typing import Any
 from uuid import uuid4
+import base64
 
 from aegis.agent.policy_gate import PolicyGate
 from aegis.audit.logger import AuditLogger, redact
@@ -23,11 +24,25 @@ from aegis.storage.state import ensure_private_dir, ensure_private_file
 
 
 PROCESS_WRAPPER_CODE = r"""
+import base64
+try:
+    import fcntl
+    import pty
+    import select
+    import struct
+    import termios
+except Exception:
+    fcntl = None
+    pty = None
+    select = None
+    struct = None
+    termios = None
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 
 SECRET_PATTERNS = (
     re.compile(r"\b(Authorization\s*:\s*(?:Bearer|Basic)\s+)[^\r\n,;]+", re.I),
@@ -60,35 +75,124 @@ argv = payload["argv"]
 cwd = payload["cwd"]
 log_path = payload["log_path"]
 max_log_bytes = int(payload.get("max_log_bytes", 65536))
+control_path = payload.get("control_path")
+use_pty = bool(payload.get("pty", False))
+rows = int(payload.get("rows", 24))
+cols = int(payload.get("cols", 80))
 env = {"PATH": os.environ.get("PATH", ""), "PYTHONIOENCODING": "utf-8"}
-written = 0
-with open(log_path, "a", encoding="utf-8", errors="replace") as log:
-    log.write("aegis_process_started\n")
+
+def append_log(log, text, written):
+    safe = redact_text(text)
+    if written < max_log_bytes:
+        remaining = max_log_bytes - written
+        log.write(safe[:remaining])
+        written += min(len(safe), remaining)
+        if written >= max_log_bytes:
+            log.write("\n[AEGIS_LOG_TRUNCATED]\n")
+        log.flush()
+    return written
+
+def set_winsize(fd, next_rows, next_cols):
+    if fcntl is None or termios is None or struct is None:
+        return
+    safe_rows = max(1, min(int(next_rows), 1000))
+    safe_cols = max(1, min(int(next_cols), 1000))
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", safe_rows, safe_cols, 0, 0))
+
+def read_control_events(offset):
+    if not control_path:
+        return offset, []
+    try:
+        with open(control_path, "r", encoding="utf-8", errors="replace") as control:
+            control.seek(offset)
+            lines = control.readlines()
+            return control.tell(), lines
+    except OSError:
+        return offset, []
+
+def apply_control_event(master_fd, line):
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return
+    kind = event.get("type")
+    if kind == "stdin":
+        try:
+            data = base64.b64decode(str(event.get("data") or ""), validate=True)
+        except Exception:
+            data = b""
+        if data:
+            os.write(master_fd, data)
+    elif kind == "resize":
+        set_winsize(master_fd, int(event.get("rows") or 24), int(event.get("cols") or 80))
+
+def run_pipe(log):
+    written = 0
+    log.write("aegis_process_started pty=false\n")
     log.flush()
     process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, errors="replace", env=env)
     while True:
         chunk = process.stdout.readline() if process.stdout else ""
         if chunk:
-            safe = redact_text(chunk)
-            if written < max_log_bytes:
-                remaining = max_log_bytes - written
-                log.write(safe[:remaining])
-                written += min(len(safe), remaining)
-                if written >= max_log_bytes:
-                    log.write("\n[AEGIS_LOG_TRUNCATED]\n")
-                log.flush()
+            written = append_log(log, chunk, written)
         elif process.poll() is not None:
             break
     if process.stdout:
         for chunk in process.stdout:
-            safe = redact_text(chunk)
-            if written < max_log_bytes:
-                remaining = max_log_bytes - written
-                log.write(safe[:remaining])
-                written += min(len(safe), remaining)
-    log.write(f"\naegis_process_exited returncode={process.returncode}\n")
+            written = append_log(log, chunk, written)
+    return process.returncode or 0
+
+def run_pty(log):
+    if pty is None or select is None:
+        log.write("aegis_process_error pty_unavailable\n")
+        log.flush()
+        return 127
+    written = 0
+    log.write("aegis_process_started pty=true\n")
     log.flush()
-sys.exit(process.returncode or 0)
+    master_fd, slave_fd = pty.openpty()
+    set_winsize(master_fd, rows, cols)
+    process = subprocess.Popen(argv, cwd=cwd, stdin=slave_fd, stdout=slave_fd, stderr=slave_fd, text=False, env=env, close_fds=True)
+    os.close(slave_fd)
+    control_offset = 0
+    try:
+        while True:
+            ready, _, _ = select.select([master_fd], [], [], 0.05)
+            if master_fd in ready:
+                try:
+                    chunk = os.read(master_fd, 4096)
+                except OSError:
+                    chunk = b""
+                if chunk:
+                    written = append_log(log, chunk.decode("utf-8", errors="replace"), written)
+            control_offset, lines = read_control_events(control_offset)
+            for line in lines:
+                apply_control_event(master_fd, line)
+            if process.poll() is not None:
+                while True:
+                    ready, _, _ = select.select([master_fd], [], [], 0)
+                    if master_fd not in ready:
+                        break
+                    try:
+                        chunk = os.read(master_fd, 4096)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    written = append_log(log, chunk.decode("utf-8", errors="replace"), written)
+                break
+    finally:
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+    return process.returncode or 0
+
+with open(log_path, "a", encoding="utf-8", errors="replace") as log:
+    returncode = run_pty(log) if use_pty else run_pipe(log)
+    log.write(f"\naegis_process_exited returncode={returncode}\n")
+    log.flush()
+sys.exit(returncode)
 """
 
 
@@ -129,7 +233,10 @@ class ProcessRegistry:
             "raw_command_included": False,
             "raw_shell_history_included": False,
             "raw_secret_values_included": False,
-            "pty_attached": False,
+            "pty_supported": _pty_supported(),
+            "stdin_streaming_supported": _pty_supported(),
+            "terminal_resize_supported": _pty_supported(),
+            "pty_attached": any(bool(row.get("pty_attached")) for row in active),
             "implemented_controls": [
                 "approval_required_start",
                 "argv_only_execution",
@@ -137,8 +244,11 @@ class ProcessRegistry:
                 "private_redacted_logs",
                 "metadata_only_registry",
                 "stop_receipts",
+                "interactive_pty_attach",
+                "stdin_streaming",
+                "terminal_resize_events",
             ],
-            "remaining_depth_work": ["interactive_pty_attach", "stdin_streaming", "terminal_resize_events"],
+            "remaining_depth_work": [] if _pty_supported() else ["interactive_pty_attach", "stdin_streaming", "terminal_resize_events"],
         }
 
     def start(
@@ -148,6 +258,9 @@ class ProcessRegistry:
         approved: bool = False,
         actor: str = "operator",
         label: str = "",
+        pty: bool = False,
+        rows: int = 24,
+        cols: int = 80,
     ) -> dict[str, Any]:
         clean_argv = _clean_argv(argv)
         if not approved:
@@ -156,28 +269,40 @@ class ProcessRegistry:
                 "reason": "background process start requires explicit approval",
                 "approval_required": True,
                 "argv_only": True,
+                "pty_requested": bool(pty),
                 "raw_command_included": False,
                 "raw_secret_values_included": False,
             }
         executable = self._validate_executable(clean_argv[0])
         _reject_secret_like_args(clean_argv)
+        safe_rows, safe_cols = _validate_terminal_size(rows, cols)
+        if pty and not _pty_supported():
+            raise RuntimeError("PTY-backed process controls are not available on this platform")
         self._evaluate_policy(actor=actor, operation="start")
         process_id = str(uuid4())
         created_at = now_utc()
         process_dir = ensure_private_dir(self.log_dir / process_id)
         log_path = ensure_private_file(process_dir / "combined.log")
         payload_path = ensure_private_file(process_dir / "payload.json")
+        control_path = ensure_private_file(process_dir / "control.jsonl") if pty else None
         wrapper_argv = [sys.executable, "-I", "-c", PROCESS_WRAPPER_CODE, str(payload_path)]
         payload = {
             "argv": [executable, *clean_argv[1:]],
             "cwd": str(self.workspace),
             "log_path": str(log_path),
             "max_log_bytes": self.max_log_bytes,
+            "pty": bool(pty),
+            "rows": safe_rows,
+            "cols": safe_cols,
+            "control_path": str(control_path) if control_path is not None else None,
         }
         payload_path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
         payload_path.chmod(0o600)
         log_path.write_text("", encoding="utf-8")
         log_path.chmod(0o600)
+        if control_path is not None:
+            control_path.write_text("", encoding="utf-8")
+            control_path.chmod(0o600)
         process = subprocess.Popen(  # noqa: S603 - wrapper argv is fixed and validated.
             wrapper_argv,
             cwd=self.workspace,
@@ -200,12 +325,19 @@ class ProcessRegistry:
             "argv_count": len(clean_argv),
             "workspace": str(self.workspace),
             "log_path": str(log_path),
+            "control_path": str(control_path) if control_path is not None else None,
             "max_log_bytes": self.max_log_bytes,
             "created_at": created_at,
             "updated_at": created_at,
             "raw_command_included": False,
             "raw_secret_values_included": False,
-            "pty_attached": False,
+            "pty_attached": bool(pty),
+            "stdin_streaming": bool(pty),
+            "resize_events": bool(pty),
+            "terminal_rows": safe_rows if pty else None,
+            "terminal_cols": safe_cols if pty else None,
+            "stdin_event_count": 0,
+            "resize_event_count": 0,
         }
         rows = [row, *[existing for existing in self._read_rows() if existing.get("id") != process_id]]
         self._write_rows(rows)
@@ -218,6 +350,58 @@ class ProcessRegistry:
             "audit_event_hash": audit_entry["event_hash"],
             "processes": self.status(limit=20),
         }
+
+    def send_input(self, process_id: str, text: str, *, append_newline: bool = True, actor: str = "operator") -> dict[str, Any]:
+        row = self._require_row(process_id)
+        self._evaluate_policy(actor=actor, operation="stdin")
+        refreshed = self._refresh_row(row)
+        if refreshed.get("status") not in {"running", "stop_requested"}:
+            raise RuntimeError(f"process {process_id!r} is not running")
+        if not refreshed.get("pty_attached"):
+            raise ValueError("stdin streaming requires a PTY-backed process")
+        value = str(text)
+        if redact_secret_values(value) != value:
+            raise ValueError("secret-like values are not allowed in process stdin")
+        payload = value + ("\n" if append_newline else "")
+        encoded = base64.b64encode(payload.encode("utf-8")).decode("ascii")
+        self._append_control_event(refreshed, {"type": "stdin", "data": encoded, "created_at": now_utc()})
+        refreshed["stdin_event_count"] = int(refreshed.get("stdin_event_count") or 0) + 1
+        refreshed["updated_at"] = now_utc()
+        self._replace_row(refreshed)
+        receipt = {
+            **_process_receipt(refreshed, event_type="process.stdin_sent"),
+            "actor": _safe_label(actor, limit=80),
+            "input_sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+            "input_bytes": len(payload.encode("utf-8")),
+            "append_newline": bool(append_newline),
+            "raw_input_included": False,
+        }
+        audit_entry = self.audit_logger.append("process.stdin_sent", receipt)
+        return {"ok": True, "process": _process_summary(refreshed), "receipt": receipt, "audit_event_hash": audit_entry["event_hash"]}
+
+    def resize(self, process_id: str, *, rows: int, cols: int, actor: str = "operator") -> dict[str, Any]:
+        row = self._require_row(process_id)
+        self._evaluate_policy(actor=actor, operation="resize")
+        refreshed = self._refresh_row(row)
+        if refreshed.get("status") not in {"running", "stop_requested"}:
+            raise RuntimeError(f"process {process_id!r} is not running")
+        if not refreshed.get("pty_attached"):
+            raise ValueError("terminal resize requires a PTY-backed process")
+        safe_rows, safe_cols = _validate_terminal_size(rows, cols)
+        self._append_control_event(refreshed, {"type": "resize", "rows": safe_rows, "cols": safe_cols, "created_at": now_utc()})
+        refreshed["terminal_rows"] = safe_rows
+        refreshed["terminal_cols"] = safe_cols
+        refreshed["resize_event_count"] = int(refreshed.get("resize_event_count") or 0) + 1
+        refreshed["updated_at"] = now_utc()
+        self._replace_row(refreshed)
+        receipt = {
+            **_process_receipt(refreshed, event_type="process.resized"),
+            "actor": _safe_label(actor, limit=80),
+            "rows": safe_rows,
+            "cols": safe_cols,
+        }
+        audit_entry = self.audit_logger.append("process.resized", receipt)
+        return {"ok": True, "process": _process_summary(refreshed), "receipt": receipt, "audit_event_hash": audit_entry["event_hash"]}
 
     def logs(self, process_id: str, *, max_bytes: int = 4096) -> dict[str, Any]:
         row = self._require_row(process_id)
@@ -288,6 +472,16 @@ class ProcessRegistry:
             return True
         return not _pid_alive(pid)
 
+    def _append_control_event(self, row: dict[str, Any], event: dict[str, Any]) -> None:
+        path = Path(str(row.get("control_path") or ""))
+        resolved = path.resolve()
+        if self.log_dir not in (resolved, *resolved.parents):
+            raise PermissionError("process control path escapes private log directory")
+        ensure_private_file(resolved)
+        with resolved.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+        resolved.chmod(0o600)
+
     def _evaluate_policy(self, *, actor: str, operation: str) -> None:
         if self.policy_gate is None:
             return
@@ -298,7 +492,7 @@ class ProcessRegistry:
                 task_type="background process",
                 risk_level=RiskLevel.HIGH,
                 connector="process",
-                operation="execute" if operation == "start" else "stop",
+                operation="execute" if operation == "start" else operation,
                 requested_scopes=("execute",),
                 data_sensitivity=Sensitivity.INTERNAL,
                 approval_state="approved",
@@ -389,6 +583,21 @@ def _reject_secret_like_args(argv: list[str]) -> None:
             raise ValueError("secret-like values are not allowed in background process argv")
 
 
+def _pty_supported() -> bool:
+    return os.name == "posix"
+
+
+def _validate_terminal_size(rows: int, cols: int) -> tuple[int, int]:
+    try:
+        safe_rows = int(rows)
+        safe_cols = int(cols)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("terminal rows and cols must be integers") from exc
+    if safe_rows < 1 or safe_rows > 1000 or safe_cols < 1 or safe_cols > 1000:
+        raise ValueError("terminal rows and cols must be between 1 and 1000")
+    return safe_rows, safe_cols
+
+
 def _pid_alive(pid: int) -> bool:
     proc_stat = Path(f"/proc/{pid}/stat")
     if proc_stat.exists():
@@ -430,7 +639,13 @@ def _process_summary(row: dict[str, Any]) -> dict[str, Any]:
         "exited_at": row.get("exited_at"),
         "raw_command_included": False,
         "raw_secret_values_included": False,
-        "pty_attached": False,
+        "pty_attached": bool(row.get("pty_attached")),
+        "stdin_streaming": bool(row.get("stdin_streaming")),
+        "resize_events": bool(row.get("resize_events")),
+        "terminal_rows": row.get("terminal_rows"),
+        "terminal_cols": row.get("terminal_cols"),
+        "stdin_event_count": int(row.get("stdin_event_count") or 0),
+        "resize_event_count": int(row.get("resize_event_count") or 0),
     }
 
 
@@ -447,6 +662,10 @@ def _process_receipt(row: dict[str, Any], *, event_type: str) -> dict[str, Any]:
         "log_artifact_sha256": hashlib.sha256(str(row.get("log_path", "")).encode("utf-8")).hexdigest(),
         "raw_command_included": False,
         "raw_secret_values_included": False,
-        "pty_attached": False,
+        "pty_attached": bool(row.get("pty_attached")),
+        "stdin_streaming": bool(row.get("stdin_streaming")),
+        "resize_events": bool(row.get("resize_events")),
+        "terminal_rows": row.get("terminal_rows"),
+        "terminal_cols": row.get("terminal_cols"),
         "created_at": now_utc(),
     }

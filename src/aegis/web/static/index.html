@@ -421,7 +421,16 @@
           <form id="process-form" class="inline-form two-col">
             <input id="process-label" placeholder="label">
             <input id="process-argv" placeholder='["python3","-c","print(\"ok\")"]'>
+            <label class="checkline"><input id="process-pty" type="checkbox">PTY</label>
+            <input id="process-rows" type="number" min="1" max="1000" value="24" aria-label="rows">
+            <input id="process-cols" type="number" min="1" max="1000" value="80" aria-label="columns">
             <button type="submit">Start</button>
+          </form>
+          <form id="process-input-form" class="inline-form two-col">
+            <input id="process-input-id" placeholder="process id">
+            <input id="process-input-text" placeholder="stdin text">
+            <button type="submit">Input</button>
+            <button id="process-resize-button" type="button" class="secondary">Resize</button>
           </form>
           <div id="process-output" class="evidence-block"></div>
           <div id="processes" class="list compact-list"></div>

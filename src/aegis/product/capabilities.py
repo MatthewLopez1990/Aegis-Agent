@@ -174,7 +174,7 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
                 "name": "Execution backends",
                 "state": "policy_visible",
                 "coverage": f"{len(backends)} backend definitions, {processes['active_process_count']} active background process(es)",
-                "detail": "Local, Docker, SSH, Singularity, Modal, Daytona, and Vercel Sandbox are represented for policy decisions; governed argv-only background processes expose approval-gated start, stop, status, and redacted private logs.",
+                "detail": "Local, Docker, SSH, Singularity, Modal, Daytona, and Vercel Sandbox are represented for policy decisions; governed argv-only background processes expose approval-gated start, PTY, stdin, resize, stop, status, and redacted private logs.",
             },
         ],
         "competitive_targets": competitive_targets,
@@ -756,7 +756,7 @@ def _live_gap_backlog(
             "detail": (
                 "Some nonlocal execution adapters are enabled with receipts; hosted sandbox backends still require provider-specific activation work."
                 if implemented_backends
-                else "Local governed background processes are available for argv-only runs; nonlocal execution adapters exist but are disabled by default and require scoped credentials, allowlists, and rollback posture before use."
+                else "Local governed background processes are available for argv-only and PTY-backed runs; nonlocal execution adapters exist but are disabled by default and require scoped credentials, allowlists, and rollback posture before use."
                 if available_backends
                 else "Enable backend-gated execution paths only after sandbox credentials, scope limits, rollback, and receipts are implemented."
             ),
@@ -773,13 +773,12 @@ def _live_gap_backlog(
             "available_backend_adapters": available_backends,
             "operator_checklist": _remote_backend_operator_checklist(implemented_backends, available_backends, processes),
             "next_steps": [
-                "Add interactive PTY attach, stdin streaming, and resize events on top of the existing local process registry.",
                 "Add backend-specific auth checks through brokered handles.",
                 "Enforce workspace, network, resource, and rollback limits before dispatch.",
                 "Record activation, execution, and cleanup receipts for every remote run.",
             ],
-            "required_controls": ["approval_required_process_start", "executable_allowlist", "private_redacted_process_logs", "brokered_backend_auth", "scope_limits", "resource_limits", "rollback_receipts"],
-            "verification_gates": ["process_start_approval_gate", "process_log_redaction", "disabled_backend_denial", "approved_activation", "cleanup_receipt", "scope_escape_rejection"],
+            "required_controls": ["approval_required_process_start", "executable_allowlist", "private_redacted_process_logs", "pty_stdin_resize_receipts", "brokered_backend_auth", "scope_limits", "resource_limits", "rollback_receipts"],
+            "verification_gates": ["process_start_approval_gate", "process_log_redaction", "process_pty_input_resize_receipts", "disabled_backend_denial", "approved_activation", "cleanup_receipt", "scope_escape_rejection"],
             "evaluation_scenarios": ["processes.governed_background_registry", "backend_activation.remote_execution_disabled"],
             "configured_provider_count": len(configured_providers),
         },
@@ -1257,8 +1256,8 @@ def _remote_backend_operator_checklist(
     return [
         {
             "control": "local_background_process_registry",
-            "state": "enforced" if {"approval_required_start", "private_redacted_logs", "stop_receipts"}.issubset(process_controls) else "pending",
-            "detail": "Local background processes use argv-only execution, executable allowlists, explicit approval, private redacted logs, and stop receipts before deeper PTY attach is added.",
+            "state": "enforced" if {"approval_required_start", "private_redacted_logs", "stop_receipts", "interactive_pty_attach", "stdin_streaming", "terminal_resize_events"}.issubset(process_controls) else "pending",
+            "detail": "Local background processes use argv-only execution, executable allowlists, explicit approval, private redacted logs, PTY attach, stdin streaming, resize receipts, and stop receipts.",
         },
         {
             "control": "explicit_backend_enablement",
