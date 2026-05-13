@@ -1552,6 +1552,13 @@ class CliTests(unittest.TestCase):
                         "[security]",
                         "live_http_reads = true",
                         "live_rest_writes = true",
+                        "live_github_writes = true",
+                        "live_gitlab_writes = true",
+                        "live_graph_calendar_writes = true",
+                        "live_graph_email_writes = true",
+                        "live_graph_contact_writes = true",
+                        "live_service_desk_writes = true",
+                        "live_messaging_writes = true",
                         "",
                         "[models]",
                         'custom_base_url = "https://models.example.com/v1"',
@@ -1574,6 +1581,13 @@ class CliTests(unittest.TestCase):
             self.assertEqual(config.allowed_shell_commands, ("pwd",))
             self.assertTrue(config.live_http_reads)
             self.assertTrue(config.live_rest_writes)
+            self.assertTrue(config.live_github_writes)
+            self.assertTrue(config.live_gitlab_writes)
+            self.assertTrue(config.live_graph_calendar_writes)
+            self.assertTrue(config.live_graph_email_writes)
+            self.assertTrue(config.live_graph_contact_writes)
+            self.assertTrue(config.live_service_desk_writes)
+            self.assertTrue(config.live_messaging_writes)
             self.assertEqual(config.custom_model_base_url, "https://models.example.com/v1")
             self.assertEqual(config.azure_foundry_base_url, "https://aoai.example.openai.azure.com/openai/v1")
             self.assertEqual(config.google_vertex_project, "aegis-test-project")

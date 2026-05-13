@@ -12,6 +12,14 @@ secrets = "secrets.json"
 [security]
 default_read_only = true
 live_http_reads = false
+live_rest_writes = false
+live_github_writes = false
+live_gitlab_writes = false
+live_graph_calendar_writes = false
+live_graph_email_writes = false
+live_graph_contact_writes = false
+live_service_desk_writes = false
+live_messaging_writes = false
 allowed_shell_commands = ["pwd", "ls", "find", "python", "python3"]
 network_allowlist = ["example.com", "localhost", "127.0.0.1"]
 
@@ -89,6 +97,7 @@ Secure defaults:
 
 - Filesystem connector is read-only.
 - HTTP connector is mock-mode unless `live_http_reads = true` is configured.
+- Generic REST/media live writes use `live_rest_writes`; provider connectors use narrower per-adapter flags such as `live_github_writes`, `live_gitlab_writes`, `live_graph_calendar_writes`, `live_graph_email_writes`, `live_graph_contact_writes`, `live_service_desk_writes`, and `live_messaging_writes`.
 - Shell commands are parsed without a shell, must match the allowlist, and are additionally checked against conservative per-command argument rules. The shell connector blocks interactive Python, `python -c`, `python -m`, absolute or parent-directory listing paths, and mutating `find` actions such as `-exec` and `-delete`.
 - Data, audit logs, and brokered model auth secrets stay local.
 - Model-provider calls are policy-gated by the network allowlist, including local endpoints with a base URL.

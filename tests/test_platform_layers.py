@@ -2123,7 +2123,8 @@ class PlatformLayerTests(unittest.TestCase):
                         "",
                         "[security]",
                         "live_rest_writes = true",
-                        'network_allowlist = ["example.com", "hooks.example.com", "smtp.example.com"]',
+                        "live_github_writes = true",
+                        'network_allowlist = ["api.github.com", "example.com", "hooks.example.com", "smtp.example.com"]',
                         "",
                         "[channels.webhook]",
                         "enabled = true",
@@ -2151,11 +2152,20 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(live_gap["status"], "live_connectors_partially_live")
             adapter_names = {adapter["name"] for adapter in live_gap["implemented_live_adapters"]}
             self.assertIn("generic_rest", adapter_names)
-            self.assertIn("mock_messaging", adapter_names)
+            self.assertIn("github", adapter_names)
             self.assertIn("webhook", adapter_names)
             self.assertIn("email", adapter_names)
             self.assertIn("chat_webhook", adapter_names)
+            self.assertNotIn("gitlab", adapter_names)
+            self.assertNotIn("mock_graph", adapter_names)
+            self.assertNotIn("mock_servicenow", adapter_names)
+            self.assertNotIn("mock_messaging", adapter_names)
             self.assertNotIn("generic_rest", {adapter["name"] for adapter in live_gap["available_live_adapters"]})
+            self.assertNotIn("github", {adapter["name"] for adapter in live_gap["available_live_adapters"]})
+            self.assertIn("gitlab", {adapter["name"] for adapter in live_gap["available_live_adapters"]})
+            self.assertIn("mock_graph", {adapter["name"] for adapter in live_gap["available_live_adapters"]})
+            self.assertIn("mock_servicenow", {adapter["name"] for adapter in live_gap["available_live_adapters"]})
+            self.assertIn("mock_messaging", {adapter["name"] for adapter in live_gap["available_live_adapters"]})
             self.assertIn("available_live_adapters", live_gap)
             checklist = {item["control"]: item for item in live_gap["operator_checklist"]}
             self.assertEqual(checklist["promotion_scope"]["state"], "partial")
@@ -2163,6 +2173,67 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertTrue(all(adapter["raw_secret_values_included"] is False for adapter in live_gap["implemented_live_adapters"]))
             self.assertTrue(all(adapter["raw_secret_values_included"] is False for adapter in live_gap["available_live_adapters"]))
             self.assertNotIn("AEGIS_CHAT_WEBHOOK_URL", json.dumps(live_gap, sort_keys=True))
+
+    def test_live_connector_flags_promote_only_the_configured_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "live_rest_writes = true",
+                        "live_github_writes = true",
+                        'network_allowlist = ["api.github.com", "example.com", "gitlab.com", "graph.microsoft.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+
+            statuses = {status["name"]: status for status in orchestrator.connectors.status()}
+            self.assertTrue(statuses["generic_rest"]["live_writes"])
+            self.assertTrue(statuses["github"]["live_writes"])
+            self.assertFalse(statuses["gitlab"]["live_writes"])
+            self.assertFalse(statuses["mock_graph"]["live_calendar_writes"])
+            self.assertFalse(statuses["mock_graph"]["live_email_writes"])
+            self.assertFalse(statuses["mock_graph"]["live_contact_writes"])
+            self.assertFalse(statuses["mock_servicenow"]["live_writes"])
+            self.assertFalse(statuses["mock_messaging"]["live_writes"])
+
+            with patch("aegis.connectors.github._private_network_error", return_value=None):
+                github = orchestrator.tools.execute(
+                    "github_issue",
+                    {"operation": "create", "api_url": "https://api.github.com/repos/example/aegis/issues", "title": "Live issue"},
+                    approved=True,
+                )
+            self.assertFalse(github["ok"])
+            self.assertEqual(github["preflight_status"], "blocked")
+            github_blockers = {blocker["control"] for blocker in github["activation"]["blockers"]}
+            self.assertNotIn("live_enablement_flag", github_blockers)
+            self.assertIn("brokered_token", github_blockers)
+            self.assertIn("live_enablement_flag", github["activation"]["configured_controls"])
+
+            gitlab = orchestrator.tools.execute(
+                "gitlab_issue",
+                {"operation": "create", "api_url": "https://gitlab.com/api/v4/projects/1/issues", "title": "Live issue"},
+                approved=True,
+            )
+            self.assertFalse(gitlab["ok"])
+            self.assertIn("live_enablement_flag", {blocker["control"] for blocker in gitlab["activation"]["blockers"]})
+
+            calendar = orchestrator.tools.execute(
+                "calendar_write",
+                {"api_url": "https://graph.microsoft.com/v1.0/me/events", "event": {"subject": "Planning"}},
+                approved=True,
+            )
+            self.assertFalse(calendar["ok"])
+            self.assertIn("live_enablement_flag", {blocker["control"] for blocker in calendar["activation"]["blockers"]})
 
     def test_configured_docker_backend_records_activation_execution_and_cleanup_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
