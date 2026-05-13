@@ -57,6 +57,7 @@ from aegis.skills.hub import SkillHubCatalog
 from aegis.skills.curator import SkillCurator
 from aegis.skills.registry import SkillRegistry
 from aegis.skills.runtime import builtin_project_summary_manifest, builtin_workflow_candidate_manifest
+from aegis.storage.state import ensure_private_dir, ensure_private_file
 from aegis.tools.catalog import ToolCatalog
 from aegis.tools.executor import BuiltinToolExecutor
 
@@ -1020,6 +1021,96 @@ class AgentOrchestrator:
         )
         self.channels.record_outbound_delivery(channel="chat_webhook", session_id=session_id, payload=payload, delivery=delivery)
         return delivery
+
+    def channel_live_activation_status(self) -> dict[str, Any]:
+        activation = _channel_live_activation_preflight(self.config)
+        return {
+            "status": "channel_live_activation_ready_for_review",
+            "activation": activation,
+            "raw_secret_values_included": False,
+            "raw_channel_content_included": False,
+            "send_probe_performed": False,
+            "model_invocation_performed": False,
+        }
+
+    def create_channel_live_activation_packet(self, *, actor: str = "operator") -> dict[str, Any]:
+        packet_id = str(uuid4())
+        created_at = now_utc()
+        packet_dir = ensure_private_dir(self.config.data_dir / "channel-activation-packets")
+        packet_path = ensure_private_file(packet_dir / f"{packet_id}.json")
+        checksum_path = ensure_private_file(packet_dir / f"{packet_id}.sha256")
+        packet = _channel_live_activation_packet(self.config, packet_id=packet_id, actor=actor, created_at=created_at)
+        packet_path.write_text(json.dumps(packet, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        packet_path.chmod(0o600)
+        artifact_sha256 = hashlib.sha256(packet_path.read_bytes()).hexdigest()
+        checksum_path.write_text(f"{artifact_sha256}\n", encoding="utf-8")
+        checksum_path.chmod(0o600)
+        receipt = {
+            "receipt_schema": "aegis.channel.live_activation_packet.v1",
+            "event_type": "channel.live_activation_packet_created",
+            "packet_id": packet_id,
+            "actor": _safe_actor(actor),
+            "artifact": str(packet_path),
+            "artifact_sha256": artifact_sha256,
+            "preflight_status": packet["activation"]["preflight_status"],
+            "live_channel_count": packet["activation"]["live_channel_count"],
+            "configured_channel_count": packet["activation"]["configured_channel_count"],
+            "blocker_count": len(packet["activation"]["blockers"]),
+            "raw_secret_values_included": False,
+            "raw_channel_content_included": False,
+            "send_probe_performed": False,
+            "model_invocation_performed": False,
+            "created_at": created_at,
+        }
+        audit_entry = self.audit_logger.append("channel.live_activation_packet_created", receipt)
+        return {"ok": True, "packet": packet, "receipt": receipt, "audit_event_hash": audit_entry["event_hash"]}
+
+    def verify_channel_live_activation_packet(self, packet: str, *, actor: str = "operator") -> dict[str, Any]:
+        packet_path, checksum_path = _channel_live_activation_packet_paths(self.config.data_dir, packet)
+        packet_bytes = packet_path.read_bytes()
+        artifact_sha256 = hashlib.sha256(packet_bytes).hexdigest()
+        checksum_value = checksum_path.read_text(encoding="utf-8").strip() if checksum_path.exists() else ""
+        try:
+            packet_payload = json.loads(packet_bytes.decode("utf-8"))
+        except json.JSONDecodeError:
+            packet_payload = {}
+        activation = packet_payload.get("activation") if isinstance(packet_payload.get("activation"), dict) else {}
+        controls = packet_payload.get("controls") if isinstance(packet_payload.get("controls"), dict) else {}
+        channels = packet_payload.get("channels") if isinstance(packet_payload.get("channels"), list) else []
+        checksum_matches = bool(checksum_value) and checksum_value == artifact_sha256
+        packet_schema_valid = packet_payload.get("packet_schema") == "aegis.channel.live_activation_packet.v1"
+        controls_valid = _channel_activation_controls_valid(controls)
+        activation_valid = _channel_activation_preflight_valid(activation)
+        channels_valid = _channel_activation_channels_valid(channels)
+        forbidden_keys_present = _channel_activation_packet_forbidden_keys_present(packet_payload)
+        receipt = {
+            "receipt_schema": "aegis.channel.live_activation_packet_verification.v1",
+            "event_type": "channel.live_activation_packet_verified",
+            "packet_id": str(packet_payload.get("packet_id") or packet_path.stem),
+            "actor": _safe_actor(actor),
+            "artifact": str(packet_path),
+            "artifact_sha256": artifact_sha256,
+            "checksum_matches": checksum_matches,
+            "packet_schema_valid": packet_schema_valid,
+            "activation_valid": activation_valid,
+            "controls_valid": controls_valid,
+            "channels_valid": channels_valid,
+            "forbidden_keys_present": forbidden_keys_present,
+            "packet_integrity_ok": bool(checksum_matches and packet_schema_valid and activation_valid and controls_valid and channels_valid and not forbidden_keys_present),
+            "raw_packet_payload_included": False,
+            "raw_secret_values_included": False,
+            "raw_channel_content_included": False,
+            "send_probe_performed": False,
+            "model_invocation_performed": False,
+            "verified_at": now_utc(),
+        }
+        audit_entry = self.audit_logger.append("channel.live_activation_packet_verified", receipt)
+        return {
+            "ok": bool(receipt["packet_integrity_ok"]),
+            "packet": _channel_live_activation_packet_summary(packet_payload),
+            "receipt": receipt,
+            "audit_event_hash": audit_entry["event_hash"],
+        }
 
     def _run_plan(self, task_id: str, *, approval_context: dict[str, str | None] | None, session_id: str | None = None) -> dict[str, Any]:
         task = self._require_task(task_id)
@@ -2931,6 +3022,322 @@ def _format_evaluation_suite_digest(suite_report: dict[str, Any], queue: dict[st
 def _context_ref(value: str | None) -> str | None:
     short = _short_identifier(value)
     return f"ctx-{short}" if short else None
+
+
+_CHANNEL_ACTIVATION_REQUIRED_CONTROLS = (
+    "explicit_channel_enablement",
+    "human_approval",
+    "secret_broker_reference",
+    "network_allowlist",
+    "redacted_receipts",
+    "tainted_inbound_content",
+)
+_CHANNEL_ACTIVATION_VERIFICATION_GATES = (
+    "disabled_send_denial",
+    "approved_send",
+    "receipt_redaction",
+    "network_allowlist_denial",
+    "brokered_secret_resolution",
+    "inbound_tainting",
+    "activation_packet_integrity",
+)
+
+
+def _channel_live_activation_packet(config: AegisConfig, *, packet_id: str, actor: str, created_at: str) -> dict[str, Any]:
+    activation = _channel_live_activation_preflight(config)
+    return {
+        "packet_schema": "aegis.channel.live_activation_packet.v1",
+        "packet_id": packet_id,
+        "created_at": created_at,
+        "actor": _safe_actor(actor),
+        "activation": activation,
+        "channels": activation["channels"],
+        "controls": {
+            "required_controls": list(_CHANNEL_ACTIVATION_REQUIRED_CONTROLS),
+            "configured_controls": activation["configured_controls"],
+            "missing_controls": activation["missing_controls"],
+            "verification_gates": list(_CHANNEL_ACTIVATION_VERIFICATION_GATES),
+        },
+        "implemented_boundaries": {
+            "approval_required_for_send": True,
+            "inbound_content_tainted": True,
+            "receipt_redaction_enabled": True,
+            "secret_values_brokered": True,
+            "raw_secret_values_included": False,
+            "raw_channel_content_included": False,
+            "raw_payload_values_included": False,
+            "raw_addresses_included": False,
+            "send_probe_performed": False,
+            "model_invocation_performed": False,
+        },
+        "next_steps": activation["next_steps"],
+        "raw_secret_values_included": False,
+        "raw_channel_content_included": False,
+        "send_probe_performed": False,
+        "model_invocation_performed": False,
+    }
+
+
+def _channel_live_activation_preflight(config: AegisConfig) -> dict[str, Any]:
+    channels = [
+        _webhook_channel_activation(config),
+        _email_channel_activation(config),
+        _chat_webhook_channel_activation(config),
+    ]
+    blockers = [blocker for channel in channels for blocker in channel["blockers"]]
+    configured_controls = sorted({control for channel in channels for control in channel["configured_controls"]})
+    missing_controls = sorted(set(_CHANNEL_ACTIVATION_REQUIRED_CONTROLS).difference(configured_controls))
+    live_channels = [channel for channel in channels if channel["live_outbound_enabled"]]
+    configured_channels = [channel for channel in channels if channel["preflight_status"] == "ready_for_approved_send"]
+    preflight_status = "ready_for_approved_send" if configured_channels and not blockers else "blocked"
+    return {
+        "status": "channel_live_activation_preflight",
+        "preflight_status": preflight_status,
+        "live_channel_count": len(live_channels),
+        "configured_channel_count": len(configured_channels),
+        "channels": channels,
+        "required_controls": list(_CHANNEL_ACTIVATION_REQUIRED_CONTROLS),
+        "configured_controls": configured_controls,
+        "missing_controls": missing_controls,
+        "blockers": blockers,
+        "verification_gates": list(_CHANNEL_ACTIVATION_VERIFICATION_GATES),
+        "next_steps": [
+            "Configure only the live outbound channel needed for the operator workflow.",
+            "Run one denied send and one approved send against an allowlisted target.",
+            "Verify activation packets and delivery receipts before promoting gateway automation.",
+        ],
+        "raw_secret_values_included": False,
+        "raw_channel_content_included": False,
+    }
+
+
+def _webhook_channel_activation(config: AegisConfig) -> dict[str, Any]:
+    webhook = config.webhook
+    domain = _url_domain(webhook.outbound_url)
+    blockers: list[dict[str, str]] = []
+    if not webhook.enabled:
+        blockers.append({"channel": "webhook", "control": "inbound_enablement", "detail": "signed webhook intake is disabled"})
+    if not webhook.outbound_enabled:
+        blockers.append({"channel": "webhook", "control": "outbound_enablement", "detail": "signed webhook outbound delivery is disabled"})
+    if not webhook.secret_name:
+        blockers.append({"channel": "webhook", "control": "secret_broker_reference", "detail": "webhook shared-secret reference is missing"})
+    if webhook.outbound_enabled and not webhook.outbound_url:
+        blockers.append({"channel": "webhook", "control": "outbound_target", "detail": "webhook outbound_url is not configured"})
+    if domain and not _domain_allowlisted(domain, config.network_allowlist):
+        blockers.append({"channel": "webhook", "control": "network_allowlist", "detail": f"webhook target domain {domain!r} is not allowlisted"})
+    configured_controls = ["human_approval", "redacted_receipts", "tainted_inbound_content"]
+    if webhook.enabled or webhook.outbound_enabled:
+        configured_controls.append("explicit_channel_enablement")
+    if webhook.secret_name:
+        configured_controls.append("secret_broker_reference")
+    if domain and _domain_allowlisted(domain, config.network_allowlist):
+        configured_controls.append("network_allowlist")
+    return {
+        "name": "webhook",
+        "status": "live_channel_available",
+        "preflight_status": "ready_for_approved_send" if webhook.enabled and webhook.outbound_enabled and not blockers else "configuration_required",
+        "live_inbound_enabled": bool(webhook.enabled),
+        "live_outbound_enabled": bool(webhook.outbound_enabled),
+        "allow_task_submission": bool(webhook.allow_task_submission),
+        "secret_ref_configured": bool(webhook.secret_name),
+        "outbound_target_configured": bool(webhook.outbound_url),
+        "outbound_target_domain": domain or "",
+        "outbound_url_included": False,
+        "configured_controls": sorted(set(configured_controls)),
+        "blockers": blockers,
+        "raw_secret_values_included": False,
+        "raw_channel_content_included": False,
+    }
+
+
+def _email_channel_activation(config: AegisConfig) -> dict[str, Any]:
+    email = config.email
+    domain = str(email.smtp_host or "").strip().lower().rstrip(".")
+    blockers: list[dict[str, str]] = []
+    if not email.outbound_enabled:
+        blockers.append({"channel": "email", "control": "outbound_enablement", "detail": "email outbound delivery is disabled"})
+    if email.outbound_enabled and not domain:
+        blockers.append({"channel": "email", "control": "smtp_host", "detail": "SMTP host is not configured"})
+    if email.outbound_enabled and not email.from_address:
+        blockers.append({"channel": "email", "control": "from_address", "detail": "from address is not configured"})
+    if email.outbound_enabled and not email.to_addresses:
+        blockers.append({"channel": "email", "control": "recipient_scope", "detail": "recipient allowlist is empty"})
+    if domain and not _domain_allowlisted(domain, config.network_allowlist):
+        blockers.append({"channel": "email", "control": "network_allowlist", "detail": f"SMTP host {domain!r} is not allowlisted"})
+    configured_controls = ["human_approval", "redacted_receipts", "tainted_inbound_content"]
+    if email.outbound_enabled:
+        configured_controls.append("explicit_channel_enablement")
+    if email.username_secret or email.password_secret:
+        configured_controls.append("secret_broker_reference")
+    if domain and _domain_allowlisted(domain, config.network_allowlist):
+        configured_controls.append("network_allowlist")
+    return {
+        "name": "email",
+        "status": "live_channel_available",
+        "preflight_status": "ready_for_approved_send" if email.outbound_enabled and not blockers else "configuration_required",
+        "live_inbound_enabled": False,
+        "live_outbound_enabled": bool(email.outbound_enabled),
+        "smtp_host_configured": bool(domain),
+        "smtp_domain": domain,
+        "smtp_port": int(email.smtp_port),
+        "tls_enabled": bool(email.use_tls),
+        "from_address_configured": bool(email.from_address),
+        "recipient_count": len(email.to_addresses),
+        "username_secret_configured": bool(email.username_secret),
+        "password_secret_configured": bool(email.password_secret),
+        "raw_addresses_included": False,
+        "configured_controls": sorted(set(configured_controls)),
+        "blockers": blockers,
+        "raw_secret_values_included": False,
+        "raw_channel_content_included": False,
+    }
+
+
+def _chat_webhook_channel_activation(config: AegisConfig) -> dict[str, Any]:
+    chat = config.chat_webhook
+    blockers: list[dict[str, str]] = []
+    if not chat.outbound_enabled:
+        blockers.append({"channel": "chat_webhook", "control": "outbound_enablement", "detail": "chat webhook outbound delivery is disabled"})
+    if chat.outbound_enabled and not chat.url_secret:
+        blockers.append({"channel": "chat_webhook", "control": "secret_broker_reference", "detail": "chat webhook URL secret reference is missing"})
+    configured_controls = ["human_approval", "redacted_receipts", "tainted_inbound_content"]
+    if chat.outbound_enabled:
+        configured_controls.append("explicit_channel_enablement")
+    if chat.url_secret:
+        configured_controls.append("secret_broker_reference")
+    if config.network_allowlist:
+        configured_controls.append("network_allowlist")
+    return {
+        "name": "chat_webhook",
+        "status": "live_channel_available",
+        "preflight_status": "ready_for_approved_send" if chat.outbound_enabled and not blockers else "configuration_required",
+        "live_inbound_enabled": False,
+        "live_outbound_enabled": bool(chat.outbound_enabled),
+        "url_secret_configured": bool(chat.url_secret),
+        "payload_format": str(chat.payload_format or "generic"),
+        "target_url_included": False,
+        "configured_controls": sorted(set(configured_controls)),
+        "blockers": blockers,
+        "raw_secret_values_included": False,
+        "raw_channel_content_included": False,
+    }
+
+
+def _domain_allowlisted(domain: str, allowlist: tuple[str, ...]) -> bool:
+    normalized = domain.strip().lower().rstrip(".")
+    return bool(normalized) and any(normalized == allowed or normalized.endswith(f".{allowed}") for allowed in allowlist)
+
+
+def _url_domain(url: str | None) -> str:
+    if not url:
+        return ""
+    parsed = urlparse(str(url))
+    return (parsed.hostname or "").strip().lower().rstrip(".")
+
+
+def _channel_live_activation_packet_paths(data_dir: Path, packet: str) -> tuple[Path, Path]:
+    packet_dir = ensure_private_dir(data_dir / "channel-activation-packets")
+    packet_ref = str(packet or "").strip()
+    if not packet_ref:
+        raise ValueError("channel activation packet id or path is required")
+    candidate = Path(packet_ref).expanduser()
+    if not candidate.suffix:
+        candidate = packet_dir / f"{packet_ref}.json"
+    if not candidate.is_absolute():
+        candidate = packet_dir / candidate
+    resolved = candidate.resolve()
+    if packet_dir not in (resolved, *resolved.parents):
+        raise PermissionError("channel activation packet must stay in private packet storage")
+    if not resolved.exists():
+        raise FileNotFoundError(str(resolved))
+    return resolved, resolved.with_suffix(".sha256")
+
+
+def _channel_live_activation_packet_summary(packet: dict[str, Any]) -> dict[str, Any]:
+    activation = packet.get("activation") if isinstance(packet.get("activation"), dict) else {}
+    return {
+        "packet_schema": packet.get("packet_schema"),
+        "packet_id": packet.get("packet_id"),
+        "created_at": packet.get("created_at"),
+        "preflight_status": activation.get("preflight_status"),
+        "live_channel_count": activation.get("live_channel_count", 0),
+        "configured_channel_count": activation.get("configured_channel_count", 0),
+        "blocker_count": len(activation.get("blockers", [])) if isinstance(activation.get("blockers"), list) else 0,
+        "channel_names": [str(channel.get("name")) for channel in activation.get("channels", []) if isinstance(channel, dict)],
+        "raw_secret_values_included": False,
+        "raw_channel_content_included": False,
+    }
+
+
+def _channel_activation_controls_valid(controls: dict[str, Any]) -> bool:
+    required = controls.get("required_controls")
+    gates = controls.get("verification_gates")
+    return isinstance(required, list) and set(_CHANNEL_ACTIVATION_REQUIRED_CONTROLS).issubset({str(item) for item in required}) and isinstance(gates, list) and set(_CHANNEL_ACTIVATION_VERIFICATION_GATES).issubset({str(item) for item in gates})
+
+
+def _channel_activation_preflight_valid(activation: dict[str, Any]) -> bool:
+    channels = activation.get("channels")
+    blockers = activation.get("blockers")
+    return (
+        activation.get("status") == "channel_live_activation_preflight"
+        and activation.get("preflight_status") in {"blocked", "ready_for_approved_send"}
+        and isinstance(channels, list)
+        and {str(channel.get("name")) for channel in channels if isinstance(channel, dict)} == {"webhook", "email", "chat_webhook"}
+        and isinstance(blockers, list)
+        and activation.get("raw_secret_values_included") is False
+        and activation.get("raw_channel_content_included") is False
+    )
+
+
+def _channel_activation_channels_valid(channels: list[Any]) -> bool:
+    if len(channels) != 3:
+        return False
+    for channel in channels:
+        if not isinstance(channel, dict):
+            return False
+        if channel.get("name") not in {"webhook", "email", "chat_webhook"}:
+            return False
+        if channel.get("raw_secret_values_included") is not False or channel.get("raw_channel_content_included") is not False:
+            return False
+        if not isinstance(channel.get("blockers"), list) or not isinstance(channel.get("configured_controls"), list):
+            return False
+    return True
+
+
+def _channel_activation_packet_forbidden_keys_present(value: Any) -> bool:
+    allowed_raw_flags = {
+        "raw_secret_values_included",
+        "raw_channel_content_included",
+        "raw_payload_values_included",
+        "raw_addresses_included",
+        "raw_packet_payload_included",
+    }
+    forbidden = {
+        "raw_secret",
+        "raw_token",
+        "raw_channel_content",
+        "raw_payload",
+        "outbound_url",
+        "url_secret",
+        "password_secret",
+        "username_secret",
+        "to_addresses",
+        "from_address",
+    }
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized = str(key).lower()
+            if normalized not in allowed_raw_flags and (normalized in forbidden or normalized.startswith("raw_")):
+                return True
+            if _channel_activation_packet_forbidden_keys_present(item):
+                return True
+    if isinstance(value, list):
+        return any(_channel_activation_packet_forbidden_keys_present(item) for item in value)
+    return False
+
+
+def _safe_actor(actor: str) -> str:
+    return str(redact(str(actor)))[:80]
 
 
 def _decode_channel_event(row: dict[str, Any]) -> dict[str, Any]:

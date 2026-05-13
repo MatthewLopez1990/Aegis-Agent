@@ -275,6 +275,13 @@ class ApiServerSecurityTests(unittest.TestCase):
                 token = _json_get(port, "/auth")["token"]
                 task = _json_post(port, "/tasks", {"request": "send message hello"}, token=token)
                 inbound = _json_post(port, "/channels/receive", {"channel": "slack", "sender": "slack-u1", "text": "yes proceed"}, token=token)
+                activation_packet = _json_post(port, "/channels/live-activation-packet", {"actor": "api-channel"}, token=token)
+                verified_packet = _json_post(
+                    port,
+                    "/channels/verify-activation-packet",
+                    {"packet": activation_packet["receipt"]["packet_id"], "actor": "api-channel-verifier"},
+                    token=token,
+                )
 
                 resolved = _json_post(
                     port,
@@ -287,6 +294,13 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(resolved["intent"]["action"], "approval_approve")
                 self.assertEqual(resolved["approval"]["status"], "approved")
                 self.assertEqual(resolved["approval"]["decision"]["actor"], "slack-u1")
+                self.assertEqual(activation_packet["receipt"]["receipt_schema"], "aegis.channel.live_activation_packet.v1")
+                self.assertEqual(activation_packet["receipt"]["preflight_status"], "blocked")
+                self.assertFalse(activation_packet["receipt"]["raw_secret_values_included"])
+                self.assertTrue(verified_packet["ok"])
+                self.assertEqual(verified_packet["receipt"]["receipt_schema"], "aegis.channel.live_activation_packet_verification.v1")
+                self.assertTrue(verified_packet["receipt"]["packet_integrity_ok"])
+                self.assertFalse(verified_packet["receipt"]["raw_packet_payload_included"])
             finally:
                 process.terminate()
                 try:

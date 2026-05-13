@@ -20,6 +20,7 @@ const state = {
   taskScope: "session",
   memoryQuery: "",
   skillHubQuery: "",
+  channelActivationPacketId: "",
   pluginMarketplaceQuery: "",
   pluginMarketplaceCatalogPath: "",
   pluginPreparedUpdateCandidateId: "",
@@ -2001,6 +2002,9 @@ const renderRemoteControlOutbox = (payload = {}) => {
 };
 
 const renderChannelOutput = (payload) => {
+  if (payload.receipt?.packet_id && String(payload.receipt?.receipt_schema || "").startsWith("aegis.channel.live_activation_packet")) {
+    state.channelActivationPacketId = payload.receipt.packet_id;
+  }
   const node = document.getElementById("channel-render-output");
   node.innerHTML = `
     <strong>${text(payload.status || "Channel Render")}</strong>
@@ -2788,6 +2792,23 @@ document.getElementById("channel-email-send-form").addEventListener("submit", as
   });
   renderChannelOutput(result);
   await refresh();
+});
+
+document.getElementById("channel-live-activation-packet").addEventListener("click", async () => {
+  const result = await api("/channels/live-activation-packet", {
+    method: "POST",
+    body: JSON.stringify({ actor: "web-operator" }),
+  });
+  renderChannelOutput(result);
+});
+
+document.getElementById("channel-verify-activation-packet").addEventListener("click", async () => {
+  const activationPacket = state.channelActivationPacketId;
+  const result = await api("/channels/verify-activation-packet", {
+    method: "POST",
+    body: JSON.stringify({ packet: activationPacket, actor: "web-operator" }),
+  });
+  renderChannelOutput(result);
 });
 
 document.getElementById("policy-evaluate-form").addEventListener("submit", async (event) => {

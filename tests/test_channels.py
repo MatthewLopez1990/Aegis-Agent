@@ -145,6 +145,29 @@ class ChannelWebhookTests(unittest.TestCase):
             self.assertEqual(event["payload"]["delivery_id"], delivered["delivery_id"])
             self.assertNotIn("abc123", json.dumps(event, sort_keys=True))
 
+    def test_channel_live_activation_packet_is_private_and_verifiable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            orchestrator = build_orchestrator(data_dir=root / ".aegis", workspace=root)
+
+            packet = orchestrator.create_channel_live_activation_packet(actor="channel-reviewer")
+            verified = orchestrator.verify_channel_live_activation_packet(packet["receipt"]["packet_id"], actor="channel-verifier")
+
+            self.assertTrue(packet["ok"])
+            self.assertEqual(packet["packet"]["packet_schema"], "aegis.channel.live_activation_packet.v1")
+            self.assertEqual(packet["receipt"]["receipt_schema"], "aegis.channel.live_activation_packet.v1")
+            self.assertEqual(packet["receipt"]["preflight_status"], "blocked")
+            self.assertGreaterEqual(packet["receipt"]["blocker_count"], 1)
+            self.assertFalse(packet["receipt"]["raw_secret_values_included"])
+            self.assertFalse(packet["packet"]["raw_channel_content_included"])
+            self.assertEqual({row["name"] for row in packet["packet"]["channels"]}, {"webhook", "email", "chat_webhook"})
+            self.assertTrue(Path(packet["receipt"]["artifact"]).exists())
+            self.assertTrue(verified["ok"])
+            self.assertEqual(verified["receipt"]["receipt_schema"], "aegis.channel.live_activation_packet_verification.v1")
+            self.assertTrue(verified["receipt"]["packet_integrity_ok"])
+            self.assertFalse(verified["receipt"]["raw_packet_payload_included"])
+            self.assertNotIn("AEGIS_WEBHOOK_SHARED_SECRET", json.dumps(packet, sort_keys=True))
+
     def test_direct_inbound_receive_redacts_stored_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

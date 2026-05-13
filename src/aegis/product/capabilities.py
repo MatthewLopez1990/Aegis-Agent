@@ -486,10 +486,11 @@ def _live_gap_backlog(
             "next_steps": [
                 "Add per-provider credential handles and domain allowlists.",
                 "Keep live writes approval-gated with runtime rate limits and redacted receipts.",
+                "Create and verify channel activation packets before promoting signed webhook, email, or chat-webhook delivery.",
                 "Promote each adapter only after mock, denied, approved, and audit-path tests pass.",
             ],
-            "required_controls": ["human_approval", "secret_broker", "network_allowlist", "rate_limits", "rollback_receipts", "audit_receipts"],
-            "verification_gates": ["mock_fallback", "denied_write", "approved_write", "rate_limit_denial", "rollback_receipt", "receipt_redaction"],
+            "required_controls": ["human_approval", "secret_broker", "network_allowlist", "rate_limits", "rollback_receipts", "audit_receipts", "channel_activation_packet_verification"],
+            "verification_gates": ["mock_fallback", "denied_write", "approved_write", "rate_limit_denial", "rollback_receipt", "receipt_redaction", "channel_activation_packet_integrity"],
             "evaluation_scenarios": [
                 "connector_abuse.write_without_scope",
                 "live_connector_receipts.redacted_write_summary",

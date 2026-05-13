@@ -262,7 +262,7 @@ SECURITY_COMMANDS = (
     "rollback-bundle",
     "evaluate",
 )
-CHANNEL_COMMANDS = ("render", "receive", "resolve-approval", "send-webhook", "send-email", "send-chat-webhook", "events")
+CHANNEL_COMMANDS = ("render", "receive", "resolve-approval", "send-webhook", "send-email", "send-chat-webhook", "activation-packet", "verify-activation-packet", "events")
 EVALUATION_COMMANDS = ("queue", "review", "trends", "delta", "readiness")
 SLASH_COMMAND_ALIASES = {
     "add-dir": "add_dir",
@@ -938,11 +938,20 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_channel(self, arg: str) -> None:
-        """channel render|receive|resolve-approval|send-webhook|send-email|send-chat-webhook|events -- inspect and exercise channel adapters."""
+        """channel render|receive|resolve-approval|send-webhook|send-email|send-chat-webhook|activation-packet|verify-activation-packet|events -- inspect and exercise channel adapters."""
         parts = shlex.split(arg)
         if parts and parts[0] == "events":
             limit = int(parts[1]) if len(parts) > 1 else 20
             _print_json({"events": self.orchestrator.channels.events(limit=limit)})
+            return
+        if parts and parts[0] == "activation-packet":
+            _print_json(self.orchestrator.create_channel_live_activation_packet(actor="tui-operator"))
+            return
+        if parts and parts[0] == "verify-activation-packet":
+            if len(parts) < 2:
+                print("usage: channel verify-activation-packet <packet-id-or-path>")
+                return
+            _print_json(self.orchestrator.verify_channel_live_activation_packet(parts[1], actor="tui-operator"))
             return
         if parts and parts[0] == "resolve-approval":
             if len(parts) < 3:
@@ -991,7 +1000,7 @@ class AegisTui(cmd.Cmd):
             _print_json({"message": self.orchestrator.channels.events(limit=1)[0]})
             return
         if len(parts) < 3 or parts[0] != "render":
-            print("usage: channel render <channel> <text> | channel receive <channel> <text> | channel resolve-approval <event_id> <approval_id> | channel send-webhook <text> --approved | channel send-email <subject> <text> --approved | channel send-chat-webhook <text> --approved | channel events [limit]")
+            print("usage: channel render <channel> <text> | channel receive <channel> <text> | channel resolve-approval <event_id> <approval_id> | channel send-webhook <text> --approved | channel send-email <subject> <text> --approved | channel send-chat-webhook <text> --approved | channel activation-packet | channel verify-activation-packet <packet> | channel events [limit]")
             return
         channel = parts[1]
         text = " ".join(parts[2:])

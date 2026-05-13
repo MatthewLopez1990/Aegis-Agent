@@ -1449,6 +1449,20 @@ class CliTests(unittest.TestCase):
 
             status = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "status"]))
             listed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "events", "--limit", "1"]))
+            activation_packet = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "activation-packet", "--actor", "cli-channel"]))
+            verified_packet = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "channel",
+                        "verify-activation-packet",
+                        activation_packet["receipt"]["packet_id"],
+                        "--actor",
+                        "cli-verifier",
+                    ]
+                )
+            )
             events = build_orchestrator(data_dir=data_dir, workspace=root).channels.events(limit=1)
             self.assertEqual(result["status"], "rendered_pending_approval")
             self.assertEqual(inbound["message"]["direction"], "inbound")
@@ -1462,6 +1476,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(events[0]["direction"], "outbound")
             self.assertEqual(listed["events"][0]["channel"], "slack")
             self.assertEqual(listed["events"][0]["direction"], "outbound")
+            self.assertEqual(activation_packet["receipt"]["receipt_schema"], "aegis.channel.live_activation_packet.v1")
+            self.assertEqual(activation_packet["receipt"]["preflight_status"], "blocked")
+            self.assertEqual(verified_packet["receipt"]["receipt_schema"], "aegis.channel.live_activation_packet_verification.v1")
+            self.assertTrue(verified_packet["receipt"]["packet_integrity_ok"])
             self.assertNotIn("abc123", json.dumps(events, sort_keys=True))
             self.assertNotIn("abc123", json.dumps(listed, sort_keys=True))
 

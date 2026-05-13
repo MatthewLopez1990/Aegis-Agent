@@ -1250,6 +1250,19 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     )
                 )
                 return
+            if path == "/channels/live-activation-packet":
+                payload = self._read_json()
+                self._json(orchestrator.create_channel_live_activation_packet(actor=str(payload.get("actor", "api-operator"))))
+                return
+            if path == "/channels/verify-activation-packet":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.verify_channel_live_activation_packet(
+                        str(_required(payload, "packet")),
+                        actor=str(payload.get("actor", "api-operator")),
+                    )
+                )
+                return
             if path == "/models/auth/logout":
                 payload = self._read_json()
                 self._json(
