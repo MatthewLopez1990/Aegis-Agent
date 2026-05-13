@@ -3603,6 +3603,23 @@ document.getElementById("browser-live-download").addEventListener("click", async
   await refresh();
 });
 
+document.getElementById("browser-live-upload").addEventListener("click", async () => {
+  if (!state.browserSessionId) {
+    renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
+    return;
+  }
+  const selector = document.getElementById("browser-selector").value || "input[type=file]";
+  const filePath = document.getElementById("browser-upload-path").value.trim();
+  state.pendingBrowserAction = { action: "live_upload", session_id: state.browserSessionId, selector, file_path: filePath };
+  renderBrowserOutput(
+    await api("/browser/upload", {
+      method: "POST",
+      body: JSON.stringify({ session_id: state.browserSessionId, selector, file_path: filePath }),
+    })
+  );
+  await refresh();
+});
+
 document.getElementById("browser-output").addEventListener("click", async (event) => {
   const createActivationPacket = event.target.closest("[data-browser-live-activation-packet]");
   if (createActivationPacket) {
@@ -3641,6 +3658,8 @@ document.getElementById("browser-output").addEventListener("click", async (event
         ? "/browser/submit"
         : action.action === "live_download"
           ? "/browser/download"
+        : action.action === "live_upload"
+          ? "/browser/upload"
         : action.action === "live_navigate"
           ? "/browser/live-navigate"
           : action.action === "live_screenshot"
@@ -3653,6 +3672,8 @@ document.getElementById("browser-output").addEventListener("click", async (event
         ? { session_id: action.session_id, selector: action.selector, approval_id: approvalId, live: action.action === "live_submit" }
         : action.action === "live_download"
           ? { session_id: action.session_id, selector: action.selector, approval_id: approvalId }
+        : action.action === "live_upload"
+          ? { session_id: action.session_id, selector: action.selector, file_path: action.file_path, approval_id: approvalId }
         : action.action === "live_navigate"
           ? { session_id: action.session_id, url: action.url, approval_id: approvalId }
           : action.action === "live_screenshot"

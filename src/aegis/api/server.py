@@ -1480,6 +1480,24 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     return
                 self._json(_with_browser_artifact_urls(orchestrator, orchestrator.browser.live_download(session_id=session_id, selector=selector, approved=True)))
                 return
+            if path == "/browser/upload":
+                payload = self._read_json()
+                session_id = str(_required(payload, "session_id"))
+                selector = str(_required(payload, "selector"))
+                file_path = str(_required(payload, "file_path"))
+                approval = _browser_action_approval(
+                    orchestrator,
+                    action="live_upload",
+                    session_id=session_id,
+                    selector=selector,
+                    file_path=file_path,
+                    approval_id=payload.get("approval_id"),
+                )
+                if not approval["approved"]:
+                    self._json(approval["response"])
+                    return
+                self._json(_with_browser_artifact_urls(orchestrator, orchestrator.browser.live_upload(session_id=session_id, selector=selector, file_path=file_path, approved=True)))
+                return
             if path == "/channels/render":
                 payload = self._read_json()
                 hints = payload.get("channel_hints", {})
@@ -2898,9 +2916,10 @@ def _browser_action_approval(
     selector: str | None = None,
     fields: dict[str, Any] | None = None,
     url: str | None = None,
+    file_path: str | None = None,
     approval_id: Any = None,
 ) -> dict[str, Any]:
-    payload = orchestrator.browser.action_approval_payload(action=action, session_id=session_id, selector=selector, fields=fields, url=url)
+    payload = orchestrator.browser.action_approval_payload(action=action, session_id=session_id, selector=selector, fields=fields, url=url, file_path=file_path)
     if approval_id:
         approval = orchestrator.approvals.get(str(approval_id))
         if _approved_payload(approval) != payload:

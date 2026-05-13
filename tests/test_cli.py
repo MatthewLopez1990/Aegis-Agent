@@ -289,6 +289,82 @@ class CliTests(unittest.TestCase):
             self.assertEqual(Path(captured["artifact_path"]).read_bytes(), b"fake-download-bytes")
             self.assertTrue(Path(captured["metadata_path"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
 
+    def test_browser_live_upload_command_is_approval_gated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            root = Path(temp)
+            source = root / "report.pdf"
+            source.write_bytes(b"%PDF-1.7\nfake upload")
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "[security]",
+                        "live_browser_uploads = true",
+                        'network_allowlist = ["example.com"]',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            session = orchestrator.browser.create_session(label="CLI live upload")
+            with (
+                patch("aegis.browser.controller._find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch("aegis.browser.controller._private_network_error", return_value=None),
+                patch("aegis.browser.controller._capture_live_chromium_snapshot", side_effect=_fake_live_chrome_snapshot),
+            ):
+                orchestrator.browser.live_navigate(session_id=session["id"], url="https://example.com/uploads", approved=True)
+
+            blocked = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "browser",
+                        "--workspace",
+                        str(root),
+                        "live-upload",
+                        session["id"],
+                        "#file",
+                        "report.pdf",
+                    ]
+                )
+            )
+            with (
+                patch("aegis.browser.controller._find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch("aegis.browser.controller._private_network_error", return_value=None),
+                patch("aegis.browser.controller._capture_live_chromium_upload", side_effect=_fake_live_chrome_upload),
+            ):
+                captured = dispatch(
+                    parser.parse_args(
+                        [
+                            "--data-dir",
+                            str(data_dir),
+                            "browser",
+                            "--workspace",
+                            str(root),
+                            "live-upload",
+                            session["id"],
+                            "#file",
+                            "report.pdf",
+                            "--approved",
+                        ]
+                    )
+                )
+
+            self.assertEqual(blocked["status"], "approval_required")
+            self.assertTrue(captured["ok"])
+            self.assertEqual(captured["mode"], "live_chromium_cdp_ephemeral_upload")
+            self.assertTrue(captured["uploads_allowed"])
+            self.assertFalse(captured["downloads_allowed"])
+            self.assertFalse(captured["raw_browser_content_included"])
+            self.assertEqual(captured["source_filename"], "report.pdf")
+            self.assertEqual(captured["source_sha256"], sha256(source.read_bytes()).hexdigest())
+            self.assertTrue(Path(captured["artifact_path"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+
     def test_model_auth_readiness_packet_commands_create_and_verify_packet(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             parser = build_parser()
@@ -441,6 +517,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("approved_live_browser_readonly_snapshot", browser_gap["verification_gates"])
             self.assertIn("approved_live_browser_selector_mutation", browser_gap["verification_gates"])
             self.assertIn("approved_live_browser_download", browser_gap["verification_gates"])
+            self.assertIn("approved_live_browser_upload", browser_gap["verification_gates"])
             self.assertIn("playwright_chromium_adapter_preflight", browser_gap["verification_gates"])
             self.assertIn("disabled_live_browser_denial", browser_gap["verification_gates"])
             self.assertIn("browser.live_activation_packet_preflight", browser_gap["evaluation_scenarios"])
@@ -448,6 +525,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("browser.live_readonly_snapshot", browser_gap["evaluation_scenarios"])
             self.assertIn("browser.live_selector_mutation", browser_gap["evaluation_scenarios"])
             self.assertIn("browser.live_download", browser_gap["evaluation_scenarios"])
+            self.assertIn("browser.live_upload", browser_gap["evaluation_scenarios"])
             self.assertIn("browser.live_automation_denied_until_adapter_ready", browser_gap["evaluation_scenarios"])
             browser_controls = {control["control"] for control in browser_gap["implemented_hardening_controls"]}
             self.assertIn("live_browser_activation_packets", browser_controls)
@@ -456,7 +534,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("approved_live_browser_readonly_adapter", browser_controls)
             self.assertIn("approved_live_browser_selector_mutation_adapter", browser_controls)
             self.assertIn("approved_live_browser_download_adapter", browser_controls)
-            self.assertIn("live_browser_upload_and_arbitrary_js_adapter", browser_gap["remaining_depth_work"])
+            self.assertIn("approved_live_browser_upload_adapter", browser_controls)
+            self.assertIn("live_browser_arbitrary_js_adapter", browser_gap["remaining_depth_work"])
             browser_checklist = {item["control"]: item for item in browser_gap["operator_checklist"]}
             self.assertEqual(browser_checklist["live_browser_activation_packets"]["state"], "available_adapter_blocked")
             self.assertEqual(browser_checklist["playwright_chromium_adapter_preflight"]["state"], "blocked_adapter_candidate")
@@ -464,7 +543,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(browser_checklist["live_browser_readonly_adapter"]["state"], "available_opt_in")
             self.assertEqual(browser_checklist["live_browser_selector_mutation_adapter"]["state"], "available_opt_in")
             self.assertEqual(browser_checklist["live_browser_download_adapter"]["state"], "available_opt_in")
-            self.assertEqual(browser_checklist["live_browser_automation"]["state"], "download_available_depth_remaining")
+            self.assertEqual(browser_checklist["live_browser_upload_adapter"]["state"], "available_opt_in")
+            self.assertEqual(browser_checklist["live_browser_automation"]["state"], "upload_available_depth_remaining")
             subagent_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "subagent_runtime_depth")
             self.assertIn("operator_batch_receipts", subagent_gap["required_controls"])
             self.assertIn("parent_bound_review_receipts", subagent_gap["required_controls"])
@@ -3594,6 +3674,33 @@ def _fake_live_chrome_download(
         "download_url_sha256": sha256(download_url.encode("utf-8")).hexdigest(),
         "action_result": {"ok": True, "status": "clicked_for_download", "selector": selector, "url_after": url},
         "download_policy_applied": True,
+        "error": None,
+    }
+
+
+def _fake_live_chrome_upload(
+    *,
+    executable: str,
+    url: str,
+    selector: str,
+    source_path: Path,
+    screenshot_path: Path,
+    artifact_dir: Path,
+    allowlist: tuple[str, ...],
+    width: int = 1280,
+    height: int = 900,
+) -> dict[str, object]:
+    del executable, source_path, artifact_dir, allowlist
+    screenshot_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-live-upload")
+    return {
+        "ok": True,
+        "status": "uploaded",
+        "width": width,
+        "height": height,
+        "exit_code": 0,
+        "url_after": url,
+        "title": "Fake live upload",
+        "action_result": {"ok": True, "status": "uploaded", "selector": selector, "file_count": 1, "url_after": url},
         "error": None,
     }
 

@@ -36,6 +36,7 @@ _MAX_STATIC_DOM_NODES = 120
 _MAX_STATIC_DOM_DEPTH = 12
 _MAX_STATIC_DOM_TEXT_CHARS = 160
 _MAX_LIVE_BROWSER_DOWNLOAD_BYTES = 25 * 1024 * 1024
+_MAX_LIVE_BROWSER_UPLOAD_BYTES = 10 * 1024 * 1024
 _MAX_LIVE_BROWSER_DOWNLOAD_MIME_SAMPLE_BYTES = 4096
 _ALLOWED_LIVE_BROWSER_DOWNLOAD_MIME_TYPES = {
     "application/json",
@@ -46,6 +47,7 @@ _ALLOWED_LIVE_BROWSER_DOWNLOAD_MIME_TYPES = {
     "text/csv",
     "text/plain",
 }
+_ALLOWED_LIVE_BROWSER_UPLOAD_MIME_TYPES = set(_ALLOWED_LIVE_BROWSER_DOWNLOAD_MIME_TYPES)
 _STATIC_DOM_ATTR_ALLOWLIST = {
     "id",
     "class",
@@ -74,14 +76,18 @@ class BrowserController:
         live_browser_reads: bool = False,
         live_browser_mutations: bool = False,
         live_browser_downloads: bool = False,
+        live_browser_uploads: bool = False,
+        workspace_root: str | Path | None = None,
         network_allowlist: tuple[str, ...] = (),
     ) -> None:
         self.connectors = connectors
         self.audit_logger = audit_logger
         self.artifact_dir = ensure_private_dir(artifact_dir)
-        self.live_browser_reads = live_browser_reads or live_browser_mutations or live_browser_downloads
+        self.live_browser_reads = live_browser_reads or live_browser_mutations or live_browser_downloads or live_browser_uploads
         self.live_browser_mutations = live_browser_mutations
         self.live_browser_downloads = live_browser_downloads
+        self.live_browser_uploads = live_browser_uploads
+        self.workspace_root = Path(workspace_root or ".").expanduser().resolve()
         self.network_allowlist = network_allowlist
         self.session_store_path = ensure_private_file(self.artifact_dir / "sessions.json")
         self._sessions: dict[str, dict[str, Any]] = {}
@@ -262,6 +268,7 @@ class BrowserController:
             live_browser_reads=self.live_browser_reads,
             live_browser_mutations=self.live_browser_mutations,
             live_browser_downloads=self.live_browser_downloads,
+            live_browser_uploads=self.live_browser_uploads,
         )
         response = {
             "ok": True,
@@ -271,22 +278,28 @@ class BrowserController:
             "interactive_elements": interactive_elements,
             "interactive_element_count": len(interactive_elements),
             "selector_inventory": selector_inventory,
-            "unsupported_live_actions": _unsupported_live_browser_actions(live_mutation_supported=self.live_browser_mutations, live_download_supported=self.live_browser_downloads),
+            "unsupported_live_actions": _unsupported_live_browser_actions(
+                live_mutation_supported=self.live_browser_mutations,
+                live_download_supported=self.live_browser_downloads,
+                live_upload_supported=self.live_browser_uploads,
+            ),
             "readiness": {
-                "live_browser_adapter": "download_available_if_configured" if self.live_browser_downloads else "mutation_available_if_configured" if self.live_browser_mutations else "read_only_available_if_configured" if self.live_browser_reads else "blocked_pending_boundaries",
+                "live_browser_adapter": "upload_available_if_configured" if self.live_browser_uploads else "download_available_if_configured" if self.live_browser_downloads else "mutation_available_if_configured" if self.live_browser_mutations else "read_only_available_if_configured" if self.live_browser_reads else "blocked_pending_boundaries",
                 "approval_required_for_mutation": True,
-                "javascript_executed": bool(self.live_browser_mutations or self.live_browser_downloads),
+                "javascript_executed": bool(self.live_browser_mutations or self.live_browser_downloads or self.live_browser_uploads),
                 "cookie_persistence": False,
-                "real_selector_events_dispatched": bool(self.live_browser_mutations or self.live_browser_downloads),
+                "real_selector_events_dispatched": bool(self.live_browser_mutations or self.live_browser_downloads or self.live_browser_uploads),
                 "dom_mutation_supported": bool(self.live_browser_mutations),
                 "static_dom_form_fill_supported": True,
                 "live_selector_mutation_supported": bool(self.live_browser_mutations),
                 "live_download_supported": bool(self.live_browser_downloads),
+                "live_upload_supported": bool(self.live_browser_uploads),
             },
             "activation": activation,
             "live_browser_read_adapter": "available" if self.live_browser_reads else "disabled",
             "live_browser_mutation_adapter": "available" if self.live_browser_mutations else "disabled",
             "live_browser_download_adapter": "available" if self.live_browser_downloads else "disabled",
+            "live_browser_upload_adapter": "available" if self.live_browser_uploads else "disabled",
             "preflight_status": activation["preflight_status"],
             "automation_boundaries": _browser_automation_boundaries(rendered=False),
             "mode": "http_content_no_js_selector_inventory",
@@ -306,6 +319,7 @@ class BrowserController:
         selector: str | None = None,
         fields: dict[str, Any] | None = None,
         url: str | None = None,
+        file_path: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"kind": "browser_action", "action": action, "session_id": session_id}
         if action == "click":
@@ -398,6 +412,28 @@ class BrowserController:
             if not target["ok"]:
                 payload["blocked_reason"] = str(target["reason"])
             return payload
+        if action == "live_upload":
+            session = self._require_session(session_id)
+            current_url = _session_url(session) or ""
+            target = _live_browser_url_check(current_url, allowlist=self.network_allowlist) if current_url else {"ok": False, "domain": "", "reason": "missing_url"}
+            source = _live_upload_source_check(file_path, workspace_root=self.workspace_root)
+            payload["selector"] = selector or ""
+            payload["upload_effect"] = "live_browser_workspace_file_upload"
+            payload["target_origin"] = _url_origin(current_url) if current_url else ""
+            payload["target_path"] = _url_path(current_url) if current_url else ""
+            payload["target_domain"] = target["domain"]
+            payload["target_url_sha256"] = hashlib.sha256(current_url.encode("utf-8", errors="replace")).hexdigest() if current_url else ""
+            payload["source_filename"] = source.get("filename", "")
+            payload["source_bytes"] = source.get("bytes", 0)
+            payload["source_mime_type"] = source.get("mime_type", "")
+            payload["source_path_sha256"] = source.get("path_sha256", "")
+            payload["source_sha256"] = source.get("sha256", "")
+            payload["max_upload_bytes"] = _MAX_LIVE_BROWSER_UPLOAD_BYTES
+            if not target["ok"]:
+                payload["blocked_reason"] = str(target["reason"])
+            if not source["ok"]:
+                payload["source_blocked_reason"] = str(source["reason"])
+            return payload
         if action == "live_navigate":
             if not url:
                 raise ValueError("live browser navigation approval requires url")
@@ -428,6 +464,7 @@ class BrowserController:
             live_browser_reads=self.live_browser_reads,
             live_browser_mutations=self.live_browser_mutations,
             live_browser_downloads=self.live_browser_downloads,
+            live_browser_uploads=self.live_browser_uploads,
         )
         response = {
             "ok": False,
@@ -441,7 +478,11 @@ class BrowserController:
             "preflight_status": activation["preflight_status"],
             "activation": activation,
             "automation_boundaries": _browser_automation_boundaries(rendered=False),
-            "unsupported_live_actions": _unsupported_live_browser_actions(live_mutation_supported=self.live_browser_mutations, live_download_supported=self.live_browser_downloads),
+            "unsupported_live_actions": _unsupported_live_browser_actions(
+                live_mutation_supported=self.live_browser_mutations,
+                live_download_supported=self.live_browser_downloads,
+                live_upload_supported=self.live_browser_uploads,
+            ),
             "mode": "live_browser_adapter_denied",
         }
         self.audit_logger.append("browser.live_automation_denied", response)
@@ -452,13 +493,15 @@ class BrowserController:
             live_browser_reads=self.live_browser_reads,
             live_browser_mutations=self.live_browser_mutations,
             live_browser_downloads=self.live_browser_downloads,
+            live_browser_uploads=self.live_browser_uploads,
         )
         return {
-            "status": activation["status"] if self.live_browser_reads or self.live_browser_mutations or self.live_browser_downloads else "live_browser_activation_ready_for_review",
+            "status": activation["status"] if self.live_browser_reads or self.live_browser_mutations or self.live_browser_downloads or self.live_browser_uploads else "live_browser_activation_ready_for_review",
             "activation": activation,
-            "live_browser_adapter_enabled": bool(self.live_browser_reads or self.live_browser_mutations or self.live_browser_downloads),
+            "live_browser_adapter_enabled": bool(self.live_browser_reads or self.live_browser_mutations or self.live_browser_downloads or self.live_browser_uploads),
             "live_browser_mutation_adapter_enabled": bool(self.live_browser_mutations),
             "live_browser_download_adapter_enabled": bool(self.live_browser_downloads),
+            "live_browser_upload_adapter_enabled": bool(self.live_browser_uploads),
             "raw_browser_content_included": False,
             "raw_secret_values_included": False,
             "model_invocation_performed": False,
@@ -477,6 +520,7 @@ class BrowserController:
             live_browser_reads=self.live_browser_reads,
             live_browser_mutations=self.live_browser_mutations,
             live_browser_downloads=self.live_browser_downloads,
+            live_browser_uploads=self.live_browser_uploads,
         )
         packet_path.write_text(json.dumps(packet, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         packet_path.chmod(0o600)
@@ -496,9 +540,10 @@ class BrowserController:
             "preflight_status": packet["activation"]["preflight_status"],
             "candidate_adapter_count": packet["activation"]["candidate_adapter_count"],
             "playwright_chromium_preflight_status": _playwright_chromium_preflight_status(packet["activation"]),
-            "live_browser_adapter_enabled": bool(self.live_browser_reads or self.live_browser_mutations or self.live_browser_downloads),
+            "live_browser_adapter_enabled": bool(self.live_browser_reads or self.live_browser_mutations or self.live_browser_downloads or self.live_browser_uploads),
             "live_browser_mutation_adapter_enabled": bool(self.live_browser_mutations),
             "live_browser_download_adapter_enabled": bool(self.live_browser_downloads),
+            "live_browser_upload_adapter_enabled": bool(self.live_browser_uploads),
             "raw_browser_content_included": False,
             "raw_secret_values_included": False,
             "raw_cookie_values_included": False,
@@ -567,12 +612,19 @@ class BrowserController:
             return {"status": "approval_required", "session_id": session_id, "selector": selector, "reason": "live browser download requires approval"}
         return self._capture_live_download(session=session, selector=selector)
 
+    def live_upload(self, *, session_id: str, selector: str, file_path: str, approved: bool = False) -> dict[str, Any]:
+        session = self._require_session(session_id)
+        if not approved:
+            return {"status": "approval_required", "session_id": session_id, "selector": selector, "file_path": _path_hash(file_path), "reason": "live browser upload requires approval"}
+        return self._capture_live_upload(session=session, selector=selector, file_path=file_path)
+
     def _capture_live_download(self, *, session: dict[str, Any], selector: str) -> dict[str, Any]:
         session_id = str(session["id"])
         activation = _live_browser_activation_preflight(
             live_browser_reads=self.live_browser_reads,
             live_browser_mutations=self.live_browser_mutations,
             live_browser_downloads=self.live_browser_downloads,
+            live_browser_uploads=self.live_browser_uploads,
         )
         if not self.live_browser_downloads:
             return self.deny_live_automation(action="live_download", session_id=session_id, selector=selector)
@@ -726,6 +778,176 @@ class BrowserController:
         self.audit_logger.append("browser.live_download_captured" if result["ok"] else "browser.live_download_failed", response)
         return response
 
+    def _capture_live_upload(self, *, session: dict[str, Any], selector: str, file_path: str) -> dict[str, Any]:
+        session_id = str(session["id"])
+        activation = _live_browser_activation_preflight(
+            live_browser_reads=self.live_browser_reads,
+            live_browser_mutations=self.live_browser_mutations,
+            live_browser_downloads=self.live_browser_downloads,
+            live_browser_uploads=self.live_browser_uploads,
+        )
+        if not self.live_browser_uploads:
+            return self.deny_live_automation(action="live_upload", session_id=session_id, selector=selector)
+        url = _session_url(session)
+        if not url:
+            response = {"ok": False, "status": "missing_url", "action": "live_upload", "session_id": session_id, "reason": "browser session has no current URL"}
+            self.audit_logger.append("browser.live_upload_blocked", response)
+            return response
+        source = _live_upload_source_check(file_path, workspace_root=self.workspace_root)
+        if not source["ok"]:
+            response = {
+                "ok": False,
+                "status": "upload_source_blocked",
+                "action": "live_upload",
+                "session_id": session_id,
+                "selector": _redacted_string(selector, limit=500),
+                "reason": source["reason"],
+                "source_path_sha256": source.get("path_sha256", ""),
+                "activation": activation,
+                "preflight_status": activation["preflight_status"],
+            }
+            self.audit_logger.append("browser.live_upload_blocked", response)
+            return response
+        executable = _find_chrome_executable()
+        if not executable:
+            response = {
+                "ok": False,
+                "status": "live_browser_runtime_unavailable",
+                "action": "live_upload",
+                "session_id": session_id,
+                "url": url,
+                "reason": "Chrome/Chromium executable was not found",
+                "activation": activation,
+                "preflight_status": activation["preflight_status"],
+            }
+            self.audit_logger.append("browser.live_upload_blocked", response)
+            return response
+        url_check = _live_browser_url_check(url, allowlist=self.network_allowlist)
+        if not url_check["ok"]:
+            response = {
+                "ok": False,
+                "status": "live_browser_navigation_blocked",
+                "action": "live_upload",
+                "session_id": session_id,
+                "url": url,
+                "reason": url_check["reason"],
+                "domain": url_check["domain"],
+                "activation": activation,
+                "preflight_status": activation["preflight_status"],
+            }
+            self.audit_logger.append("browser.live_upload_blocked", response)
+            return response
+        screenshot_artifact = self.artifact_dir / f"{session_id}.live-upload.png"
+        evidence_artifact = self.artifact_dir / f"{session_id}.live-upload.evidence.json"
+        result = _capture_live_chromium_upload(
+            executable=executable,
+            url=url,
+            selector=selector,
+            source_path=source["path"],
+            screenshot_path=screenshot_artifact,
+            artifact_dir=self.artifact_dir,
+            allowlist=self.network_allowlist,
+        )
+        artifact_hashes: dict[str, str] = {"source_sha256": str(source["sha256"])}
+        if screenshot_artifact.exists():
+            screenshot_artifact.chmod(0o600)
+            artifact_hashes["live_upload_png_sha256"] = _file_sha256(screenshot_artifact)
+        sandbox_receipt = _browser_live_upload_sandbox_receipt(executable=executable, exit_code=result["exit_code"], allowlist=self.network_allowlist)
+        evidence = _browser_live_upload_evidence(
+            session,
+            selector=selector,
+            url=url,
+            source=source,
+            result=result,
+            artifact_hashes=artifact_hashes,
+            sandbox_receipt=sandbox_receipt,
+        )
+        evidence_artifact.write_text(json.dumps(evidence, indent=2, sort_keys=True), encoding="utf-8")
+        evidence_artifact.chmod(0o600)
+        artifact_hashes["evidence_json_sha256"] = _file_sha256(evidence_artifact)
+        live_uploads = list(session.get("live_uploads", []))
+        live_uploads.append(
+            {
+                "selector": _redacted_string(selector, limit=500),
+                "uploaded_at": now_utc(),
+                "ok": bool(result["ok"]),
+                "source_filename": source["filename"],
+                "source_bytes": source["bytes"],
+                "source_mime_type": source["mime_type"],
+                "source_path_sha256": source["path_sha256"],
+            }
+        )
+        session_artifacts = list(session.get("artifacts", []))
+        session_artifacts.extend(str(path) for path in (screenshot_artifact, evidence_artifact) if path.exists())
+        session.update(
+            {
+                "current_url": _redacted_string(str(result.get("url_after") or url), limit=2000),
+                "title": _redacted_string(f"Live upload {url_check['domain']}", limit=200),
+                "updated_at": now_utc(),
+                "last_text_length": 0,
+                "live_browser_last_capture_at": now_utc(),
+                "live_browser_last_status": "uploaded" if result["ok"] else str(result.get("status") or "upload_failed"),
+                "live_uploads": live_uploads[-25:],
+                "artifacts": session_artifacts[-50:],
+            }
+        )
+        self._persist_sessions()
+        response = {
+            "ok": result["ok"],
+            "status": "uploaded" if result["ok"] else str(result.get("status") or "upload_failed"),
+            "action": "live_upload",
+            "session_id": session_id,
+            "session": _public_session(session),
+            "url_before": url,
+            "url_after": _redacted_string(str(result.get("url_after") or url), limit=2000),
+            "domain": url_check["domain"],
+            "selector": _redacted_string(selector, limit=500),
+            "artifact_path": str(screenshot_artifact) if screenshot_artifact.exists() else None,
+            "artifact_type": "png_live_browser_upload_snapshot",
+            "evidence_path": str(evidence_artifact),
+            "evidence_artifact_type": "json_browser_live_upload_evidence",
+            "source_filename": source["filename"],
+            "source_mime_type": source["mime_type"],
+            "source_bytes": source["bytes"],
+            "source_sha256": source["sha256"],
+            "source_path_sha256": source["path_sha256"],
+            "max_upload_bytes": _MAX_LIVE_BROWSER_UPLOAD_BYTES,
+            "mode": "live_chromium_cdp_ephemeral_upload",
+            "width": result["width"],
+            "height": result["height"],
+            "artifact_hashes": artifact_hashes,
+            "sandbox_receipt": sandbox_receipt,
+            "activation": activation,
+            "preflight_status": activation["preflight_status"],
+            "javascript_executed": True,
+            "page_javascript_allowed": True,
+            "cookies_persisted": False,
+            "cookie_jar_persisted": False,
+            "local_storage_persisted": False,
+            "session_storage_persisted": False,
+            "real_selector_events_dispatched": bool(result["ok"]),
+            "real_page_mutation_allowed": True,
+            "downloads_allowed": False,
+            "uploads_allowed": True,
+            "raw_browser_content_included": False,
+            "raw_secret_values_included": False,
+            "raw_cookie_values_included": False,
+            "raw_storage_values_included": False,
+            "raw_network_body_returned": False,
+            "content_returned": False,
+            "action_result": _safe_live_upload_action_result(result.get("action_result")),
+            "evidence": {
+                "action": "live_upload",
+                "url_after": _redacted_string(str(result.get("url_after") or url), limit=2000),
+                "mode": "live_chromium_cdp_ephemeral_upload",
+                "content_returned": False,
+                "artifact_hashes": artifact_hashes,
+            },
+            "error": result.get("error"),
+        }
+        self.audit_logger.append("browser.live_upload_captured" if result["ok"] else "browser.live_upload_failed", response)
+        return response
+
     def _capture_live_mutation(
         self,
         *,
@@ -739,6 +961,7 @@ class BrowserController:
             live_browser_reads=self.live_browser_reads,
             live_browser_mutations=self.live_browser_mutations,
             live_browser_downloads=self.live_browser_downloads,
+            live_browser_uploads=self.live_browser_uploads,
         )
         if not self.live_browser_mutations:
             return self.deny_live_automation(action=action, session_id=session_id, selector=selector)
@@ -884,6 +1107,7 @@ class BrowserController:
             live_browser_reads=self.live_browser_reads,
             live_browser_mutations=self.live_browser_mutations,
             live_browser_downloads=self.live_browser_downloads,
+            live_browser_uploads=self.live_browser_uploads,
         )
         if not self.live_browser_reads:
             return self.deny_live_automation(action=action, session_id=session_id)
@@ -1433,6 +1657,7 @@ def _normalize_persisted_session(item: Any) -> dict[str, Any] | None:
         "interactive_elements": _normalize_interactive_elements(item.get("interactive_elements")),
         "live_mutations": _normalize_live_mutations(item.get("live_mutations")),
         "live_downloads": _normalize_live_downloads(item.get("live_downloads")),
+        "live_uploads": _normalize_live_uploads(item.get("live_uploads")),
     }
     if item.get("last_content") is not None:
         session["last_content"] = _bounded_redacted_content(str(item.get("last_content")))
@@ -1519,6 +1744,27 @@ def _normalize_live_downloads(value: Any) -> list[dict[str, Any]]:
             }
         )
     return downloads
+
+
+def _normalize_live_uploads(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    uploads: list[dict[str, Any]] = []
+    for item in value[-25:]:
+        if not isinstance(item, dict):
+            continue
+        uploads.append(
+            {
+                "selector": _redacted_string(item.get("selector"), limit=500),
+                "uploaded_at": str(item.get("uploaded_at") or now_utc()),
+                "ok": bool(item.get("ok", False)),
+                "source_filename": _redacted_string(item.get("source_filename"), limit=200),
+                "source_bytes": _safe_int(item.get("source_bytes")),
+                "source_mime_type": _redacted_string(item.get("source_mime_type"), limit=120),
+                "source_path_sha256": _redacted_string(item.get("source_path_sha256"), limit=64),
+            }
+        )
+    return uploads
 
 
 def _normalize_interactive_elements(value: Any) -> list[dict[str, str]]:
@@ -1902,16 +2148,17 @@ def _selector_action(tag: str, input_type: str) -> str:
     return "click"
 
 
-def _unsupported_live_browser_actions(*, live_mutation_supported: bool = False, live_download_supported: bool = False) -> list[str]:
-    if live_mutation_supported or live_download_supported:
+def _unsupported_live_browser_actions(*, live_mutation_supported: bool = False, live_download_supported: bool = False, live_upload_supported: bool = False) -> list[str]:
+    if live_mutation_supported or live_download_supported or live_upload_supported:
         unsupported = [
             "arbitrary_javascript_evaluate",
             "cookie_persistence",
             "raw_dom_capture",
-            "uploads",
             "persistent_browser_profile",
         ]
-        if live_download_supported and not live_mutation_supported:
+        if not live_upload_supported:
+            unsupported.insert(3, "uploads")
+        if (live_download_supported or live_upload_supported) and not live_mutation_supported:
             unsupported.insert(0, "live_selector_click_fill_submit")
         if not live_download_supported:
             unsupported.insert(3, "downloads")
@@ -1926,19 +2173,30 @@ def _unsupported_live_browser_actions(*, live_mutation_supported: bool = False, 
     ]
 
 
-def _live_browser_activation_preflight(*, live_browser_reads: bool = False, live_browser_mutations: bool = False, live_browser_downloads: bool = False) -> dict[str, Any]:
-    live_browser_reads = live_browser_reads or live_browser_mutations or live_browser_downloads
+def _live_browser_activation_preflight(*, live_browser_reads: bool = False, live_browser_mutations: bool = False, live_browser_downloads: bool = False, live_browser_uploads: bool = False) -> dict[str, Any]:
+    live_browser_reads = live_browser_reads or live_browser_mutations or live_browser_downloads or live_browser_uploads
     adapter_candidates = _live_browser_adapter_candidates(
         live_browser_reads=live_browser_reads,
         live_browser_mutations=live_browser_mutations,
         live_browser_downloads=live_browser_downloads,
+        live_browser_uploads=live_browser_uploads,
     )
     blockers = [
         {"control": "live_browser_adapter", "detail": "no Playwright/Chromium real browser automation mutation adapter is enabled"},
         {"control": "approval_gated_mutation", "detail": "real clicks, form fills, downloads, uploads, and page mutations must require matching approval"},
         {"control": "redacted_artifact_receipts", "detail": "screenshots, DOM captures, console logs, and network traces must be hash-receipted and secret-redacted"},
     ]
-    if live_browser_downloads:
+    if live_browser_uploads and live_browser_downloads:
+        blockers = [
+            {"control": "arbitrary_js", "detail": "arbitrary JavaScript evaluation, persistent browser state, and raw browser capture remain disabled"},
+            {"control": "raw_dom_capture", "detail": "raw live DOM, cookies, storage values, console logs, and network bodies are still excluded from receipts"},
+        ]
+    elif live_browser_uploads:
+        blockers = [
+            {"control": "downloads_and_arbitrary_js", "detail": "downloads, arbitrary JavaScript evaluation, persistent browser state, and raw browser capture remain disabled"},
+            {"control": "raw_dom_capture", "detail": "raw live DOM, cookies, storage values, console logs, and network bodies are still excluded from receipts"},
+        ]
+    elif live_browser_downloads:
         blockers = [
             {"control": "uploads_and_arbitrary_js", "detail": "uploads, arbitrary JavaScript evaluation, file chooser access, and persistent browser state remain disabled"},
             {"control": "raw_dom_capture", "detail": "raw live DOM, cookies, storage values, console logs, and network bodies are still excluded from receipts"},
@@ -1953,48 +2211,24 @@ def _live_browser_activation_preflight(*, live_browser_reads: bool = False, live
         blockers.insert(2, {"control": "network_allowlist", "detail": "navigation and subresource requests must pass configured provider/domain allowlists"})
         blockers.insert(3, {"control": "script_policy", "detail": "page JavaScript execution policy must be explicit before live DOM automation"})
         blockers.insert(4, {"control": "cookie_and_storage_isolation", "detail": "cookies, local storage, and session storage must be isolated and redacted in receipts"})
-    status = (
-        "live_browser_mutation_download_adapter_enabled"
-        if live_browser_mutations and live_browser_downloads
-        else "live_browser_download_adapter_enabled"
-        if live_browser_downloads
-        else "live_browser_mutation_adapter_enabled"
-        if live_browser_mutations
-        else "live_browser_readonly_adapter_enabled"
-        if live_browser_reads
-        else "live_browser_adapter_required"
+    feature_label = _live_browser_feature_label(
+        live_browser_mutations=live_browser_mutations,
+        live_browser_downloads=live_browser_downloads,
+        live_browser_uploads=live_browser_uploads,
     )
-    preflight_status = (
-        "ready_mutation_download_adapter_enabled"
-        if live_browser_mutations and live_browser_downloads
-        else "ready_download_adapter_enabled"
-        if live_browser_downloads
-        else "ready_mutation_adapter_enabled"
-        if live_browser_mutations
-        else "ready_readonly_mutation_blocked"
-        if live_browser_reads
-        else "blocked"
-    )
-    selected_adapter = (
-        "chromium-cdp-ephemeral-mutation-download"
-        if live_browser_mutations and live_browser_downloads
-        else "chromium-cdp-ephemeral-download"
-        if live_browser_downloads
-        else "chromium-cdp-ephemeral-mutation"
-        if live_browser_mutations
-        else "headless-chromium-readonly"
-        if live_browser_reads
-        else None
-    )
+    status = f"live_browser_{feature_label}_adapter_enabled" if feature_label else "live_browser_readonly_adapter_enabled" if live_browser_reads else "live_browser_adapter_required"
+    preflight_status = f"ready_{feature_label}_adapter_enabled" if feature_label else "ready_readonly_mutation_blocked" if live_browser_reads else "blocked"
+    selected_adapter = f"chromium-cdp-ephemeral-{feature_label.replace('_', '-')}" if feature_label else "headless-chromium-readonly" if live_browser_reads else None
     return {
         "status": status,
         "preflight_status": preflight_status,
         "selected_adapter": selected_adapter,
         "candidate_adapter_count": len(adapter_candidates),
         "adapter_candidates": adapter_candidates,
-        "live_browser_adapter_enabled": bool(live_browser_reads or live_browser_mutations or live_browser_downloads),
+        "live_browser_adapter_enabled": bool(live_browser_reads or live_browser_mutations or live_browser_downloads or live_browser_uploads),
         "live_browser_mutation_adapter_enabled": bool(live_browser_mutations),
         "live_browser_download_adapter_enabled": bool(live_browser_downloads),
+        "live_browser_upload_adapter_enabled": bool(live_browser_uploads),
         "configured_controls": [
             "http_connector_navigation_allowlist",
             "virtual_interaction_approval_gate",
@@ -2036,6 +2270,18 @@ def _live_browser_activation_preflight(*, live_browser_reads: bool = False, live
                 if live_browser_downloads
                 else []
             ),
+            *(
+                [
+                    "chromium_cdp_ephemeral_upload_adapter",
+                    "approval_bound_upload",
+                    "upload_workspace_scope",
+                    "upload_size_limit",
+                    "upload_mime_allowlist",
+                    "upload_artifact_receipts",
+                ]
+                if live_browser_uploads
+                else []
+            ),
         ],
         "required_controls": [blocker["control"] for blocker in blockers],
         "blockers": blockers,
@@ -2050,21 +2296,34 @@ def _live_browser_activation_preflight(*, live_browser_reads: bool = False, live
             *(["approved_live_browser_readonly_snapshot"] if live_browser_reads else []),
             *(["approved_live_browser_selector_mutation"] if live_browser_mutations else []),
             *(["approved_live_browser_download"] if live_browser_downloads else []),
+            *(["approved_live_browser_upload"] if live_browser_uploads else []),
             "playwright_chromium_adapter_preflight",
         ],
         "next_steps": [
             "Enable live browser reads only with an explicit security.live_browser_reads config flag and approved action payload.",
             "Enable live browser selector mutation only with an explicit security.live_browser_mutations config flag and matching approval payload.",
             "Enable live browser downloads only with an explicit security.live_browser_downloads config flag and matching selector approval payload.",
+            "Enable live browser uploads only with an explicit security.live_browser_uploads config flag, workspace-scoped source file, and matching selector approval payload.",
             "Use the headless Chromium read-only adapter for screenshot evidence only unless the mutation adapter is explicitly enabled.",
-            "Keep uploads, file chooser access, persistent cookies/storage, raw DOM capture, and raw network body capture disabled.",
+            "Keep arbitrary JavaScript evaluation, persistent cookies/storage, raw DOM capture, and raw network body capture disabled.",
             "Keep every real page mutation approval-gated and bind approvals to the exact selector/action payload.",
             "Record redacted hash receipts for screenshots, DOM snapshots, downloads, uploads, console logs, and network traces.",
         ],
     }
 
 
-def _live_browser_adapter_candidates(*, live_browser_reads: bool = False, live_browser_mutations: bool = False, live_browser_downloads: bool = False) -> list[dict[str, Any]]:
+def _live_browser_feature_label(*, live_browser_mutations: bool = False, live_browser_downloads: bool = False, live_browser_uploads: bool = False) -> str:
+    features: list[str] = []
+    if live_browser_mutations:
+        features.append("mutation")
+    if live_browser_downloads:
+        features.append("download")
+    if live_browser_uploads:
+        features.append("upload")
+    return "_".join(features)
+
+
+def _live_browser_adapter_candidates(*, live_browser_reads: bool = False, live_browser_mutations: bool = False, live_browser_downloads: bool = False, live_browser_uploads: bool = False) -> list[dict[str, Any]]:
     chrome_path = _find_chrome_executable()
     playwright_available = importlib.util.find_spec("playwright") is not None
     blockers = [
@@ -2200,6 +2459,54 @@ def _live_browser_adapter_candidates(*, live_browser_reads: bool = False, live_b
                 ],
             }
         )
+    if live_browser_uploads:
+        candidates.append(
+            {
+                "name": "chromium-cdp-ephemeral-upload",
+                "engine": "chromium",
+                "runtime": "chrome-devtools-protocol",
+                "status": "upload_enabled" if chrome_path else "runtime_missing",
+                "preflight_status": "ready" if chrome_path else "blocked",
+                "enabled": bool(chrome_path),
+                "package_available": True,
+                "chromium_executable_available": bool(chrome_path),
+                "raw_executable_path_included": False,
+                "required_controls": [
+                    "ephemeral_profile",
+                    "network_allowlist",
+                    "script_policy",
+                    "cookie_and_storage_isolation",
+                    "approval_gated_upload",
+                    "upload_workspace_scope",
+                    "upload_size_limit",
+                    "upload_mime_allowlist",
+                    "redacted_artifact_receipts",
+                ],
+                "configured_controls": [
+                    "http_connector_navigation_allowlist",
+                    "virtual_interaction_approval_gate",
+                    "browser_automation_boundary_receipts",
+                    "private_artifact_storage",
+                    "artifact_hash_receipts",
+                    "secret_redaction",
+                    "ephemeral_profile",
+                    "network_allowlist",
+                    "script_policy",
+                    "cookie_and_storage_isolation",
+                    "approval_gated_upload",
+                    "upload_workspace_scope",
+                    "upload_size_limit",
+                    "upload_mime_allowlist",
+                    "redacted_artifact_receipts",
+                ],
+                "blockers": [] if chrome_path else [{"control": "chromium_runtime", "detail": "google-chrome, chromium, or chromium-browser is not available on PATH"}],
+                "next_steps": [
+                    "Use only approved live_upload actions bound to an exact file input selector and workspace-scoped source file.",
+                    "Keep downloads disabled unless live_browser_downloads is also explicitly configured.",
+                    "Keep arbitrary JavaScript evaluation, raw DOM capture, raw network body capture, cookies, storage, and persistent browser profiles disabled.",
+                ],
+            }
+        )
     candidates.append(
         {
             "name": "playwright-chromium",
@@ -2289,12 +2596,17 @@ _BROWSER_ACTIVATION_REQUIRED_GATES = (
 )
 
 
-def _browser_live_activation_packet(*, packet_id: str, actor: str, created_at: str, live_browser_reads: bool = False, live_browser_mutations: bool = False, live_browser_downloads: bool = False) -> dict[str, Any]:
-    live_browser_reads = live_browser_reads or live_browser_mutations or live_browser_downloads
-    activation = _live_browser_activation_preflight(live_browser_reads=live_browser_reads, live_browser_mutations=live_browser_mutations, live_browser_downloads=live_browser_downloads)
+def _browser_live_activation_packet(*, packet_id: str, actor: str, created_at: str, live_browser_reads: bool = False, live_browser_mutations: bool = False, live_browser_downloads: bool = False, live_browser_uploads: bool = False) -> dict[str, Any]:
+    live_browser_reads = live_browser_reads or live_browser_mutations or live_browser_downloads or live_browser_uploads
+    activation = _live_browser_activation_preflight(
+        live_browser_reads=live_browser_reads,
+        live_browser_mutations=live_browser_mutations,
+        live_browser_downloads=live_browser_downloads,
+        live_browser_uploads=live_browser_uploads,
+    )
     chrome_path = _find_chrome_executable()
     controls = {control: False for control in _BROWSER_ACTIVATION_FALSE_CONTROLS}
-    controls["live_browser_adapter_enabled"] = bool(live_browser_reads or live_browser_mutations or live_browser_downloads)
+    controls["live_browser_adapter_enabled"] = bool(live_browser_reads or live_browser_mutations or live_browser_downloads or live_browser_uploads)
     if live_browser_mutations:
         controls["real_page_mutation_allowed"] = True
         controls["real_selector_events_dispatched"] = True
@@ -2304,6 +2616,11 @@ def _browser_live_activation_packet(*, packet_id: str, actor: str, created_at: s
         controls["real_selector_events_dispatched"] = True
         controls["page_javascript_allowed"] = True
         controls["downloads_allowed"] = True
+    if live_browser_uploads:
+        controls["real_page_mutation_allowed"] = True
+        controls["real_selector_events_dispatched"] = True
+        controls["page_javascript_allowed"] = True
+        controls["uploads_allowed"] = True
     return {
         "packet_schema": "aegis.browser.live_activation_packet.v1",
         "packet_id": packet_id,
@@ -2317,7 +2634,12 @@ def _browser_live_activation_packet(*, packet_id: str, actor: str, created_at: s
             "raw_executable_path_included": False,
             "raw_environment_included": False,
         },
-        "implemented_boundaries": _browser_automation_boundaries(rendered=live_browser_mutations or live_browser_downloads, live_mutation=live_browser_mutations, live_download=live_browser_downloads),
+        "implemented_boundaries": _browser_automation_boundaries(
+            rendered=live_browser_mutations or live_browser_downloads or live_browser_uploads,
+            live_mutation=live_browser_mutations,
+            live_download=live_browser_downloads,
+            live_upload=live_browser_uploads,
+        ),
         "review_instructions": [
             "Treat this packet as local activation metadata, not proof that live browser automation is enabled.",
             "Verify checksum, schema, blockers, and control flags before implementing a live adapter.",
@@ -2333,6 +2655,7 @@ def _browser_live_activation_controls_valid(controls: dict[str, Any]) -> bool:
         return False
     mutation_enabled = controls.get("real_page_mutation_allowed") is True or controls.get("real_selector_events_dispatched") is True or controls.get("page_javascript_allowed") is True
     download_enabled = controls.get("downloads_allowed") is True
+    upload_enabled = controls.get("uploads_allowed") is True
     for control in _BROWSER_ACTIVATION_FALSE_CONTROLS:
         if control == "live_browser_adapter_enabled":
             if controls.get(control) not in {False, True}:
@@ -2340,8 +2663,12 @@ def _browser_live_activation_controls_valid(controls: dict[str, Any]) -> bool:
             continue
         if control == "downloads_allowed" and download_enabled:
             continue
-        if control == "uploads_allowed" and controls.get(control) is not False:
-            return False
+        if control == "uploads_allowed":
+            if upload_enabled:
+                continue
+            if controls.get(control) is not False:
+                return False
+            continue
         if mutation_enabled and control in {"real_page_mutation_allowed", "real_selector_events_dispatched", "page_javascript_allowed"}:
             if controls.get(control) is not True:
                 return False
@@ -2351,30 +2678,32 @@ def _browser_live_activation_controls_valid(controls: dict[str, Any]) -> bool:
     return True
 
 
+def _browser_live_activation_feature_label(status: str) -> str:
+    prefix = "live_browser_"
+    suffix = "_adapter_enabled"
+    if not status.startswith(prefix) or not status.endswith(suffix):
+        return ""
+    label = status[len(prefix) : -len(suffix)]
+    return "" if label == "readonly" else label
+
+
 def _browser_live_activation_preflight_valid(activation: dict[str, Any]) -> bool:
-    mutation_enabled = activation.get("status") in {"live_browser_mutation_adapter_enabled", "live_browser_mutation_download_adapter_enabled"}
-    download_enabled = activation.get("status") in {"live_browser_download_adapter_enabled", "live_browser_mutation_download_adapter_enabled"}
+    feature_label = _browser_live_activation_feature_label(str(activation.get("status") or ""))
+    features = set(feature_label.split("_")) if feature_label else set()
+    mutation_enabled = "mutation" in features
+    download_enabled = "download" in features
+    upload_enabled = "upload" in features
     live_readonly = activation.get("status") == "live_browser_readonly_adapter_enabled"
-    if mutation_enabled and download_enabled:
-        if activation.get("preflight_status") != "ready_mutation_download_adapter_enabled":
+    if features:
+        if activation.get("preflight_status") != f"ready_{feature_label}_adapter_enabled":
             return False
-        if activation.get("selected_adapter") != "chromium-cdp-ephemeral-mutation-download" or activation.get("live_browser_adapter_enabled") is not True:
+        if activation.get("selected_adapter") != f"chromium-cdp-ephemeral-{feature_label.replace('_', '-')}" or activation.get("live_browser_adapter_enabled") is not True:
             return False
-        if activation.get("live_browser_mutation_adapter_enabled") is not True or activation.get("live_browser_download_adapter_enabled") is not True:
+        if activation.get("live_browser_mutation_adapter_enabled") is not bool(mutation_enabled):
             return False
-    elif download_enabled:
-        if activation.get("preflight_status") != "ready_download_adapter_enabled":
+        if activation.get("live_browser_download_adapter_enabled") is not bool(download_enabled):
             return False
-        if activation.get("selected_adapter") != "chromium-cdp-ephemeral-download" or activation.get("live_browser_adapter_enabled") is not True:
-            return False
-        if activation.get("live_browser_download_adapter_enabled") is not True:
-            return False
-    elif mutation_enabled:
-        if activation.get("preflight_status") != "ready_mutation_adapter_enabled":
-            return False
-        if activation.get("selected_adapter") != "chromium-cdp-ephemeral-mutation" or activation.get("live_browser_adapter_enabled") is not True:
-            return False
-        if activation.get("live_browser_mutation_adapter_enabled") is not True:
+        if activation.get("live_browser_upload_adapter_enabled") is not bool(upload_enabled):
             return False
     elif live_readonly:
         if activation.get("preflight_status") != "ready_readonly_mutation_blocked":
@@ -2395,7 +2724,19 @@ def _browser_live_activation_preflight_valid(activation: dict[str, Any]) -> bool
     required_controls = {str(control) for control in activation.get("required_controls") or []}
     configured_controls = {str(control) for control in activation.get("configured_controls") or []}
     verification_gates = {str(gate) for gate in activation.get("verification_gates") or []}
-    required_blockers = {"uploads_and_arbitrary_js", "raw_dom_capture"} if download_enabled else {"downloads_and_uploads", "raw_dom_capture"} if mutation_enabled else {"live_browser_adapter", "approval_gated_mutation", "redacted_artifact_receipts"} if live_readonly else set(_BROWSER_ACTIVATION_REQUIRED_BLOCKERS)
+    required_blockers = (
+        {"arbitrary_js", "raw_dom_capture"}
+        if upload_enabled and download_enabled
+        else {"downloads_and_arbitrary_js", "raw_dom_capture"}
+        if upload_enabled
+        else {"uploads_and_arbitrary_js", "raw_dom_capture"}
+        if download_enabled
+        else {"downloads_and_uploads", "raw_dom_capture"}
+        if mutation_enabled
+        else {"live_browser_adapter", "approval_gated_mutation", "redacted_artifact_receipts"}
+        if live_readonly
+        else set(_BROWSER_ACTIVATION_REQUIRED_BLOCKERS)
+    )
     configured_required = set(_BROWSER_ACTIVATION_REQUIRED_CONFIGURED_CONTROLS)
     if live_readonly:
         configured_required.update(
@@ -2427,6 +2768,17 @@ def _browser_live_activation_preflight_valid(activation: dict[str, Any]) -> bool
                 "upload_denial",
             }
         )
+    if upload_enabled:
+        configured_required.update(
+            {
+                "chromium_cdp_ephemeral_upload_adapter",
+                "approval_bound_upload",
+                "upload_workspace_scope",
+                "upload_size_limit",
+                "upload_mime_allowlist",
+                "upload_artifact_receipts",
+            }
+        )
     gates_required = set(_BROWSER_ACTIVATION_REQUIRED_GATES)
     if live_readonly:
         gates_required.add("approved_live_browser_readonly_snapshot")
@@ -2434,6 +2786,8 @@ def _browser_live_activation_preflight_valid(activation: dict[str, Any]) -> bool
         gates_required.add("approved_live_browser_selector_mutation")
     if download_enabled:
         gates_required.add("approved_live_browser_download")
+    if upload_enabled:
+        gates_required.add("approved_live_browser_upload")
     return (
         required_blockers.issubset(blocker_controls)
         and required_blockers.issubset(required_controls)
@@ -2476,6 +2830,7 @@ def _browser_live_activation_boundaries_valid(boundaries: dict[str, Any]) -> boo
         return False
     mutation_enabled = boundaries.get("real_page_mutation_allowed") is True or boundaries.get("real_selector_events_dispatched") is True
     download_enabled = boundaries.get("downloads_allowed") is True
+    upload_enabled = boundaries.get("uploads_allowed") is True
     false_fields = (
         "cookie_jar_persisted",
         "cookies_persisted",
@@ -2501,7 +2856,7 @@ def _browser_live_activation_boundaries_valid(boundaries: dict[str, Any]) -> boo
             return False
     if boundaries.get("downloads_allowed") not in ({True, False} if download_enabled else {False}):
         return False
-    if boundaries.get("uploads_allowed") is not False:
+    if boundaries.get("uploads_allowed") not in ({True, False} if upload_enabled else {False}):
         return False
     required = {str(item) for item in boundaries.get("required_before_live_browser_adapter") or []}
     return set(_BROWSER_ACTIVATION_REQUIRED_BLOCKERS).difference({"live_browser_adapter"}).issubset(required)
@@ -2562,6 +2917,7 @@ def _browser_live_activation_packet_summary(packet: dict[str, Any]) -> dict[str,
         "live_browser_adapter_enabled": bool(controls.get("live_browser_adapter_enabled", False)),
         "live_browser_mutation_adapter_enabled": bool(controls.get("real_page_mutation_allowed", False)),
         "live_browser_download_adapter_enabled": bool(controls.get("downloads_allowed", False)),
+        "live_browser_upload_adapter_enabled": bool(controls.get("uploads_allowed", False)),
         "raw_browser_content_included": False,
         "raw_secret_values_included": False,
         "raw_cookie_values_included": False,
@@ -3181,11 +3537,11 @@ def _browser_render_sandbox_receipt(*, executable: str, exit_code: int | None) -
     }
 
 
-def _browser_automation_boundaries(*, rendered: bool, live_mutation: bool = False, live_download: bool = False) -> dict[str, Any]:
-    live_browser_action = live_mutation or live_download
+def _browser_automation_boundaries(*, rendered: bool, live_mutation: bool = False, live_download: bool = False, live_upload: bool = False) -> dict[str, Any]:
+    live_browser_action = live_mutation or live_download or live_upload
     return {
         "boundary_schema": "browser_automation_boundaries_v1",
-        "capture_surface": "live_browser_download_snapshot" if live_download else "live_browser_mutation_snapshot" if live_mutation else "sanitized_generated_html" if rendered else "http_content_session_state",
+        "capture_surface": "live_browser_upload_snapshot" if live_upload else "live_browser_download_snapshot" if live_download else "live_browser_mutation_snapshot" if live_mutation else "sanitized_generated_html" if rendered else "http_content_session_state",
         "navigation_network": "main_frame_allowlist_only" if live_browser_action else "disabled_for_generated_file_capture" if rendered else "http_connector_allowlist_only",
         "remote_subresources_loaded": "allowlisted_only" if live_browser_action else False,
         "page_javascript_allowed": bool(live_browser_action),
@@ -3198,7 +3554,7 @@ def _browser_automation_boundaries(*, rendered: bool, live_mutation: bool = Fals
         "real_page_mutation_allowed": bool(live_browser_action),
         "virtual_interactions_only": not live_browser_action,
         "downloads_allowed": bool(live_download),
-        "uploads_allowed": False,
+        "uploads_allowed": bool(live_upload),
         "raw_secret_capture_allowed": False,
         "required_before_live_browser_adapter": [
             "ephemeral_profile",
@@ -3757,6 +4113,131 @@ def _capture_live_chromium_download(
                     process.wait(timeout=5)
 
 
+def _capture_live_chromium_upload(
+    *,
+    executable: str,
+    url: str,
+    selector: str,
+    source_path: Path,
+    screenshot_path: Path,
+    artifact_dir: Path,
+    allowlist: tuple[str, ...],
+    width: int = 1280,
+    height: int = 900,
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="aegis-browser-upload-", dir=artifact_dir) as profile_dir:
+        try:
+            if screenshot_path.exists():
+                screenshot_path.unlink()
+        except OSError:
+            pass
+        command = [
+            executable,
+            "--headless=new",
+            "--remote-debugging-port=0",
+            "--remote-allow-origins=*",
+            "--disable-background-networking",
+            "--disable-default-apps",
+            "--disable-extensions",
+            "--disable-gpu",
+            "--disable-notifications",
+            "--disable-popup-blocking",
+            "--disable-sync",
+            "--disable-translate",
+            "--hide-scrollbars",
+            "--mute-audio",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--deny-permission-prompts",
+            "--disable-features=AutofillServerCommunication,OptimizationHints,MediaRouter,Translate",
+            f"--host-resolver-rules={_chrome_host_resolver_rules(allowlist)}",
+            f"--user-data-dir={profile_dir}",
+            f"--window-size={width},{height}",
+            "about:blank",
+        ]
+        process: subprocess.Popen[str] | None = None
+        client: _CdpClient | None = None
+        try:
+            process = subprocess.Popen(command, cwd=artifact_dir, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            port = _read_devtools_port(Path(profile_dir), timeout=8)
+            target = _create_cdp_target(port, url)
+            websocket_url = str(target.get("webSocketDebuggerUrl") or "")
+            if not websocket_url:
+                raise RuntimeError("Chrome DevTools target did not expose a websocket URL")
+            client = _CdpClient(websocket_url, timeout=8)
+            client.call("Page.enable")
+            client.call("Runtime.enable")
+            client.call("Network.enable")
+            client.call("DOM.enable")
+            _try_cdp(client, "Browser.setDownloadBehavior", {"behavior": "deny"})
+            client.call("Page.navigate", {"url": url})
+            client.wait_for("Page.loadEventFired", timeout=10)
+            verify_result = client.evaluate(_live_upload_verify_expression(selector=selector), timeout=5)
+            if not (isinstance(verify_result, dict) and verify_result.get("ok")):
+                url_after = client.evaluate("location.href", timeout=5)
+                title = client.evaluate("document.title || ''", timeout=5)
+                return {
+                    "ok": False,
+                    "status": str(verify_result.get("status") if isinstance(verify_result, dict) else "file_input_not_found"),
+                    "width": width,
+                    "height": height,
+                    "exit_code": process.poll(),
+                    "url_after": _redacted_string(url_after, limit=2000) if isinstance(url_after, str) else _redacted_string(url, limit=2000),
+                    "title": _redacted_string(title, limit=200) if isinstance(title, str) else "",
+                    "action_result": verify_result if isinstance(verify_result, dict) else {"ok": False, "status": "invalid_action_result"},
+                    "error": str(verify_result.get("status") if isinstance(verify_result, dict) else "file input not found"),
+                }
+            document = client.call("DOM.getDocument", {"depth": 1, "pierce": True}, timeout=5)
+            root = document.get("root") if isinstance(document, dict) else {}
+            root_node_id = int(root.get("nodeId") or 0) if isinstance(root, dict) else 0
+            node = client.call("DOM.querySelector", {"nodeId": root_node_id, "selector": selector}, timeout=5)
+            node_id = int(node.get("nodeId") or 0) if isinstance(node, dict) else 0
+            if node_id <= 0:
+                raise RuntimeError("file input selector was not found after verification")
+            client.call("DOM.setFileInputFiles", {"nodeId": node_id, "files": [str(source_path)]}, timeout=8)
+            action_result = client.evaluate(_live_upload_finalize_expression(selector=selector), timeout=8)
+            url_after = client.evaluate("location.href", timeout=5)
+            title = client.evaluate("document.title || ''", timeout=5)
+            screenshot = client.call("Page.captureScreenshot", {"format": "png", "fromSurface": True}, timeout=10)
+            data = screenshot.get("data") if isinstance(screenshot, dict) else None
+            if isinstance(data, str) and data:
+                screenshot_path.write_bytes(base64.b64decode(data))
+            ok = bool(isinstance(action_result, dict) and action_result.get("ok"))
+            return {
+                "ok": ok,
+                "status": "uploaded" if ok else str(action_result.get("status") if isinstance(action_result, dict) else "upload_failed"),
+                "width": width,
+                "height": height,
+                "exit_code": process.poll(),
+                "url_after": _redacted_string(url_after, limit=2000) if isinstance(url_after, str) else _redacted_string(url, limit=2000),
+                "title": _redacted_string(title, limit=200) if isinstance(title, str) else "",
+                "action_result": action_result if isinstance(action_result, dict) else {"ok": False, "status": "invalid_action_result"},
+                "error": None if ok else str(redact(str(action_result.get("status") if isinstance(action_result, dict) else "live browser upload failed")[:500])),
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "status": "upload_failed",
+                "width": width,
+                "height": height,
+                "exit_code": process.poll() if process else None,
+                "url_after": _redacted_string(url, limit=2000),
+                "title": "",
+                "action_result": {"ok": False, "status": "upload_failed"},
+                "error": str(redact(str(exc)[:500])),
+            }
+        finally:
+            if client is not None:
+                client.close()
+            if process is not None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+
+
 def _wait_for_chromium_download(download_dir: Path, *, timeout: float, max_bytes: int) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     last_path: Path | None = None
@@ -3792,6 +4273,45 @@ def _safe_download_filename(value: Any) -> str:
     raw = Path(str(value or "download.bin")).name
     safe = "".join(char if char.isalnum() or char in {".", "-", "_"} else "_" for char in raw)[:160].strip("._")
     return safe or "download.bin"
+
+
+def _path_hash(value: Any) -> str:
+    return hashlib.sha256(str(value or "").encode("utf-8", errors="replace")).hexdigest()
+
+
+def _live_upload_source_check(value: Any, *, workspace_root: Path) -> dict[str, Any]:
+    path_hash = _path_hash(value)
+    if not value:
+        return {"ok": False, "reason": "missing upload source path", "path_sha256": path_hash, "filename": "", "bytes": 0, "mime_type": "", "sha256": ""}
+    raw_path = Path(str(value)).expanduser()
+    candidate = raw_path if raw_path.is_absolute() else workspace_root / raw_path
+    try:
+        candidate = candidate.resolve()
+    except OSError as exc:
+        return {"ok": False, "reason": str(exc), "path_sha256": path_hash, "filename": raw_path.name, "bytes": 0, "mime_type": "", "sha256": ""}
+    resolved_path_hash = hashlib.sha256(str(candidate).encode("utf-8", errors="replace")).hexdigest()
+    if workspace_root not in (candidate, *candidate.parents):
+        return {"ok": False, "reason": "upload source path escapes workspace root", "path_sha256": resolved_path_hash, "filename": candidate.name, "bytes": 0, "mime_type": "", "sha256": ""}
+    if not candidate.is_file():
+        return {"ok": False, "reason": "upload source path is not a file", "path_sha256": resolved_path_hash, "filename": candidate.name, "bytes": 0, "mime_type": "", "sha256": ""}
+    size = candidate.stat().st_size
+    if size <= 0:
+        return {"ok": False, "reason": "upload source file is empty", "path_sha256": resolved_path_hash, "filename": candidate.name, "bytes": size, "mime_type": "", "sha256": ""}
+    if size > _MAX_LIVE_BROWSER_UPLOAD_BYTES:
+        return {"ok": False, "reason": "upload source exceeds size limit", "path_sha256": resolved_path_hash, "filename": candidate.name, "bytes": size, "mime_type": "", "sha256": ""}
+    mime_type = _live_download_mime_type(candidate, filename=candidate.name)
+    if mime_type not in _ALLOWED_LIVE_BROWSER_UPLOAD_MIME_TYPES:
+        return {"ok": False, "reason": "upload source MIME type is not allowed", "path_sha256": resolved_path_hash, "filename": candidate.name, "bytes": size, "mime_type": mime_type, "sha256": ""}
+    return {
+        "ok": True,
+        "reason": None,
+        "path": candidate,
+        "path_sha256": resolved_path_hash,
+        "filename": _safe_download_filename(candidate.name),
+        "bytes": size,
+        "mime_type": mime_type,
+        "sha256": _file_sha256(candidate),
+    }
 
 
 def _live_download_mime_type(path: Path, *, filename: str) -> str:
@@ -3965,6 +4485,67 @@ def _live_download_expression(*, selector: str) -> str:
   element.dispatchEvent(new MouseEvent('mouseup', {{ bubbles: true, cancelable: true, view: window }}));
   element.click();
   return {{ ok: true, status: 'clicked_for_download', selector, element: safeElement(element), url_before: before, url_after: location.href }};
+}})()
+""".strip()
+
+
+def _live_upload_verify_expression(*, selector: str) -> str:
+    selector_json = json.dumps(selector or "", ensure_ascii=False)
+    return f"""
+(() => {{
+  const selector = {selector_json};
+  const element = document.querySelector(selector);
+  if (!element) return {{ ok: false, status: 'selector_not_found', selector }};
+  const tag = element.tagName ? element.tagName.toLowerCase() : '';
+  const type = String(element.getAttribute('type') || '').toLowerCase();
+  if (tag !== 'input' || type !== 'file') return {{ ok: false, status: 'not_file_input', selector, tag, type }};
+  const rect = element.getBoundingClientRect();
+  return {{
+    ok: true,
+    status: 'file_input_ready',
+    selector,
+    element: {{
+      tag,
+      type,
+      id: String(element.id || '').slice(0, 300),
+      name: String(element.getAttribute('name') || '').slice(0, 300),
+      accept: String(element.getAttribute('accept') || '').slice(0, 300),
+      multiple: Boolean(element.multiple),
+      rect: {{ x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }}
+    }},
+    url_before: location.href
+  }};
+}})()
+""".strip()
+
+
+def _live_upload_finalize_expression(*, selector: str) -> str:
+    selector_json = json.dumps(selector or "", ensure_ascii=False)
+    return f"""
+(() => {{
+  const selector = {selector_json};
+  const element = document.querySelector(selector);
+  if (!element) return {{ ok: false, status: 'selector_not_found', selector }};
+  const fileCount = element.files ? element.files.length : 0;
+  element.dispatchEvent(new Event('input', {{ bubbles: true }}));
+  element.dispatchEvent(new Event('change', {{ bubbles: true }}));
+  const rect = element.getBoundingClientRect();
+  return {{
+    ok: fileCount === 1,
+    status: fileCount === 1 ? 'uploaded' : 'file_not_attached',
+    selector,
+    file_count: fileCount,
+    element: {{
+      tag: element.tagName ? element.tagName.toLowerCase() : '',
+      type: String(element.getAttribute('type') || '').toLowerCase(),
+      id: String(element.id || '').slice(0, 300),
+      name: String(element.getAttribute('name') || '').slice(0, 300),
+      accept: String(element.getAttribute('accept') || '').slice(0, 300),
+      multiple: Boolean(element.multiple),
+      rect: {{ x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }}
+    }},
+    url_after: location.href
+  }};
 }})()
 """.strip()
 
@@ -4207,6 +4788,39 @@ def _browser_live_download_sandbox_receipt(*, executable: str, exit_code: int | 
     }
 
 
+def _browser_live_upload_sandbox_receipt(*, executable: str, exit_code: int | None, allowlist: tuple[str, ...]) -> dict[str, Any]:
+    return {
+        "sandbox_profile": "live_chromium_cdp_ephemeral_upload",
+        "adapter": "chromium-cdp-ephemeral-upload",
+        "ambient_workspace_read": False,
+        "explicit_workspace_source_reads_only": True,
+        "ambient_network": "allowlisted_browser_navigation_only",
+        "navigation_network": "main_frame_allowlist_only",
+        "network_allowlist": list(allowlist),
+        "remote_subresources_allowed": "allowlisted_only",
+        "remote_subresources_loaded": "allowlisted_only",
+        "cookies_persisted": False,
+        "cookie_jar_persisted": False,
+        "local_storage_persisted": False,
+        "session_storage_persisted": False,
+        "javascript_executed": True,
+        "page_javascript_allowed": True,
+        "original_page_dom_returned": False,
+        "dom_renderer_used": True,
+        "real_selector_events_dispatched": True,
+        "real_page_mutation_allowed": True,
+        "downloads_allowed": False,
+        "uploads_allowed": True,
+        "file_chooser_allowed": True,
+        "max_upload_bytes": _MAX_LIVE_BROWSER_UPLOAD_BYTES,
+        "renderer": Path(executable).name,
+        "renderer_exit_code": exit_code,
+        "raw_secret_capture_allowed": False,
+        "raw_network_body_returned": False,
+        "writes_confined_to": ".aegis/browser",
+    }
+
+
 def _browser_live_mutation_evidence(
     session: dict[str, Any],
     *,
@@ -4292,6 +4906,51 @@ def _browser_live_download_evidence(
     }
 
 
+def _browser_live_upload_evidence(
+    session: dict[str, Any],
+    *,
+    selector: str,
+    url: str,
+    source: dict[str, Any],
+    result: dict[str, Any],
+    artifact_hashes: dict[str, str],
+    sandbox_receipt: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "evidence_schema": "aegis.browser.live_upload_evidence.v1",
+        "captured_at": now_utc(),
+        "session_id": str(session.get("id", "")),
+        "action": "live_upload",
+        "selector": _redacted_string(selector, limit=500),
+        "url_before": _redacted_string(url, limit=2000),
+        "url_after": _redacted_string(str(result.get("url_after") or url), limit=2000),
+        "url_sha256": hashlib.sha256(url.encode("utf-8", errors="replace")).hexdigest(),
+        "capture_surface": "live_browser_private_upload",
+        "rendering_status": "rendered" if result.get("ok") else "render_failed",
+        "mode": "live_chromium_cdp_ephemeral_upload",
+        "source_filename": _redacted_string(source.get("filename"), limit=200),
+        "source_mime_type": _redacted_string(source.get("mime_type"), limit=120),
+        "source_bytes": _safe_int(source.get("bytes")),
+        "source_sha256": _redacted_string(source.get("sha256"), limit=64),
+        "source_path_sha256": _redacted_string(source.get("path_sha256"), limit=64),
+        "max_upload_bytes": _MAX_LIVE_BROWSER_UPLOAD_BYTES,
+        "content_returned": False,
+        "raw_browser_content_included": False,
+        "raw_secret_values_included": False,
+        "raw_cookie_values_included": False,
+        "raw_storage_values_included": False,
+        "raw_network_body_returned": False,
+        "model_invocation_performed": False,
+        "width": result.get("width"),
+        "height": result.get("height"),
+        "artifact_hashes": dict(artifact_hashes),
+        "sandbox_receipt": sandbox_receipt,
+        "automation_boundaries": _browser_automation_boundaries(rendered=True, live_upload=True),
+        "action_result": _safe_live_upload_action_result(result.get("action_result")),
+        "error": result.get("error"),
+    }
+
+
 def _safe_live_mutation_action_result(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
@@ -4327,6 +4986,22 @@ def _safe_live_download_action_result(value: Any) -> dict[str, Any]:
     if isinstance(value.get("element"), dict):
         element = _safe_live_mutation_element(value["element"])
         element["download_attr_present"] = bool(value["element"].get("download_attr_present", False))
+        safe["element"] = element
+    return safe
+
+
+def _safe_live_upload_action_result(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    safe: dict[str, Any] = {}
+    for key in ("ok", "status", "selector", "file_count", "url_before", "url_after"):
+        if key in value:
+            item = value[key]
+            safe[key] = _redacted_string(item, limit=500) if isinstance(item, str) else item
+    if isinstance(value.get("element"), dict):
+        element = _safe_live_mutation_element(value["element"])
+        element["accept"] = _redacted_string(value["element"].get("accept"), limit=120)
+        element["multiple"] = bool(value["element"].get("multiple", False))
         safe["element"] = element
     return safe
 
