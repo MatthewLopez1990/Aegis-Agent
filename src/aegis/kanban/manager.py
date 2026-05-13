@@ -46,6 +46,24 @@ result = {
 }
 print(json.dumps(result, sort_keys=True))
 """
+ALLOWED_SUBAGENT_WORKER_RESULT_KEYS = {
+    "worker_schema",
+    "status",
+    "profile_id",
+    "budget_schema",
+    "task_sha256",
+    "task_character_count",
+    "task_word_count",
+    "task_line_count",
+    "tool_calls_used",
+    "network_access",
+    "model_invocation",
+    "raw_instruction_included",
+    "raw_instruction_forwarded_to_model",
+    "returncode",
+    "stderr_sha256",
+    "stdout_sha256",
+}
 
 
 class KanbanManager:
@@ -127,22 +145,49 @@ class KanbanManager:
             "created_at": timestamp,
         }
         receipt_count = _handoff_receipt_count(metadata, default=1 if metadata.get("handoff_receipt") else 0) + 1
+        metadata_update: dict[str, Any] = {
+            "handoff_receipt": "subagent.handoff_recorded",
+            "handoff_receipts_recorded": receipt_count,
+            "last_handoff_receipt": receipt,
+        }
+        completion_receipt = None
+        if lane == "done" and isinstance(metadata.get("parent_review_receipt"), dict):
+            completion_receipt = _subagent_review_completion_receipt(
+                card=card,
+                board=board,
+                metadata=metadata,
+                handoff_receipt=receipt,
+                actor=actor,
+                completed_at=timestamp,
+            )
+            parent_task_id = _parent_task_id(card, metadata)
+            parent_task_linked = self._record_parent_task_review_completion(parent_task_id, completion_receipt)
+            completion_receipt["parent_task_linked"] = parent_task_linked
+            receipt["review_completion_receipt"] = completion_receipt
+            metadata_update.update(
+                {
+                    "review_status": completion_receipt["review_status"],
+                    "review_completion_receipt": completion_receipt,
+                    "parent_task_review_linked": parent_task_linked,
+                    "raw_worker_output_included": False,
+                }
+            )
         self.store.move_kanban_card(card_id, lane)
-        self.store.update_kanban_card_metadata(
-            card_id,
-            {
-                "handoff_receipt": "subagent.handoff_recorded",
-                "handoff_receipts_recorded": receipt_count,
-                "last_handoff_receipt": receipt,
-            },
-        )
+        self.store.update_kanban_card_metadata(card_id, metadata_update)
         audit_entry = self.audit_logger.append(
             "subagent.handoff_recorded",
             {**receipt, "role": metadata.get("role"), "receipt_count": receipt_count},
             task_id=str(card.get("task_id")) if card.get("task_id") else None,
         )
+        review_audit_entry = None
+        if completion_receipt is not None:
+            review_audit_entry = self.audit_logger.append(
+                "subagent.review_completed",
+                completion_receipt,
+                task_id=str(completion_receipt.get("parent_task_id")) if completion_receipt.get("parent_task_linked") else str(card.get("task_id")) if card.get("task_id") else None,
+            )
         updated_card = self._require_card(card_id)
-        return {
+        result = {
             "ok": True,
             "card_id": card_id,
             "lane": lane,
@@ -151,6 +196,10 @@ class KanbanManager:
             "audit_event_hash": audit_entry["event_hash"],
             "card": _subagent_card_summary(updated_card),
         }
+        if completion_receipt is not None:
+            result["review_completion_receipt"] = completion_receipt
+            result["review_audit_event_hash"] = review_audit_entry["event_hash"] if review_audit_entry else None
+        return result
 
     def run_subagent_delegation(self, card_id: str, *, actor: str = "operator", approved: bool = False) -> dict[str, Any]:
         card, board, metadata = self._require_subagent_card(card_id)
@@ -222,6 +271,24 @@ class KanbanManager:
             "raw_stderr_included": False,
             "worker_result": worker_result,
         }
+        parent_task_id = _parent_task_id(card, metadata)
+        parent_task_exists = bool(parent_task_id and self.store.get_task(parent_task_id) is not None)
+        review_binding_receipt = _subagent_review_binding_receipt(
+            card=card,
+            board=board,
+            metadata=metadata,
+            result_receipt=result_receipt,
+            worker_result=worker_result,
+            result_status=result_status,
+            result_lane=result_lane,
+            parent_task_id=parent_task_id,
+            parent_task_exists=parent_task_exists,
+            completed_at=completed_at,
+        )
+        parent_task_linked = self._record_parent_task_review_binding(parent_task_id, review_binding_receipt) if parent_task_exists else False
+        review_binding_receipt["parent_task_linked"] = parent_task_linked
+        result_receipt["review_binding_receipt"] = review_binding_receipt
+        review_status = str(review_binding_receipt["review_artifact"]["review_status"])
         self.store.move_kanban_card(card_id, result_lane)
         self.store.update_kanban_card_metadata(
             card_id,
@@ -230,10 +297,20 @@ class KanbanManager:
                 "subagent_runs_recorded": run_count,
                 "last_run_receipt": result_receipt,
                 "last_worker_result": worker_result,
+                "review_status": review_status,
+                "parent_review_receipt": review_binding_receipt,
+                "review_artifact": review_binding_receipt["review_artifact"],
+                "parent_task_review_linked": parent_task_linked,
+                "raw_worker_output_included": False,
                 "raw_instruction_forwarded_to_model": False,
             },
         )
         audit_entry = self.audit_logger.append("subagent.worker_completed", result_receipt, task_id=str(card.get("task_id")) if card.get("task_id") else None)
+        review_audit_entry = self.audit_logger.append(
+            "subagent.review_binding_recorded",
+            review_binding_receipt,
+            task_id=parent_task_id if parent_task_linked else str(card.get("task_id")) if card.get("task_id") else None,
+        )
         updated_card = self._require_card(card_id)
         return {
             "ok": result_status == "completed",
@@ -242,7 +319,9 @@ class KanbanManager:
             "lane": result_lane,
             "run_id": run_id,
             "receipt": result_receipt,
+            "review_receipt": review_binding_receipt,
             "audit_event_hash": audit_entry["event_hash"],
+            "review_audit_event_hash": review_audit_entry["event_hash"],
             "card": _subagent_card_summary(updated_card),
         }
 
@@ -346,6 +425,60 @@ class KanbanManager:
             "raw_instruction_included": False,
             "raw_instruction_forwarded_to_model": False,
         }
+
+    def _record_parent_task_review_binding(self, parent_task_id: str | None, review_receipt: dict[str, Any]) -> bool:
+        if not parent_task_id:
+            return False
+        task = self.store.get_task(parent_task_id)
+        if not task:
+            return False
+        checkpoint = _decode_checkpoint(task)
+        binding = _parent_review_checkpoint_entry(review_receipt)
+        bindings = [
+            row
+            for row in _checkpoint_review_bindings(checkpoint)
+            if not (row.get("card_id") == binding["card_id"] and row.get("run_id") == binding["run_id"])
+        ]
+        bindings.append(binding)
+        checkpoint["subagent_review_bindings"] = bindings[-20:]
+        checkpoint["subagent_review_required"] = any(row.get("review_status") == "awaiting_operator_review" for row in checkpoint["subagent_review_bindings"])
+        checkpoint["last_subagent_review_binding"] = binding
+        checkpoint["subagent_review_action_hints"] = subagent_review_action_hints(checkpoint)
+        checkpoint["raw_subagent_worker_output_included"] = False
+        checkpoint["raw_subagent_instruction_included"] = False
+        self.store.update_task(parent_task_id, checkpoint=checkpoint)
+        return True
+
+    def _record_parent_task_review_completion(self, parent_task_id: str | None, completion_receipt: dict[str, Any]) -> bool:
+        if not parent_task_id:
+            return False
+        task = self.store.get_task(parent_task_id)
+        if not task:
+            return False
+        checkpoint = _decode_checkpoint(task)
+        completion = _parent_review_completion_entry(completion_receipt)
+        updated_bindings: list[dict[str, Any]] = []
+        matched = False
+        for row in _checkpoint_review_bindings(checkpoint):
+            next_row = dict(row)
+            if row.get("card_id") == completion["card_id"] and (
+                not completion.get("run_id") or row.get("run_id") == completion.get("run_id")
+            ):
+                next_row["review_status"] = completion["review_status"]
+                next_row["review_completed_at"] = completion["review_completed_at"]
+                next_row["completion_receipt_sha256"] = completion["completion_receipt_sha256"]
+                matched = True
+            updated_bindings.append(next_row)
+        if not matched:
+            updated_bindings.append(completion)
+        checkpoint["subagent_review_bindings"] = updated_bindings[-20:]
+        checkpoint["subagent_review_required"] = any(row.get("review_status") == "awaiting_operator_review" for row in checkpoint["subagent_review_bindings"])
+        checkpoint["last_subagent_review_completion"] = completion
+        checkpoint["subagent_review_action_hints"] = subagent_review_action_hints(checkpoint)
+        checkpoint["raw_subagent_worker_output_included"] = False
+        checkpoint["raw_subagent_instruction_included"] = False
+        self.store.update_task(parent_task_id, checkpoint=checkpoint)
+        return True
 
     def list_boards(self) -> list[dict[str, Any]]:
         return [_decode(row) for row in self.store.list_kanban_boards()]
@@ -527,6 +660,12 @@ class KanbanManager:
                     lanes[lane] += 1
         open_cards = [card for card in cards if card.get("lane") != "done"]
         active_roles = sorted({str(card.get("owner")) for card in open_cards if card.get("owner")})
+        parent_bound_review_cards = [
+            card for card in cards if isinstance(card.get("metadata", {}).get("parent_review_receipt"), dict)
+        ]
+        parent_task_review_links = [
+            card for card in parent_bound_review_cards if bool(card.get("metadata", {}).get("parent_task_review_linked", False))
+        ]
         safe_cards = [_subagent_card_summary(card) for card in sorted(cards, key=lambda row: str(row.get("updated_at", "")), reverse=True)[: max(0, limit)]]
         return {
             "status": "delegation_queue_ready" if board is not None else "no_delegations",
@@ -542,6 +681,8 @@ class KanbanManager:
             "review_cards": lanes["review"],
             "blocked_cards": lanes["blocked"],
             "done_cards": lanes["done"],
+            "parent_bound_review_cards": len(parent_bound_review_cards),
+            "parent_task_review_links": len(parent_task_review_links),
             "active_roles": active_roles,
             "profiles": profiles,
             "profile_count": len(profiles),
@@ -558,9 +699,11 @@ class KanbanManager:
                 "recursive_budget_limits",
                 "isolated_parallel_runtime",
                 "operator_approved_batch_runtime",
+                "parent_bound_review_receipts",
             ],
             "remaining_depth_work": [],
             "raw_instruction_included": False,
+            "raw_worker_output_included": False,
         }
 
     def _require_board(self, board_id: str) -> dict[str, Any]:
@@ -614,6 +757,205 @@ def _subagent_run_count(metadata: dict[str, Any]) -> int:
         return 0
 
 
+def _parent_task_id(card: dict[str, Any], metadata: dict[str, Any]) -> str | None:
+    value = metadata.get("parent_task_id") or card.get("task_id")
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    return normalized or None
+
+
+def _stable_json_sha256(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _subagent_review_status(result_status: str, result_lane: str) -> str:
+    if result_status == "completed" and result_lane == "review":
+        return "awaiting_operator_review"
+    return "worker_failed_review_required"
+
+
+def _subagent_review_binding_receipt(
+    *,
+    card: dict[str, Any],
+    board: dict[str, Any],
+    metadata: dict[str, Any],
+    result_receipt: dict[str, Any],
+    worker_result: dict[str, Any],
+    result_status: str,
+    result_lane: str,
+    parent_task_id: str | None,
+    parent_task_exists: bool,
+    completed_at: str,
+) -> dict[str, Any]:
+    summary = str(worker_result.get("summary", ""))
+    review_status = _subagent_review_status(result_status, result_lane)
+    run_id = str(result_receipt.get("run_id") or "")
+    worker_result_sha256 = _stable_json_sha256(worker_result)
+    result_receipt_sha256 = _stable_json_sha256({key: value for key, value in result_receipt.items() if key != "review_binding_receipt"})
+    review_artifact = {
+        "artifact_schema": "aegis.subagent.review_artifact.v1",
+        "card_id": str(card["id"]),
+        "run_id": run_id,
+        "parent_task_id": parent_task_id,
+        "profile_id": metadata.get("profile_id"),
+        "review_status": review_status,
+        "review_lane": result_lane,
+        "worker_status": worker_result.get("status"),
+        "worker_result_sha256": worker_result_sha256,
+        "worker_receipt_sha256": result_receipt_sha256,
+        "result_summary_sha256": hashlib.sha256(summary.encode("utf-8")).hexdigest() if summary else None,
+        "result_summary_character_count": len(summary),
+        "result_summary_included": False,
+        "worker_task_character_count": worker_result.get("task_character_count"),
+        "worker_task_word_count": worker_result.get("task_word_count"),
+        "worker_task_line_count": worker_result.get("task_line_count"),
+        "taint": "TOOL_OUTPUT",
+        "instructions_tainted": bool(metadata.get("instructions_tainted", True)),
+        "operator_review_required": True,
+        "raw_worker_output_included": False,
+        "raw_worker_result_included": False,
+        "raw_instruction_included": False,
+        "raw_instruction_forwarded_to_model": False,
+        "autonomous_runtime": False,
+        "next_actions": [
+            "agents status",
+            f"agents handoff {card['id']} done reviewed" if review_status == "awaiting_operator_review" else f"agents handoff {card['id']} blocked reviewed",
+        ],
+    }
+    return {
+        "receipt_schema": "aegis.subagent.review_binding.v1",
+        "event_type": "subagent.review_binding_recorded",
+        "card_id": str(card["id"]),
+        "board_id": str(board["id"]),
+        "run_id": run_id,
+        "parent_task_id": parent_task_id,
+        "parent_task_exists": parent_task_exists,
+        "parent_task_linked": False,
+        "review_status": review_status,
+        "review_lane": result_lane,
+        "worker_result_status": worker_result.get("status"),
+        "worker_result_sha256": worker_result_sha256,
+        "worker_receipt_sha256": result_receipt_sha256,
+        "review_artifact": review_artifact,
+        "raw_worker_output_included": False,
+        "raw_worker_result_included": False,
+        "raw_instruction_included": False,
+        "raw_instruction_forwarded_to_model": False,
+        "autonomous_runtime": False,
+        "created_at": completed_at,
+    }
+
+
+def _subagent_review_completion_receipt(
+    *,
+    card: dict[str, Any],
+    board: dict[str, Any],
+    metadata: dict[str, Any],
+    handoff_receipt: dict[str, Any],
+    actor: str,
+    completed_at: str,
+) -> dict[str, Any]:
+    review_receipt = metadata.get("parent_review_receipt") if isinstance(metadata.get("parent_review_receipt"), dict) else {}
+    parent_task_id = _parent_task_id(card, metadata)
+    return {
+        "receipt_schema": "aegis.subagent.review_completion.v1",
+        "event_type": "subagent.review_completed",
+        "card_id": str(card["id"]),
+        "board_id": str(board["id"]),
+        "run_id": review_receipt.get("run_id"),
+        "parent_task_id": parent_task_id,
+        "parent_task_linked": False,
+        "review_status": "operator_review_completed",
+        "reviewer": _safe_actor(actor),
+        "handoff_receipt_sha256": _stable_json_sha256(handoff_receipt),
+        "worker_result_sha256": review_receipt.get("worker_result_sha256"),
+        "worker_receipt_sha256": review_receipt.get("worker_receipt_sha256"),
+        "raw_review_note_included": False,
+        "raw_worker_output_included": False,
+        "raw_worker_result_included": False,
+        "raw_instruction_included": False,
+        "raw_instruction_forwarded_to_model": False,
+        "autonomous_runtime": False,
+        "completed_at": completed_at,
+    }
+
+
+def _decode_checkpoint(task: dict[str, Any]) -> dict[str, Any]:
+    try:
+        decoded = json.loads(task.get("checkpoint_json") or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _checkpoint_review_bindings(checkpoint: dict[str, Any]) -> list[dict[str, Any]]:
+    bindings = checkpoint.get("subagent_review_bindings", [])
+    if not isinstance(bindings, list):
+        return []
+    return [dict(row) for row in bindings if isinstance(row, dict)]
+
+
+def _parent_review_checkpoint_entry(review_receipt: dict[str, Any]) -> dict[str, Any]:
+    artifact = review_receipt.get("review_artifact") if isinstance(review_receipt.get("review_artifact"), dict) else {}
+    return {
+        "binding_schema": "aegis.subagent.parent_review_binding.v1",
+        "card_id": review_receipt.get("card_id"),
+        "run_id": review_receipt.get("run_id"),
+        "parent_task_id": review_receipt.get("parent_task_id"),
+        "review_status": review_receipt.get("review_status"),
+        "review_lane": review_receipt.get("review_lane"),
+        "worker_result_status": review_receipt.get("worker_result_status"),
+        "worker_result_sha256": review_receipt.get("worker_result_sha256"),
+        "worker_receipt_sha256": review_receipt.get("worker_receipt_sha256"),
+        "result_summary_sha256": artifact.get("result_summary_sha256"),
+        "result_summary_character_count": artifact.get("result_summary_character_count"),
+        "worker_task_character_count": artifact.get("worker_task_character_count"),
+        "worker_task_word_count": artifact.get("worker_task_word_count"),
+        "worker_task_line_count": artifact.get("worker_task_line_count"),
+        "taint": artifact.get("taint", "TOOL_OUTPUT"),
+        "operator_review_required": True,
+        "raw_worker_output_included": False,
+        "raw_worker_result_included": False,
+        "raw_instruction_included": False,
+        "raw_instruction_forwarded_to_model": False,
+        "created_at": review_receipt.get("created_at"),
+    }
+
+
+def _parent_review_completion_entry(completion_receipt: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "binding_schema": "aegis.subagent.parent_review_binding.v1",
+        "card_id": completion_receipt.get("card_id"),
+        "run_id": completion_receipt.get("run_id"),
+        "parent_task_id": completion_receipt.get("parent_task_id"),
+        "review_status": completion_receipt.get("review_status"),
+        "worker_result_sha256": completion_receipt.get("worker_result_sha256"),
+        "worker_receipt_sha256": completion_receipt.get("worker_receipt_sha256"),
+        "completion_receipt_sha256": _stable_json_sha256(completion_receipt),
+        "review_completed_at": completion_receipt.get("completed_at"),
+        "operator_review_required": False,
+        "raw_worker_output_included": False,
+        "raw_worker_result_included": False,
+        "raw_instruction_included": False,
+        "raw_instruction_forwarded_to_model": False,
+    }
+
+
+def subagent_review_action_hints(checkpoint: dict[str, Any]) -> list[dict[str, str]]:
+    hints: list[dict[str, str]] = []
+    for binding in reversed(_checkpoint_review_bindings(checkpoint)):
+        card_id = str(binding.get("card_id") or "")
+        if not card_id or binding.get("review_status") != "awaiting_operator_review":
+            continue
+        hints.append({"label": "Review Subagent", "command": "agents status", "action": "subagent_review_status", "card_id": card_id})
+        hints.append({"label": "Complete Subagent Review", "command": f"agents handoff {card_id} done reviewed", "action": "subagent_review_complete", "card_id": card_id})
+        if len(hints) >= 4:
+            break
+    return hints
+
+
 def _worker_timeout_seconds(budget: dict[str, Any]) -> float:
     try:
         configured = int(budget.get("max_runtime_seconds", 0))
@@ -660,9 +1002,12 @@ def _decode_worker_result(stdout: str) -> dict[str, Any]:
             "raw_instruction_included": False,
             "raw_instruction_forwarded_to_model": False,
         }
-    decoded["raw_instruction_included"] = False
-    decoded["raw_instruction_forwarded_to_model"] = False
-    return decoded
+    sanitized = {key: decoded[key] for key in ALLOWED_SUBAGENT_WORKER_RESULT_KEYS if key in decoded}
+    sanitized["worker_schema"] = str(sanitized.get("worker_schema") or "aegis.subagent.isolated_worker.v1")
+    sanitized["raw_instruction_included"] = False
+    sanitized["raw_instruction_forwarded_to_model"] = False
+    sanitized["raw_worker_output_included"] = False
+    return sanitized
 
 
 def _profile_id(name: str) -> str:
@@ -871,5 +1216,11 @@ def _subagent_card_summary(card: dict[str, Any]) -> dict[str, Any]:
         "subagent_runs_recorded": _subagent_run_count(metadata),
         "last_run_receipt": metadata.get("last_run_receipt"),
         "last_worker_result": metadata.get("last_worker_result"),
+        "review_status": metadata.get("review_status"),
+        "parent_review_receipt": metadata.get("parent_review_receipt"),
+        "review_artifact": metadata.get("review_artifact"),
+        "review_completion_receipt": metadata.get("review_completion_receipt"),
+        "parent_task_review_linked": bool(metadata.get("parent_task_review_linked", False)),
+        "raw_worker_output_included": bool(metadata.get("raw_worker_output_included", False)),
         "raw_instruction_forwarded_to_model": bool(metadata.get("raw_instruction_forwarded_to_model", False)),
     }

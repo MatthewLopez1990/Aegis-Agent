@@ -19,7 +19,7 @@ from aegis.config.loader import load_config, write_default_config
 from aegis.connectors.registry import build_default_registry
 from aegis.execution.backends import ExecutionBackendRegistry
 from aegis.hooks.manager import HOOK_EVENTS, HookManager
-from aegis.kanban.manager import KanbanManager
+from aegis.kanban.manager import KanbanManager, subagent_review_action_hints
 from aegis.memory.manager import MemoryManager
 from aegis.memory.models import MemoryType
 from aegis.memory.store import LocalStore
@@ -2291,7 +2291,8 @@ def _session_manager(config: Any) -> SessionManager:
 
 def _task_list_payload(orchestrator: Any, row: dict[str, Any]) -> dict[str, Any]:
     payload = dict(row)
-    payload["action_hints"] = _task_action_hints(payload.get("id"), payload.get("session_id"), status=payload.get("status"))
+    checkpoint = _decode_checkpoint_json(payload.get("checkpoint_json"))
+    payload["action_hints"] = _task_action_hints(payload.get("id"), payload.get("session_id"), status=payload.get("status"), checkpoint=checkpoint)
     if payload.get("session_id"):
         payload["session"] = orchestrator.status(str(payload["id"])).get("session")
     else:
@@ -2299,7 +2300,7 @@ def _task_list_payload(orchestrator: Any, row: dict[str, Any]) -> dict[str, Any]
     return payload
 
 
-def _task_action_hints(task_id: Any, session_id: Any, *, status: Any) -> list[dict[str, str]]:
+def _task_action_hints(task_id: Any, session_id: Any, *, status: Any, checkpoint: dict[str, Any] | None = None) -> list[dict[str, str]]:
     hints: list[dict[str, str]] = []
     task_id_text = str(task_id) if task_id else ""
     if session_id:
@@ -2312,7 +2313,21 @@ def _task_action_hints(task_id: Any, session_id: Any, *, status: Any) -> list[di
         )
     if task_id_text and status in {"waiting_approval", "paused"}:
         hints.append({"label": "Resume", "command": f"task resume {task_id_text}", "action": "task_resume", "task_id": task_id_text})
+    if isinstance(checkpoint, dict):
+        hints.extend(subagent_review_action_hints(checkpoint))
     return hints
+
+
+def _decode_checkpoint_json(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value:
+        return {}
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
 
 
 def _approval_payload(orchestrator: Any, row: dict[str, Any]) -> dict[str, Any]:

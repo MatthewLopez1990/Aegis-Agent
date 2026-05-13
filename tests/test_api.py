@@ -751,7 +751,7 @@ class ApiServerSecurityTests(unittest.TestCase):
                 subagent_replayed = _json_post(
                     port,
                     "/subagents/delegate",
-                    {"role": "Researcher", "task": "Compare provider auth gaps.", "approval_id": subagent_gated["approval_id"]},
+                    {"role": "Researcher", "task": "Compare provider auth gaps.", "approval_id": subagent_gated["approval_id"], "task_id": task["id"]},
                     token=token,
                 )
                 self.assertTrue(subagent_replayed["ok"])
@@ -793,8 +793,16 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(subagent_run["lane"], "review")
                 self.assertEqual(subagent_run["receipt"]["worker_process"], "python_isolated_subprocess")
                 self.assertFalse(subagent_run["receipt"]["worker_result"]["raw_instruction_included"])
+                self.assertEqual(subagent_run["review_receipt"]["receipt_schema"], "aegis.subagent.review_binding.v1")
+                self.assertTrue(subagent_run["review_receipt"]["parent_task_linked"])
+                self.assertFalse(subagent_run["review_receipt"]["raw_worker_output_included"])
                 self.assertEqual(subagent_run["subagents"]["review_cards"], 1)
                 self.assertTrue(subagent_run["subagents"]["cards"][0]["isolated_parallel_runtime"])
+                self.assertEqual(subagent_run["subagents"]["cards"][0]["review_status"], "awaiting_operator_review")
+                self.assertIn("parent_bound_review_receipts", subagent_run["subagents"]["implemented_controls"])
+                subagent_parent_task = _json_get(port, f"/tasks/{task['id']}", token=token)
+                self.assertTrue(subagent_parent_task["checkpoint"]["subagent_review_required"])
+                self.assertIn("subagent_review_complete", {hint["action"] for hint in subagent_parent_task["action_hints"]})
                 subagent_second_gated = _json_post(port, "/subagents/delegate", {"role": "Researcher", "task": "Review remote receipts."}, token=token)
                 _json_post(
                     port,

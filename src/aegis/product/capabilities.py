@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from aegis.connectors.base import live_connector_activation
+from aegis.kanban.manager import subagent_review_action_hints
 
 
 ACTIVE_WORK_STATUSES = {"pending", "planned", "running", "waiting_approval", "paused"}
@@ -634,18 +636,17 @@ def _live_gap_backlog(
             "status": "isolated_worker_ready_autonomous_recursion_blocked",
             "detail": (
                 f"Approved subagent work is tracked through a durable, auditable delegation queue with "
-                f"{subagent_delegations['open_cards']} open card(s), {subagent_delegations.get('enabled_profile_count', 0)} enabled profile(s), enforced queue budgets, sanitized handoff receipts, approved isolated worker-run receipts, and operator-approved batch-run receipts; recursive autonomous model-loop execution remains blocked."
+                f"{subagent_delegations['open_cards']} open card(s), {subagent_delegations.get('enabled_profile_count', 0)} enabled profile(s), enforced queue budgets, sanitized handoff receipts, approved isolated worker-run receipts, parent-bound review receipts, and operator-approved batch-run receipts; recursive autonomous model-loop execution remains blocked."
             ),
             "sample_tools": ["subagent_delegate"],
             "operator_checklist": _subagent_operator_checklist(subagent_delegations),
             "next_steps": [
-                "Bind isolated worker output receipts to parent task completion and review workflows.",
                 "Add richer result artifacts while preserving tainted-instruction boundaries.",
                 "Only consider recursive autonomous model loops after deeper isolation, budget, and review controls land.",
             ],
-            "required_controls": ["human_approval", "tainted_instruction_metadata", "durable_queue", "recursive_budget_limits", "handoff_receipts", "isolated_worker_receipts", "operator_batch_receipts"],
-            "verification_gates": ["approval_required_delegation", "status_queue_visibility", "raw_instruction_redaction", "isolated_worker_receipts", "operator_batch_receipts", "blocked_autonomous_runtime"],
-            "evaluation_scenarios": ["subagent.delegation_queue_visibility", "subagent.isolated_worker_receipts", "subagent.operator_batch_receipts", "subagent.autonomous_runtime_blocked"],
+            "required_controls": ["human_approval", "tainted_instruction_metadata", "durable_queue", "recursive_budget_limits", "handoff_receipts", "isolated_worker_receipts", "parent_bound_review_receipts", "operator_batch_receipts"],
+            "verification_gates": ["approval_required_delegation", "status_queue_visibility", "raw_instruction_redaction", "isolated_worker_receipts", "parent_bound_review_receipt", "parent_task_review_binding", "operator_batch_receipts", "blocked_autonomous_runtime"],
+            "evaluation_scenarios": ["subagent.delegation_queue_visibility", "subagent.isolated_worker_receipts", "subagent.parent_bound_review_receipt", "subagent.operator_batch_receipts", "subagent.autonomous_runtime_blocked"],
             "configured_provider_count": len(configured_providers),
         },
         {
@@ -723,6 +724,11 @@ def _subagent_operator_checklist(subagent_delegations: dict[str, Any]) -> list[d
             "control": "operator_approved_batch_runtime",
             "state": "enforced" if "operator_approved_batch_runtime" in subagent_delegations.get("implemented_controls", []) else "blocked",
             "detail": "Operators can drain multiple ready subagent cards through the same approved isolated worker path and receive one sanitized batch receipt.",
+        },
+        {
+            "control": "parent_bound_review_receipts",
+            "state": "enforced" if "parent_bound_review_receipts" in subagent_delegations.get("implemented_controls", []) else "pending",
+            "detail": "Isolated worker results produce parent-task review bindings with hashes, counts, taint flags, and explicit review actions without raw worker output.",
         },
     ]
 
@@ -1112,6 +1118,7 @@ def _tool_implementation_readiness(tools: list[dict[str, Any]]) -> list[dict[str
 
 
 def _decode_task(orchestrator: Any, row: dict[str, Any]) -> dict[str, Any]:
+    checkpoint = _decode_checkpoint_json(row.get("checkpoint_json"))
     task = {
         "id": row["id"],
         "user_request": row["user_request"],
@@ -1120,7 +1127,7 @@ def _decode_task(orchestrator: Any, row: dict[str, Any]) -> dict[str, Any]:
         "risk_level": row["risk_level"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
-        "action_hints": _task_action_hints(row.get("id"), row.get("session_id"), status=row.get("status")),
+        "action_hints": _task_action_hints(row.get("id"), row.get("session_id"), status=row.get("status"), checkpoint=checkpoint),
     }
     if row.get("session_id"):
         task["session_id"] = row["session_id"]
@@ -1130,7 +1137,7 @@ def _decode_task(orchestrator: Any, row: dict[str, Any]) -> dict[str, Any]:
     return task
 
 
-def _task_action_hints(task_id: Any, session_id: Any, *, status: Any) -> list[dict[str, str]]:
+def _task_action_hints(task_id: Any, session_id: Any, *, status: Any, checkpoint: dict[str, Any] | None = None) -> list[dict[str, str]]:
     hints: list[dict[str, str]] = []
     task_id_text = str(task_id) if task_id else ""
     if session_id:
@@ -1143,7 +1150,21 @@ def _task_action_hints(task_id: Any, session_id: Any, *, status: Any) -> list[di
         )
     if task_id_text and status in {"waiting_approval", "paused"}:
         hints.append({"label": "Resume", "command": f"task resume {task_id_text}", "action": "task_resume", "task_id": task_id_text})
+    if isinstance(checkpoint, dict):
+        hints.extend(subagent_review_action_hints(checkpoint))
     return hints
+
+
+def _decode_checkpoint_json(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value:
+        return {}
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
 
 
 def _decode_pending_approval(orchestrator: Any, approval: dict[str, Any]) -> dict[str, Any]:

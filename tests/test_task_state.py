@@ -99,6 +99,59 @@ class TaskStateTests(unittest.TestCase):
             self.assertIn("task", event_kinds)
             self.assertTrue(any(item["title"] == "receipt.generated" for item in timeline["items"]))
 
+    def test_subagent_run_binds_review_receipt_to_parent_task_without_raw_worker_content(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            orchestrator = build_orchestrator(data_dir=root / ".aegis", workspace=root)
+            parent = orchestrator.submit_task("Track the parent review workflow.")
+            orchestrator.kanban.create_subagent_profile("Researcher", max_parallel_cards=2)
+            delegated = orchestrator.tools.execute(
+                "subagent_delegate",
+                {"role": "Researcher", "task": "Compare provider auth gaps token=abc123."},
+                approved=True,
+                task_id=parent["id"],
+            )
+            worker_stdout = json.dumps(
+                {
+                    "worker_schema": "aegis.subagent.isolated_worker.v1",
+                    "status": "completed",
+                    "profile_id": "researcher",
+                    "task_sha256": "0" * 64,
+                    "raw_output": "token=abc123",
+                    "summary": "raw token=abc123",
+                    "network_access": "disabled",
+                    "model_invocation": False,
+                }
+            )
+
+            with patch(
+                "aegis.kanban.manager._run_subagent_worker",
+                return_value=subprocess.CompletedProcess(args=("worker",), returncode=0, stdout=worker_stdout, stderr="stderr token=abc123"),
+            ):
+                run = orchestrator.kanban.run_subagent_delegation(delegated["card_id"], approved=True, actor="operator")
+
+            self.assertTrue(run["ok"])
+            self.assertEqual(run["review_receipt"]["receipt_schema"], "aegis.subagent.review_binding.v1")
+            self.assertTrue(run["review_receipt"]["parent_task_linked"])
+            self.assertEqual(run["review_receipt"]["parent_task_id"], parent["id"])
+            self.assertFalse(run["review_receipt"]["raw_worker_output_included"])
+            self.assertFalse(run["review_receipt"]["raw_instruction_included"])
+            self.assertNotIn("raw_output", run["receipt"]["worker_result"])
+            self.assertNotIn("summary", run["receipt"]["worker_result"])
+            parent_status = orchestrator.status(parent["id"])
+            parent_payload = json.dumps(parent_status, sort_keys=True)
+            self.assertTrue(parent_status["checkpoint"]["subagent_review_required"])
+            self.assertEqual(parent_status["checkpoint"]["subagent_review_bindings"][0]["card_id"], delegated["card_id"])
+            self.assertIn("subagent_review_complete", {hint["action"] for hint in parent_status["action_hints"]})
+            self.assertNotIn("token=abc123", parent_payload)
+            self.assertNotIn("stderr token", parent_payload)
+
+            completed = orchestrator.kanban.move_subagent_delegation(delegated["card_id"], "done", actor="operator", reason="reviewed token=abc123")
+            self.assertEqual(completed["review_completion_receipt"]["review_status"], "operator_review_completed")
+            parent_after_review = orchestrator.status(parent["id"])
+            self.assertFalse(parent_after_review["checkpoint"]["subagent_review_required"])
+            self.assertNotIn("token=abc123", json.dumps(parent_after_review, sort_keys=True))
+
     def test_task_evidence_keeps_audit_events_after_unrelated_activity(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

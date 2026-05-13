@@ -137,9 +137,12 @@ class CliTests(unittest.TestCase):
             self.assertEqual(browser_checklist["live_browser_automation"]["state"], "blocked_with_preflight")
             subagent_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "subagent_runtime_depth")
             self.assertIn("operator_batch_receipts", subagent_gap["required_controls"])
+            self.assertIn("parent_bound_review_receipts", subagent_gap["required_controls"])
+            self.assertIn("subagent.parent_bound_review_receipt", subagent_gap["evaluation_scenarios"])
             self.assertIn("subagent.operator_batch_receipts", subagent_gap["evaluation_scenarios"])
             subagent_checklist = {item["control"]: item for item in subagent_gap["operator_checklist"]}
             self.assertEqual(subagent_checklist["operator_approved_batch_runtime"]["state"], "enforced")
+            self.assertEqual(subagent_checklist["parent_bound_review_receipts"]["state"], "enforced")
             backend_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "remote_backend_activation")
             self.assertEqual(backend_gap["status"], "backend_adapters_available_unconfigured")
             self.assertIn("available_backend_adapters", backend_gap)
@@ -578,6 +581,7 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             parser = build_parser()
             data_dir = Path(temp) / ".aegis"
+            parent_task = dispatch(parser.parse_args(["--data-dir", str(data_dir), "task", "submit", "Track subagent review binding."]))
 
             initial = dispatch(parser.parse_args(["--data-dir", str(data_dir), "agents", "status"]))
             self.assertEqual(initial["status"], "no_delegations")
@@ -641,7 +645,7 @@ class CliTests(unittest.TestCase):
                         "Compare provider auth gaps.",
                         "--approved",
                         "--task-id",
-                        "parent-task",
+                        parent_task["id"],
                     ]
                 )
             )
@@ -649,7 +653,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(delegated["execution_mode"], "durable_card_queue")
             self.assertFalse(delegated["raw_instruction_forwarded_to_model"])
             self.assertEqual(delegated["subagents"]["ready_cards"], 1)
-            self.assertEqual(delegated["subagents"]["cards"][0]["parent_task_id"], "parent-task")
+            self.assertEqual(delegated["subagents"]["cards"][0]["parent_task_id"], parent_task["id"])
             self.assertEqual(delegated["subagents"]["cards"][0]["profile_id"], "researcher")
             self.assertEqual(delegated["subagents"]["cards"][0]["profile_snapshot"]["tool_allowlist"], ["web_search"])
             self.assertTrue(delegated["subagents"]["cards"][0]["budget_enforced"])
@@ -710,13 +714,22 @@ class CliTests(unittest.TestCase):
             self.assertEqual(run["receipt"]["worker_result"]["network_access"], "disabled")
             self.assertFalse(run["receipt"]["worker_result"]["model_invocation"])
             self.assertFalse(run["receipt"]["worker_result"]["raw_instruction_included"])
+            self.assertEqual(run["review_receipt"]["receipt_schema"], "aegis.subagent.review_binding.v1")
+            self.assertTrue(run["review_receipt"]["parent_task_linked"])
+            self.assertFalse(run["review_receipt"]["raw_worker_output_included"])
             self.assertEqual(run["subagents"]["review_cards"], 1)
             self.assertTrue(run["subagents"]["cards"][0]["isolated_parallel_runtime"])
             self.assertEqual(run["subagents"]["cards"][0]["subagent_runs_recorded"], 1)
             self.assertIn("task_sha256", run["subagents"]["cards"][0]["last_worker_result"])
+            self.assertEqual(run["subagents"]["cards"][0]["review_status"], "awaiting_operator_review")
+            self.assertEqual(run["subagents"]["cards"][0]["parent_review_receipt"]["receipt_schema"], "aegis.subagent.review_binding.v1")
+            task_status = dispatch(parser.parse_args(["--data-dir", str(data_dir), "task", "status", parent_task["id"]]))
+            self.assertTrue(task_status["checkpoint"]["subagent_review_required"])
+            self.assertIn("subagent_review_complete", {hint["action"] for hint in task_status["action_hints"]})
             audit_text = (data_dir / "audit.jsonl").read_text(encoding="utf-8")
             self.assertIn("subagent.handoff_recorded", audit_text)
             self.assertIn("subagent.worker_completed", audit_text)
+            self.assertIn("subagent.review_binding_recorded", audit_text)
             self.assertNotIn("reviewed raw private handoff reason", audit_text)
             disabled_profile = dispatch(parser.parse_args(["--data-dir", str(data_dir), "agents", "profile-disable", "researcher"]))
             self.assertTrue(disabled_profile["ok"])
@@ -786,6 +799,9 @@ class CliTests(unittest.TestCase):
             self.assertFalse(batch["raw_instruction_forwarded_to_model"])
             self.assertEqual(batch["subagents"]["review_cards"], 2)
             self.assertIn("operator_approved_batch_runtime", batch["subagents"]["implemented_controls"])
+            self.assertIn("parent_bound_review_receipts", batch["subagents"]["implemented_controls"])
+            self.assertEqual(batch["subagents"]["parent_bound_review_cards"], 2)
+            self.assertTrue(all(result["review_receipt"]["receipt_schema"] == "aegis.subagent.review_binding.v1" for result in batch["results"]))
             self.assertTrue(all(result["receipt"]["worker_process"] == "python_isolated_subprocess" for result in batch["results"]))
             audit_text = (data_dir / "audit.jsonl").read_text(encoding="utf-8")
             self.assertIn("subagent.batch_completed", audit_text)

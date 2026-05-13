@@ -35,7 +35,7 @@ from aegis.channels.email import deliver_smtp_email
 from aegis.channels.webhook import deliver_signed_webhook, verify_signed_webhook
 from aegis.execution.backends import ExecutionBackendRegistry
 from aegis.hooks.manager import HookManager
-from aegis.kanban.manager import KanbanManager
+from aegis.kanban.manager import KanbanManager, subagent_review_action_hints
 from aegis.learning.loop import LearningLoop
 from aegis.memory.manager import MemoryManager, MemorySafetyError
 from aegis.memory.models import MemoryType
@@ -352,6 +352,7 @@ class AgentOrchestrator:
     def status(self, task_id: str) -> dict[str, Any]:
         task = self._require_task(task_id)
         session = self._task_session_snapshot(task)
+        checkpoint = json.loads(task["checkpoint_json"])
         return {
             "id": task["id"],
             "status": task["status"],
@@ -359,9 +360,9 @@ class AgentOrchestrator:
             "risk_level": task["risk_level"],
             "session_id": task.get("session_id"),
             "session": session,
-            "action_hints": _task_action_hints(task["id"], task.get("session_id"), status=task["status"]),
+            "action_hints": _task_action_hints(task["id"], task.get("session_id"), status=task["status"], checkpoint=checkpoint),
             "plan": json.loads(task["plan_json"]),
-            "checkpoint": json.loads(task["checkpoint_json"]),
+            "checkpoint": checkpoint,
             "receipt": json.loads(task["receipt_json"]) if task["receipt_json"] else None,
         }
 
@@ -2972,7 +2973,7 @@ def _checkpoint_approval_id(result: dict[str, Any]) -> str | None:
     return None
 
 
-def _task_action_hints(task_id: Any, session_id: Any, *, status: Any) -> list[dict[str, str]]:
+def _task_action_hints(task_id: Any, session_id: Any, *, status: Any, checkpoint: dict[str, Any] | None = None) -> list[dict[str, str]]:
     hints: list[dict[str, str]] = []
     task_id_text = str(task_id) if task_id else ""
     if session_id:
@@ -2985,6 +2986,8 @@ def _task_action_hints(task_id: Any, session_id: Any, *, status: Any) -> list[di
         )
     if task_id_text and status in {TaskStatus.WAITING_APPROVAL.value, TaskStatus.PAUSED.value}:
         hints.append({"label": "Resume", "command": f"task resume {task_id_text}", "action": "task_resume", "task_id": task_id_text})
+    if isinstance(checkpoint, dict):
+        hints.extend(subagent_review_action_hints(checkpoint))
     return hints
 
 

@@ -18,6 +18,7 @@ from aegis.approvals.actions import approval_action_hints
 from aegis.approvals.models import ApprovalRequest
 from aegis.channels.base import ChannelResponse
 from aegis.hooks.manager import HOOK_EVENTS
+from aegis.kanban.manager import subagent_review_action_hints
 from aegis.memory.models import MemoryType
 from aegis.migration.openclaw import preview_hermes_memory_import, preview_openclaw_memory_import
 from aegis.product.capabilities import build_product_dashboard
@@ -2461,13 +2462,13 @@ def _task_summary(row: dict[str, Any], *, orchestrator: Any | None = None) -> di
     receipt_json = decoded.pop("receipt_json", None)
     decoded["receipt"] = json.loads(receipt_json) if receipt_json else None
     decoded["session"] = None
-    decoded["action_hints"] = _task_action_hints(decoded.get("id"), decoded.get("session_id"), status=decoded.get("status"))
+    decoded["action_hints"] = _task_action_hints(decoded.get("id"), decoded.get("session_id"), status=decoded.get("status"), checkpoint=decoded["checkpoint"])
     if orchestrator is not None and decoded.get("session_id"):
         decoded["session"] = orchestrator.status(str(decoded["id"])).get("session")
     return decoded
 
 
-def _task_action_hints(task_id: Any, session_id: Any, *, status: Any) -> list[dict[str, str]]:
+def _task_action_hints(task_id: Any, session_id: Any, *, status: Any, checkpoint: dict[str, Any] | None = None) -> list[dict[str, str]]:
     hints: list[dict[str, str]] = []
     task_id_text = str(task_id) if task_id else ""
     if session_id:
@@ -2480,6 +2481,8 @@ def _task_action_hints(task_id: Any, session_id: Any, *, status: Any) -> list[di
         )
     if task_id_text and status in {"waiting_approval", "paused"}:
         hints.append({"label": "Resume", "command": f"task resume {task_id_text}", "action": "task_resume", "task_id": task_id_text})
+    if isinstance(checkpoint, dict):
+        hints.extend(subagent_review_action_hints(checkpoint))
     return hints
 
 
