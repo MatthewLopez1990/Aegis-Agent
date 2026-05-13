@@ -125,6 +125,56 @@ class SchedulerTests(unittest.TestCase):
             self.assertIn("hook.run", event_types)
             self.assertIn("schedule.no_agent_hook_ran", event_types)
 
+    def test_schedule_can_use_previous_hook_output_as_redacted_untrusted_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            orchestrator = build_orchestrator(data_dir=root / ".aegis", workspace=root)
+            producer = orchestrator.create_script_schedule(
+                name="Collect local status",
+                cron="@hourly",
+                command=[
+                    "python3",
+                    "-c",
+                    "print('probe result token=abc123')",
+                ],
+                channel="terminal",
+            )
+            orchestrator.schedules.approve(producer["id"], approved_by="reviewer")
+            orchestrator.schedules.activate(producer["id"])
+            orchestrator.store.update_schedule(producer["id"], {"next_run_at": "2000-01-01T00:00:00+00:00"})
+
+            produced = orchestrator.run_due_schedules()["results"][0]
+            producer_after = orchestrator.schedules.get(producer["id"])
+            output_snapshot = producer_after["metadata"]["last_hook_output"]
+            self.assertEqual(produced["hook_output_snapshot"]["output_sha256"], output_snapshot["output_sha256"])
+            self.assertIn("[REDACTED_VALUE]", output_snapshot["stdout_preview"])
+            self.assertNotIn("abc123", json.dumps(output_snapshot, sort_keys=True))
+
+            consumer = orchestrator.schedules.create_schedule(
+                name="Summarize probe",
+                natural_language="Summarize the last local probe output",
+                cron="@hourly",
+                task_request="Summarize the prior no-agent probe.",
+                channel="terminal",
+                context_from=(f"schedule:last-hook-output:{producer['id']}",),
+            )
+            orchestrator.schedules.approve(consumer["id"], approved_by="reviewer")
+            orchestrator.schedules.activate(consumer["id"])
+            orchestrator.store.update_schedule(consumer["id"], {"next_run_at": "2000-01-01T00:00:00+00:00"})
+
+            consumed = orchestrator.run_due_schedules()["results"][0]
+
+            self.assertEqual(consumed["context_primary_path"], None)
+            self.assertEqual(consumed["context_snapshots"][0]["kind"], "schedule_last_hook_output")
+            self.assertFalse(consumed["context_snapshots"][0]["raw_content_included"])
+            task = orchestrator.store.get_task(consumed["task_id"])
+            self.assertIsNotNone(task)
+            self.assertIn("Scheduled context_from snapshots", task["user_request"])
+            self.assertIn("[REDACTED_VALUE]", task["user_request"])
+            self.assertNotIn("abc123", task["user_request"])
+            consumer_after = orchestrator.schedules.get(consumer["id"])
+            self.assertEqual(consumer_after["metadata"]["last_context_snapshot_count"], 1)
+
     def test_due_schedule_claim_prevents_duplicate_runs(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
