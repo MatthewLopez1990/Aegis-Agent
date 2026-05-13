@@ -2898,7 +2898,13 @@ class CliTests(unittest.TestCase):
                 "- Operator prefers governed migration commits.\n- token=abc123 should never be imported.\n",
                 encoding="utf-8",
             )
+            (openclaw_home / "config.yaml").write_text("api_key: abc123\n", encoding="utf-8")
+            (openclaw_home / "sessions").mkdir()
+            (openclaw_home / "sessions" / "session.jsonl").write_text(json.dumps({"summary": "Migration session metadata"}), encoding="utf-8")
+            (openclaw_home / "skills").mkdir()
+            (openclaw_home / "skills" / "candidate.json").write_text(json.dumps({"name": "Candidate"}), encoding="utf-8")
 
+            inspected = dispatch(parser.parse_args(["--data-dir", str(data_dir), "migrate", "openclaw", str(openclaw_home)]))
             preview = dispatch(
                 parser.parse_args(["--data-dir", str(data_dir), "migrate", "openclaw-memory-preview", str(openclaw_home), "--owner", "operator", "--scope", "repo"])
             )
@@ -2907,9 +2913,15 @@ class CliTests(unittest.TestCase):
             )
             stored = LocalStore(data_dir / "aegis.db").get_memory(committed["memories"][0]["id"])
 
-            self.assertEqual(preview["candidate_count"], 1)
+            self.assertEqual(inspected["inventory_mode"], "metadata_only_inventory")
+            self.assertEqual(inspected["inventory_counts"]["config_files"], 1)
+            self.assertEqual(inspected["inventory_counts"]["session_files"], 1)
+            self.assertEqual(inspected["inventory_counts"]["skill_files"], 1)
+            self.assertFalse(inspected["raw_content_included"])
+            self.assertNotIn("abc123", json.dumps(inspected, sort_keys=True))
+            self.assertEqual(preview["candidate_count"], 2)
             self.assertEqual(committed["mode"], "memory_preview_commit")
-            self.assertEqual(committed["committed_count"], 1)
+            self.assertEqual(committed["committed_count"], 2)
             self.assertEqual(committed["memories"][0]["provenance"]["candidate_id"], preview["candidates"][0]["id"])
             self.assertEqual(committed["memories"][0]["provenance"]["reviewer"], "cli-reviewer")
             self.assertNotIn("abc123", json.dumps(committed, sort_keys=True))

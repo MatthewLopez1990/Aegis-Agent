@@ -105,6 +105,7 @@ Commands:
 - `memory export [query]`
 - `memory delete <memory_id>`
 - `migrate openclaw|hermes|openclaw-memory-preview|hermes-memory-preview|openclaw-memory-commit|hermes-memory-commit <path> [--owner USER] [--scope SCOPE]`
+- `migrate openclaw|hermes` renders a metadata-only inventory for config, context, memory, sessions, skills, plugins, schedules, and process files without raw content or content hashes.
 - `mcp list|register <name> <command-or-endpoint> <tool,tool>|register <name> <command-or-endpoint> --discover [--transport stdio|streamable-http] [--token-secret name] [--tool name] [--exclude-tool name] [--no-resources] [--no-prompts] [--enable] [--no-approval]|auth token <server> <token-secret>|auth oauth <server> [--resource-metadata url] [--authorization-server url] [--token-secret name] [--scope scope]|call <server> <tool> <json> [--approved]`
 - Discovered stdio and Streamable HTTP MCP servers expose Hermes-style virtual tools named `mcp_<server>_<tool>` in `tools`, `toolsets`, and `/tools/run`; capability-aware utility wrappers add `mcp_<server>_list_resources`, `mcp_<server>_read_resource`, `mcp_<server>_list_prompts`, and `mcp_<server>_get_prompt` when the MCP session advertises resources or prompts. Streamable HTTP bearer credentials can be attached by secret name, and OAuth protected-resource metadata from a sanitized `WWW-Authenticate` challenge can be recorded or configured with a brokered OAuth bearer secret. Calls still flow through the MCP allowlist, policy gate, approval path, and tool-output quarantine.
 - `reload-mcp`

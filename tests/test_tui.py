@@ -1627,6 +1627,9 @@ class TuiTests(unittest.TestCase):
                 "- Operator prefers dry-run migration previews.\n- token=abc123 should never be imported.\n",
                 encoding="utf-8",
             )
+            (openclaw_home / "config.yaml").write_text("api_key: abc123\n", encoding="utf-8")
+            (openclaw_home / "sessions").mkdir()
+            (openclaw_home / "sessions" / "session.jsonl").write_text(json.dumps({"summary": "Session metadata"}), encoding="utf-8")
             tui = AegisTui(data_dir=root / ".aegis", workspace=root)
             output = io.StringIO()
 
@@ -1637,15 +1640,19 @@ class TuiTests(unittest.TestCase):
 
             rendered = output.getvalue()
             self.assertIn('"mode": "dry_run_only"', rendered)
+            self.assertIn('"inventory_mode": "metadata_only_inventory"', rendered)
+            self.assertIn('"config_files": 1', rendered)
+            self.assertIn('"session_files": 1', rendered)
             self.assertIn('"mode": "dry_run_memory_preview"', rendered)
             self.assertIn('"mode": "memory_preview_commit"', rendered)
-            self.assertIn('"committed_count": 1', rendered)
+            self.assertIn('"committed_count": 2', rendered)
             self.assertIn('"reviewer": "tui-reviewer"', rendered)
             self.assertIn('"review_required"', rendered)
             self.assertIn('"owner": "operator"', rendered)
             self.assertIn('"scope": "repo"', rendered)
             self.assertNotIn("abc123", rendered)
             self.assertTrue(tui.orchestrator.memory.retrieve_relevant("dry-run migration", owner="operator", scope="repo"))
+            self.assertTrue(tui.orchestrator.memory.retrieve_relevant("Session metadata", owner="operator", scope="repo"))
             self.assertEqual(tui.orchestrator.memory.retrieve_relevant("migration previews"), [])
 
     def test_mcp_call_command_requires_approval_then_runs_allowlisted_stdio_server(self) -> None:

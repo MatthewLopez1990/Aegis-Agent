@@ -15,7 +15,33 @@ from aegis.security.taint import Sensitivity
 
 _MAX_IMPORT_FILE_BYTES = 128_000
 _MAX_CANDIDATES = 100
+_MAX_INVENTORY_ITEMS = 100
 _SUPPORTED_MEMORY_SUFFIXES = {".md", ".markdown", ".txt", ".json", ".jsonl"}
+_SUPPORTED_METADATA_SUFFIXES = {
+    ".md",
+    ".markdown",
+    ".txt",
+    ".json",
+    ".jsonl",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".mdc",
+    ".py",
+    ".sh",
+}
+_SECRET_PATH_MARKERS = ("secret", "token", "credential", "apikey", "api_key", "password", ".env", "oauth")
+_CONTEXT_FILENAMES = {
+    "SOUL.md",
+    "MEMORY.md",
+    "USER.md",
+    "AGENTS.md",
+    "CLAUDE.md",
+    ".hermes.md",
+    "HERMES.md",
+    ".cursorrules",
+    "TOOLS.md",
+}
 
 
 def inspect_openclaw_home(path: str | Path) -> dict[str, Any]:
@@ -28,11 +54,33 @@ def inspect_openclaw_home(path: str | Path) -> dict[str, Any]:
         "skills": root / "skills",
         "config": root / "openclaw.yaml",
     }
+    inventory = _inventory_home(
+        root,
+        config_files=[
+            root / "openclaw.yaml",
+            root / "openclaw.yml",
+            root / "config.yaml",
+            root / "config.yml",
+            root / "config.json",
+            root / "settings.json",
+        ],
+        memory_dirs=[root / "memory", root / "memories"],
+        session_dirs=[root / "sessions", root / "conversations"],
+        skill_dirs=[root / "skills"],
+        plugin_dirs=[root / "plugins"],
+        schedule_dirs=[root / "schedules", root / "jobs"],
+        process_dirs=[root / "processes", root / "bashes"],
+    )
     return {
         "root": str(root),
         "exists": root.exists(),
         "found": {name: target.exists() for name, target in candidates.items()},
         "mode": "dry_run_only",
+        "inventory_mode": "metadata_only_inventory",
+        "inventory": inventory["inventory"],
+        "inventory_counts": inventory["counts"],
+        "blocked_inventory": inventory["blocked"],
+        "raw_content_included": False,
         "secrets_import": "blocked_by_default_use_secrets_broker",
     }
 
@@ -59,11 +107,33 @@ def inspect_hermes_home(path: str | Path) -> dict[str, Any]:
         "config": root / "config.yaml",
         "sessions": root / "sessions",
     }
+    inventory = _inventory_home(
+        root,
+        config_files=[
+            root / "config.yaml",
+            root / "config.yml",
+            root / "config.json",
+            root / "settings.json",
+            root / "hermes.yaml",
+            root / "hermes.yml",
+        ],
+        memory_dirs=[root / "memory", root / "memories"],
+        session_dirs=[root / "sessions", root / "conversations", root / "chats"],
+        skill_dirs=[root / "skills", root / "procedures"],
+        plugin_dirs=[root / "plugins", root / "extensions"],
+        schedule_dirs=[root / "cron", root / "jobs", root / "schedules"],
+        process_dirs=[root / "processes", root / "terminals", root / "shells"],
+    )
     return {
         "root": str(root),
         "exists": root.exists(),
         "found": {name: target.exists() for name, target in candidates.items()},
         "mode": "dry_run_only",
+        "inventory_mode": "metadata_only_inventory",
+        "inventory": inventory["inventory"],
+        "inventory_counts": inventory["counts"],
+        "blocked_inventory": inventory["blocked"],
+        "raw_content_included": False,
         "secrets_import": "blocked_by_default_use_secrets_broker",
     }
 
@@ -148,6 +218,117 @@ def _iter_supported_files(path: Path) -> list[Path]:
     if not path.is_dir():
         return []
     return sorted(item for item in path.rglob("*") if item.is_file() and item.suffix.lower() in _SUPPORTED_MEMORY_SUFFIXES)
+
+
+def _inventory_home(
+    root: Path,
+    *,
+    config_files: list[Path],
+    memory_dirs: list[Path],
+    session_dirs: list[Path],
+    skill_dirs: list[Path],
+    plugin_dirs: list[Path],
+    schedule_dirs: list[Path],
+    process_dirs: list[Path],
+) -> dict[str, Any]:
+    blocked: list[dict[str, Any]] = []
+    inventory = {
+        "context_files": _metadata_entries(_iter_context_files(root), root=root, kind="context_file", blocked=blocked),
+        "config_files": _metadata_entries(config_files, root=root, kind="config_file", blocked=blocked),
+        "memory_files": _metadata_entries(_iter_inventory_files(memory_dirs), root=root, kind="memory_file", blocked=blocked),
+        "session_files": _metadata_entries(_iter_inventory_files(session_dirs), root=root, kind="session_file", blocked=blocked),
+        "skill_files": _metadata_entries(_iter_inventory_files(skill_dirs), root=root, kind="skill_file", blocked=blocked),
+        "plugin_files": _metadata_entries(_iter_inventory_files(plugin_dirs), root=root, kind="plugin_file", blocked=blocked),
+        "schedule_files": _metadata_entries(_iter_inventory_files(schedule_dirs), root=root, kind="schedule_file", blocked=blocked),
+        "process_files": _metadata_entries(_iter_inventory_files(process_dirs), root=root, kind="process_file", blocked=blocked),
+    }
+    return {
+        "inventory": inventory,
+        "counts": {name: len(entries) for name, entries in inventory.items()},
+        "blocked": blocked[:_MAX_INVENTORY_ITEMS],
+    }
+
+
+def _iter_inventory_files(paths: list[Path]) -> list[Path]:
+    files: list[Path] = []
+    for path in paths:
+        if not path.exists():
+            continue
+        if path.is_file():
+            if path.suffix.lower() in _SUPPORTED_METADATA_SUFFIXES:
+                files.append(path)
+            continue
+        if path.is_dir():
+            for item in sorted(path.rglob("*")):
+                if len(files) >= _MAX_INVENTORY_ITEMS:
+                    return files
+                if item.is_file() and item.suffix.lower() in _SUPPORTED_METADATA_SUFFIXES:
+                    files.append(item)
+    return files[:_MAX_INVENTORY_ITEMS]
+
+
+def _iter_context_files(root: Path) -> list[Path]:
+    if not root.exists():
+        return []
+    files: list[Path] = [root / name for name in sorted(_CONTEXT_FILENAMES) if (root / name).exists()]
+    cursor_rules = root / ".cursor" / "rules"
+    if cursor_rules.exists():
+        files.extend(sorted(cursor_rules.glob("*.mdc")))
+    for item in sorted(root.rglob("*")):
+        if len(files) >= _MAX_INVENTORY_ITEMS:
+            break
+        if item.is_file() and (item.name in _CONTEXT_FILENAMES or item.match("*/.cursor/rules/*.mdc")) and item not in files:
+            files.append(item)
+    return files[:_MAX_INVENTORY_ITEMS]
+
+
+def _metadata_entries(paths: list[Path], *, root: Path, kind: str, blocked: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    root_resolved = root.resolve(strict=False)
+    seen: set[Path] = set()
+    for path in paths:
+        if len(entries) >= _MAX_INVENTORY_ITEMS:
+            break
+        if not path.exists():
+            continue
+        try:
+            resolved = path.expanduser().resolve(strict=True)
+        except OSError as exc:
+            blocked.append(_blocked_file(path, root=root, reason=f"resolve_failed:{exc.__class__.__name__}"))
+            continue
+        if root_resolved not in (resolved, *resolved.parents):
+            blocked.append(_blocked_file(path, root=root, reason="outside_import_root"))
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        try:
+            file_stat = resolved.stat()
+        except OSError as exc:
+            blocked.append(_blocked_file(path, root=root, reason=f"stat_failed:{exc.__class__.__name__}"))
+            continue
+        relative_path = _relative(resolved, root_resolved)
+        secret_like_path = _secret_like_path(relative_path)
+        entries.append(
+            {
+                "path": relative_path,
+                "kind": kind,
+                "suffix": resolved.suffix.lower(),
+                "size_bytes": int(file_stat.st_size),
+                "path_sha256": hashlib.sha256(relative_path.encode("utf-8", errors="replace")).hexdigest(),
+                "secret_like_path": secret_like_path,
+                "secrets_import": "blocked_by_default_use_secrets_broker" if secret_like_path else "not_detected_from_path",
+                "raw_content_included": False,
+                "content_hash_included": False,
+                "import_action": "metadata_only_review",
+            }
+        )
+    return entries
+
+
+def _secret_like_path(path: str) -> bool:
+    lowered = path.lower()
+    return any(marker in lowered for marker in _SECRET_PATH_MARKERS)
 
 
 def _extract_candidate_texts(raw: str, *, suffix: str) -> list[str]:

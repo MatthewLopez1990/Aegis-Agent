@@ -343,7 +343,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "multi-agent routing primitives",
                 "schedules",
                 "diagnostic panels",
-                "migration inspection",
+                "metadata-only migration inspection",
                 "session-bound run visibility",
             ],
             "security_delta": "Aegis defaults to mock or dry-run mode for broad-access capabilities until credentials, scopes, rollback, and approvals are explicit.",
