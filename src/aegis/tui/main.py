@@ -3366,7 +3366,7 @@ class AegisTui(cmd.Cmd):
             if label is None and len(parts) > 1 and not parts[1].startswith("--"):
                 label = parts[1]
             allowed_actions = _comma_separated(
-                _option_value(parts, "--allowed-actions") or "status,events,pause,cancel"
+                _option_value(parts, "--allowed-actions") or "status,events,resume,pause,cancel"
             )
             expires_in_seconds = _optional_int(_option_value(parts, "--expires-in-seconds"))
             registry = RemoteControlPairingRegistry(

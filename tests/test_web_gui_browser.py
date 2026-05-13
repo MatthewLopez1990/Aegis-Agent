@@ -1027,6 +1027,7 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn('id="remote-control-session-id"', markup)
         self.assertIn('id="remote-control-task-id"', markup)
         self.assertIn('id="remote-control-actions"', markup)
+        self.assertIn('value="status,events,resume,pause,cancel"', markup)
         self.assertIn('id="remote-control-ttl"', markup)
         self.assertIn('id="remote-control-relay-form"', markup)
         self.assertIn('id="remote-control-relay-url"', markup)

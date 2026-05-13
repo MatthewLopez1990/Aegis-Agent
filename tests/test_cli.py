@@ -757,6 +757,8 @@ class CliTests(unittest.TestCase):
             parser = build_parser()
             data_dir = Path(temp) / ".aegis"
             data_dir.mkdir()
+            default_pair_args = parser.parse_args(["--data-dir", str(data_dir), "remote-control", "pair"])
+            self.assertEqual(default_pair_args.allowed_actions, "status,events,resume,pause,cancel")
             (data_dir / "config.toml").write_text(
                 "\n".join(
                     [

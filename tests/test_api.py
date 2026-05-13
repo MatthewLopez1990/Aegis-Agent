@@ -546,7 +546,7 @@ class ApiServerSecurityTests(unittest.TestCase):
                         "label": "API smoke phone",
                         "task_id": remote_control_task["id"],
                         "session_id": web_session["id"],
-                        "allowed_actions": ["status", "events", "pause", "cancel"],
+                        "allowed_actions": ["status", "events", "resume", "pause", "cancel"],
                         "expires_in_seconds": 90,
                     },
                     token=token,
@@ -1267,13 +1267,14 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(remote_pair["token_header"], "X-Aegis-Remote-Token")
                 self.assertEqual(remote_pair["pairing"]["status"], "active")
                 self.assertEqual(remote_pair["pairing"]["task_id"], remote_control_task["id"])
-                self.assertEqual(remote_pair["pairing"]["allowed_actions"], ["cancel", "events", "pause", "status"])
+                self.assertEqual(remote_pair["pairing"]["allowed_actions"], ["cancel", "events", "pause", "resume", "status"])
                 self.assertNotIn(remote_token, json.dumps(remote_pair["pairing"], sort_keys=True))
                 self.assertEqual(remote_status_paired["status"], "remote_pairing_active")
                 self.assertEqual(remote_directory["status"], "remote_directory_available")
                 self.assertEqual(remote_directory["scope"]["type"], "task")
                 self.assertEqual(remote_directory["tasks"][0]["id"], remote_control_task["id"])
                 self.assertEqual(remote_directory["tasks"][0]["links"]["status"], f"/remote-control/tasks/{remote_control_task['id']}")
+                self.assertEqual(remote_directory["tasks"][0]["links"]["resume"], f"/remote-control/tasks/{remote_control_task['id']}/resume")
                 self.assertFalse(remote_directory["user_request_included"])
                 self.assertFalse(remote_directory["plan_receipt_included"])
                 self.assertEqual(local_remote_directory["tasks"][0]["id"], remote_control_task["id"])

@@ -435,6 +435,8 @@ class TuiTests(unittest.TestCase):
             pair_payload = json.loads(pair_rendered)
             self.assertIn('"status": "paired"', pair_rendered)
             self.assertIn('"token_header": "X-Aegis-Remote-Token"', pair_rendered)
+            self.assertEqual(pair_payload["pairing"]["allowed_actions"], ["cancel", "events", "pause", "resume", "status"])
+            self.assertIn('"task_resume": "http://127.0.0.1:8765/remote-control/tasks/:id/resume"', pair_rendered)
             self.assertIn('"task_pause": "http://127.0.0.1:8765/remote-control/tasks/:id/pause"', pair_rendered)
             self.assertNotIn("token_sha256", pair_rendered)
             directory_output = io.StringIO()

@@ -459,7 +459,7 @@ def build_parser() -> argparse.ArgumentParser:
     remote_control_pair.add_argument("--task-id", help="Optional task scope")
     remote_control_pair.add_argument(
         "--allowed-actions",
-        default="status,events,pause,cancel",
+        default="status,events,resume,pause,cancel",
         help="Comma-separated task actions",
     )
     remote_control_pair.add_argument(
