@@ -729,12 +729,12 @@ class BuiltinToolExecutor:
         adapter_name = str(provider_adapter["name"] or "generic")
         source_file: dict[str, Any] | None = None
         mask_file: dict[str, Any] | None = None
-        if adapter_name in {"openai_image_edit", "google_imagen_edit"}:
+        if adapter_name in {"openai_image_edit", "google_imagen_edit", "google_imagen_upscale"}:
             try:
                 root = _workspace_root(self.connectors)
                 source_file = _live_media_source_file(root=root, source_path=source_path, field="image", provider_adapter=adapter_name)
                 mask_path = str(params.get("mask_path") or params.get("mask") or "").strip()
-                if mask_path:
+                if mask_path and adapter_name in {"openai_image_edit", "google_imagen_edit"}:
                     mask_file = _live_media_source_file(root=root, source_path=mask_path, field="mask", provider_adapter=adapter_name)
             except ToolExecutionError as exc:
                 return {
@@ -3252,6 +3252,10 @@ def _live_media_provider_adapter(*, name: str, params: dict[str, Any]) -> dict[s
         if name != "image_edit":
             return {"name": raw, "error": "google_imagen_edit provider adapter currently supports image_edit only"}
         return {"name": "google_imagen_edit", "error": None}
+    if raw in {"google_imagen_upscale", "vertex_imagen_upscale", "vertex_ai_imagen_upscale", "imagen_upscale", "google_vertex_imagen_upscale"}:
+        if name != "image_edit":
+            return {"name": raw, "error": "google_imagen_upscale provider adapter currently supports image_edit only"}
+        return {"name": "google_imagen_upscale", "error": None}
     if raw in {"openai_image_edit", "openai_images_edit", "openai_images_edits", "openai_compatible_image_edit"}:
         if name != "image_edit":
             return {"name": raw, "error": "openai_image_edit provider adapter currently supports image_edit only"}
@@ -3624,6 +3628,43 @@ def _live_media_request_payload(
                 output_options["compressionQuality"] = parsed_quality
             parameters["outputOptions"] = output_options
         return {"instances": [instance], "parameters": parameters}
+    if provider_adapter == "google_imagen_upscale":
+        if source_file is None:
+            raise ToolExecutionError("google_imagen_upscale requires a workspace-scoped source image")
+        factor = str(params.get("upscale_factor") or params.get("upscaleFactor") or params.get("scale") or "x2").strip().lower()
+        if factor not in {"x2", "x3", "x4"}:
+            raise ToolExecutionError("upscaleFactor must be x2, x3, or x4")
+        instance = {
+            "prompt": str(params.get("prompt") or prompt or "Upscale the image")[:2000],
+            "image": {
+                "bytesBase64Encoded": "<redacted>",
+                "sha256": str(source_file["sha256"]),
+                "mimeType": str(source_file["mime_type"]),
+                "byteCount": int(source_file["bytes"]),
+            },
+        }
+        parameters: dict[str, Any] = {
+            "mode": "upscale",
+            "upscaleConfig": {
+                "upscaleFactor": factor,
+            },
+        }
+        output_mime = str(params.get("output_mime_type") or params.get("mime_type") or params.get("mimeType") or "").strip()
+        compression_quality = params.get("compression_quality", params.get("compressionQuality"))
+        if output_mime or compression_quality is not None:
+            output_options: dict[str, Any] = {}
+            if output_mime:
+                output_options["mimeType"] = output_mime[:80]
+            if compression_quality is not None:
+                try:
+                    parsed_quality = int(compression_quality)
+                except (TypeError, ValueError) as exc:
+                    raise ToolExecutionError("compressionQuality must be an integer") from exc
+                if parsed_quality < 0 or parsed_quality > 100:
+                    raise ToolExecutionError("compressionQuality must be between 0 and 100")
+                output_options["compressionQuality"] = parsed_quality
+            parameters["outputOptions"] = output_options
+        return {"instances": [instance], "parameters": parameters}
     if provider_adapter == "openai_tts":
         payload = {
             "model": str(params.get("model") or "gpt-4o-mini-tts")[:200],
@@ -3756,6 +3797,11 @@ def _send_live_media_provider_request(
             return {"ok": False, "http_status": 0, "error": "google_imagen_edit requires a workspace-scoped source image"}
         body = _encode_google_imagen_edit_json(payload=payload, source_file=source_file, mask_file=mask_file)
         content_type = "application/json"
+    elif provider_adapter == "google_imagen_upscale":
+        if source_file is None:
+            return {"ok": False, "http_status": 0, "error": "google_imagen_upscale requires a workspace-scoped source image"}
+        body = _encode_google_imagen_upscale_json(payload=payload, source_file=source_file)
+        content_type = "application/json"
     else:
         body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
         content_type = "application/json"
@@ -3767,7 +3813,7 @@ def _send_live_media_provider_request(
         headers["xi-api-key"] = token
     else:
         headers["Authorization"] = f"Bearer {token}"
-    if provider_adapter in {"stability_v1_text_to_image", "google_imagen", "google_imagen_edit"}:
+    if provider_adapter in {"stability_v1_text_to_image", "google_imagen", "google_imagen_edit", "google_imagen_upscale"}:
         headers["Accept"] = "application/json"
     request = Request(
         url,
@@ -3846,18 +3892,19 @@ def _live_media_source_file(*, root: Path, source_path: str, field: str, provide
 
 
 def _source_image_upload_mime(content: bytes, *, provider_adapter: str = "openai_image_edit") -> tuple[str, str]:
+    google_imagen_source_adapter = provider_adapter in {"google_imagen_edit", "google_imagen_upscale"}
     if content.startswith(b"\x89PNG\r\n\x1a\n"):
         return "image/png", "png"
     if content.startswith(b"\xff\xd8"):
         return "image/jpeg", "jpg"
-    if provider_adapter == "google_imagen_edit" and (content.startswith(b"GIF87a") or content.startswith(b"GIF89a")):
+    if google_imagen_source_adapter and (content.startswith(b"GIF87a") or content.startswith(b"GIF89a")):
         return "image/gif", "gif"
-    if provider_adapter == "google_imagen_edit" and content.startswith(b"BM"):
+    if google_imagen_source_adapter and content.startswith(b"BM"):
         return "image/bmp", "bmp"
-    if provider_adapter != "google_imagen_edit" and content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+    if not google_imagen_source_adapter and content.startswith(b"RIFF") and content[8:12] == b"WEBP":
         return "image/webp", "webp"
-    if provider_adapter == "google_imagen_edit":
-        raise ToolExecutionError("google_imagen_edit source images must be PNG, JPEG, GIF, or BMP")
+    if google_imagen_source_adapter:
+        raise ToolExecutionError(f"{provider_adapter} source images must be PNG, JPEG, GIF, or BMP")
     raise ToolExecutionError("openai_image_edit source images must be PNG, JPEG, or WEBP")
 
 
@@ -3961,6 +4008,24 @@ def _encode_google_imagen_edit_json(*, payload: dict[str, Any], source_file: dic
     prompt = redacted_instance.get("prompt")
     if prompt:
         actual_instance["prompt"] = str(prompt)
+    actual_payload: dict[str, Any] = {"instances": [actual_instance]}
+    parameters = payload.get("parameters")
+    if isinstance(parameters, dict):
+        actual_payload["parameters"] = parameters
+    return json.dumps(actual_payload, sort_keys=True, default=str).encode("utf-8")
+
+
+def _encode_google_imagen_upscale_json(*, payload: dict[str, Any], source_file: dict[str, Any]) -> bytes:
+    instances = payload.get("instances")
+    if not isinstance(instances, list) or not instances or not isinstance(instances[0], dict):
+        raise ToolExecutionError("google_imagen_upscale request payload must include one instance")
+    redacted_instance = instances[0]
+    actual_instance: dict[str, Any] = {
+        "prompt": str(redacted_instance.get("prompt") or "Upscale the image"),
+        "image": {
+            "bytesBase64Encoded": base64.b64encode(bytes(source_file["content"])).decode("ascii"),
+        },
+    }
     actual_payload: dict[str, Any] = {"instances": [actual_instance]}
     parameters = payload.get("parameters")
     if isinstance(parameters, dict):

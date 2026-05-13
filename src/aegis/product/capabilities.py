@@ -639,6 +639,10 @@ def _live_gap_backlog(
                     "evidence": "approved provider-backed image edits can send a Google Vertex Imagen edit predict-style JSON request with workspace-scoped reference images and persist returned predictions[].bytesBase64Encoded artifacts without storing raw prompt, source bytes, response body, or secret values",
                 },
                 {
+                    "control": "google_imagen_upscale_provider_adapter",
+                    "evidence": "approved provider-backed image upscale can send a Google Vertex Imagen upscale predict-style JSON request with a workspace-scoped source image and persist returned predictions[].bytesBase64Encoded artifacts without storing raw prompt, source bytes, response body, or secret values",
+                },
+                {
                     "control": "openai_style_tts_provider_adapter",
                     "evidence": "approved provider-backed TTS can send an OpenAI-style speech request and persist the returned audio artifact without storing raw text, response body, or secret values",
                 },
@@ -686,6 +690,7 @@ def _live_gap_backlog(
                     {"adapter": "google_imagen", "tool": "image_generate", "response_shape": "predictions[].bytesBase64Encoded"},
                     {"adapter": "openai_image_edit", "tool": "image_edit", "response_shape": "data[].b64_json"},
                     {"adapter": "google_imagen_edit", "tool": "image_edit", "response_shape": "predictions[].bytesBase64Encoded"},
+                    {"adapter": "google_imagen_upscale", "tool": "image_edit", "response_shape": "predictions[].bytesBase64Encoded"},
                     {"adapter": "openai_tts", "tool": "tts", "response_shape": "binary_audio"},
                     {"adapter": "elevenlabs_tts", "tool": "tts", "response_shape": "binary_audio"},
                     {"adapter": "openai_transcription", "tool": "voice_transcribe", "response_shape": "transcript_text"},
@@ -693,7 +698,7 @@ def _live_gap_backlog(
                     {"adapter": "openai_video", "tool": "video_generate", "response_shape": "job_lifecycle_and_bounded_artifacts"},
                 ],
                 "remaining_by_modality": {
-                    "image": ["provider-native image upscale and product-image adapters"],
+                    "image": ["provider-native product-image adapters"],
                     "audio": ["additional provider-native speech-to-speech, voice-cloning, and dialogue adapters"],
                     "video": ["additional provider-native video lifecycle adapters"],
                 },
@@ -738,6 +743,7 @@ def _live_gap_backlog(
                     "google_imagen_provider_adapter",
                     "openai_style_image_edit_provider_adapter",
                     "google_imagen_edit_provider_adapter",
+                    "google_imagen_upscale_provider_adapter",
                     "openai_style_tts_provider_adapter",
                     "elevenlabs_tts_provider_adapter",
                     "openai_style_transcription_provider_adapter",

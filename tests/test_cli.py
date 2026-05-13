@@ -737,6 +737,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("stability_v1_image_provider_adapter", browser_controls)
             self.assertIn("google_imagen_provider_adapter", browser_controls)
             self.assertIn("google_imagen_edit_provider_adapter", browser_controls)
+            self.assertIn("google_imagen_upscale_provider_adapter", browser_controls)
             self.assertIn("elevenlabs_tts_provider_adapter", browser_controls)
             self.assertIn("elevenlabs_transcription_provider_adapter", browser_controls)
             provider_media_adapters = browser_gap["provider_media_adapters"]
@@ -748,6 +749,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(implemented_media_adapters["google_imagen"]["response_shape"], "predictions[].bytesBase64Encoded")
             self.assertIn("google_imagen_edit", implemented_media_adapters)
             self.assertEqual(implemented_media_adapters["google_imagen_edit"]["response_shape"], "predictions[].bytesBase64Encoded")
+            self.assertIn("google_imagen_upscale", implemented_media_adapters)
+            self.assertEqual(implemented_media_adapters["google_imagen_upscale"]["response_shape"], "predictions[].bytesBase64Encoded")
             self.assertIn("elevenlabs_tts", implemented_media_adapters)
             self.assertEqual(implemented_media_adapters["elevenlabs_tts"]["response_shape"], "binary_audio")
             self.assertIn("elevenlabs_transcription", implemented_media_adapters)
