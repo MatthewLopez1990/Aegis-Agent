@@ -2053,6 +2053,14 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 )
                 self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)))})
                 return
+            if path == "/subagents/review-packet":
+                payload = self._read_json()
+                result = orchestrator.kanban.create_subagent_review_packet(
+                    str(_required(payload, "card_id")),
+                    actor=str(payload.get("actor", "api-operator")),
+                )
+                self._json({**result, "subagents": orchestrator.kanban.subagent_status(limit=int(payload.get("limit", 20)), include_previews=False)})
+                return
             if path == "/subagents/run-batch":
                 payload = self._read_json()
                 result = orchestrator.kanban.run_subagent_batch(

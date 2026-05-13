@@ -268,6 +268,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("remote-env|teleport|tp", help_rendered)
             self.assertIn("web-setup", help_rendered)
             self.assertIn("pr_comments", help_rendered)
+            self.assertIn("agents status|profiles|delegate|handoff|review-packet|run|run-batch", help_rendered)
             self.assertIn("terminal-setup|vim", help_rendered)
             self.assertIn("footer|busy|indicator|details", help_rendered)
             self.assertIn("snapshot|snap|rollback", help_rendered)
@@ -359,8 +360,10 @@ class TuiTests(unittest.TestCase):
             self.assertIn("profile-create", tui.complete_agents("profile-c", "agents profile-c", len("agents "), len("agents profile-c")))
             self.assertIn("profile-disable", tui.complete_agents("profile-d", "agents profile-d", len("agents "), len("agents profile-d")))
             self.assertIn("handoff", tui.complete_agents("ha", "agents ha", len("agents "), len("agents ha")))
+            self.assertIn("review-packet", tui.complete_agents("review", "agents review", len("agents "), len("agents review")))
             self.assertIn("run", tui.complete_agents("ru", "agents ru", len("agents "), len("agents ru")))
             self.assertIn("run-batch", tui.complete_agents("run-b", "agents run-b", len("agents "), len("agents run-b")))
+            self.assertIn("review-packet", tui.completedefault("review", "/agents review", len("/agents "), len("/agents review")))
             self.assertIn("--discover", tui.completedefault("--", "/mcp register fake python3 --", len("/mcp register fake python3 "), len("/mcp register fake python3 --")))
             self.assertIn("--transport", tui.completedefault("--", "/mcp register fake python3 --", len("/mcp register fake python3 "), len("/mcp register fake python3 --")))
             self.assertIn("--no-resources", tui.completedefault("--", "/mcp register fake python3 --", len("/mcp register fake python3 "), len("/mcp register fake python3 --")))
@@ -1105,6 +1108,41 @@ class TuiTests(unittest.TestCase):
             self.assertIn(tui.session["id"][:8], rendered)
             self.assertIn(f"session open {tui.session['id']}", rendered)
             self.assertIn(tui.session["title"], rendered)
+
+    def test_agents_review_packet_command_creates_model_ready_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tui = AegisTui(data_dir=root / ".aegis", workspace=root)
+
+            with redirect_stdout(io.StringIO()):
+                tui.onecmd("agents profile-create Reviewer --tool calculator")
+                tui.onecmd("agents delegate Reviewer Summarize milestone evidence --approved")
+
+            card_id = tui.orchestrator.kanban.subagent_status()["cards"][0]["id"]
+            output = io.StringIO()
+            with redirect_stdout(output):
+                tui.onecmd("agents review-packet")
+                tui.onecmd(f"agents review-packet {card_id}")
+
+            rendered = output.getvalue()
+            packet_paths = list((root / ".aegis" / "subagent-review-packets").glob("*.json"))
+            self.assertEqual(len(packet_paths), 1)
+            packet = json.loads(packet_paths[0].read_text(encoding="utf-8"))
+            self.assertIn("usage: agents review-packet <card-id>", rendered)
+            self.assertIn('"receipt_schema": "aegis.subagent.model_review_packet.v1"', rendered)
+            self.assertIn('"event_type": "subagent.model_review_packet_created"', rendered)
+            self.assertIn('"actor": "tui-operator"', rendered)
+            self.assertIn('"model_ready": true', rendered)
+            self.assertNotIn("Summarize milestone evidence", rendered)
+            self.assertIn('"operator_review_required": true', rendered)
+            self.assertIn('"model_invocation_performed": false', rendered)
+            self.assertIn('"raw_instruction_included": false', rendered)
+            self.assertIn('"subagents"', rendered)
+            self.assertEqual(packet["actor"], "tui-operator")
+            self.assertEqual(packet["card"]["card_id"], card_id)
+            self.assertTrue(packet["controls"]["model_ready"])
+            self.assertFalse(packet["controls"]["raw_instruction_included"])
+            self.assertFalse(packet["controls"]["model_invocation_performed"])
 
     def test_mcp_commands_register_disabled_approval_required_server(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

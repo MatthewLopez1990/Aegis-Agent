@@ -800,6 +800,23 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertTrue(subagent_run["subagents"]["cards"][0]["isolated_parallel_runtime"])
                 self.assertEqual(subagent_run["subagents"]["cards"][0]["review_status"], "awaiting_operator_review")
                 self.assertIn("parent_bound_review_receipts", subagent_run["subagents"]["implemented_controls"])
+                subagent_review_packet = _json_post(
+                    port,
+                    "/subagents/review-packet",
+                    {"card_id": subagent_replayed["card_id"], "actor": "api-reviewer"},
+                    token=token,
+                )
+                self.assertTrue(subagent_review_packet["ok"])
+                self.assertEqual(subagent_review_packet["card_id"], subagent_replayed["card_id"])
+                self.assertEqual(subagent_review_packet["receipt"]["receipt_schema"], "aegis.subagent.model_review_packet.v1")
+                self.assertEqual(subagent_review_packet["receipt"]["actor"], "api-reviewer")
+                self.assertTrue(subagent_review_packet["receipt"]["model_ready"])
+                self.assertFalse(subagent_review_packet["receipt"]["model_invocation_performed"])
+                self.assertEqual(subagent_review_packet["packet"]["review"]["review_status"], "awaiting_operator_review")
+                self.assertEqual(subagent_review_packet["subagents"]["review_cards"], 1)
+                self.assertIn("model_ready_review_packets", subagent_review_packet["subagents"]["implemented_controls"])
+                subagent_review_packet_payload = json.dumps(subagent_review_packet, sort_keys=True)
+                self.assertNotIn("Compare provider auth gaps", subagent_review_packet_payload)
                 subagent_parent_task = _json_get(port, f"/tasks/{task['id']}", token=token)
                 self.assertTrue(subagent_parent_task["checkpoint"]["subagent_review_required"])
                 self.assertIn("subagent_review_complete", {hint["action"] for hint in subagent_parent_task["action_hints"]})

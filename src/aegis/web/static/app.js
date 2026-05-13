@@ -751,15 +751,41 @@ const refresh = async () => {
 const renderSubagents = (payload) => {
   const summary = document.getElementById("subagent-summary");
   const batchControl = (payload.implemented_controls || []).includes("operator_approved_batch_runtime") ? " · batch run ready" : "";
-  summary.textContent = `${payload.open_cards || 0} open · ${payload.ready_cards || 0} ready · ${payload.in_progress_cards || 0} active · ${payload.done_cards || 0} done · profiles ${payload.enabled_profile_count || 0}/${payload.profile_count || 0} · autonomous runtime ${payload.autonomous_runtime ? "enabled" : "blocked"}${batchControl}`;
+  const reviewPacketControl = (payload.implemented_controls || []).includes("model_ready_review_packets") ? " · review packets ready" : "";
+  summary.textContent = `${payload.open_cards || 0} open · ${payload.ready_cards || 0} ready · ${payload.in_progress_cards || 0} active · ${payload.review_cards || 0} review · ${payload.done_cards || 0} done · profiles ${payload.enabled_profile_count || 0}/${payload.profile_count || 0} · autonomous runtime ${payload.autonomous_runtime ? "enabled" : "blocked"}${batchControl}${reviewPacketControl}`;
   setList("subagent-cards", payload.cards || [], (x) => ({
     title: x.title,
     detail: x.description_preview || "No preview",
-    meta: `${x.lane} · ${x.owner || "unassigned"} · tainted ${x.instructions_tainted ? "yes" : "no"} · handoffs ${x.handoff_receipts_recorded || 0} · runs ${x.subagent_runs_recorded || 0}`,
+    meta: subagentCardMeta(x),
     actions: subagentLaneActions(x),
     tone: x.lane === "done" ? "ready" : x.lane === "blocked" ? "attention" : "",
   }), "No subagent delegation cards");
 };
+
+const subagentCardMeta = (card) => {
+  const reviewPacketCount = Number(card.review_packets_recorded || 0);
+  const hasReviewPacket = Boolean(card.model_ready_review_packet || card.model_ready_review_packet_available || card.model_review_packet || card.review_packet);
+  const parts = [
+    card.lane,
+    card.owner || "unassigned",
+    `tainted ${card.instructions_tainted ? "yes" : "no"}`,
+    `handoffs ${card.handoff_receipts_recorded || 0}`,
+    `runs ${card.subagent_runs_recorded || 0}`,
+  ];
+  if (card.review_status) {
+    parts.push(`review ${card.review_status}`);
+  }
+  if (reviewPacketCount || hasReviewPacket) {
+    parts.push(`packets ${reviewPacketCount || 1}`);
+  }
+  if (hasReviewPacket) {
+    parts.push("model-ready");
+  }
+  return parts.join(" · ");
+};
+
+const subagentHasReviewPacket = (card) =>
+  Boolean(card.model_ready_review_packet || card.model_ready_review_packet_available || card.model_review_packet || card.review_packet);
 
 const subagentLaneActions = (card) => {
   const nextLane = {
@@ -772,6 +798,10 @@ const subagentLaneActions = (card) => {
   const actions = [];
   if (["ready", "in_progress"].includes(card.lane)) {
     actions.push(`<button type="button" data-subagent-run="${escapeHtml(card.id)}">Run</button>`);
+  }
+  if (card.lane !== "done") {
+    const label = subagentHasReviewPacket(card) ? "Refresh Review Packet" : "Create Review Packet";
+    actions.push(`<button type="button" class="secondary" data-subagent-review-packet="${escapeHtml(card.id)}">${text(label)}</button>`);
   }
   if (nextLane) {
     actions.push(`<button type="button" class="secondary" data-subagent-card="${escapeHtml(card.id)}" data-subagent-lane="${escapeHtml(nextLane)}">${text(nextLane.replaceAll("_", " "))}</button>`);
@@ -3863,6 +3893,17 @@ document.getElementById("subagent-output").addEventListener("click", async (even
 });
 
 document.getElementById("subagent-cards").addEventListener("click", async (event) => {
+  const reviewPacketCard = event.target.dataset.subagentReviewPacket;
+  if (reviewPacketCard) {
+    const result = await api("/subagents/review-packet", {
+      method: "POST",
+      body: JSON.stringify({ card_id: reviewPacketCard, actor: "web-operator" }),
+    });
+    renderSubagentOutput(result);
+    renderSubagents(result.subagents || await api("/subagents/status?limit=12"));
+    await refresh();
+    return;
+  }
   const runCard = event.target.dataset.subagentRun;
   if (runCard) {
     const result = await api("/subagents/run", {

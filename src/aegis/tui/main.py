@@ -217,7 +217,7 @@ SCHEDULE_COMMANDS = ("create", "memory-review-digest", "memory-review-escalation
 BROWSER_COMMANDS = ("status", "connect", "disconnect", "session", "sessions", "close", "navigate", "extract", "inspect", "table", "screenshot", "render", "click", "fill")
 MCP_COMMANDS = ("list", "register", "auth", "call")
 HOOK_COMMANDS = ("list", "add", "enable", "disable", "remove", "run")
-AGENTS_COMMANDS = ("status", "profiles", "profile-create", "profile-disable", "delegate", "handoff", "run", "run-batch")
+AGENTS_COMMANDS = ("status", "profiles", "profile-create", "profile-disable", "delegate", "handoff", "review-packet", "run", "run-batch")
 REMOTE_CONTROL_COMMANDS = ("pair", "directory", "revoke", "relay", "relay-directory", "relay-notify", "push-targets", "push-register", "push-disable", "push-rotate", "push", "relay-outbox", "relay-retry", "relay-confirm", "relay-pull", "relay-action")
 SESSION_COMMANDS = ("new", "open", "rename", "set-model", "set-personality", "activate", "archive", "pause", "append", "history", "tasks", "compact")
 TASK_COMMANDS = ("status", "resume", "pause", "cancel", "events", "timeline", "submit", "list", "all", "session")
@@ -3831,7 +3831,7 @@ class AegisTui(cmd.Cmd):
         self.do_models("route alias/fast")
 
     def do_agents(self, arg: str) -> None:
-        """agents [status|profiles|profile-create|profile-disable|delegate|handoff|run|run-batch] -- manage subagent delegations."""
+        """agents [status|profiles|profile-create|profile-disable|delegate|handoff|review-packet|run|run-batch] -- manage subagent delegations."""
         parts = shlex.split(arg)
         if parts and parts[0] == "profiles":
             _print_json({"profiles": self.orchestrator.kanban.list_subagent_profiles(), "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
@@ -3876,6 +3876,16 @@ class AegisTui(cmd.Cmd):
                 reason=" ".join(parts[3:]),
             )
             _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20)})
+            return
+        if parts and parts[0] == "review-packet":
+            if len(parts) < 2:
+                print("usage: agents review-packet <card-id>")
+                return
+            result = self.orchestrator.kanban.create_subagent_review_packet(
+                parts[1],
+                actor="tui-operator",
+            )
+            _print_json({**result, "subagents": self.orchestrator.kanban.subagent_status(limit=20, include_previews=False)})
             return
         if parts and parts[0] == "run":
             if len(parts) < 2:
@@ -6192,6 +6202,7 @@ def _command_reference() -> str:
             "toolsets               Group tools by permission and risk",
             "allowed-tools|bashes   Policy-visible tools and shell posture",
             "tools list|run|enable|disable  Governed tool catalog and policy-owned preferences",
+            "agents status|profiles|delegate|handoff|review-packet|run|run-batch  Subagent coordination and review packets",
             "skills hub|search|browse|inspect|install  Governed skills and virtual Skill Hub",
             "curator status|run|pin|archive  Local authored skill maintenance",
             "plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-bundle|install-marketplace|update-marketplace|prepare-update|apply-prepared-update",
@@ -6331,7 +6342,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         "Explore",
         (
             ("capabilities", "parity and readiness"),
-            ("agents", "multi-agent coordination and delegation surfaces"),
+            ("agents status|delegate|review-packet|run", "multi-agent coordination and review packets"),
             ("remote-control|rc|handoff|remote-env|teleport|tp|mobile|desktop|app", "local-first remote-control readiness"),
             ("web-setup", "local web control-plane setup"),
             ("connectors|channels|platforms", "integration surfaces"),

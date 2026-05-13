@@ -782,6 +782,30 @@ class CliTests(unittest.TestCase):
             self.assertIn("task_sha256", run["subagents"]["cards"][0]["last_worker_result"])
             self.assertEqual(run["subagents"]["cards"][0]["review_status"], "awaiting_operator_review")
             self.assertEqual(run["subagents"]["cards"][0]["parent_review_receipt"]["receipt_schema"], "aegis.subagent.review_binding.v1")
+            review_packet = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "agents",
+                        "review-packet",
+                        delegated["card_id"],
+                        "--actor",
+                        "cli-reviewer",
+                    ]
+                )
+            )
+            self.assertTrue(review_packet["ok"])
+            self.assertEqual(review_packet["card_id"], delegated["card_id"])
+            self.assertEqual(review_packet["receipt"]["receipt_schema"], "aegis.subagent.model_review_packet.v1")
+            self.assertEqual(review_packet["receipt"]["actor"], "cli-reviewer")
+            self.assertTrue(review_packet["receipt"]["model_ready"])
+            self.assertFalse(review_packet["receipt"]["model_invocation_performed"])
+            self.assertEqual(review_packet["packet"]["review"]["review_status"], "awaiting_operator_review")
+            self.assertEqual(review_packet["subagents"]["review_cards"], 1)
+            self.assertIn("model_ready_review_packets", review_packet["subagents"]["implemented_controls"])
+            review_packet_payload = json.dumps(review_packet, sort_keys=True)
+            self.assertNotIn("Compare provider auth gaps", review_packet_payload)
             task_status = dispatch(parser.parse_args(["--data-dir", str(data_dir), "task", "status", parent_task["id"]]))
             self.assertTrue(task_status["checkpoint"]["subagent_review_required"])
             self.assertIn("subagent_review_complete", {hint["action"] for hint in task_status["action_hints"]})
@@ -789,6 +813,7 @@ class CliTests(unittest.TestCase):
             self.assertIn("subagent.handoff_recorded", audit_text)
             self.assertIn("subagent.worker_completed", audit_text)
             self.assertIn("subagent.review_binding_recorded", audit_text)
+            self.assertIn("subagent.model_review_packet_created", audit_text)
             self.assertNotIn("reviewed raw private handoff reason", audit_text)
             disabled_profile = dispatch(parser.parse_args(["--data-dir", str(data_dir), "agents", "profile-disable", "researcher"]))
             self.assertTrue(disabled_profile["ok"])
