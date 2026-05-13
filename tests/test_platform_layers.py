@@ -1410,6 +1410,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("openai_style_tts_provider_adapter", browser_hardening_controls)
             self.assertIn("elevenlabs_tts_provider_adapter", browser_hardening_controls)
             self.assertIn("elevenlabs_speech_to_speech_provider_adapter", browser_hardening_controls)
+            self.assertIn("elevenlabs_text_to_dialogue_provider_adapter", browser_hardening_controls)
             self.assertIn("openai_style_transcription_provider_adapter", browser_hardening_controls)
             self.assertIn("elevenlabs_transcription_provider_adapter", browser_hardening_controls)
             self.assertIn("openai_style_video_provider_adapter", browser_hardening_controls)
@@ -3234,6 +3235,120 @@ class PlatformLayerTests(unittest.TestCase):
                 )
             self.assertFalse(denied["ok"])
             self.assertEqual(denied["status"], "invalid_source")
+
+    def test_elevenlabs_text_to_dialogue_provider_adapter_uses_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            mp3_bytes = b"ID3\x04\x00\x00\x00\x00\x00\x21Aegis dialogue audio"
+            captured: dict[str, str] = {}
+
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "audio/mpeg"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return mp3_bytes
+
+            def fake_open(request, timeout):
+                captured["url"] = request.full_url
+                captured["authorization"] = request.headers.get("Authorization", "")
+                captured["xi_api_key"] = request.headers.get("Xi-api-key", "") or request.headers.get("xi-api-key", "")
+                captured["accept"] = request.headers.get("Accept", "")
+                captured["body"] = request.data.decode("utf-8")
+                return FakeResponse()
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                dialogue = orchestrator.tools.execute(
+                    "tts",
+                    {
+                        "provider_url": "https://media.example.com/v1/text-to-dialogue",
+                        "provider_adapter": "elevenlabs_text_to_dialogue",
+                        "inputs": [
+                            {"text": "[careful] Ship this only after review token=abc123", "voice_id": "JBFqnCBsd6RMkjVDRZzb"},
+                            {"text": "[clear] Approved receipts stay redacted", "voice_id": "Aw4FAjKCGjjNkVhN1Xmq"},
+                        ],
+                        "model_id": "eleven_v3",
+                        "language_code": "en",
+                        "seed": 7,
+                        "apply_text_normalization": "auto",
+                        "output_format": "mp3_44100_128",
+                    },
+                    approved=True,
+                )
+
+            body = json.loads(captured["body"])
+            metadata_text = Path(dialogue["metadata_path"]).read_text(encoding="utf-8")
+            self.assertTrue(dialogue["ok"])
+            self.assertEqual(dialogue["provider_adapter"], "elevenlabs_text_to_dialogue")
+            self.assertEqual(dialogue["mode"], "live_provider_mp3")
+            self.assertEqual(dialogue["mime_type"], "audio/mpeg")
+            self.assertEqual(Path(dialogue["asset_path"]).read_bytes(), mp3_bytes)
+            self.assertEqual(captured["authorization"], "")
+            self.assertEqual(captured["xi_api_key"], "secret-media-token")
+            self.assertEqual(captured["accept"], "audio/mpeg")
+            self.assertTrue(captured["url"].endswith("?output_format=mp3_44100_128"))
+            self.assertEqual(body["model_id"], "eleven_v3")
+            self.assertEqual(body["language_code"], "en")
+            self.assertEqual(body["seed"], 7)
+            self.assertEqual(body["apply_text_normalization"], "auto")
+            self.assertEqual(body["inputs"][0]["voice_id"], "JBFqnCBsd6RMkjVDRZzb")
+            self.assertEqual(body["inputs"][1]["voice_id"], "Aw4FAjKCGjjNkVhN1Xmq")
+            self.assertNotIn("output_format", body)
+            self.assertEqual(dialogue["provider_receipt"]["provider_adapter"], "elevenlabs_text_to_dialogue")
+            self.assertEqual(dialogue["provider_receipt"]["request_format"], "application/json")
+            self.assertEqual(
+                dialogue["provider_receipt"]["payload_keys"],
+                ["apply_text_normalization", "inputs", "language_code", "model_id", "output_format", "seed"],
+            )
+            self.assertFalse(dialogue["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(dialogue["provider_receipt"]["raw_secret_values_included"])
+            self.assertFalse(dialogue["provider_receipt"]["raw_response_body_included"])
+            self.assertEqual(dialogue["sandbox_receipt"]["provider_adapter"], "elevenlabs_text_to_dialogue")
+            self.assertNotIn("Ship this only after review", metadata_text)
+            self.assertNotIn("abc123", metadata_text)
+            self.assertNotIn("secret-media-token", metadata_text)
+
+            wrong_tool_adapter = executor_module._live_media_provider_adapter(
+                name="image_generate",
+                params={"provider_adapter": "elevenlabs_text_to_dialogue"},
+            )
+            self.assertEqual(wrong_tool_adapter["name"], "elevenlabs_text_to_dialogue")
+            self.assertIn("supports tts only", str(wrong_tool_adapter["error"]))
+
+            with self.assertRaises(executor_module.ToolExecutionError):
+                executor_module._live_media_request_payload(
+                    name="tts",
+                    prompt="",
+                    text="",
+                    source_path="",
+                    params={"inputs": [{"text": "bad", "voice_id": "bad/voice"}]},
+                    provider_adapter="elevenlabs_text_to_dialogue",
+                )
 
     def test_openai_style_transcription_provider_adapter_uploads_audio_with_redacted_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

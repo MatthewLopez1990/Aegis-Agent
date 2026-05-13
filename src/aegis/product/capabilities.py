@@ -347,7 +347,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "session-bound run visibility",
             ],
             "security_delta": "Aegis defaults to mock or dry-run mode for broad-access capabilities until credentials, scopes, rollback, and approvals are explicit.",
-            "live_gap": "Mobile nodes, native desktop wrappers, and live third-party channel implementations remain staged; generic/OpenAI-style media plus Stability AI v1 image generation, Google Vertex Imagen image generation, ElevenLabs TTS, and ElevenLabs speech-to-text are implemented, while additional provider-specific image, audio, and video adapters remain staged behind secure adapter work.",
+            "live_gap": "Mobile nodes, native desktop wrappers, and live third-party channel implementations remain staged; generic/OpenAI-style media plus Stability AI v1 image generation, Google Vertex Imagen image generation/edit/upscale, ElevenLabs TTS, ElevenLabs speech-to-speech, ElevenLabs text-to-dialogue, and ElevenLabs speech-to-text are implemented, while additional provider-specific image, audio, and video adapters remain staged behind secure adapter work.",
             "target_requirements": [
                 "native_shell_depth",
                 "live_browser_automation",
@@ -655,6 +655,10 @@ def _live_gap_backlog(
                     "evidence": "approved provider-backed speech-to-speech can upload one workspace-scoped audio file through an ElevenLabs multipart request with a brokered xi-api-key header and persist the returned audio artifact without storing raw source audio, response body, or secret values",
                 },
                 {
+                    "control": "elevenlabs_text_to_dialogue_provider_adapter",
+                    "evidence": "approved provider-backed dialogue generation can send bounded ElevenLabs text-and-voice-id turns with a brokered xi-api-key header and persist the returned audio artifact without storing raw text, response body, or secret values",
+                },
+                {
                     "control": "openai_style_transcription_provider_adapter",
                     "evidence": "approved provider-backed audio transcription can upload one workspace-scoped audio file through an OpenAI-style multipart request and return transcript text without storing raw audio, raw response bodies, or secret values",
                 },
@@ -698,13 +702,14 @@ def _live_gap_backlog(
                     {"adapter": "openai_tts", "tool": "tts", "response_shape": "binary_audio"},
                     {"adapter": "elevenlabs_tts", "tool": "tts", "response_shape": "binary_audio"},
                     {"adapter": "elevenlabs_speech_to_speech", "tool": "tts", "response_shape": "binary_audio"},
+                    {"adapter": "elevenlabs_text_to_dialogue", "tool": "tts", "response_shape": "binary_audio"},
                     {"adapter": "openai_transcription", "tool": "voice_transcribe", "response_shape": "transcript_text"},
                     {"adapter": "elevenlabs_transcription", "tool": "voice_transcribe", "response_shape": "transcript_text"},
                     {"adapter": "openai_video", "tool": "video_generate", "response_shape": "job_lifecycle_and_bounded_artifacts"},
                 ],
                 "remaining_by_modality": {
                     "image": ["provider-native product-image adapters"],
-                    "audio": ["additional provider-native voice-cloning and dialogue adapters"],
+                    "audio": ["additional provider-native voice-cloning adapters"],
                     "video": ["additional provider-native video lifecycle adapters"],
                 },
                 "raw_prompt_or_secret_storage": False,
@@ -752,6 +757,7 @@ def _live_gap_backlog(
                     "openai_style_tts_provider_adapter",
                     "elevenlabs_tts_provider_adapter",
                     "elevenlabs_speech_to_speech_provider_adapter",
+                    "elevenlabs_text_to_dialogue_provider_adapter",
                     "openai_style_transcription_provider_adapter",
                     "elevenlabs_transcription_provider_adapter",
                     "openai_style_video_provider_adapter",

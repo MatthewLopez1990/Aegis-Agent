@@ -22,7 +22,7 @@ import tarfile
 import tempfile
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import Request
 import wave
 import zlib
@@ -3288,6 +3288,10 @@ def _live_media_provider_adapter(*, name: str, params: dict[str, Any]) -> dict[s
         if name != "tts":
             return {"name": raw, "error": "elevenlabs_speech_to_speech provider adapter currently supports tts only"}
         return {"name": "elevenlabs_speech_to_speech", "error": None}
+    if raw in {"elevenlabs_text_to_dialogue", "elevenlabs_dialogue", "elevenlabs_dialog", "eleven_labs_text_to_dialogue", "eleven_labs_dialogue"}:
+        if name != "tts":
+            return {"name": raw, "error": "elevenlabs_text_to_dialogue provider adapter currently supports tts only"}
+        return {"name": "elevenlabs_text_to_dialogue", "error": None}
     if raw in {"openai_transcription", "openai_transcriptions", "openai_audio_transcription", "openai_compatible_transcription"}:
         if name != "voice_transcribe":
             return {"name": raw, "error": "openai_transcription provider adapter currently supports voice_transcribe only"}
@@ -3729,6 +3733,34 @@ def _live_media_request_payload(
         if remove_noise is not None:
             payload["remove_background_noise"] = _as_bool(remove_noise, label="remove_background_noise")
         return payload
+    if provider_adapter == "elevenlabs_text_to_dialogue":
+        payload = {
+            "inputs": _elevenlabs_dialogue_inputs(params=params, fallback_text=text),
+            "model_id": str(params.get("model_id") or params.get("model") or "eleven_v3")[:200],
+        }
+        output_format = str(params.get("output_format") or params.get("format") or "").strip()
+        if output_format:
+            if not re.fullmatch(r"[A-Za-z0-9_]+", output_format):
+                raise ToolExecutionError("output_format contains unsupported characters")
+            payload["output_format"] = output_format[:80]
+        language_code = str(params.get("language_code") or params.get("languageCode") or "").strip()
+        if language_code:
+            payload["language_code"] = language_code[:40]
+        seed = params.get("seed")
+        if seed is not None:
+            try:
+                parsed_seed = int(seed)
+            except (TypeError, ValueError) as exc:
+                raise ToolExecutionError("seed must be an integer") from exc
+            if parsed_seed < 0 or parsed_seed > 4294967295:
+                raise ToolExecutionError("seed must be between 0 and 4294967295")
+            payload["seed"] = parsed_seed
+        normalization = str(params.get("apply_text_normalization") or params.get("text_normalization") or "").strip().lower()
+        if normalization:
+            if normalization not in {"auto", "on", "off"}:
+                raise ToolExecutionError("apply_text_normalization must be auto, on, or off")
+            payload["apply_text_normalization"] = normalization
+        return payload
     if provider_adapter == "openai_transcription":
         payload = {
             "model": str(params.get("model") or "gpt-4o-mini-transcribe")[:200],
@@ -3790,6 +3822,50 @@ def _google_imagen_mask_classes(value: Any) -> list[int]:
     return parsed[:20]
 
 
+def _elevenlabs_dialogue_inputs(*, params: dict[str, Any], fallback_text: str) -> list[dict[str, str]]:
+    raw_inputs = params.get("inputs", params.get("dialogue", params.get("turns")))
+    if raw_inputs in (None, ""):
+        raw_inputs = [{"text": fallback_text, "voice_id": params.get("voice_id") or params.get("voice") or ""}]
+    if isinstance(raw_inputs, str):
+        try:
+            parsed = json.loads(raw_inputs)
+        except json.JSONDecodeError as exc:
+            raise ToolExecutionError("ElevenLabs dialogue inputs must be a JSON list when provided as a string") from exc
+        raw_inputs = parsed
+    if not isinstance(raw_inputs, list) or not raw_inputs:
+        raise ToolExecutionError("elevenlabs_text_to_dialogue requires at least one dialogue input")
+    inputs: list[dict[str, str]] = []
+    unique_voices: set[str] = set()
+    total_text = 0
+    for index, item in enumerate(raw_inputs[:50]):
+        if not isinstance(item, dict):
+            raise ToolExecutionError("ElevenLabs dialogue inputs must be objects with text and voice_id")
+        text_value = str(item.get("text") or "").strip()
+        voice_id = str(item.get("voice_id") or item.get("voiceId") or item.get("voice") or "").strip()
+        if not text_value:
+            raise ToolExecutionError(f"ElevenLabs dialogue input {index + 1} requires text")
+        if not voice_id:
+            raise ToolExecutionError(f"ElevenLabs dialogue input {index + 1} requires voice_id")
+        if len(voice_id) > 200 or not re.fullmatch(r"[A-Za-z0-9_-]+", voice_id):
+            raise ToolExecutionError("ElevenLabs dialogue voice_id contains unsupported characters")
+        total_text += len(text_value)
+        if total_text > 2000:
+            raise ToolExecutionError("ElevenLabs dialogue text must be 2000 characters or less per request")
+        unique_voices.add(voice_id)
+        if len(unique_voices) > 10:
+            raise ToolExecutionError("ElevenLabs dialogue supports at most 10 unique voice IDs per request")
+        inputs.append({"text": text_value[:2000], "voice_id": voice_id})
+    return inputs
+
+
+def _elevenlabs_dialogue_request_url(*, url: str, payload: dict[str, Any]) -> str:
+    output_format = str(payload.get("output_format") or "").strip()
+    if not output_format:
+        return url
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}output_format={quote(output_format, safe='')}"
+
+
 def _live_media_provider_receipt(*, domain: str, http_status: int, request_payload: dict[str, Any], handle_present: bool, provider_adapter: str = "generic") -> dict[str, Any]:
     encoded = json.dumps(request_payload, sort_keys=True, default=str).encode("utf-8")
     request_format = "application/json"
@@ -3843,22 +3919,26 @@ def _send_live_media_provider_request(
             return {"ok": False, "http_status": 0, "error": "elevenlabs_speech_to_speech requires a workspace-scoped audio file"}
         body, content_type = _encode_elevenlabs_speech_to_speech_multipart(payload=payload, audio_file=audio_file)
     else:
-        body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        body_payload = dict(payload)
+        if provider_adapter == "elevenlabs_text_to_dialogue":
+            body_payload.pop("output_format", None)
+        body = json.dumps(body_payload, sort_keys=True, default=str).encode("utf-8")
         content_type = "application/json"
     headers = {
         "Content-Type": content_type,
         "User-Agent": "Aegis-Agent/0.1",
     }
-    if provider_adapter in {"elevenlabs_tts", "elevenlabs_speech_to_speech"}:
+    if provider_adapter in {"elevenlabs_tts", "elevenlabs_speech_to_speech", "elevenlabs_text_to_dialogue"}:
         headers["xi-api-key"] = token
     else:
         headers["Authorization"] = f"Bearer {token}"
     if provider_adapter in {"stability_v1_text_to_image", "google_imagen", "google_imagen_edit", "google_imagen_upscale"}:
         headers["Accept"] = "application/json"
-    if provider_adapter == "elevenlabs_speech_to_speech":
+    if provider_adapter in {"elevenlabs_speech_to_speech", "elevenlabs_text_to_dialogue"}:
         headers["Accept"] = "audio/mpeg"
+    request_url = _elevenlabs_dialogue_request_url(url=url, payload=payload) if provider_adapter == "elevenlabs_text_to_dialogue" else url
     request = Request(
-        url,
+        request_url,
         data=body,
         method="POST",
         headers=headers,
