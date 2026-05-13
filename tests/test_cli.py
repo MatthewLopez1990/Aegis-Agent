@@ -65,6 +65,89 @@ class CliTests(unittest.TestCase):
         self.assertTrue(manifest["approval_required"])
         self.assertEqual(manifest["sandbox_profile"], "no_tools")
 
+    def test_skill_draft_verify_and_install_candidate_is_review_gated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            data_dir = Path(temp) / ".aegis"
+            observed_task = "operator pasted token=abc123 while explaining repeated workflow"
+
+            drafted = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "skill",
+                        "draft",
+                        "test.cli_curated",
+                        "--name",
+                        "CLI Curated",
+                        "--description",
+                        "CLI reviewed disabled candidate",
+                        "--observed-task",
+                        observed_task,
+                        "--actor",
+                        "cli-test",
+                    ]
+                )
+            )
+
+            self.assertEqual(drafted["status"], "skill_candidate_drafted")
+            candidate_path = Path(drafted["candidate_path"])
+            self.assertTrue(candidate_path.exists())
+            if os.name == "posix":
+                self.assertEqual(stat.S_IMODE(candidate_path.stat().st_mode), 0o600)
+            self.assertNotIn("token=abc123", candidate_path.read_text(encoding="utf-8"))
+
+            verified = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "skill",
+                        "verify-draft",
+                        drafted["candidate_id"],
+                    ]
+                )
+            )
+            gated = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "skill",
+                        "install-draft",
+                        drafted["candidate_id"],
+                    ]
+                )
+            )
+            installed = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "skill",
+                        "install-draft",
+                        drafted["candidate_id"],
+                        "--approved",
+                        "--actor",
+                        "cli-test",
+                    ]
+                )
+            )
+            listed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "skill", "list"]))
+
+            self.assertTrue(verified["ok"])
+            self.assertEqual(gated["status"], "approval_required")
+            self.assertFalse(gated["auto_enable"])
+            self.assertEqual(installed["status"], "skill_candidate_installed_disabled")
+            skill_rows = {row["id"]: row for row in listed["skills"]}
+            self.assertIn("test.cli_curated", skill_rows)
+            self.assertFalse(skill_rows["test.cli_curated"]["enabled"])
+            self.assertEqual(skill_rows["test.cli_curated"]["manifest"]["source"], "curator-draft")
+            audit_text = (data_dir / "audit.jsonl").read_text(encoding="utf-8")
+            self.assertIn("skill.curator_candidate_install_blocked", audit_text)
+            self.assertNotIn("token=abc123", audit_text)
+
     def test_browser_activation_packet_commands_create_and_verify_packet(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             parser = build_parser()

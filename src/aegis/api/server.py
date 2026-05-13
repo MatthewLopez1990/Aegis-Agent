@@ -569,6 +569,9 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
             if path == "/skills":
                 self._json({"skills": orchestrator.skills.list_public()})
                 return
+            if path == "/skill-curator":
+                self._json(orchestrator.skill_curator.status())
+                return
             if path == "/plugins":
                 self._json(_plugins_payload(orchestrator))
                 return
@@ -1515,6 +1518,30 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 payload = self._read_json()
                 skill_id = unquote(match_skill_enable.group(1))
                 result = orchestrator.enable_skill(skill_id, approval_id=str(payload["approval_id"]) if payload.get("approval_id") else None)
+                self._json({**result, "skills": orchestrator.skills.list_public()})
+                return
+            if path == "/skill-curator/draft":
+                payload = self._read_json()
+                result = orchestrator.skill_curator.draft_candidate(
+                    str(_required(payload, "skill_id")),
+                    name=str(_required(payload, "name")),
+                    description=str(_required(payload, "description")),
+                    observed_task=str(payload.get("observed_task", "")),
+                    actor=str(payload.get("actor", "api-operator")),
+                )
+                self._json(result)
+                return
+            if path == "/skill-curator/verify-draft":
+                payload = self._read_json()
+                self._json(orchestrator.skill_curator.verify_candidate(str(_required(payload, "candidate_id"))))
+                return
+            if path == "/skill-curator/install-draft":
+                payload = self._read_json()
+                result = orchestrator.skill_curator.install_candidate(
+                    str(_required(payload, "candidate_id")),
+                    actor=str(payload.get("actor", "api-operator")),
+                    approved=payload.get("approved") is True,
+                )
                 self._json({**result, "skills": orchestrator.skills.list_public()})
                 return
             if path == "/browser/sessions":

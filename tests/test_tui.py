@@ -295,7 +295,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("model|models|provider|usage", help_rendered)
             self.assertIn("insights [days]", help_rendered)
             self.assertIn("gquota [model]", help_rendered)
-            self.assertIn("curator status|run|pin|archive", help_rendered)
+            self.assertIn("curator status|run|draft|verify-draft|install-draft|pin|archive", help_rendered)
             self.assertIn("login|logout <provider>", help_rendered)
             self.assertIn("reasoning-effort metadata and usage cost", help_rendered)
             self.assertIn("UI preference and status metadata", help_rendered)
@@ -324,6 +324,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn("inspect", tui.complete_skills("in", "skills in", len("skills "), len("skills in")))
             self.assertIn("install", tui.complete_skills("in", "skills in", len("skills "), len("skills in")))
             self.assertIn("archive", tui.complete_curator("ar", "curator ar", len("curator "), len("curator ar")))
+            self.assertIn("draft", tui.complete_curator("dr", "curator dr", len("curator "), len("curator dr")))
+            self.assertIn("install-draft", tui.complete_curator("inst", "curator inst", len("curator "), len("curator inst")))
             self.assertIn("run", tui.complete_curator("ru", "curator ru", len("curator "), len("curator ru")))
             self.assertIn("fetch-manifest", tui.complete_plugins("fetch", "plugins fetch", len("plugins "), len("plugins fetch")))
             self.assertIn("fetch-bundle", tui.complete_plugins("fetch-b", "plugins fetch-b", len("plugins "), len("plugins fetch-b")))
@@ -341,6 +343,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn("pending", tui.completedefault("p", "/queue p", len("/queue "), len("/queue p")))
             self.assertIn("--limit", tui.completedefault("--", "/queue all --", len("/queue all "), len("/queue all --")))
             self.assertIn("--dry-run", tui.completedefault("--", "/curator run --", len("/curator run "), len("/curator run --")))
+            self.assertIn("--name", tui.completedefault("--", "/curator draft local.generated --", len("/curator draft local.generated "), len("/curator draft local.generated --")))
+            self.assertIn("--approved", tui.completedefault("--", "/curator install-draft candidate --", len("/curator install-draft candidate "), len("/curator install-draft candidate --")))
             self.assertIn("openclaw-memory-preview", tui.complete_migrate("openclaw", "migrate openclaw", len("migrate "), len("migrate openclaw")))
             self.assertIn("candidate", tui.complete_repair("ca", "repair ca", len("repair "), len("repair ca")))
             self.assertIn("readiness", tui.complete_repair("rea", "repair rea", len("repair "), len("repair rea")))
@@ -828,6 +832,16 @@ class TuiTests(unittest.TestCase):
             with redirect_stdout(output):
                 tui.onecmd("/curator")
                 tui.onecmd("/curator run --dry-run")
+                tui.onecmd("/curator draft local.generated --name Generated --description 'Generated disabled candidate' --observed-task 'operator pasted token=abc123'")
+
+            candidate_path = next((root / ".aegis" / "skill-candidates").glob("*.json"))
+            candidate_id = candidate_path.stem
+            self.assertNotIn("token=abc123", candidate_path.read_text(encoding="utf-8"))
+
+            with redirect_stdout(output):
+                tui.onecmd(f"/curator verify-draft {candidate_id}")
+                tui.onecmd(f"/curator install-draft {candidate_id}")
+                tui.onecmd(f"/curator install-draft {candidate_id} --approved")
                 tui.onecmd("/curator pin local.curated")
                 tui.onecmd("/curator archive local.curated")
                 tui.onecmd("/curator unpin local.curated")
@@ -841,6 +855,10 @@ class TuiTests(unittest.TestCase):
             rendered = output.getvalue()
             self.assertIn('"status": "curator_status"', rendered)
             self.assertIn('"status": "curator_run_dry_run"', rendered)
+            self.assertIn('"status": "skill_candidate_drafted"', rendered)
+            self.assertIn('"status": "skill_candidate_verified"', rendered)
+            self.assertIn('"status": "approval_required"', rendered)
+            self.assertIn('"status": "skill_candidate_installed_disabled"', rendered)
             self.assertIn('"status": "curator_skill_pinned"', rendered)
             self.assertIn("pinned skills cannot be archived", rendered)
             self.assertIn('"status": "curator_skill_unpinned"', rendered)
@@ -853,7 +871,10 @@ class TuiTests(unittest.TestCase):
             self.assertIn('"status": "curator_resumed"', rendered)
             self.assertIn('"raw_secret_values_included": false', rendered)
             self.assertIn("unattended_skill_deletion", rendered)
+            self.assertIn("unapproved_skill_install", rendered)
+            self.assertNotIn("token=abc123", rendered)
             self.assertFalse(tui.orchestrator.skills.get("local.curated")[1])
+            self.assertFalse(tui.orchestrator.skills.get("local.generated")[1])
 
     def test_tui_busy_and_dashboard_show_active_work_counts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

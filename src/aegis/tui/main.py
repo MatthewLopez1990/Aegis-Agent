@@ -243,7 +243,7 @@ TOOLS_COMMANDS = ("list", "run", "disable", "enable")
 BACKEND_COMMANDS = ("list", "doctor", "select")
 SKILLS_COMMANDS = ("hub", "search", "browse", "inspect", "install", "disable", "enable")
 PLUGIN_COMMANDS = ("list", "install", "enable", "disable", "remove", "reload", "marketplace", "updates", "fetch-manifest", "fetch-bundle", "install-bundle", "install-marketplace", "update-marketplace", "prepare-update", "apply-prepared-update")
-CURATOR_COMMANDS = ("status", "run", "pin", "unpin", "archive", "restore", "pause", "resume")
+CURATOR_COMMANDS = ("status", "run", "draft", "verify-draft", "install-draft", "pin", "unpin", "archive", "restore", "pause", "resume")
 REPAIR_COMMANDS = ("readiness", "review", "approve", "reject", "candidate", "generate-candidate", "synthesis-prompt", "synthesize-candidate", "review-candidate", "apply-candidate", "rollback-candidate", "attempt")
 SCHEDULE_COMMANDS = ("create", "script", "no-agent", "memory-review-digest", "memory-review-escalation", "evaluation-run", "evaluation-suite", "due", "approve", "activate", "pause", "run-due")
 BROWSER_COMMANDS = (
@@ -1341,7 +1341,7 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_curator(self, arg: str) -> None:
-        """curator [status|run|pin|unpin|archive|restore|pause|resume] -- maintain local authored skills."""
+        """curator [status|run|draft|verify-draft|install-draft|pin|unpin|archive|restore|pause|resume] -- maintain local authored skills."""
         try:
             parts = shlex.split(arg) if arg else []
         except ValueError as exc:
@@ -1355,6 +1355,30 @@ class AegisTui(cmd.Cmd):
                 return
             if action == "run":
                 _print_json(curator.run(dry_run="--dry-run" in parts[1:]))
+                return
+            if action == "draft":
+                options = _parse_curator_draft_options(parts[1:])
+                _print_json(
+                    curator.draft_candidate(
+                        options["skill_id"],
+                        name=options["name"],
+                        description=options["description"],
+                        observed_task=options["observed_task"],
+                        actor="tui-operator",
+                    )
+                )
+                return
+            if action == "verify-draft":
+                if len(parts) < 2:
+                    print("usage: curator verify-draft <candidate_id>")
+                    return
+                _print_json(curator.verify_candidate(parts[1]))
+                return
+            if action == "install-draft":
+                if len(parts) < 2:
+                    print("usage: curator install-draft <candidate_id> --approved")
+                    return
+                _print_json(curator.install_candidate(parts[1], actor="tui-operator", approved="--approved" in parts[2:]))
                 return
             if action in {"pin", "unpin", "archive", "restore"}:
                 if len(parts) < 2:
@@ -1374,7 +1398,7 @@ class AegisTui(cmd.Cmd):
         except (PermissionError, ValueError) as exc:
             print(f"curator error: {exc}")
             return
-        print("usage: curator [status|run [--dry-run]|pin <skill_id>|unpin <skill_id>|archive <skill_id>|restore <skill_id>|pause|resume]")
+        print("usage: curator [status|run [--dry-run]|draft <skill_id> --name <name> --description <description>|verify-draft <candidate_id>|install-draft <candidate_id> --approved|pin <skill_id>|unpin <skill_id>|archive <skill_id>|restore <skill_id>|pause|resume]")
 
     def do_migrate(self, arg: str) -> None:
         """migrate openclaw|hermes|openclaw-memory-preview|hermes-memory-preview|openclaw-memory-commit|hermes-memory-commit <path> [--owner USER] [--scope SCOPE] -- migration inspection and governed memory commit."""
@@ -6527,6 +6551,31 @@ def _parse_subagent_run_batch_options(parts: list[str]) -> dict[str, Any]:
     return options
 
 
+def _parse_curator_draft_options(parts: list[str]) -> dict[str, Any]:
+    if not parts:
+        raise ValueError("curator draft requires a skill_id")
+    options: dict[str, Any] = {"skill_id": parts[0], "name": "", "description": "", "observed_task": ""}
+    index = 1
+    while index < len(parts):
+        part = parts[index]
+        if part == "--name":
+            options["name"] = _next_required(parts, index, "--name")
+            index += 2
+            continue
+        if part == "--description":
+            options["description"] = _next_required(parts, index, "--description")
+            index += 2
+            continue
+        if part == "--observed-task":
+            options["observed_task"] = _next_required(parts, index, "--observed-task")
+            index += 2
+            continue
+        raise ValueError(f"unknown draft option: {part}")
+    if not options["name"] or not options["description"]:
+        raise ValueError("curator draft requires --name and --description")
+    return options
+
+
 def _parse_hook_add_args(parts: list[str]) -> dict[str, Any]:
     if not parts:
         raise ValueError("hook event required")
@@ -6752,7 +6801,7 @@ def _command_reference() -> str:
             "tools list|run|enable|disable  Governed tool catalog and policy-owned preferences",
             "agents status|autonomy-preflight|autonomy-step|autonomy-run|profiles|delegate|handoff|review-packet|verify-packet|model-review|run|run-batch  Subagent coordination and runtime preflight",
             "skills hub|search|browse|inspect|install  Governed skills and virtual Skill Hub",
-            "curator status|run|pin|archive  Local authored skill maintenance",
+            "curator status|run|draft|verify-draft|install-draft|pin|archive  Local authored skill maintenance",
             "plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-bundle|install-marketplace|update-marketplace|prepare-update|apply-prepared-update",
             "plugin|reload|reload-plugins|reload-skills|reload_skills  Extension inventory aliases",
             "memory health|search|session-preview|create|update|merge|expire",
@@ -6886,7 +6935,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("tools list|run|enable|disable", "safe tool execution and policy-owned preferences"),
             ("toolsets", "tool catalog grouped by permission and risk"),
             ("skills hub|search|browse|inspect|install", "governed skill hub"),
-            ("curator status|run|pin|archive", "local authored skill maintenance"),
+            ("curator status|run|draft|verify-draft|install-draft|pin|archive", "local authored skill maintenance"),
             ("plugin|plugins|reload|reload-plugins|reload-skills", "extension inventory and reload readiness"),
             ("reload_skills", "extension inventory and reload readiness"),
             ("memory search|create|review", "durable memory"),
@@ -7370,6 +7419,8 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("plugins", "apply-prepared-update"): ("--approved", "--enable", "--disable"),
     ("plugin", "apply-prepared-update"): ("--approved", "--enable", "--disable"),
     ("curator", "run"): ("--dry-run",),
+    ("curator", "draft"): ("--name", "--description", "--observed-task"),
+    ("curator", "install-draft"): ("--approved",),
     ("remote-control", "pair"): ("--label", "--session-id", "--task-id", "--allowed-actions", "--expires-in-seconds"),
     ("remote-control", "directory"): ("--pairing-id", "--limit"),
     ("remote-control", "revoke"): ("--relay-auth-secret", "--approved"),

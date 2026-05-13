@@ -44,6 +44,7 @@ from aegis.security.secrets_broker import SecretsBroker
 from aegis.security.taint import Sensitivity, TrustClass
 from aegis.sessions.manager import SessionManager
 from aegis.skills.manifest import SkillManifest
+from aegis.skills.builder import create_skill_template as build_skill_template
 from aegis.skills.hub import SkillHubCatalog
 from aegis.skills.registry import SkillRegistry
 from aegis.skills.signing import DEFAULT_SKILL_SIGNING_KEY, ensure_signing_key, sign_manifest, verify_manifest_signature
@@ -333,6 +334,18 @@ def build_parser() -> argparse.ArgumentParser:
     skill_create.add_argument("--name", required=True)
     skill_create.add_argument("--description", required=True)
     skill_create.add_argument("--output", help="Optional path to write the manifest JSON")
+    skill_draft = skill_sub.add_parser("draft", help="Draft a private reviewed skill candidate")
+    skill_draft.add_argument("skill_id")
+    skill_draft.add_argument("--name", required=True)
+    skill_draft.add_argument("--description", required=True)
+    skill_draft.add_argument("--observed-task", default="")
+    skill_draft.add_argument("--actor", default="local-user")
+    skill_verify_draft = skill_sub.add_parser("verify-draft", help="Verify a private skill draft candidate")
+    skill_verify_draft.add_argument("candidate_id")
+    skill_install_draft = skill_sub.add_parser("install-draft", help="Install a verified skill draft as disabled")
+    skill_install_draft.add_argument("candidate_id")
+    skill_install_draft.add_argument("--approved", action="store_true")
+    skill_install_draft.add_argument("--actor", default="local-user")
     skill_register = skill_sub.add_parser("register", help="Register a skill manifest JSON file")
     skill_register.add_argument("manifest_path")
     skill_register.add_argument("--enable", action="store_true")
@@ -1534,6 +1547,21 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 Path(args.output).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
                 return {"ok": True, "path": args.output, "manifest": manifest}
             return {"manifest": manifest}
+        if args.skill_command == "draft":
+            orchestrator = build_orchestrator(data_dir=config.data_dir)
+            return orchestrator.skill_curator.draft_candidate(
+                args.skill_id,
+                name=args.name,
+                description=args.description,
+                observed_task=args.observed_task,
+                actor=args.actor,
+            )
+        if args.skill_command == "verify-draft":
+            orchestrator = build_orchestrator(data_dir=config.data_dir)
+            return orchestrator.skill_curator.verify_candidate(args.candidate_id)
+        if args.skill_command == "install-draft":
+            orchestrator = build_orchestrator(data_dir=config.data_dir)
+            return orchestrator.skill_curator.install_candidate(args.candidate_id, actor=args.actor, approved=args.approved)
         if args.skill_command == "register":
             raw = json.loads(Path(args.manifest_path).read_text(encoding="utf-8"))
             manifest = registry.register(
@@ -3072,29 +3100,7 @@ def _comma_separated(value: str) -> list[str]:
 
 
 def create_skill_template(skill_id: str, *, name: str, description: str) -> dict[str, Any]:
-    return {
-        "id": skill_id,
-        "name": name,
-        "description": description,
-        "version": "0.1.0",
-        "author": "local-user",
-        "source": "cli-generated",
-        "permissions": {},
-        "connectors": [],
-        "secrets": [],
-        "network": {},
-        "filesystem": {},
-        "commands": [],
-        "input_schema": {"type": "object"},
-        "output_schema": {"type": "object"},
-        "risk_level": "medium",
-        "approval_required": True,
-        "sandbox_profile": "no_tools",
-        "tests": [],
-        "evals": [],
-        "rollback": "Disable or delete the skill.",
-        "changelog": ["Created disabled template."],
-    }
+    return build_skill_template(skill_id, name=name, description=description)
 
 
 if __name__ == "__main__":

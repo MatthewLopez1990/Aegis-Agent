@@ -123,6 +123,82 @@ class ApiServerSecurityTests(unittest.TestCase):
                     process.kill()
                     process.wait(timeout=5)
 
+    def test_skill_curator_api_drafts_verifies_and_installs_disabled_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            port = _free_port()
+            workspace = Path(temp) / "workspace"
+            workspace.mkdir()
+            data_dir = Path(temp) / ".aegis"
+            env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "aegis.cli.main",
+                    "--data-dir",
+                    str(data_dir),
+                    "serve",
+                    "--workspace",
+                    str(workspace),
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                ],
+                cwd=Path(__file__).resolve().parents[1],
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                _wait_for_server(port)
+                token = _json_get(port, "/auth")["token"]
+
+                before = _json_get(port, "/skill-curator", token=token)
+                draft = _json_post(
+                    port,
+                    "/skill-curator/draft",
+                    {
+                        "skill_id": "test.api_curated",
+                        "name": "API Curated",
+                        "description": "API reviewed disabled candidate",
+                        "observed_task": "operator pasted token=abc123 during workflow review",
+                        "actor": "api-test",
+                    },
+                    token=token,
+                )
+                verify = _json_post(port, "/skill-curator/verify-draft", {"candidate_id": draft["candidate_id"]}, token=token)
+                gated = _json_post(port, "/skill-curator/install-draft", {"candidate_id": draft["candidate_id"], "approved": "true"}, token=token)
+                installed = _json_post(port, "/skill-curator/install-draft", {"candidate_id": draft["candidate_id"], "approved": True, "actor": "api-test"}, token=token)
+                after = _json_get(port, "/skill-curator", token=token)
+                skills = _json_get(port, "/skills", token=token)
+
+                self.assertEqual(before["status"], "curator_status")
+                self.assertEqual(draft["status"], "skill_candidate_drafted")
+                self.assertNotIn("token=abc123", json.dumps(draft, sort_keys=True))
+                candidate_path = Path(str(draft["candidate_path"]))
+                self.assertTrue(candidate_path.exists())
+                if os.name == "posix":
+                    self.assertEqual(candidate_path.stat().st_mode & 0o777, 0o600)
+                self.assertNotIn("token=abc123", candidate_path.read_text(encoding="utf-8"))
+                self.assertTrue(verify["ok"])
+                self.assertEqual(gated["status"], "approval_required")
+                self.assertEqual(installed["status"], "skill_candidate_installed_disabled")
+                self.assertFalse(installed["auto_enable"])
+                self.assertGreaterEqual(after["candidate_count"], 1)
+                skill_rows = {row["id"]: row for row in skills["skills"]}
+                self.assertIn("test.api_curated", skill_rows)
+                self.assertFalse(skill_rows["test.api_curated"]["enabled"])
+                self.assertEqual(skill_rows["test.api_curated"]["sandbox_profile"], "no_tools")
+                self.assertNotIn("token=abc123", (data_dir / "audit.jsonl").read_text(encoding="utf-8"))
+            finally:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+
     def test_hooks_api_registers_lists_and_runs_governed_hook(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             port = _free_port()

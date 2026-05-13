@@ -118,7 +118,7 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
             {
                 "name": "Safe defaults",
                 "state": "enforced",
-                "detail": "Live writes, sends, shell execution, MCP calls, generated skills, and risky backends are approval-gated.",
+                "detail": "Live writes, sends, shell execution, MCP calls, generated skills, reviewed skill draft installs, and risky backends are approval-gated.",
             },
         ],
         "capability_groups": [
@@ -320,6 +320,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "scoped remote-control directory",
                 "allowlisted brokered-bearer Streamable HTTP MCP",
                 "remote MCP OAuth protected-resource metadata and brokered OAuth bearer configuration",
+                "reviewed private skill draft candidates",
             ],
             "security_delta": "Aegis treats all external outputs as tainted data and requires approval for high-impact actions by default.",
             "live_gap": "API-key-ready Hermes providers including Hugging Face, NVIDIA NIM, Vercel AI Gateway, OpenCode, Kilo Code, Ollama Cloud, Arcee, GMI, StepFun, Xiaomi, Tencent TokenHub, Kimi China, and MiniMax China are routable alongside brokered Nous Portal OAuth, MiniMax Token Plan, brokered MiniMax OAuth, brokered Google Gemini OAuth / Code Assist, verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, Google Vertex AI, AWS Bedrock, Azure Foundry cloud-identity bridges, and remote MCP OAuth protected-resource metadata/brokered bearer configuration; remaining work is local operator sign-in/configuration for unverified accounts and future provider-native bridges beyond the tracked target set.",
@@ -338,6 +339,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "browser tool surface",
                 "media tool surface",
                 "plugins and skills",
+                "reviewed skill draft candidates",
                 "multi-agent routing primitives",
                 "schedules",
                 "diagnostic panels",
@@ -378,6 +380,8 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "model-ready subagent review packets",
                 "governed lifecycle hooks",
                 "governed local plugin install lifecycle",
+                "reviewed private skill draft candidates",
+                "disabled skill candidate installation",
                 "verified plugin marketplace manifest fetch/install",
                 "signed remote plugin bundle review",
                 "explicit signed remote plugin bundle install",
@@ -388,7 +392,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "approved PR autofix response posting",
             ],
             "security_delta": "Aegis exposes Claude-style controls through the governed local runtime and requires scoped pairings, approved relay registration, and redacted receipts before off-device access.",
-            "live_gap": "Unattended plugin bundle auto-install, unattended plugin auto-update, recursive subagent model-loop depth, broad cloud relay delivery, and future provider OAuth bridges beyond the tracked target set remain explicit gaps instead of silent stubs; the HTTPS relay notification path now exposes a mobile/gateway delivery contract, one-delivery relay confirmation reconciliation, and CLI/TUI/API/web can register, rotate, and publish approved brokered APNS/FCM target records without capturing raw device tokens.",
+            "live_gap": "Unattended unreviewed plugin bundle auto-install, unattended plugin auto-update, recursive subagent model-loop depth, broad cloud relay delivery, and future provider OAuth bridges beyond the tracked target set remain explicit gaps instead of silent stubs; reviewed skill draft candidates can now be staged, verified, and installed disabled from CLI/TUI/API without raw observed task capture.",
             "target_requirements": [
                 "unattended_remote_plugin_bundle_auto_install",
                 "unattended_plugin_auto_update",
