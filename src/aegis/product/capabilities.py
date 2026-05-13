@@ -773,22 +773,95 @@ def _live_connector_adapters(connectors: list[dict[str, Any]], config: Any) -> l
     for connector in connectors:
         live_flags = sorted(key for key, value in connector.items() if key.startswith("live_") and value is True)
         if live_flags:
+            name = str(connector.get("name", "unknown"))
             adapters.append(
                 {
                     "kind": "connector",
-                    "name": str(connector.get("name", "unknown")),
+                    "name": name,
                     "status": "live_enabled",
                     "live_flags": live_flags,
+                    "capabilities": list(_LIVE_CONNECTOR_CAPABILITIES.get(name, ())),
+                    "activation": _configured_live_connector_activation(name, connector),
                     "raw_secret_values_included": False,
                 }
             )
     if getattr(config.webhook, "enabled", False) and getattr(config.webhook, "outbound_enabled", False):
-        adapters.append({"kind": "channel", "name": "webhook", "status": "live_outbound_enabled", "raw_secret_values_included": False})
+        adapters.append(
+            {
+                "kind": "channel",
+                "name": "webhook",
+                "status": "live_outbound_enabled",
+                "capabilities": list(_LIVE_CHANNEL_CAPABILITIES["webhook"]),
+                "activation": _configured_live_channel_activation("webhook"),
+                "raw_secret_values_included": False,
+            }
+        )
     if getattr(config.email, "outbound_enabled", False):
-        adapters.append({"kind": "channel", "name": "email", "status": "live_outbound_enabled", "raw_secret_values_included": False})
+        adapters.append(
+            {
+                "kind": "channel",
+                "name": "email",
+                "status": "live_outbound_enabled",
+                "capabilities": list(_LIVE_CHANNEL_CAPABILITIES["email"]),
+                "activation": _configured_live_channel_activation("email"),
+                "raw_secret_values_included": False,
+            }
+        )
     if getattr(config.chat_webhook, "outbound_enabled", False):
-        adapters.append({"kind": "channel", "name": "chat_webhook", "status": "live_outbound_enabled", "raw_secret_values_included": False})
+        adapters.append(
+            {
+                "kind": "channel",
+                "name": "chat_webhook",
+                "status": "live_outbound_enabled",
+                "capabilities": list(_LIVE_CHANNEL_CAPABILITIES["chat_webhook"]),
+                "activation": _configured_live_channel_activation("chat_webhook"),
+                "raw_secret_values_included": False,
+            }
+        )
     return adapters
+
+
+def _configured_live_connector_activation(name: str, connector: dict[str, Any]) -> dict[str, Any]:
+    configured_controls = ["live_enablement_flag", "redacted_receipts", "runtime_rate_limits", "rollback_receipts"]
+    blockers: list[dict[str, str]] = []
+    allowlist = tuple(str(item) for item in connector.get("allowlist", ()) if str(item))
+    if allowlist:
+        configured_controls.append("network_allowlist")
+    else:
+        blockers.append({"control": "network_allowlist", "detail": "at least one provider host must remain allowlisted before live writes run"})
+    if name in _LIVE_CONNECTOR_TOKEN_REQUIRED:
+        blockers.append({"control": "brokered_token", "detail": "a brokered provider credential must resolve for each approved live write"})
+    preflight_status = "ready_for_approved_call" if not blockers else "runtime_configuration_required"
+    return {
+        "status": "live_enabled",
+        "preflight_status": preflight_status,
+        "required_controls": ["live_enablement_flag", "network_allowlist", "human_approval", "redacted_receipts"]
+        + (["brokered_token"] if name in _LIVE_CONNECTOR_TOKEN_REQUIRED else []),
+        "configured_controls": configured_controls,
+        "blockers": blockers,
+        "verification_gates": ["mock_fallback", "approved_write", "rate_limit_denial", "rollback_receipt", "receipt_redaction"],
+        "next_steps": [
+            f"Run one approved {name} live write against an allowlisted provider endpoint.",
+            "Confirm the receipt stays redacted and rollback guidance is present before broader promotion.",
+        ],
+        "raw_secret_values_included": False,
+    }
+
+
+def _configured_live_channel_activation(name: str) -> dict[str, Any]:
+    return {
+        "status": "live_outbound_enabled",
+        "preflight_status": "ready_for_approved_send",
+        "required_controls": ["explicit_channel_config", "human_approval", "secret_broker_or_allowlist", "redacted_receipts"],
+        "configured_controls": ["explicit_channel_config", "redacted_receipts"],
+        "blockers": [],
+        "verification_gates": ["approved_send", "receipt_redaction"],
+        "next_steps": [
+            f"Send one approved {name} delivery in the target environment.",
+            "Confirm delivery receipts stay redacted before using the channel broadly.",
+        ],
+        "raw_secret_values_included": False,
+    }
 
 
 def _browser_media_operator_checklist(implemented_controls: list[str], remaining_depth_work: list[str]) -> list[dict[str, str]]:
@@ -968,6 +1041,9 @@ _LIVE_CONNECTOR_CAPABILITIES = {
     "mock_servicenow": ("ticket_write",),
     "mock_messaging": ("message_send", "message_rollback"),
 }
+
+
+_LIVE_CONNECTOR_TOKEN_REQUIRED = {"github", "gitlab", "mock_graph", "mock_servicenow", "mock_messaging"}
 
 
 _LIVE_CHANNEL_CAPABILITIES = {

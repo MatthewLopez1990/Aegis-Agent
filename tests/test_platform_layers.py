@@ -2167,6 +2167,15 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("mock_servicenow", {adapter["name"] for adapter in live_gap["available_live_adapters"]})
             self.assertIn("mock_messaging", {adapter["name"] for adapter in live_gap["available_live_adapters"]})
             self.assertIn("available_live_adapters", live_gap)
+            implemented = {adapter["name"]: adapter for adapter in live_gap["implemented_live_adapters"]}
+            self.assertEqual(implemented["generic_rest"]["activation"]["preflight_status"], "ready_for_approved_call")
+            self.assertIn("network_allowlist", implemented["generic_rest"]["activation"]["configured_controls"])
+            self.assertEqual(implemented["github"]["activation"]["preflight_status"], "runtime_configuration_required")
+            self.assertIn("brokered_token", {blocker["control"] for blocker in implemented["github"]["activation"]["blockers"]})
+            self.assertNotIn("live_enablement_flag", {blocker["control"] for blocker in implemented["github"]["activation"]["blockers"]})
+            self.assertEqual(implemented["webhook"]["activation"]["preflight_status"], "ready_for_approved_send")
+            self.assertEqual(implemented["email"]["activation"]["preflight_status"], "ready_for_approved_send")
+            self.assertEqual(implemented["chat_webhook"]["activation"]["preflight_status"], "ready_for_approved_send")
             checklist = {item["control"]: item for item in live_gap["operator_checklist"]}
             self.assertEqual(checklist["promotion_scope"]["state"], "partial")
             self.assertEqual(checklist["human_approval"]["state"], "enforced")
