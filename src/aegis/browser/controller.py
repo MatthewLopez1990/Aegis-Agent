@@ -20,6 +20,7 @@ import zlib
 
 from aegis.audit.logger import AuditLogger, redact
 from aegis.connectors.base import ConnectorRequest
+from aegis.connectors.http import _private_network_error, _validate_url
 from aegis.connectors.registry import ConnectorRegistry
 from aegis.security.taint import now_utc
 from aegis.storage.state import ensure_private_dir, ensure_private_file
@@ -48,10 +49,20 @@ _DOM_SECRETISH_TOKEN_RE = re.compile(r"\b(?=[A-Za-z0-9_-]{6,}\b)(?=[A-Za-z0-9_-]
 
 
 class BrowserController:
-    def __init__(self, connectors: ConnectorRegistry, audit_logger: AuditLogger, artifact_dir: str | Path) -> None:
+    def __init__(
+        self,
+        connectors: ConnectorRegistry,
+        audit_logger: AuditLogger,
+        artifact_dir: str | Path,
+        *,
+        live_browser_reads: bool = False,
+        network_allowlist: tuple[str, ...] = (),
+    ) -> None:
         self.connectors = connectors
         self.audit_logger = audit_logger
         self.artifact_dir = ensure_private_dir(artifact_dir)
+        self.live_browser_reads = live_browser_reads
+        self.network_allowlist = network_allowlist
         self.session_store_path = ensure_private_file(self.artifact_dir / "sessions.json")
         self._sessions: dict[str, dict[str, Any]] = {}
         self._load_sessions()
@@ -227,7 +238,7 @@ class BrowserController:
         session = self._require_session(session_id)
         interactive_elements = _normalize_interactive_elements(session.get("interactive_elements"))
         selector_inventory = _selector_inventory(interactive_elements)
-        activation = _live_browser_activation_preflight()
+        activation = _live_browser_activation_preflight(live_browser_reads=self.live_browser_reads)
         response = {
             "ok": True,
             "session_id": session_id,
@@ -247,6 +258,7 @@ class BrowserController:
                 "static_dom_form_fill_supported": True,
             },
             "activation": activation,
+            "live_browser_read_adapter": "available" if self.live_browser_reads else "disabled",
             "preflight_status": activation["preflight_status"],
             "automation_boundaries": _browser_automation_boundaries(rendered=False),
             "mode": "http_content_no_js_selector_inventory",
@@ -265,6 +277,7 @@ class BrowserController:
         session_id: str,
         selector: str | None = None,
         fields: dict[str, Any] | None = None,
+        url: str | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"kind": "browser_action", "action": action, "session_id": session_id}
         if action == "click":
@@ -314,11 +327,33 @@ class BrowserController:
             payload["target_path"] = _url_path(target_url)
             payload["target_url_sha256"] = hashlib.sha256(target_url.encode("utf-8", errors="replace")).hexdigest()
             return payload
+        if action == "live_navigate":
+            if not url:
+                raise ValueError("live browser navigation approval requires url")
+            target = _live_browser_url_check(url, allowlist=self.network_allowlist)
+            payload["navigation_effect"] = "live_browser_readonly_snapshot"
+            payload["target_origin"] = _url_origin(url)
+            payload["target_path"] = _url_path(url)
+            payload["target_domain"] = target["domain"]
+            payload["target_url_sha256"] = hashlib.sha256(url.encode("utf-8", errors="replace")).hexdigest()
+            if not target["ok"]:
+                payload["blocked_reason"] = str(target["reason"])
+            return payload
+        if action == "live_screenshot":
+            session = self._require_session(session_id)
+            current_url = _session_url(session) or ""
+            payload["capture_effect"] = "live_browser_readonly_snapshot"
+            payload["target_origin"] = _url_origin(current_url) if current_url else ""
+            payload["target_path"] = _url_path(current_url) if current_url else ""
+            payload["target_url_sha256"] = hashlib.sha256(current_url.encode("utf-8", errors="replace")).hexdigest() if current_url else ""
+            if not current_url:
+                payload["blocked_reason"] = "missing_url"
+            return payload
         raise ValueError(f"unsupported browser approval action: {action}")
 
     def deny_live_automation(self, *, action: str, session_id: str | None = None, selector: str | None = None) -> dict[str, Any]:
         session = self._require_session(session_id) if session_id else None
-        activation = _live_browser_activation_preflight()
+        activation = _live_browser_activation_preflight(live_browser_reads=self.live_browser_reads)
         response = {
             "ok": False,
             "status": "blocked_pending_live_browser_adapter",
@@ -338,11 +373,11 @@ class BrowserController:
         return response
 
     def live_activation_status(self) -> dict[str, Any]:
-        activation = _live_browser_activation_preflight()
+        activation = _live_browser_activation_preflight(live_browser_reads=self.live_browser_reads)
         return {
-            "status": "live_browser_activation_ready_for_review",
+            "status": "live_browser_read_adapter_enabled" if self.live_browser_reads else "live_browser_activation_ready_for_review",
             "activation": activation,
-            "live_browser_adapter_enabled": False,
+            "live_browser_adapter_enabled": bool(self.live_browser_reads),
             "raw_browser_content_included": False,
             "raw_secret_values_included": False,
             "model_invocation_performed": False,
@@ -354,7 +389,7 @@ class BrowserController:
         packet_dir = ensure_private_dir(self.artifact_dir / "live-activation-packets")
         packet_path = ensure_private_file(packet_dir / f"{packet_id}.json")
         checksum_path = ensure_private_file(packet_dir / f"{packet_id}.sha256")
-        packet = _browser_live_activation_packet(packet_id=packet_id, actor=actor, created_at=created_at)
+        packet = _browser_live_activation_packet(packet_id=packet_id, actor=actor, created_at=created_at, live_browser_reads=self.live_browser_reads)
         packet_path.write_text(json.dumps(packet, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         packet_path.chmod(0o600)
         artifact_sha256 = hashlib.sha256(packet_path.read_bytes()).hexdigest()
@@ -373,7 +408,7 @@ class BrowserController:
             "preflight_status": packet["activation"]["preflight_status"],
             "candidate_adapter_count": packet["activation"]["candidate_adapter_count"],
             "playwright_chromium_preflight_status": _playwright_chromium_preflight_status(packet["activation"]),
-            "live_browser_adapter_enabled": False,
+            "live_browser_adapter_enabled": bool(self.live_browser_reads),
             "raw_browser_content_included": False,
             "raw_secret_values_included": False,
             "raw_cookie_values_included": False,
@@ -388,6 +423,148 @@ class BrowserController:
             "receipt": receipt,
             "audit_event_hash": audit_entry["event_hash"],
         }
+
+    def live_navigate(self, *, session_id: str | None, url: str, approved: bool = False) -> dict[str, Any]:
+        if not approved:
+            session = self._session_or_create(session_id)
+            return {
+                "status": "approval_required",
+                "session_id": session["id"],
+                "url": _redacted_string(url, limit=2000),
+                "reason": "live browser navigation requires approval",
+            }
+        session = self._session_or_create(session_id)
+        return self._capture_live_readonly(session=session, url=url, action="live_navigate")
+
+    def live_screenshot(self, *, session_id: str, approved: bool = False) -> dict[str, Any]:
+        session = self._require_session(session_id)
+        if not approved:
+            return {
+                "status": "approval_required",
+                "session_id": session_id,
+                "url": _session_url(session),
+                "reason": "live browser screenshot requires approval",
+            }
+        url = _session_url(session)
+        if not url:
+            response = {"ok": False, "status": "missing_url", "session_id": session_id, "reason": "browser session has no current URL"}
+            self.audit_logger.append("browser.live_screenshot_blocked", response)
+            return response
+        return self._capture_live_readonly(session=session, url=url, action="live_screenshot")
+
+    def _capture_live_readonly(self, *, session: dict[str, Any], url: str, action: str) -> dict[str, Any]:
+        session_id = str(session["id"])
+        activation = _live_browser_activation_preflight(live_browser_reads=self.live_browser_reads)
+        if not self.live_browser_reads:
+            return self.deny_live_automation(action=action, session_id=session_id)
+        executable = _find_chrome_executable()
+        if not executable:
+            response = {
+                "ok": False,
+                "status": "live_browser_runtime_unavailable",
+                "action": action,
+                "session_id": session_id,
+                "url": _redacted_string(url, limit=2000),
+                "reason": "Chrome/Chromium executable was not found",
+                "activation": activation,
+                "preflight_status": activation["preflight_status"],
+            }
+            self.audit_logger.append("browser.live_read_blocked", response)
+            return response
+        url_check = _live_browser_url_check(url, allowlist=self.network_allowlist)
+        if not url_check["ok"]:
+            response = {
+                "ok": False,
+                "status": "live_browser_navigation_blocked",
+                "action": action,
+                "session_id": session_id,
+                "url": _redacted_string(url, limit=2000),
+                "reason": url_check["reason"],
+                "domain": url_check["domain"],
+                "activation": activation,
+                "preflight_status": activation["preflight_status"],
+            }
+            self.audit_logger.append("browser.live_read_blocked", response)
+            return response
+        artifact = self.artifact_dir / f"{session_id}.live.png"
+        evidence_artifact = self.artifact_dir / f"{session_id}.live.evidence.json"
+        result = _capture_live_chromium_snapshot(
+            executable=executable,
+            url=url,
+            output_path=artifact,
+            artifact_dir=self.artifact_dir,
+            allowlist=self.network_allowlist,
+        )
+        artifact_hashes: dict[str, str] = {}
+        if artifact.exists():
+            artifact.chmod(0o600)
+            artifact_hashes["live_png_sha256"] = _file_sha256(artifact)
+        sandbox_receipt = _browser_live_read_sandbox_receipt(executable=executable, exit_code=result["exit_code"], allowlist=self.network_allowlist)
+        evidence = _browser_live_read_evidence(
+            session,
+            action=action,
+            url=url,
+            result=result,
+            artifact_hashes=artifact_hashes,
+            sandbox_receipt=sandbox_receipt,
+        )
+        evidence_artifact.write_text(json.dumps(evidence, indent=2, sort_keys=True), encoding="utf-8")
+        evidence_artifact.chmod(0o600)
+        artifact_hashes["evidence_json_sha256"] = _file_sha256(evidence_artifact)
+        session_artifacts = list(session.get("artifacts", []))
+        session_artifacts.extend(str(path) for path in (artifact, evidence_artifact) if path.exists())
+        session.update(
+            {
+                "current_url": _redacted_string(url, limit=2000),
+                "title": _redacted_string(f"Live snapshot {url_check['domain']}", limit=200),
+                "updated_at": now_utc(),
+                "last_text_length": 0,
+                "live_browser_last_capture_at": now_utc(),
+                "live_browser_last_status": "captured" if result["ok"] else "capture_failed",
+                "artifacts": session_artifacts[-50:],
+            }
+        )
+        self._persist_sessions()
+        response = {
+            "ok": result["ok"],
+            "status": "captured" if result["ok"] else "capture_failed",
+            "action": action,
+            "session_id": session_id,
+            "session": _public_session(session),
+            "url": _redacted_string(url, limit=2000),
+            "domain": url_check["domain"],
+            "artifact_path": str(artifact) if artifact.exists() else None,
+            "artifact_type": "png_live_browser_readonly_snapshot",
+            "mode": "live_chromium_readonly_no_persistent_state",
+            "width": result["width"],
+            "height": result["height"],
+            "evidence_path": str(evidence_artifact),
+            "evidence_artifact_type": "json_browser_live_read_evidence",
+            "artifact_hashes": artifact_hashes,
+            "sandbox_receipt": sandbox_receipt,
+            "activation": activation,
+            "preflight_status": activation["preflight_status"],
+            "javascript_executed": False,
+            "page_javascript_allowed": False,
+            "cookies_persisted": False,
+            "cookie_jar_persisted": False,
+            "local_storage_persisted": False,
+            "session_storage_persisted": False,
+            "real_selector_events_dispatched": False,
+            "real_page_mutation_allowed": False,
+            "raw_browser_content_included": False,
+            "raw_secret_values_included": False,
+            "evidence": {
+                "action": action,
+                "url_after": _redacted_string(url, limit=2000),
+                "mode": "live_chromium_readonly_no_persistent_state",
+                "content_returned": False,
+                "artifact_hashes": artifact_hashes,
+            },
+            "error": result.get("error"),
+        }
+        self.audit_logger.append("browser.live_read_captured" if result["ok"] else "browser.live_read_failed", response)
+        return response
 
     def verify_live_activation_packet(self, packet: str, *, actor: str = "operator") -> dict[str, Any]:
         packet_path, checksum_path = _browser_live_activation_packet_paths(self.artifact_dir, packet)
@@ -1263,24 +1440,25 @@ def _unsupported_live_browser_actions() -> list[str]:
     ]
 
 
-def _live_browser_activation_preflight() -> dict[str, Any]:
-    adapter_candidates = _live_browser_adapter_candidates()
+def _live_browser_activation_preflight(*, live_browser_reads: bool = False) -> dict[str, Any]:
+    adapter_candidates = _live_browser_adapter_candidates(live_browser_reads=live_browser_reads)
     blockers = [
-        {"control": "live_browser_adapter", "detail": "no Playwright/Chromium real browser automation adapter is enabled"},
-        {"control": "ephemeral_profile", "detail": "live automation must use a per-run browser profile with no persistent cookies or storage"},
-        {"control": "network_allowlist", "detail": "navigation and subresource requests must pass configured provider/domain allowlists"},
-        {"control": "script_policy", "detail": "page JavaScript execution policy must be explicit before live DOM automation"},
-        {"control": "cookie_and_storage_isolation", "detail": "cookies, local storage, and session storage must be isolated and redacted in receipts"},
+        {"control": "live_browser_adapter", "detail": "no Playwright/Chromium real browser automation mutation adapter is enabled"},
         {"control": "approval_gated_mutation", "detail": "real clicks, form fills, downloads, uploads, and page mutations must require matching approval"},
         {"control": "redacted_artifact_receipts", "detail": "screenshots, DOM captures, console logs, and network traces must be hash-receipted and secret-redacted"},
     ]
+    if not live_browser_reads:
+        blockers.insert(1, {"control": "ephemeral_profile", "detail": "live automation must use a per-run browser profile with no persistent cookies or storage"})
+        blockers.insert(2, {"control": "network_allowlist", "detail": "navigation and subresource requests must pass configured provider/domain allowlists"})
+        blockers.insert(3, {"control": "script_policy", "detail": "page JavaScript execution policy must be explicit before live DOM automation"})
+        blockers.insert(4, {"control": "cookie_and_storage_isolation", "detail": "cookies, local storage, and session storage must be isolated and redacted in receipts"})
     return {
-        "status": "live_browser_adapter_required",
-        "preflight_status": "blocked",
-        "selected_adapter": None,
+        "status": "live_browser_readonly_adapter_enabled" if live_browser_reads else "live_browser_adapter_required",
+        "preflight_status": "ready_readonly_mutation_blocked" if live_browser_reads else "blocked",
+        "selected_adapter": "headless-chromium-readonly" if live_browser_reads else None,
         "candidate_adapter_count": len(adapter_candidates),
         "adapter_candidates": adapter_candidates,
-        "live_browser_adapter_enabled": False,
+        "live_browser_adapter_enabled": bool(live_browser_reads),
         "configured_controls": [
             "http_connector_navigation_allowlist",
             "virtual_interaction_approval_gate",
@@ -1290,6 +1468,17 @@ def _live_browser_activation_preflight() -> dict[str, Any]:
             "secret_redaction",
             "live_activation_packet_receipts",
             "live_activation_packet_verification",
+            *(
+                [
+                    "headless_chromium_readonly_adapter",
+                    "ephemeral_chromium_profile",
+                    "main_frame_network_allowlist",
+                    "cookie_storage_disposal",
+                    "live_browser_readonly_receipts",
+                ]
+                if live_browser_reads
+                else []
+            ),
         ],
         "required_controls": [blocker["control"] for blocker in blockers],
         "blockers": blockers,
@@ -1301,10 +1490,12 @@ def _live_browser_activation_preflight() -> dict[str, Any]:
             "approval_required_mutation",
             "redacted_artifact_receipts",
             "live_activation_packet_integrity",
+            *(["approved_live_browser_readonly_snapshot"] if live_browser_reads else []),
             "playwright_chromium_adapter_preflight",
         ],
         "next_steps": [
-            "Create and verify a private live activation packet before implementing or enabling the Playwright/Chromium adapter.",
+            "Enable live browser reads only with an explicit security.live_browser_reads config flag and approved action payload.",
+            "Use the headless Chromium read-only adapter for screenshot evidence only; do not treat it as permission for selector mutation.",
             "Keep the Playwright/Chromium adapter disabled until navigation, subresource, script, cookie, and storage boundaries are enforceable.",
             "Keep every real page mutation approval-gated and bind approvals to the exact selector/action payload.",
             "Record redacted hash receipts for screenshots, DOM snapshots, downloads, uploads, console logs, and network traces.",
@@ -1312,7 +1503,7 @@ def _live_browser_activation_preflight() -> dict[str, Any]:
     }
 
 
-def _live_browser_adapter_candidates() -> list[dict[str, Any]]:
+def _live_browser_adapter_candidates(*, live_browser_reads: bool = False) -> list[dict[str, Any]]:
     chrome_path = _find_chrome_executable()
     playwright_available = importlib.util.find_spec("playwright") is not None
     blockers = [
@@ -1324,7 +1515,45 @@ def _live_browser_adapter_candidates() -> list[dict[str, Any]]:
         blockers.append({"control": "playwright_runtime", "detail": "python package playwright is not installed in this runtime"})
     if not chrome_path:
         blockers.append({"control": "chromium_runtime", "detail": "google-chrome, chromium, or chromium-browser is not available on PATH"})
-    return [
+    candidates: list[dict[str, Any]] = []
+    if live_browser_reads:
+        candidates.append(
+            {
+                "name": "headless-chromium-readonly",
+                "engine": "chromium",
+                "runtime": "chrome-headless-cli",
+                "status": "readonly_enabled" if chrome_path else "runtime_missing",
+                "preflight_status": "ready" if chrome_path else "blocked",
+                "enabled": bool(chrome_path),
+                "chromium_executable_available": bool(chrome_path),
+                "raw_executable_path_included": False,
+                "required_controls": [
+                    "explicit_enablement",
+                    "ephemeral_profile",
+                    "main_frame_network_allowlist",
+                    "script_policy",
+                    "cookie_and_storage_isolation",
+                    "redacted_artifact_receipts",
+                ],
+                "configured_controls": [
+                    "explicit_enablement",
+                    "ephemeral_profile",
+                    "main_frame_network_allowlist",
+                    "script_policy",
+                    "cookie_and_storage_isolation",
+                    "redacted_artifact_receipts",
+                    "private_artifact_storage",
+                    "artifact_hash_receipts",
+                    "secret_redaction",
+                ],
+                "blockers": [] if chrome_path else [{"control": "chromium_runtime", "detail": "google-chrome, chromium, or chromium-browser is not available on PATH"}],
+                "next_steps": [
+                    "Use only approved live_navigate or live_screenshot actions.",
+                    "Keep selector events, page mutation, downloads, uploads, and persistent cookies disabled.",
+                ],
+            }
+        )
+    candidates.append(
         {
             "name": "playwright-chromium",
             "engine": "chromium",
@@ -1358,7 +1587,8 @@ def _live_browser_adapter_candidates() -> list[dict[str, Any]]:
                 "Keep cookies, storage, JavaScript, downloads, uploads, and selector mutations disabled until receipt controls are enforced.",
             ],
         }
-    ]
+    )
+    return candidates
 
 
 _BROWSER_ACTIVATION_FALSE_CONTROLS = (
@@ -1410,9 +1640,11 @@ _BROWSER_ACTIVATION_REQUIRED_GATES = (
 )
 
 
-def _browser_live_activation_packet(*, packet_id: str, actor: str, created_at: str) -> dict[str, Any]:
-    activation = _live_browser_activation_preflight()
+def _browser_live_activation_packet(*, packet_id: str, actor: str, created_at: str, live_browser_reads: bool = False) -> dict[str, Any]:
+    activation = _live_browser_activation_preflight(live_browser_reads=live_browser_reads)
     chrome_path = _find_chrome_executable()
+    controls = {control: False for control in _BROWSER_ACTIVATION_FALSE_CONTROLS}
+    controls["live_browser_adapter_enabled"] = bool(live_browser_reads)
     return {
         "packet_schema": "aegis.browser.live_activation_packet.v1",
         "packet_id": packet_id,
@@ -1432,7 +1664,7 @@ def _browser_live_activation_packet(*, packet_id: str, actor: str, created_at: s
             "Verify checksum, schema, blockers, and control flags before implementing a live adapter.",
             "Do not use this packet to bypass approvals for real clicks, form fills, downloads, uploads, or page mutations.",
         ],
-        "controls": {control: False for control in _BROWSER_ACTIVATION_FALSE_CONTROLS},
+        "controls": controls,
     }
 
 
@@ -1440,14 +1672,28 @@ def _browser_live_activation_controls_valid(controls: dict[str, Any]) -> bool:
     expected_controls = set(_BROWSER_ACTIVATION_FALSE_CONTROLS)
     if set(controls) != expected_controls:
         return False
-    return all(controls.get(control) is False for control in _BROWSER_ACTIVATION_FALSE_CONTROLS)
+    for control in _BROWSER_ACTIVATION_FALSE_CONTROLS:
+        if control == "live_browser_adapter_enabled":
+            if controls.get(control) not in {False, True}:
+                return False
+            continue
+        if controls.get(control) is not False:
+            return False
+    return True
 
 
 def _browser_live_activation_preflight_valid(activation: dict[str, Any]) -> bool:
-    if activation.get("status") != "live_browser_adapter_required" or activation.get("preflight_status") != "blocked":
-        return False
-    if activation.get("selected_adapter") is not None or activation.get("live_browser_adapter_enabled") is not False:
-        return False
+    live_readonly = activation.get("status") == "live_browser_readonly_adapter_enabled"
+    if live_readonly:
+        if activation.get("preflight_status") != "ready_readonly_mutation_blocked":
+            return False
+        if activation.get("selected_adapter") != "headless-chromium-readonly" or activation.get("live_browser_adapter_enabled") is not True:
+            return False
+    else:
+        if activation.get("status") != "live_browser_adapter_required" or activation.get("preflight_status") != "blocked":
+            return False
+        if activation.get("selected_adapter") is not None or activation.get("live_browser_adapter_enabled") is not False:
+            return False
     if not _browser_live_adapter_candidates_valid(activation.get("adapter_candidates")):
         return False
     blockers = activation.get("blockers")
@@ -1457,12 +1703,26 @@ def _browser_live_activation_preflight_valid(activation: dict[str, Any]) -> bool
     required_controls = {str(control) for control in activation.get("required_controls") or []}
     configured_controls = {str(control) for control in activation.get("configured_controls") or []}
     verification_gates = {str(gate) for gate in activation.get("verification_gates") or []}
-    required_blockers = set(_BROWSER_ACTIVATION_REQUIRED_BLOCKERS)
+    required_blockers = {"live_browser_adapter", "approval_gated_mutation", "redacted_artifact_receipts"} if live_readonly else set(_BROWSER_ACTIVATION_REQUIRED_BLOCKERS)
+    configured_required = set(_BROWSER_ACTIVATION_REQUIRED_CONFIGURED_CONTROLS)
+    if live_readonly:
+        configured_required.update(
+            {
+                "headless_chromium_readonly_adapter",
+                "ephemeral_chromium_profile",
+                "main_frame_network_allowlist",
+                "cookie_storage_disposal",
+                "live_browser_readonly_receipts",
+            }
+        )
+    gates_required = set(_BROWSER_ACTIVATION_REQUIRED_GATES)
+    if live_readonly:
+        gates_required.add("approved_live_browser_readonly_snapshot")
     return (
         required_blockers.issubset(blocker_controls)
         and required_blockers.issubset(required_controls)
-        and set(_BROWSER_ACTIVATION_REQUIRED_CONFIGURED_CONTROLS).issubset(configured_controls)
-        and set(_BROWSER_ACTIVATION_REQUIRED_GATES).issubset(verification_gates)
+        and configured_required.issubset(configured_controls)
+        and gates_required.issubset(verification_gates)
     )
 
 
@@ -1570,7 +1830,7 @@ def _browser_live_activation_packet_summary(packet: dict[str, Any]) -> dict[str,
         "verification_gates": list(activation.get("verification_gates") or []),
         "chrome_renderer_available": bool(environment.get("chrome_renderer_available", False)),
         "chrome_renderer_name": environment.get("chrome_renderer_name"),
-        "live_browser_adapter_enabled": False,
+        "live_browser_adapter_enabled": bool(controls.get("live_browser_adapter_enabled", False)),
         "raw_browser_content_included": False,
         "raw_secret_values_included": False,
         "raw_cookie_values_included": False,
@@ -2316,6 +2576,154 @@ def _capture_chrome_screenshot(
         "height": height,
         "exit_code": completed.returncode,
         "error": None if ok else str(redact((completed.stderr or completed.stdout or "render failed")[:500])),
+    }
+
+
+def _live_browser_url_check(url: str, *, allowlist: tuple[str, ...]) -> dict[str, Any]:
+    parsed = urlparse(url)
+    domain = parsed.hostname or ""
+    validation_error = _validate_url(parsed)
+    if validation_error:
+        return {"ok": False, "domain": domain, "reason": validation_error}
+    if not any(domain == allowed or domain.endswith(f".{allowed}") for allowed in allowlist):
+        return {"ok": False, "domain": domain, "reason": f"domain {domain!r} is not allowlisted"}
+    private_error = _private_network_error(domain)
+    if private_error:
+        return {"ok": False, "domain": domain, "reason": private_error}
+    return {"ok": True, "domain": domain, "reason": None}
+
+
+def _capture_live_chromium_snapshot(
+    *,
+    executable: str,
+    url: str,
+    output_path: Path,
+    artifact_dir: Path,
+    allowlist: tuple[str, ...],
+    width: int = 1280,
+    height: int = 900,
+) -> dict[str, Any]:
+    with tempfile.TemporaryDirectory(prefix="aegis-browser-live-", dir=artifact_dir) as profile_dir:
+        command = [
+            executable,
+            "--headless=new",
+            "--disable-background-networking",
+            "--disable-default-apps",
+            "--disable-extensions",
+            "--disable-gpu",
+            "--disable-notifications",
+            "--disable-popup-blocking",
+            "--disable-sync",
+            "--disable-translate",
+            "--hide-scrollbars",
+            "--mute-audio",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--deny-permission-prompts",
+            "--blink-settings=scriptEnabled=false,imagesEnabled=false",
+            "--disable-features=AutofillServerCommunication,OptimizationHints,MediaRouter,Translate",
+            f"--host-resolver-rules={_chrome_host_resolver_rules(allowlist)}",
+            f"--user-data-dir={profile_dir}",
+            f"--window-size={width},{height}",
+            f"--screenshot={output_path}",
+            url,
+        ]
+        try:
+            completed = subprocess.run(command, cwd=artifact_dir, capture_output=True, text=True, timeout=20, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return {"ok": False, "width": width, "height": height, "exit_code": None, "error": str(redact(str(exc)[:500]))}
+    ok = completed.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0
+    return {
+        "ok": ok,
+        "width": width,
+        "height": height,
+        "exit_code": completed.returncode,
+        "error": None if ok else str(redact((completed.stderr or completed.stdout or "live browser capture failed")[:500])),
+    }
+
+
+def _chrome_host_resolver_rules(allowlist: tuple[str, ...]) -> str:
+    excludes = []
+    for host in allowlist:
+        normalized = str(host).strip().lower()
+        if not normalized:
+            continue
+        excludes.append(f"EXCLUDE {normalized}")
+        if not normalized.startswith("*."):
+            excludes.append(f"EXCLUDE *.{normalized}")
+    if not excludes:
+        return "MAP * 0.0.0.0"
+    return ", ".join(["MAP * 0.0.0.0", *excludes])
+
+
+def _browser_live_read_sandbox_receipt(*, executable: str, exit_code: int | None, allowlist: tuple[str, ...]) -> dict[str, Any]:
+    return {
+        "sandbox_profile": "live_chromium_readonly_ephemeral_profile",
+        "adapter": "headless-chromium-readonly",
+        "ambient_workspace_read": False,
+        "ambient_network": "main_frame_allowlist_with_best_effort_subresource_blocking",
+        "navigation_network": "main_frame_allowlist_only",
+        "network_allowlist": list(allowlist),
+        "remote_subresources_allowed": False,
+        "remote_subresources_loaded": False,
+        "cookies_persisted": False,
+        "cookie_jar_persisted": False,
+        "local_storage_persisted": False,
+        "session_storage_persisted": False,
+        "javascript_executed": False,
+        "page_javascript_allowed": False,
+        "original_page_dom_returned": False,
+        "dom_renderer_used": True,
+        "real_selector_events_dispatched": False,
+        "real_page_mutation_allowed": False,
+        "downloads_allowed": False,
+        "uploads_allowed": False,
+        "renderer": Path(executable).name,
+        "renderer_exit_code": exit_code,
+        "raw_secret_capture_allowed": False,
+        "writes_confined_to": ".aegis/browser",
+    }
+
+
+def _browser_live_read_evidence(
+    session: dict[str, Any],
+    *,
+    action: str,
+    url: str,
+    result: dict[str, Any],
+    artifact_hashes: dict[str, str],
+    sandbox_receipt: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "evidence_schema": "aegis.browser.live_read_evidence.v1",
+        "captured_at": now_utc(),
+        "session_id": str(session.get("id", "")),
+        "action": action,
+        "url": _redacted_string(url, limit=2000),
+        "url_sha256": hashlib.sha256(url.encode("utf-8", errors="replace")).hexdigest(),
+        "capture_surface": "live_browser_readonly_screenshot",
+        "rendering_status": "rendered" if result.get("ok") else "render_failed",
+        "mode": "live_chromium_readonly_no_persistent_state",
+        "content_returned": False,
+        "raw_browser_content_included": False,
+        "raw_secret_values_included": False,
+        "raw_cookie_values_included": False,
+        "raw_storage_values_included": False,
+        "model_invocation_performed": False,
+        "width": result.get("width"),
+        "height": result.get("height"),
+        "artifact_hashes": dict(artifact_hashes),
+        "sandbox_receipt": sandbox_receipt,
+        "automation_boundaries": {
+            **_browser_automation_boundaries(rendered=True),
+            "capture_surface": "live_browser_readonly_screenshot",
+            "navigation_network": "main_frame_allowlist_only",
+            "virtual_interactions_only": False,
+            "dom_renderer_used": True,
+            "real_selector_events_dispatched": False,
+            "real_page_mutation_allowed": False,
+        },
+        "error": result.get("error"),
     }
 
 

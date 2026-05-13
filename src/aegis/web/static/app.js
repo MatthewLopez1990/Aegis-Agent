@@ -3417,6 +3417,22 @@ document.getElementById("browser-inspect").addEventListener("click", async () =>
   renderBrowserOutput(await api("/browser/inspect", { method: "POST", body: JSON.stringify({ session_id: state.browserSessionId }) }));
 });
 
+document.getElementById("browser-live-navigate").addEventListener("click", async () => {
+  if (!state.browserSessionId) {
+    const session = await api("/browser/sessions", { method: "POST", body: JSON.stringify({ label: "Web live browser" }) });
+    state.browserSessionId = session.id;
+  }
+  const url = document.getElementById("browser-url").value || "https://example.com";
+  state.pendingBrowserAction = { action: "live_navigate", session_id: state.browserSessionId, url };
+  renderBrowserOutput(
+    await api("/browser/live-navigate", {
+      method: "POST",
+      body: JSON.stringify({ session_id: state.browserSessionId, url }),
+    })
+  );
+  await refresh();
+});
+
 document.getElementById("browser-dom-snapshot").addEventListener("click", async () => {
   if (!state.browserSessionId) {
     renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
@@ -3450,6 +3466,16 @@ document.getElementById("browser-render-screenshot").addEventListener("click", a
     return;
   }
   renderBrowserOutput(await api("/browser/render-screenshot", { method: "POST", body: JSON.stringify({ session_id: state.browserSessionId }) }));
+  await refresh();
+});
+
+document.getElementById("browser-live-screenshot").addEventListener("click", async () => {
+  if (!state.browserSessionId) {
+    renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
+    return;
+  }
+  state.pendingBrowserAction = { action: "live_screenshot", session_id: state.browserSessionId };
+  renderBrowserOutput(await api("/browser/live-screenshot", { method: "POST", body: JSON.stringify({ session_id: state.browserSessionId }) }));
   await refresh();
 });
 
@@ -3538,13 +3564,26 @@ document.getElementById("browser-output").addEventListener("click", async (event
   const approvalId = event.target.dataset.browserRunApproved;
   if (!approvalId || !state.pendingBrowserAction || state.pendingBrowserAction.approval_id !== approvalId) return;
   const action = state.pendingBrowserAction;
-  const path = action.action === "fill" ? "/browser/fill" : action.action === "submit" ? "/browser/submit" : "/browser/click";
+  const path =
+    action.action === "fill"
+      ? "/browser/fill"
+      : action.action === "submit"
+        ? "/browser/submit"
+        : action.action === "live_navigate"
+          ? "/browser/live-navigate"
+          : action.action === "live_screenshot"
+            ? "/browser/live-screenshot"
+            : "/browser/click";
   const body =
     action.action === "fill"
       ? { session_id: action.session_id, fields: action.fields, approval_id: approvalId }
       : action.action === "submit"
         ? { session_id: action.session_id, selector: action.selector, approval_id: approvalId }
-      : { session_id: action.session_id, selector: action.selector, approval_id: approvalId };
+        : action.action === "live_navigate"
+          ? { session_id: action.session_id, url: action.url, approval_id: approvalId }
+          : action.action === "live_screenshot"
+            ? { session_id: action.session_id, approval_id: approvalId }
+            : { session_id: action.session_id, selector: action.selector, approval_id: approvalId };
   const result = await api(path, { method: "POST", body: JSON.stringify(body) });
   if (result.ok) {
     state.pendingBrowserAction = null;

@@ -1316,6 +1316,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("activation_packet_verification", backlog["browser_and_media_depth"]["required_controls"])
             self.assertIn("live_browser_activation_packet_schema", backlog["browser_and_media_depth"]["verification_gates"])
             self.assertIn("live_browser_activation_packet_verification", backlog["browser_and_media_depth"]["verification_gates"])
+            self.assertIn("approved_live_browser_readonly_snapshot", backlog["browser_and_media_depth"]["verification_gates"])
             self.assertIn("playwright_chromium_adapter_preflight", backlog["browser_and_media_depth"]["verification_gates"])
             self.assertIn("disabled_live_browser_denial", backlog["browser_and_media_depth"]["verification_gates"])
             browser_hardening_controls = {control["control"] for control in backlog["browser_and_media_depth"]["implemented_hardening_controls"]}
@@ -1336,17 +1337,19 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("live_browser_activation_packets", browser_hardening_controls)
             self.assertIn("playwright_chromium_adapter_preflight", browser_hardening_controls)
             self.assertIn("live_browser_activation_packet_verification", browser_hardening_controls)
+            self.assertIn("approved_live_browser_readonly_adapter", browser_hardening_controls)
             self.assertIn("static_dom_snapshot_no_js", browser_hardening_controls)
             self.assertIn("approved_static_form_fill", browser_hardening_controls)
             self.assertIn("approved_static_form_submit", browser_hardening_controls)
             self.assertIn("approved_static_anchor_navigation", browser_hardening_controls)
             self.assertIn("disabled_live_browser_denial", browser_hardening_controls)
-            self.assertIn("live_browser_automation_adapter", backlog["browser_and_media_depth"]["remaining_depth_work"])
+            self.assertIn("live_browser_mutation_and_js_automation_adapter", backlog["browser_and_media_depth"]["remaining_depth_work"])
             self.assertNotIn("stricter_platform_media_sandbox_profiles", backlog["browser_and_media_depth"]["remaining_depth_work"])
             self.assertIn("provider_specific_media_adapter_expansion", backlog["browser_and_media_depth"]["remaining_depth_work"])
             self.assertIn("artifact_integrity.browser_media_receipts", backlog["browser_and_media_depth"]["evaluation_scenarios"])
             self.assertIn("browser.live_activation_packet_preflight", backlog["browser_and_media_depth"]["evaluation_scenarios"])
             self.assertIn("browser.live_activation_packet_verification", backlog["browser_and_media_depth"]["evaluation_scenarios"])
+            self.assertIn("browser.live_readonly_snapshot", backlog["browser_and_media_depth"]["evaluation_scenarios"])
             self.assertIn("browser.live_automation_denied_until_adapter_ready", backlog["browser_and_media_depth"]["evaluation_scenarios"])
             browser_checklist = {item["control"]: item for item in backlog["browser_and_media_depth"]["operator_checklist"]}
             self.assertEqual(browser_checklist["browser_boundary_receipts"]["state"], "available")
@@ -1357,8 +1360,9 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(browser_checklist["live_browser_activation_packets"]["state"], "available_adapter_blocked")
             self.assertEqual(browser_checklist["playwright_chromium_adapter_preflight"]["state"], "blocked_adapter_candidate")
             self.assertEqual(browser_checklist["live_browser_activation_packet_verification"]["state"], "verified_adapter_blocked")
+            self.assertEqual(browser_checklist["live_browser_readonly_adapter"]["state"], "available_opt_in")
             self.assertEqual(browser_checklist["media_worker_sandbox"]["state"], "available")
-            self.assertEqual(browser_checklist["live_browser_automation"]["state"], "blocked_with_preflight")
+            self.assertEqual(browser_checklist["live_browser_automation"]["state"], "read_only_available_mutation_blocked")
             self.assertEqual(browser_checklist["provider_media_depth"]["state"], "partial")
             self.assertEqual(browser_checklist["platform_media_sandbox_profiles"]["state"], "ready_for_review")
             self.assertIn("disabled_backend_denial", backlog["remote_backend_activation"]["verification_gates"])
@@ -1582,6 +1586,72 @@ class PlatformLayerTests(unittest.TestCase):
             checksum_result = orchestrator.browser.verify_live_activation_packet(write_packet("checksum-mismatch", packet_payload, checksum="0" * 64))
             self.assertFalse(checksum_result["ok"])
             self.assertFalse(checksum_result["receipt"]["checksum_matches"])
+
+    def test_browser_live_readonly_chromium_adapter_is_approval_gated_and_private(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "[security]",
+                        "live_browser_reads = true",
+                        'network_allowlist = ["example.com"]',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+
+            with (
+                patch.object(browser_controller_module, "_find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch.object(browser_controller_module, "_private_network_error", return_value=None),
+                patch.object(browser_controller_module, "_capture_live_chromium_snapshot", side_effect=_fake_live_chrome_snapshot) as live_capture,
+            ):
+                status = orchestrator.browser.live_activation_status()
+                approval_required = orchestrator.tools.execute("browser", {"action": "live_navigate", "url": "https://example.com"}, approved=False)
+                live_nav = orchestrator.tools.execute("browser", {"action": "live_navigate", "url": "https://example.com"}, approved=True)
+                browser_session_id = live_nav["session"]["id"]
+                live_screenshot = orchestrator.tools.execute("browser_screenshot", {"session_id": browser_session_id, "live": True}, approved=True)
+                live_click = orchestrator.tools.execute("browser_click", {"session_id": browser_session_id, "selector": "#submit", "live": True}, approved=True)
+                blocked_domain = orchestrator.tools.execute("browser", {"action": "live_navigate", "url": "https://evil.test"}, approved=True)
+
+            self.assertEqual(status["activation"]["status"], "live_browser_readonly_adapter_enabled")
+            self.assertEqual(status["activation"]["preflight_status"], "ready_readonly_mutation_blocked")
+            self.assertEqual(status["activation"]["selected_adapter"], "headless-chromium-readonly")
+            self.assertTrue(status["live_browser_adapter_enabled"])
+            self.assertEqual(approval_required["status"], "approval_required")
+            self.assertTrue(live_nav["ok"])
+            self.assertEqual(live_nav["mode"], "live_chromium_readonly_no_persistent_state")
+            self.assertEqual(live_nav["artifact_type"], "png_live_browser_readonly_snapshot")
+            self.assertFalse(live_nav["javascript_executed"])
+            self.assertFalse(live_nav["cookies_persisted"])
+            self.assertFalse(live_nav["raw_browser_content_included"])
+            self.assertEqual(live_nav["sandbox_receipt"]["sandbox_profile"], "live_chromium_readonly_ephemeral_profile")
+            self.assertEqual(live_nav["sandbox_receipt"]["navigation_network"], "main_frame_allowlist_only")
+            self.assertFalse(live_nav["sandbox_receipt"]["real_selector_events_dispatched"])
+            self.assertTrue(Path(live_nav["artifact_path"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertEqual(stat.S_IMODE(Path(live_nav["artifact_path"]).stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(Path(live_nav["evidence_path"]).stat().st_mode), 0o600)
+            live_evidence = json.loads(Path(live_nav["evidence_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(live_evidence["evidence_schema"], "aegis.browser.live_read_evidence.v1")
+            self.assertFalse(live_evidence["content_returned"])
+            self.assertFalse(live_evidence["raw_browser_content_included"])
+            self.assertEqual(live_evidence["automation_boundaries"]["capture_surface"], "live_browser_readonly_screenshot")
+            self.assertEqual(live_evidence["automation_boundaries"]["navigation_network"], "main_frame_allowlist_only")
+            self.assertFalse(live_evidence["automation_boundaries"]["real_page_mutation_allowed"])
+            self.assertTrue(live_screenshot["ok"])
+            self.assertEqual(live_screenshot["action"], "live_screenshot")
+            self.assertFalse(live_click["ok"])
+            self.assertEqual(live_click["status"], "blocked_pending_live_browser_adapter")
+            self.assertEqual(live_click["activation"]["preflight_status"], "ready_readonly_mutation_blocked")
+            self.assertFalse(blocked_domain["ok"])
+            self.assertEqual(blocked_domain["status"], "live_browser_navigation_blocked")
+            self.assertIn("not allowlisted", blocked_domain["reason"])
+            self.assertEqual(live_capture.call_args.kwargs["allowlist"], ("example.com",))
 
     def test_browser_static_form_submit_uses_http_connector_without_js(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -2849,6 +2919,8 @@ class PlatformLayerTests(unittest.TestCase):
         self.assertIn("browser-table", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("Snapshot Note", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("Rendered PNG", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("Live Snapshot", (static_root / "index.html").read_text(encoding="utf-8"))
+        self.assertIn("Live PNG", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("Record Click", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("Record Fill", (static_root / "index.html").read_text(encoding="utf-8"))
         self.assertIn("tool-run-form", (static_root / "index.html").read_text(encoding="utf-8"))
@@ -2986,7 +3058,9 @@ class PlatformLayerTests(unittest.TestCase):
         self.assertIn("/browser/sessions/${encodeURIComponent(closeId)}/close", app_js)
         self.assertIn("/browser/table", app_js)
         self.assertIn("/browser/inspect", app_js)
+        self.assertIn("/browser/live-navigate", app_js)
         self.assertIn("/browser/render-screenshot", app_js)
+        self.assertIn("/browser/live-screenshot", app_js)
         self.assertIn("/browser/click", app_js)
         self.assertIn("/browser/fill", app_js)
         self.assertIn("data-browser-close", app_js)
@@ -3094,6 +3168,21 @@ class _FakeSandboxResponse:
 def _fake_chrome_render(*, executable: str, html_path: Path, output_path: Path, artifact_dir: Path, width: int = 960, height: int = 720) -> dict[str, object]:
     del executable, html_path, artifact_dir
     output_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-render")
+    return {"ok": True, "width": width, "height": height, "exit_code": 0, "error": None}
+
+
+def _fake_live_chrome_snapshot(
+    *,
+    executable: str,
+    url: str,
+    output_path: Path,
+    artifact_dir: Path,
+    allowlist: tuple[str, ...],
+    width: int = 1280,
+    height: int = 900,
+) -> dict[str, object]:
+    del executable, url, artifact_dir, allowlist
+    output_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-live-render")
     return {"ok": True, "width": width, "height": height, "exit_code": 0, "error": None}
 
 

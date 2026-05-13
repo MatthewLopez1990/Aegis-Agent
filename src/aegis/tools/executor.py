@@ -2101,7 +2101,17 @@ class BuiltinToolExecutor:
         }[name]
         action = str(params.get("action", default_action))
         session_id = str(params["session_id"]) if params.get("session_id") else None
-        live_actions = {"live_navigate", "live_click", "live_fill", "live_submit", "live_screenshot", "live_render_screenshot", "live_evaluate"}
+        if bool(params.get("live")) and action == "navigate":
+            action = "live_navigate"
+        if bool(params.get("live")) and action in {"screenshot", "render_screenshot"}:
+            action = "live_screenshot"
+        if action == "live_navigate":
+            return self.browser.live_navigate(session_id=session_id, url=str(params["url"]), approved=approved)
+        if action in {"live_screenshot", "live_render_screenshot"}:
+            if session_id is None:
+                raise ToolExecutionError("live browser screenshot requires session_id")
+            return self.browser.live_screenshot(session_id=session_id, approved=approved)
+        live_actions = {"live_click", "live_fill", "live_submit", "live_evaluate"}
         if action in live_actions or bool(params.get("live")):
             selector = str(params["selector"]) if params.get("selector") else None
             return self.browser.deny_live_automation(action=action, session_id=session_id, selector=selector)

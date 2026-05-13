@@ -228,13 +228,17 @@ BROWSER_COMMANDS = (
     "sessions",
     "close",
     "navigate",
+    "live-navigate",
+    "live-screenshot",
     "extract",
     "inspect",
+    "dom",
     "table",
     "screenshot",
     "render",
     "click",
     "fill",
+    "submit",
     "activation-packet",
     "verify-activation-packet",
 )
@@ -2044,7 +2048,7 @@ class AegisTui(cmd.Cmd):
             print(f"evaluation review failed: {exc}")
 
     def do_browser(self, arg: str) -> None:
-        """browser status|connect|disconnect|session|sessions|close|navigate|extract|inspect|activation-packet|verify-activation-packet|dom|table|screenshot|render|click|fill|submit -- operate the governed browser sandbox."""
+        """browser status|connect|disconnect|session|sessions|close|navigate|live-navigate|live-screenshot|extract|inspect|activation-packet|verify-activation-packet|dom|table|screenshot|render|click|fill|submit -- operate the governed browser sandbox."""
         raw_parts = arg.strip().split(maxsplit=1)
         raw_command = raw_parts[0] if raw_parts else "session"
         parts = [raw_command, raw_parts[1]] if raw_command == "fill" and len(raw_parts) > 1 else shlex.split(arg)
@@ -2056,7 +2060,7 @@ class AegisTui(cmd.Cmd):
                         "status": "local_browser_sandbox_ready",
                         "active_session_id": self.browser_session_id,
                         "sessions": self.orchestrator.browser.list_sessions(),
-                        "live_browser_automation": "blocked_until_explicit_adapter",
+                        "live_browser_automation": "read_only_available_if_configured_mutation_blocked",
                         "activation": self.orchestrator.browser.live_activation_status()["activation"],
                         "raw_secret_values_included": False,
                     }
@@ -2078,7 +2082,7 @@ class AegisTui(cmd.Cmd):
                     {
                         "status": "local_browser_session_connected",
                         "session": session,
-                        "live_browser_automation": "blocked_until_explicit_adapter",
+                        "live_browser_automation": "read_only_available_if_configured_mutation_blocked",
                         "raw_secret_values_included": False,
                     }
                 )
@@ -2111,8 +2115,31 @@ class AegisTui(cmd.Cmd):
                 self.browser_session_id = result.get("session", {}).get("id", self.browser_session_id)
                 _print_json(result)
                 return
+            if command == "live-navigate":
+                if len(parts) < 2:
+                    print("browser url required")
+                    return
+                if not self.browser_session_id:
+                    self.browser_session_id = self.orchestrator.browser.create_session(label="TUI live browser")["id"]
+                approval_id = _option_value(parts, "--approval-id")
+                approval = _browser_action_approval(self.orchestrator, action="live_navigate", session_id=self.browser_session_id, url=parts[1], approval_id=approval_id)
+                if not approval.get("approved"):
+                    _print_json(approval["response"])
+                    return
+                result = self.orchestrator.browser.live_navigate(session_id=self.browser_session_id, url=parts[1], approved=True)
+                self.browser_session_id = result.get("session", {}).get("id", self.browser_session_id)
+                _print_json(result)
+                return
             if not self.browser_session_id:
                 print("browser session required")
+                return
+            if command == "live-screenshot":
+                approval_id = _option_value(parts, "--approval-id")
+                approval = _browser_action_approval(self.orchestrator, action="live_screenshot", session_id=self.browser_session_id, approval_id=approval_id)
+                if not approval.get("approved"):
+                    _print_json(approval["response"])
+                    return
+                _print_json(self.orchestrator.browser.live_screenshot(session_id=self.browser_session_id, approved=True))
                 return
             if command == "extract":
                 _print_json(self.orchestrator.browser.extract_text(session_id=self.browser_session_id))
@@ -4328,8 +4355,8 @@ class AegisTui(cmd.Cmd):
                 "status": "browser_integration_readiness",
                 "chrome_extension_connected": False,
                 "static_browser_sandbox": "available",
-                "live_browser_automation": "blocked_by_activation_preflight",
-                "next_actions": ["browser status", "browser inspect", "browser render", "capabilities"],
+                "live_browser_automation": "read_only_available_if_configured_mutation_blocked",
+                "next_actions": ["browser status", "browser inspect", "browser render", "browser live-navigate https://example.com", "capabilities"],
                 "raw_browser_content_included": False,
                 "raw_secret_values_included": False,
             }
@@ -6299,7 +6326,7 @@ def _command_reference() -> str:
             "cron                   Alias for scheduled automation",
             "voice|radio            Guarded voice and external media readiness",
             "stickers               Non-runtime merchandise boundary",
-            "browser status|connect|disconnect|session|sessions|close|navigate <url>",
+            "browser status|connect|disconnect|session|sessions|close|navigate <url>|live-navigate <url>|live-screenshot",
             "browser activation-packet|verify-activation-packet <packet>  Live adapter activation receipts",
             "browser extract|inspect|dom [selector]|screenshot|render|click <selector>|fill <json>|submit [selector]",
             "boards                 Work boards and cards",
@@ -6418,7 +6445,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("web-setup", "local web control-plane setup"),
             ("connectors|channels|platforms", "integration surfaces"),
             ("pr_comments|autofix-pr", "pull request comment and autofix readiness"),
-            ("browser status|connect|disconnect|render|activation-packet|verify-activation-packet|chrome", "sandboxed browser work"),
+            ("browser status|connect|disconnect|render|live-navigate|live-screenshot|activation-packet|verify-activation-packet|chrome", "sandboxed browser work"),
             ("boards|backends|sandbox", "work and execution planes"),
             ("voice|radio|terminal-setup|vim|mouse|tui|scroll-speed", "optional interaction and terminal readiness"),
             ("footer|busy|indicator|details|redraw", "runtime UI indicators and safe details"),
@@ -7506,9 +7533,10 @@ def _browser_action_approval(
     session_id: str,
     selector: str | None = None,
     fields: dict[str, Any] | None = None,
+    url: str | None = None,
     approval_id: str | None = None,
 ) -> dict[str, Any]:
-    payload = orchestrator.browser.action_approval_payload(action=action, session_id=session_id, selector=selector, fields=fields)
+    payload = orchestrator.browser.action_approval_payload(action=action, session_id=session_id, selector=selector, fields=fields, url=url)
     if approval_id:
         approval = orchestrator.approvals.get(approval_id)
         if _approved_payload(approval) != payload:

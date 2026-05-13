@@ -1378,6 +1378,36 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 payload = self._read_json()
                 self._json(_with_browser_artifact_urls(orchestrator, orchestrator.browser.render_screenshot(session_id=str(_required(payload, "session_id")))))
                 return
+            if path == "/browser/live-navigate":
+                payload = self._read_json()
+                session_id = str(payload.get("session_id") or orchestrator.browser.create_session(label="API live browser")["id"])
+                url = str(_required(payload, "url"))
+                approval = _browser_action_approval(
+                    orchestrator,
+                    action="live_navigate",
+                    session_id=session_id,
+                    url=url,
+                    approval_id=payload.get("approval_id"),
+                )
+                if not approval["approved"]:
+                    self._json(approval["response"])
+                    return
+                self._json(_with_browser_artifact_urls(orchestrator, orchestrator.browser.live_navigate(session_id=session_id, url=url, approved=True)))
+                return
+            if path == "/browser/live-screenshot":
+                payload = self._read_json()
+                session_id = str(_required(payload, "session_id"))
+                approval = _browser_action_approval(
+                    orchestrator,
+                    action="live_screenshot",
+                    session_id=session_id,
+                    approval_id=payload.get("approval_id"),
+                )
+                if not approval["approved"]:
+                    self._json(approval["response"])
+                    return
+                self._json(_with_browser_artifact_urls(orchestrator, orchestrator.browser.live_screenshot(session_id=session_id, approved=True)))
+                return
             if path == "/browser/click":
                 payload = self._read_json()
                 session_id = str(_required(payload, "session_id"))
@@ -2845,9 +2875,10 @@ def _browser_action_approval(
     session_id: str,
     selector: str | None = None,
     fields: dict[str, Any] | None = None,
+    url: str | None = None,
     approval_id: Any = None,
 ) -> dict[str, Any]:
-    payload = orchestrator.browser.action_approval_payload(action=action, session_id=session_id, selector=selector, fields=fields)
+    payload = orchestrator.browser.action_approval_payload(action=action, session_id=session_id, selector=selector, fields=fields, url=url)
     if approval_id:
         approval = orchestrator.approvals.get(str(approval_id))
         if _approved_payload(approval) != payload:

@@ -113,7 +113,13 @@ class AgentOrchestrator:
         self.evidence = EvidenceBundleBuilder(store, audit_logger)
         self.sessions = SessionManager(store, audit_logger)
         self.channels = ChannelRegistry(store, audit_logger)
-        self.browser = BrowserController(connectors, audit_logger, config.data_dir / "browser")
+        self.browser = BrowserController(
+            connectors,
+            audit_logger,
+            config.data_dir / "browser",
+            live_browser_reads=config.live_browser_reads,
+            network_allowlist=config.network_allowlist,
+        )
         self.models = ModelRegistry(
             store,
             audit_logger,

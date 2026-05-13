@@ -90,6 +90,63 @@ class CliTests(unittest.TestCase):
             self.assertTrue(verified["receipt"]["checksum_matches"])
             self.assertFalse(verified["receipt"]["raw_packet_payload_included"])
 
+    def test_browser_live_readonly_command_is_approval_gated(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "[security]",
+                        "live_browser_reads = true",
+                        'network_allowlist = ["example.com"]',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            blocked = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "browser",
+                        "--workspace",
+                        str(root),
+                        "live-navigate",
+                        "https://example.com",
+                    ]
+                )
+            )
+            with (
+                patch("aegis.browser.controller._find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch("aegis.browser.controller._private_network_error", return_value=None),
+                patch("aegis.browser.controller._capture_live_chromium_snapshot", side_effect=_fake_live_chrome_snapshot),
+            ):
+                captured = dispatch(
+                    parser.parse_args(
+                        [
+                            "--data-dir",
+                            str(data_dir),
+                            "browser",
+                            "--workspace",
+                            str(root),
+                            "live-navigate",
+                            "https://example.com",
+                            "--approved",
+                        ]
+                    )
+                )
+
+            self.assertEqual(blocked["status"], "approval_required")
+            self.assertTrue(captured["ok"])
+            self.assertEqual(captured["mode"], "live_chromium_readonly_no_persistent_state")
+            self.assertFalse(captured["raw_browser_content_included"])
+            self.assertTrue(Path(captured["artifact_path"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+
     def test_model_auth_readiness_packet_commands_create_and_verify_packet(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             parser = build_parser()
@@ -239,21 +296,25 @@ class CliTests(unittest.TestCase):
             self.assertIn("activation_packet_verification", browser_gap["required_controls"])
             self.assertIn("live_browser_activation_packet_schema", browser_gap["verification_gates"])
             self.assertIn("live_browser_activation_packet_verification", browser_gap["verification_gates"])
+            self.assertIn("approved_live_browser_readonly_snapshot", browser_gap["verification_gates"])
             self.assertIn("playwright_chromium_adapter_preflight", browser_gap["verification_gates"])
             self.assertIn("disabled_live_browser_denial", browser_gap["verification_gates"])
             self.assertIn("browser.live_activation_packet_preflight", browser_gap["evaluation_scenarios"])
             self.assertIn("browser.live_activation_packet_verification", browser_gap["evaluation_scenarios"])
+            self.assertIn("browser.live_readonly_snapshot", browser_gap["evaluation_scenarios"])
             self.assertIn("browser.live_automation_denied_until_adapter_ready", browser_gap["evaluation_scenarios"])
             browser_controls = {control["control"] for control in browser_gap["implemented_hardening_controls"]}
             self.assertIn("live_browser_activation_packets", browser_controls)
             self.assertIn("playwright_chromium_adapter_preflight", browser_controls)
             self.assertIn("live_browser_activation_packet_verification", browser_controls)
-            self.assertIn("live_browser_automation_adapter", browser_gap["remaining_depth_work"])
+            self.assertIn("approved_live_browser_readonly_adapter", browser_controls)
+            self.assertIn("live_browser_mutation_and_js_automation_adapter", browser_gap["remaining_depth_work"])
             browser_checklist = {item["control"]: item for item in browser_gap["operator_checklist"]}
             self.assertEqual(browser_checklist["live_browser_activation_packets"]["state"], "available_adapter_blocked")
             self.assertEqual(browser_checklist["playwright_chromium_adapter_preflight"]["state"], "blocked_adapter_candidate")
             self.assertEqual(browser_checklist["live_browser_activation_packet_verification"]["state"], "verified_adapter_blocked")
-            self.assertEqual(browser_checklist["live_browser_automation"]["state"], "blocked_with_preflight")
+            self.assertEqual(browser_checklist["live_browser_readonly_adapter"]["state"], "available_opt_in")
+            self.assertEqual(browser_checklist["live_browser_automation"]["state"], "read_only_available_mutation_blocked")
             subagent_gap = next(item for item in result["live_gap_backlog"] if item["area"] == "subagent_runtime_depth")
             self.assertIn("operator_batch_receipts", subagent_gap["required_controls"])
             self.assertIn("parent_bound_review_receipts", subagent_gap["required_controls"])
@@ -3306,6 +3367,21 @@ class _FakeSmtp:
     def send_message(self, message) -> dict[str, object]:  # noqa: ANN001
         self.captured["body"] = message.get_content()
         return {}
+
+
+def _fake_live_chrome_snapshot(
+    *,
+    executable: str,
+    url: str,
+    output_path: Path,
+    artifact_dir: Path,
+    allowlist: tuple[str, ...],
+    width: int = 1280,
+    height: int = 900,
+) -> dict[str, object]:
+    del executable, url, artifact_dir, allowlist
+    output_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-live-render")
+    return {"ok": True, "width": width, "height": height, "exit_code": 0, "error": None}
 
 
 if __name__ == "__main__":
