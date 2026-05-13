@@ -998,6 +998,104 @@ class RemoteControlPairingRegistry:
             "raw_secret_values_included": False,
         }
 
+    def confirm_relay_delivery(
+        self,
+        pairing_id: str,
+        *,
+        outbox_id: str,
+        relay_auth_token: str,
+        allowlist: tuple[str, ...],
+        approved: bool = False,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if not approved:
+            raise PermissionError("remote-control relay delivery confirmation requires explicit approval")
+        self._load()
+        checked_at = _utc_now(now)
+        pairing = self._pairings.get(pairing_id)
+        if pairing is None:
+            raise KeyError(pairing_id)
+        relay_registration = pairing.get("relay_registration")
+        if not isinstance(relay_registration, dict):
+            raise ValueError("remote-control relay delivery confirmation requires a registered relay")
+        if not relay_auth_token.strip():
+            raise ValueError("remote-control relay delivery confirmation requires a brokered relay auth token")
+        stored_hash = str(relay_registration.get("relay_auth_sha256") or "")
+        if not stored_hash or not secrets.compare_digest(stored_hash, _token_hash(relay_auth_token)):
+            raise PermissionError("remote-control relay delivery confirmation auth does not match registration")
+        public_pairing = self._public_pairing(pairing, now=checked_at)
+        if public_pairing["status"] != "active":
+            raise ValueError("remote-control relay delivery confirmation requires an active pairing")
+        relay_target = _validated_relay_target(str(relay_registration.get("relay_target") or ""), allowlist=allowlist)
+        clean_outbox_id = _optional_clean_string(outbox_id)
+        if not clean_outbox_id:
+            raise ValueError("remote-control relay delivery confirmation requires an outbox id")
+        item = self._relay_outbox_item(clean_outbox_id)
+        if item.get("kind") != "notification" or item.get("pairing_id") != pairing["id"]:
+            raise ValueError("remote-control relay delivery confirmation outbox item is outside the pairing scope")
+        if str(item.get("relay_target") or "") != relay_target:
+            raise ValueError("remote-control relay delivery confirmation relay target does not match the outbox item")
+        payload = {
+            "type": "aegis.remote_control.delivery_status",
+            "version": 1,
+            "sent_at": checked_at.isoformat(),
+            "pairing_id": pairing["id"],
+            "delivery_id": clean_outbox_id,
+            "idempotency_key": clean_outbox_id,
+            "known_outbox_status": str(item.get("status") or "unknown"),
+            "notification_event": str(item.get("event") or ""),
+            "task_id": _optional_clean_string(item.get("task_id")),
+            "session_id": _optional_clean_string(item.get("session_id")),
+            "pairing_token_included": False,
+            "relay_auth_token_included": False,
+            "user_request_included": False,
+            "plan_receipt_included": False,
+            "raw_secret_values_included": False,
+            "required_controls": ["single_delivery_status_check", "audit_receipts_without_tokens"],
+        }
+        try:
+            response_status, response_body = _post_relay_payload(relay_target, payload=payload, relay_auth_token=relay_auth_token)
+        except HTTPError as exc:
+            if 300 <= exc.code < 400:
+                raise ValueError("HTTP redirects are not followed for remote-control relay delivery confirmation") from exc
+            raise ValueError(f"remote-control relay delivery confirmation failed with status {exc.code}") from exc
+        except URLError as exc:
+            raise ValueError(f"remote-control relay delivery confirmation failed: {exc.reason}") from exc
+        relay_receipt = _parse_relay_delivery_receipt(response_body)
+        accepted = response_status is not None and 200 <= int(response_status) < 300 and _relay_receipt_accepted(relay_receipt)
+        if accepted:
+            self._mark_relay_outbox_confirmed(
+                clean_outbox_id,
+                now=checked_at,
+                response_status=response_status,
+                response_bytes=len(response_body),
+                relay_receipt=relay_receipt,
+            )
+            relay_registration["last_delivery_confirmation_at"] = checked_at.isoformat()
+            relay_registration["last_delivery_confirmation_id"] = clean_outbox_id
+            relay_registration["pairing_token_relayed"] = False
+            relay_registration["raw_secret_values_included"] = False
+            self._save()
+        updated = self._relay_outbox_item(clean_outbox_id)
+        return {
+            "status": "relay_delivery_confirmed" if accepted else "relay_delivery_unconfirmed",
+            "mode": "approved_relay_delivery_confirmation",
+            "pairing": public_pairing,
+            "relay_target": relay_target,
+            "outbox_id": clean_outbox_id,
+            "relay_response_status": response_status,
+            "relay_response_bytes": len(response_body),
+            "relay_receipt": relay_receipt,
+            "outbox_updated": accepted,
+            "outbox_item": _public_relay_outbox_item(updated),
+            "relay_acknowledged": accepted,
+            "pairing_token_relayed": False,
+            "relay_auth_token_captured": False,
+            "user_request_included": False,
+            "plan_receipt_included": False,
+            "raw_secret_values_included": False,
+        }
+
     def authorize_relay_action(
         self,
         pairing_id: str,
@@ -1336,6 +1434,7 @@ class RemoteControlPairingRegistry:
         relay_last_pull_at = str(relay_registration.get("last_pull_at") or "") if isinstance(relay_registration, dict) else ""
         relay_last_directory_publish_at = str(relay_registration.get("last_directory_publish_at") or "") if isinstance(relay_registration, dict) else ""
         relay_last_notification_publish_at = str(relay_registration.get("last_notification_publish_at") or "") if isinstance(relay_registration, dict) else ""
+        relay_last_delivery_confirmation_at = str(relay_registration.get("last_delivery_confirmation_at") or "") if isinstance(relay_registration, dict) else ""
         return {
             "id": pairing["id"],
             "label": pairing["label"],
@@ -1355,6 +1454,7 @@ class RemoteControlPairingRegistry:
             "relay_last_pull_at": relay_last_pull_at or None,
             "relay_last_directory_publish_at": relay_last_directory_publish_at or None,
             "relay_last_notification_publish_at": relay_last_notification_publish_at or None,
+            "relay_last_delivery_confirmation_at": relay_last_delivery_confirmation_at or None,
             "relay_notification_outbox_count": sum(1 for item in self._relay_outbox if item.get("pairing_id") == pairing["id"] and item.get("status") in {"pending", "failed", "retry_pending"}),
             "relay_revocation_propagated": bool(relay_revocation_relayed_at),
             "relay_revocation_relayed_at": relay_revocation_relayed_at or None,
@@ -1441,6 +1541,19 @@ class RemoteControlPairingRegistry:
         item["response_status"] = response_status
         item["last_error"] = str(error)[:240]
         item["next_retry_after"] = (now + timedelta(seconds=min(300, 30 * max(1, int(item.get("attempt_count") or 1))))).isoformat()
+        self._save()
+
+    def _mark_relay_outbox_confirmed(self, outbox_id: str, *, now: datetime, response_status: int | None, response_bytes: int, relay_receipt: dict[str, Any]) -> None:
+        item = self._relay_outbox_item(outbox_id)
+        item["status"] = "acknowledged"
+        item["confirmed_at"] = now.isoformat()
+        item["acknowledged_at"] = now.isoformat()
+        item["updated_at"] = now.isoformat()
+        item["confirmation_response_status"] = response_status
+        item["confirmation_response_bytes"] = int(response_bytes)
+        item["relay_receipt"] = relay_receipt
+        item["last_error"] = None
+        item.pop("next_retry_after", None)
         self._save()
 
 
@@ -1791,6 +1904,10 @@ def _normalize_relay_registration(value: Any) -> dict[str, Any] | None:
         normalized["last_notification_retry_at"] = str(value["last_notification_retry_at"])
     if value.get("last_notification_retry_count") is not None:
         normalized["last_notification_retry_count"] = int(value["last_notification_retry_count"])
+    if value.get("last_delivery_confirmation_at"):
+        normalized["last_delivery_confirmation_at"] = str(value["last_delivery_confirmation_at"])
+    if value.get("last_delivery_confirmation_id"):
+        normalized["last_delivery_confirmation_id"] = str(value["last_delivery_confirmation_id"])
     return normalized
 
 
@@ -1902,8 +2019,11 @@ def _normalize_relay_outbox(value: Any) -> list[dict[str, Any]]:
                 "last_attempt_at": _optional_clean_string(row.get("last_attempt_at")),
                 "delivered_at": _optional_clean_string(row.get("delivered_at")),
                 "acknowledged_at": _optional_clean_string(row.get("acknowledged_at")),
+                "confirmed_at": _optional_clean_string(row.get("confirmed_at")),
                 "response_status": _safe_optional_int(row.get("response_status")),
                 "response_bytes": _safe_int(row.get("response_bytes"), default=0),
+                "confirmation_response_status": _safe_optional_int(row.get("confirmation_response_status")),
+                "confirmation_response_bytes": _safe_int(row.get("confirmation_response_bytes"), default=0),
                 "relay_receipt": _sanitize_relay_delivery_receipt(row.get("relay_receipt")),
                 "last_error": _optional_clean_string(row.get("last_error")),
                 "next_retry_after": _optional_clean_string(row.get("next_retry_after")),
@@ -1970,8 +2090,11 @@ def _public_relay_outbox_item(item: dict[str, Any]) -> dict[str, Any]:
         "last_attempt_at": item.get("last_attempt_at"),
         "delivered_at": item.get("delivered_at"),
         "acknowledged_at": item.get("acknowledged_at"),
+        "confirmed_at": item.get("confirmed_at"),
         "response_status": item.get("response_status"),
         "response_bytes": item.get("response_bytes"),
+        "confirmation_response_status": item.get("confirmation_response_status"),
+        "confirmation_response_bytes": item.get("confirmation_response_bytes"),
         "relay_receipt": _sanitize_relay_delivery_receipt(item.get("relay_receipt")),
         "last_error": item.get("last_error"),
         "next_retry_after": item.get("next_retry_after"),

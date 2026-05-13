@@ -597,6 +597,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 "/remote-control/relay/pull",
                 "/remote-control/relay/directory",
                 "/remote-control/relay/notify",
+                "/remote-control/relay/confirm",
                 "/remote-control/push/register",
                 "/remote-control/push/disable",
                 "/remote-control/push/rotate",
@@ -1014,6 +1015,39 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                         "attempted_count": result["attempted_count"],
                         "acknowledged_count": result["acknowledged_count"],
                         "failed_count": result["failed_count"],
+                        "pairing_token_relayed": False,
+                        "relay_auth_token_captured": False,
+                        "raw_secret_values_included": False,
+                        "source": "api",
+                    },
+                )
+                self._json(result)
+                return
+            if path == "/remote-control/relay/confirm":
+                payload = self._read_json()
+                relay_secret = str(_required(payload, "relay_auth_secret"))
+                handle = orchestrator.secrets_broker.request_handle(
+                    name=relay_secret,
+                    requester="remote_control_relay",
+                    reason="confirm scoped remote-control relay notification delivery",
+                    scopes=("remote_control:relay",),
+                )
+                relay_auth_token = orchestrator.secrets_broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+                result = remote_control.confirm_relay_delivery(
+                    str(_required(payload, "pairing_id")),
+                    outbox_id=str(_required(payload, "outbox_id")),
+                    relay_auth_token=relay_auth_token,
+                    allowlist=orchestrator.config.network_allowlist,
+                    approved=bool(payload.get("approved", False)),
+                )
+                orchestrator.audit_logger.append(
+                    "remote_control.relay_delivery_confirmed",
+                    {
+                        "pairing_id": result["pairing"]["id"],
+                        "outbox_id": result["outbox_id"],
+                        "relay_target": result["relay_target"],
+                        "relay_acknowledged": result["relay_acknowledged"],
+                        "outbox_updated": result["outbox_updated"],
                         "pairing_token_relayed": False,
                         "relay_auth_token_captured": False,
                         "raw_secret_values_included": False,

@@ -527,6 +527,11 @@ def build_parser() -> argparse.ArgumentParser:
     remote_control_relay_retry.add_argument("--relay-auth-secret", required=True, help="Brokered secret name for relay bearer auth")
     remote_control_relay_retry.add_argument("--approved", action="store_true", help="Approve outbound relay retry attempts")
     remote_control_relay_retry.add_argument("--limit", type=int, default=10, help="Maximum outbox items to retry")
+    remote_control_relay_confirm = remote_control_sub.add_parser("relay-confirm", help="Confirm one relay notification delivery receipt")
+    remote_control_relay_confirm.add_argument("--pairing-id", required=True, help="Registered pairing id")
+    remote_control_relay_confirm.add_argument("--outbox-id", required=True, help="Relay notification outbox id to confirm")
+    remote_control_relay_confirm.add_argument("--relay-auth-secret", required=True, help="Brokered secret name for relay bearer auth")
+    remote_control_relay_confirm.add_argument("--approved", action="store_true", help="Approve one relay delivery confirmation check")
     remote_control_relay_action = remote_control_sub.add_parser("relay-action", help="Execute a registered relay-authenticated task action")
     remote_control_relay_action.add_argument("--pairing-id", required=True, help="Registered pairing id")
     remote_control_relay_action.add_argument("--task-id", required=True, help="Task id to control through the relay proxy")
@@ -1669,6 +1674,37 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                     "attempted_count": result["attempted_count"],
                     "acknowledged_count": result["acknowledged_count"],
                     "failed_count": result["failed_count"],
+                    "pairing_token_relayed": False,
+                    "relay_auth_token_captured": False,
+                    "raw_secret_values_included": False,
+                    "source": "cli",
+                },
+            )
+            return result
+        if args.remote_control_command == "relay-confirm":
+            broker = SecretsBroker(config.secrets_path)
+            handle = broker.request_handle(
+                name=args.relay_auth_secret,
+                requester="remote_control_relay",
+                reason="confirm scoped remote-control relay notification delivery",
+                scopes=("remote_control:relay",),
+            )
+            relay_auth_token = broker.resolve_for_authorized_tool(handle, requester="remote_control_relay")
+            result = registry.confirm_relay_delivery(
+                args.pairing_id,
+                outbox_id=args.outbox_id,
+                relay_auth_token=relay_auth_token,
+                allowlist=config.network_allowlist,
+                approved=args.approved,
+            )
+            AuditLogger(config.audit_log_path).append(
+                "remote_control.relay_delivery_confirmed",
+                {
+                    "pairing_id": result["pairing"]["id"],
+                    "outbox_id": result["outbox_id"],
+                    "relay_target": result["relay_target"],
+                    "relay_acknowledged": result["relay_acknowledged"],
+                    "outbox_updated": result["outbox_updated"],
                     "pairing_token_relayed": False,
                     "relay_auth_token_captured": False,
                     "raw_secret_values_included": False,

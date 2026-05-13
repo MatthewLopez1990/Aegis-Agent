@@ -2670,6 +2670,7 @@ document.getElementById("remote-control-form").addEventListener("submit", async 
       expires_in_seconds: Number.isFinite(ttl) ? ttl : 600,
     }),
   });
+  document.getElementById("remote-control-relay-outbox-id").value = result.outbox_id || "";
   renderRemoteControlOutput(result);
   await refresh();
 });
@@ -2812,6 +2813,18 @@ document.getElementById("remote-control-relay-retry").addEventListener("click", 
     body: JSON.stringify({
       ...remoteControlRelayBody(),
       limit: 10,
+    }),
+  });
+  renderRemoteControlOutput(result);
+  await refresh();
+});
+
+document.getElementById("remote-control-relay-confirm").addEventListener("click", async () => {
+  const result = await api("/remote-control/relay/confirm", {
+    method: "POST",
+    body: JSON.stringify({
+      ...remoteControlRelayBody(),
+      outbox_id: document.getElementById("remote-control-relay-outbox-id").value.trim(),
     }),
   });
   renderRemoteControlOutput(result);

@@ -363,6 +363,13 @@ class ApiServerSecurityTests(unittest.TestCase):
                 with self.assertRaises(HTTPError) as remote_push_targets_error:
                     _json_get(port, "/remote-control/push/targets")
                 self.assertEqual(remote_push_targets_error.exception.code, 403)
+                with self.assertRaises(HTTPError) as remote_relay_confirm_error:
+                    _json_post(
+                        port,
+                        "/remote-control/relay/confirm",
+                        {"pairing_id": "pairing", "outbox_id": "outbox", "relay_auth_secret": "secret", "approved": True},
+                    )
+                self.assertEqual(remote_relay_confirm_error.exception.code, 403)
                 with self.assertRaises(HTTPError) as remote_directory_error:
                     _json_get(port, "/remote-control/directory")
                 self.assertEqual(remote_directory_error.exception.code, 403)

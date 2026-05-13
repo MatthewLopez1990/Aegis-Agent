@@ -358,6 +358,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "approved outbound relay registration",
                 "approved relay directory publish",
                 "approved relay notification publish",
+                "approved relay delivery confirmation reconciliation",
                 "approved brokered native APNS/FCM notification publish",
                 "brokered native push target lifecycle records",
                 "approved brokered native push credential rotation",
@@ -377,7 +378,7 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "approved PR autofix response posting",
             ],
             "security_delta": "Aegis exposes Claude-style controls through the governed local runtime and requires scoped pairings, approved relay registration, and redacted receipts before off-device access.",
-            "live_gap": "Unattended plugin bundle auto-install, unattended plugin auto-update, recursive subagent model-loop depth, broad cloud relay delivery, and future provider OAuth bridges beyond the tracked target set remain explicit gaps instead of silent stubs; the HTTPS relay notification path now exposes a mobile/gateway delivery contract and CLI/TUI/API/web can register, rotate, and publish approved brokered APNS/FCM target records without capturing raw device tokens.",
+            "live_gap": "Unattended plugin bundle auto-install, unattended plugin auto-update, recursive subagent model-loop depth, broad cloud relay delivery, and future provider OAuth bridges beyond the tracked target set remain explicit gaps instead of silent stubs; the HTTPS relay notification path now exposes a mobile/gateway delivery contract, one-delivery relay confirmation reconciliation, and CLI/TUI/API/web can register, rotate, and publish approved brokered APNS/FCM target records without capturing raw device tokens.",
             "target_requirements": [
                 "unattended_remote_plugin_bundle_auto_install",
                 "unattended_plugin_auto_update",

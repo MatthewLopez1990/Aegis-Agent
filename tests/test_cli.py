@@ -395,6 +395,23 @@ class CliTests(unittest.TestCase):
                             ]
                         )
                     )
+                    relay_confirm = dispatch(
+                        parser.parse_args(
+                            [
+                                "--data-dir",
+                                str(data_dir),
+                                "remote-control",
+                                "relay-confirm",
+                                "--pairing-id",
+                                pair["pairing"]["id"],
+                                "--outbox-id",
+                                relay_notify["outbox_id"],
+                                "--relay-auth-secret",
+                                "AEGIS_REMOTE_RELAY_TOKEN",
+                                "--approved",
+                            ]
+                        )
+                    )
                     relay_retry = dispatch(
                         parser.parse_args(
                             [
@@ -522,6 +539,11 @@ class CliTests(unittest.TestCase):
             self.assertEqual(relay_outbox["status"], "relay_notification_outbox")
             self.assertEqual(relay_outbox["item_count"], 1)
             self.assertEqual(relay_outbox["items"][0]["status"], "acknowledged")
+            self.assertEqual(relay_confirm["status"], "relay_delivery_confirmed")
+            self.assertEqual(relay_confirm["outbox_id"], relay_notify["outbox_id"])
+            self.assertTrue(relay_confirm["outbox_updated"])
+            self.assertFalse(relay_confirm["relay_auth_token_captured"])
+            self.assertNotIn("relay-raw-secret", json.dumps(relay_confirm, sort_keys=True))
             self.assertEqual(relay_retry["status"], "relay_notification_outbox_retried")
             self.assertEqual(relay_retry["attempted_count"], 0)
             self.assertFalse(relay_retry["relay_auth_token_captured"])
