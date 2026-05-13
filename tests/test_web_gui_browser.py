@@ -66,6 +66,8 @@ class WebGuiBrowserSmokeTests(unittest.TestCase):
         self.assertIn("data-model-auth-verify-readiness-packet", app_js)
         self.assertIn("activation_state", app_js)
         self.assertIn("missing_config", app_js)
+        self.assertIn("const syncModelProviderOptions = (providerRows = [], authTargets = [])", app_js)
+        self.assertIn("syncModelProviderOptions(modelProviders.providers || [], modelAuthTargets.targets || dashboard.model_provider_auth_parity?.targets || [])", app_js)
         self.assertIn('const localNoAuthModelProviders = new Set(["ollama", "lmstudio"])', app_js)
         self.assertIn('document.getElementById("model-provider").addEventListener("change", syncModelAuthMethodForProvider)', app_js)
         self.assertIn('if (method === "none")', app_js)

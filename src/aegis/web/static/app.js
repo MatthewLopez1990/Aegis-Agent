@@ -348,6 +348,45 @@ const setList = (id, rows, mapper, emptyLabel = "No records") => {
   node.replaceChildren(...rows.map((row) => item(mapper(row))));
 };
 
+const modelProviderFallbackLabel = (provider) =>
+  String(provider || "")
+    .split("-")
+    .filter(Boolean)
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(" ");
+
+const syncModelProviderOptions = (providerRows = [], authTargets = []) => {
+  const select = document.getElementById("model-provider");
+  const selected = select.value;
+  const labels = new Map(Array.from(select.options).map((option) => [option.value, option.textContent]));
+  providerRows.forEach((row) => {
+    const provider = row.provider;
+    if (provider && !labels.has(provider)) {
+      labels.set(provider, row.label || modelProviderFallbackLabel(provider));
+    }
+  });
+  authTargets.forEach((row) => {
+    const provider = row.aegis_provider || row.provider;
+    if (provider && !labels.has(provider)) {
+      labels.set(provider, row.target || modelProviderFallbackLabel(provider));
+    }
+  });
+  const existing = new Set(Array.from(select.options).map((option) => option.value));
+  Array.from(labels.entries())
+    .filter(([provider]) => provider && !existing.has(provider))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .forEach(([provider, label]) => {
+      const option = document.createElement("option");
+      option.value = provider;
+      option.textContent = label;
+      select.append(option);
+    });
+  if (labels.has(selected)) {
+    select.value = selected;
+  }
+  syncModelAuthMethodForProvider();
+};
+
 const connectorPolicyMeta = (connector) => {
   const risks = Object.entries(connector.risk_by_operation || {})
     .map(([operation, risk]) => `${operation}:${risk}`)
@@ -511,6 +550,7 @@ const refresh = async () => {
     ]);
 
     mergeWebSlashCommands(commandCatalog.commands || []);
+    syncModelProviderOptions(modelProviders.providers || [], modelAuthTargets.targets || dashboard.model_provider_auth_parity?.targets || []);
     syncPendingSkillEnableApprovals([...(approvedApprovals.approvals || []), ...(approvals.approvals || [])]);
     renderMetrics(dashboard);
     renderRemoteControlRelay(remoteControlRelay);
