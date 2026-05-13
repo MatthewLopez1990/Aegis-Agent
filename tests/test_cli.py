@@ -2204,13 +2204,16 @@ class CliTests(unittest.TestCase):
             webhook_module._open_without_redirects = lambda request, *, timeout: _FakeWebhookResponse(request, captured)
             try:
                 pending = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "send-webhook", "token=abc123"]))
-                sent = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "send-webhook", "token=abc123", "--approved"]))
+                dispatch(parser.parse_args(["--data-dir", str(data_dir), "approval", "approve", pending["approval_id"]]))
+                sent = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "send-webhook", "token=abc123", "--approval-id", pending["approval_id"]]))
             finally:
                 webhook_module._open_without_redirects = original_open
                 webhook_module._private_network_error = original_private_check
 
             self.assertEqual(pending["status"], "approval_required")
+            self.assertEqual(pending["approval"]["payload"]["receipt_schema"], "aegis.channel.send_approval.v1")
             self.assertEqual(sent["status"], "delivered")
+            self.assertEqual(sent["approval_id"], pending["approval_id"])
             self.assertTrue(captured["signature"].startswith("sha256="))
             self.assertIn("[REDACTED_VALUE]", captured["body"])
             self.assertNotIn("abc123", json.dumps(sent, sort_keys=True))
@@ -2251,13 +2254,15 @@ class CliTests(unittest.TestCase):
             email_module.smtplib.SMTP = lambda host, port, timeout: _FakeSmtp(host, port, timeout, captured)  # type: ignore[assignment]
             try:
                 pending = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "send-email", "Review", "token=abc123"]))
-                sent = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "send-email", "Review", "token=abc123", "--approved"]))
+                dispatch(parser.parse_args(["--data-dir", str(data_dir), "approval", "approve", pending["approval_id"]]))
+                sent = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "send-email", "Review", "token=abc123", "--approval-id", pending["approval_id"]]))
             finally:
                 email_module.smtplib.SMTP = original_smtp  # type: ignore[assignment]
                 email_module._private_network_error = original_private_check
 
             self.assertEqual(pending["status"], "approval_required")
             self.assertEqual(sent["status"], "delivered")
+            self.assertEqual(sent["approval_id"], pending["approval_id"])
             self.assertEqual(captured["login"], ("smtp-user", "smtp-pass"))
             self.assertIn("[REDACTED_VALUE]", captured["body"])
             self.assertNotIn("abc123", json.dumps(sent, sort_keys=True))
@@ -2292,13 +2297,15 @@ class CliTests(unittest.TestCase):
             chat_webhook_module._open_without_redirects = lambda request, *, timeout: _FakeWebhookResponse(request, captured)
             try:
                 pending = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "send-chat-webhook", "token=abc123"]))
-                sent = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "send-chat-webhook", "token=abc123", "--approved"]))
+                dispatch(parser.parse_args(["--data-dir", str(data_dir), "approval", "approve", pending["approval_id"]]))
+                sent = dispatch(parser.parse_args(["--data-dir", str(data_dir), "channel", "send-chat-webhook", "token=abc123", "--approval-id", pending["approval_id"]]))
             finally:
                 chat_webhook_module._open_without_redirects = original_open
                 webhook_module._private_network_error = original_private_check
 
             self.assertEqual(pending["status"], "approval_required")
             self.assertEqual(sent["status"], "delivered")
+            self.assertEqual(sent["approval_id"], pending["approval_id"])
             self.assertEqual(sent["payload_format"], "discord")
             self.assertEqual(json.loads(str(captured["body"])), {"content": "token=[REDACTED_VALUE]"})
             self.assertNotIn("abc123", json.dumps(sent, sort_keys=True))

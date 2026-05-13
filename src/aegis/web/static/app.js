@@ -3159,7 +3159,7 @@ document.getElementById("channel-webhook-send-form").addEventListener("submit", 
     method: "POST",
     body: JSON.stringify({
       text: document.getElementById("channel-webhook-send-text").value || "",
-      approved: document.getElementById("channel-webhook-send-approved").checked,
+      approval_id: document.getElementById("channel-webhook-send-approval-id").value || undefined,
       session_id: state.activeSessionId || undefined,
     }),
   });
@@ -3173,7 +3173,7 @@ document.getElementById("channel-chat-webhook-form").addEventListener("submit", 
     method: "POST",
     body: JSON.stringify({
       text: document.getElementById("channel-chat-webhook-text").value || "",
-      approved: document.getElementById("channel-chat-webhook-approved").checked,
+      approval_id: document.getElementById("channel-chat-webhook-approval-id").value || undefined,
       session_id: state.activeSessionId || undefined,
     }),
   });
@@ -3188,7 +3188,7 @@ document.getElementById("channel-email-send-form").addEventListener("submit", as
     body: JSON.stringify({
       subject: document.getElementById("channel-email-send-subject").value || "Aegis update",
       text: document.getElementById("channel-email-send-text").value || "",
-      approved: document.getElementById("channel-email-send-approved").checked,
+      approval_id: document.getElementById("channel-email-send-approval-id").value || undefined,
       session_id: state.activeSessionId || undefined,
     }),
   });

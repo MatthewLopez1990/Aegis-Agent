@@ -1176,7 +1176,7 @@ def _live_connector_operator_checklist(
         {
             "control": "human_approval",
             "state": "enforced",
-            "detail": "High-impact live writes and sends remain approval-gated before execution.",
+            "detail": "High-impact live writes and sends remain approval-gated before execution; channel sends require payload-bound approval ids rather than standalone approved booleans.",
         },
         {
             "control": "receipt_redaction",
@@ -1186,7 +1186,7 @@ def _live_connector_operator_checklist(
         {
             "control": "runtime_rate_limits",
             "state": "partial",
-            "detail": "Generic REST, GitHub, GitLab, service-desk, Microsoft Graph, and messaging live writes enforce in-memory per-operation rate limits; remaining live adapters must add provider-specific limits before promotion.",
+            "detail": "Generic REST, GitHub, GitLab, service-desk, Microsoft Graph, messaging live writes, and outbound channel sends enforce in-memory per-operation rate limits; remaining live adapters must add provider-specific limits before promotion.",
         },
         {
             "control": "rollback_receipts",

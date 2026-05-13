@@ -446,15 +446,18 @@ def build_parser() -> argparse.ArgumentParser:
     channel_send_webhook.add_argument("text")
     channel_send_webhook.add_argument("--session-id")
     channel_send_webhook.add_argument("--approved", action="store_true")
+    channel_send_webhook.add_argument("--approval-id")
     channel_send_email = channel_sub.add_parser("send-email", help="Send a live outbound email after approval")
     channel_send_email.add_argument("subject")
     channel_send_email.add_argument("text")
     channel_send_email.add_argument("--session-id")
     channel_send_email.add_argument("--approved", action="store_true")
+    channel_send_email.add_argument("--approval-id")
     channel_send_chat_webhook = channel_sub.add_parser("send-chat-webhook", help="Send a live outbound chat webhook after approval")
     channel_send_chat_webhook.add_argument("text")
     channel_send_chat_webhook.add_argument("--session-id")
     channel_send_chat_webhook.add_argument("--approved", action="store_true")
+    channel_send_chat_webhook.add_argument("--approval-id")
 
     remote_control = subcommands.add_parser(
         "remote-control",
@@ -1679,11 +1682,11 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 ),
             }
         if args.channel_command == "send-webhook":
-            return build_orchestrator(data_dir=config.data_dir).send_webhook(text=args.text, approved=args.approved, session_id=args.session_id, metadata={"source": "cli"})
+            return build_orchestrator(data_dir=config.data_dir).send_webhook(text=args.text, approved=args.approved, approval_id=args.approval_id, session_id=args.session_id, metadata={"source": "cli"})
         if args.channel_command == "send-email":
-            return build_orchestrator(data_dir=config.data_dir).send_email(subject=args.subject, text=args.text, approved=args.approved, session_id=args.session_id, metadata={"source": "cli"})
+            return build_orchestrator(data_dir=config.data_dir).send_email(subject=args.subject, text=args.text, approved=args.approved, approval_id=args.approval_id, session_id=args.session_id, metadata={"source": "cli"})
         if args.channel_command == "send-chat-webhook":
-            return build_orchestrator(data_dir=config.data_dir).send_chat_webhook(text=args.text, approved=args.approved, session_id=args.session_id, metadata={"source": "cli"})
+            return build_orchestrator(data_dir=config.data_dir).send_chat_webhook(text=args.text, approved=args.approved, approval_id=args.approval_id, session_id=args.session_id, metadata={"source": "cli"})
 
     if args.command == "remote-control":
         registry = RemoteControlPairingRegistry(config.data_dir / "remote_control_pairings.json")

@@ -61,10 +61,12 @@ Store the shared secret in the secrets broker or environment under `secret_name`
 Approved outbound delivery uses the same signature header scheme:
 
 ```bash
-PYTHONPATH=src python3 -m aegis.cli.main channel send-webhook "Ready for review" --approved
+PYTHONPATH=src python3 -m aegis.cli.main channel send-webhook "Ready for review"
+PYTHONPATH=src python3 -m aegis.cli.main approval approve <approval_id>
+PYTHONPATH=src python3 -m aegis.cli.main channel send-webhook "Ready for review" --approval-id <approval_id>
 ```
 
-The local API exposes the same flow through `POST /channels/webhook/send` with `text` and `approved`. Without approval it returns `approval_required` and does not open the network.
+The local API exposes the same flow through `POST /channels/webhook/send` with `text` and optional `approval_id`. Without a matching approved id it creates a payload-bound approval and does not open the network. The binding covers the channel, target, session, payload fingerprint, and metadata hash without storing raw channel content; `approved: true` alone is not accepted as authority.
 
 ## Chat Webhook
 
@@ -85,10 +87,12 @@ payload_format = "slack"  # generic, slack, discord, teams
 Approved sends are available from the CLI and API:
 
 ```bash
-PYTHONPATH=src python3 -m aegis.cli.main channel send-chat-webhook "Ready for review" --approved
+PYTHONPATH=src python3 -m aegis.cli.main channel send-chat-webhook "Ready for review"
+PYTHONPATH=src python3 -m aegis.cli.main approval approve <approval_id>
+PYTHONPATH=src python3 -m aegis.cli.main channel send-chat-webhook "Ready for review" --approval-id <approval_id>
 ```
 
-The local API exposes the same flow through `POST /channels/chat-webhook/send` with `text` and `approved`. Without approval it returns `approval_required` and does not open the network.
+The local API exposes the same flow through `POST /channels/chat-webhook/send` with `text` and optional `approval_id`. Without a matching approved id it creates a payload-bound approval and does not open the network.
 
 ## Channel Approval Intents
 
@@ -125,7 +129,9 @@ to_addresses = ["operator@example.com"]
 Store SMTP credentials in the secrets broker or environment under the configured secret names. Approved sends are available from the CLI and API:
 
 ```bash
-PYTHONPATH=src python3 -m aegis.cli.main channel send-email "Review" "Ready for review" --approved
+PYTHONPATH=src python3 -m aegis.cli.main channel send-email "Review" "Ready for review"
+PYTHONPATH=src python3 -m aegis.cli.main approval approve <approval_id>
+PYTHONPATH=src python3 -m aegis.cli.main channel send-email "Review" "Ready for review" --approval-id <approval_id>
 ```
 
-The local API exposes the same flow through `POST /channels/email/send` with `subject`, `text`, and `approved`. Without approval it returns `approval_required` and does not open an SMTP connection.
+The local API exposes the same flow through `POST /channels/email/send` with `subject`, `text`, and optional `approval_id`. Without a matching approved id it creates a payload-bound approval and does not open an SMTP connection.

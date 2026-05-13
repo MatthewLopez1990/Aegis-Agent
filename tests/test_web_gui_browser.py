@@ -1306,11 +1306,11 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         script = (root / "app.js").read_text(encoding="utf-8")
 
         self.assertIn('id="channel-webhook-send-form"', markup)
-        self.assertIn('id="channel-webhook-send-approved"', markup)
+        self.assertIn('id="channel-webhook-send-approval-id"', markup)
         self.assertIn('id="channel-chat-webhook-form"', markup)
-        self.assertIn('id="channel-chat-webhook-approved"', markup)
+        self.assertIn('id="channel-chat-webhook-approval-id"', markup)
         self.assertIn('id="channel-email-send-form"', markup)
-        self.assertIn('id="channel-email-send-approved"', markup)
+        self.assertIn('id="channel-email-send-approval-id"', markup)
         self.assertIn('id="channel-live-activation-packet"', markup)
         self.assertIn('id="channel-verify-activation-packet"', markup)
         self.assertIn('id="channel-activate-packet"', markup)
@@ -1330,9 +1330,9 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn('data-channel-intent-event', script)
         self.assertIn('data-channel-intent-approval', script)
         self.assertIn("channelActivationPacketId", script)
-        self.assertIn('approved: document.getElementById("channel-webhook-send-approved").checked', script)
-        self.assertIn('approved: document.getElementById("channel-chat-webhook-approved").checked', script)
-        self.assertIn('approved: document.getElementById("channel-email-send-approved").checked', script)
+        self.assertIn('approval_id: document.getElementById("channel-webhook-send-approval-id").value || undefined', script)
+        self.assertIn('approval_id: document.getElementById("channel-chat-webhook-approval-id").value || undefined', script)
+        self.assertIn('approval_id: document.getElementById("channel-email-send-approval-id").value || undefined', script)
         self.assertIn('session_id: state.activeSessionId || undefined', script)
 
     def test_web_policy_control_exposes_rollout_workflows(self) -> None:

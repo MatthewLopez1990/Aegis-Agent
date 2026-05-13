@@ -29,6 +29,7 @@ from aegis.audit.receipts import ActionReceipt
 from aegis.browser.controller import BrowserController
 from aegis.channels.base import ChannelResponse
 from aegis.config.loader import AegisConfig, load_config
+from aegis.connectors.rate_limit import InMemoryRateLimiter
 from aegis.connectors.registry import ConnectorRegistry, build_default_registry
 from aegis.channels.registry import ChannelRegistry
 from aegis.channels.chat_webhook import deliver_chat_webhook
@@ -102,6 +103,7 @@ class AgentOrchestrator:
         self.router = ToolRouter(connectors, audit_logger)
         self.execution_engine = ExecutionEngine(self.router, self.firewall)
         self.approvals = ApprovalManager(store, audit_logger)
+        self._channel_rate_limiter = InMemoryRateLimiter()
         self.memory = MemoryManager(
             store,
             audit_logger,
@@ -1090,14 +1092,95 @@ class AgentOrchestrator:
         )
         return {"ok": True, "status": status, "event": event, "intent": intent, "approval": resolved}
 
-    def send_webhook(self, *, text: str, approved: bool = False, session_id: str | None = None, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _channel_send_approval(
+        self,
+        *,
+        binding: dict[str, Any],
+        approval_id: str | None,
+        approved: bool,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        if approval_id:
+            approval = self.approvals.get(approval_id)
+            if approval.get("status") == "denied":
+                return None, {"ok": False, "status": "approval_denied", "approval_id": approval["id"], "channel": binding["channel"]}
+            if approval.get("status") != "approved":
+                return None, {"ok": False, "status": "approval_required", "approval_id": approval["id"], "channel": binding["channel"]}
+            payload = approval.get("payload") if isinstance(approval.get("payload"), dict) else {}
+            if payload.get("receipt_schema") != "aegis.channel.send_approval.v1" or payload.get("binding_sha256") != binding["binding_sha256"]:
+                raise PermissionError("channel send approval does not match the current channel, payload, session, or target")
+            if self._channel_send_approval_used(approval["id"]):
+                raise PermissionError("channel send approval has already been used for a delivery")
+            return approval, None
+
+        approval = self.approvals.request_approval(
+            ApprovalRequest(
+                reason=f"live {binding['channel']} delivery requires payload-bound approval",
+                risk_level=RiskLevel.HIGH,
+                payload=binding,
+            )
+        )
+        requested = self.approvals.get(approval.id)
+        return None, {
+            "ok": False,
+            "status": "approval_required",
+            "approval_id": approval.id,
+            "approval": requested,
+            "channel": binding["channel"],
+            "binding_sha256": binding["binding_sha256"],
+            "approved_boolean_requested": bool(approved),
+            "approved_boolean_accepted": False,
+            "reason": "approve this payload-bound request, then replay the same send with approval_id",
+            "raw_channel_content_included": False,
+            "raw_secret_values_included": False,
+        }
+
+    def _channel_send_approval_used(self, approval_id: str) -> bool:
+        for event in self.channels.events(limit=1000):
+            if event.get("direction") != "outbound":
+                continue
+            payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+            if payload.get("approval_id") == approval_id and event.get("status") == "delivered":
+                return True
+        return False
+
+    def _channel_rate_limit(self, *, channel: str, target_key: str, limit: int, approval_id: str) -> dict[str, Any]:
+        decision = self._channel_rate_limiter.check(f"{channel}:{target_key}", limit=limit, window_seconds=60).to_dict()
+        if decision["allowed"]:
+            return decision
+        self.audit_logger.append(
+            "channel.outbound_rate_limited",
+            {"channel": channel, "approval_id": approval_id, "rate_limit": decision, "target_key": target_key},
+        )
+        return decision
+
+    def send_webhook(
+        self,
+        *,
+        text: str,
+        approved: bool = False,
+        approval_id: str | None = None,
+        session_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         config = self.config.webhook
         if not config.enabled or not config.outbound_enabled:
             raise PermissionError("webhook outbound channel is disabled")
         if not config.outbound_url:
             raise ValueError("webhook outbound_url is not configured")
-        if not approved:
-            return {"ok": False, "status": "approval_required", "reason": "live webhook delivery requires explicit approval"}
+        target = _webhook_send_target(config.outbound_url)
+        binding = _channel_send_binding(channel="webhook", action="send_webhook", session_id=session_id, metadata=metadata or {}, target=target, text=text)
+        approval, approval_response = self._channel_send_approval(binding=binding, approval_id=approval_id, approved=approved)
+        if approval_response is not None:
+            return approval_response
+        assert approval is not None
+        rate_limit = self._channel_rate_limit(
+            channel="webhook",
+            target_key=target["target_sha256"],
+            limit=config.outbound_rate_limit_per_minute,
+            approval_id=approval["id"],
+        )
+        if not rate_limit["allowed"]:
+            return {"ok": False, "status": "rate_limited", "approval_id": approval["id"], "channel": "webhook", "rate_limit": rate_limit, "raw_channel_content_included": False}
         delivery_id = str(uuid4())
         payload = {
             "channel": "webhook",
@@ -1106,6 +1189,9 @@ class AgentOrchestrator:
             "metadata": metadata or {},
             "delivery_id": delivery_id,
             "sent_at": now_utc(),
+            "approval_id": approval["id"],
+            "approval_binding_sha256": binding["binding_sha256"],
+            "approval_payload_sha256": binding["payload_sha256"],
         }
         handle = self.secrets_broker.request_handle(
             name=config.secret_name,
@@ -1121,7 +1207,18 @@ class AgentOrchestrator:
             delivery_id=delivery_id,
             allowlist=self.config.network_allowlist,
         )
-        self.channels.record_outbound_delivery(channel="webhook", session_id=session_id, payload=payload, delivery=delivery)
+        delivery.update(
+            {
+                "approval_id": approval["id"],
+                "approval_binding_sha256": binding["binding_sha256"],
+                "approval_payload_sha256": binding["payload_sha256"],
+                "rate_limit": rate_limit,
+                "raw_channel_content_included": False,
+                "raw_secret_values_included": False,
+            }
+        )
+        event_id = self.channels.record_outbound_delivery(channel="webhook", session_id=session_id, payload=payload, delivery=delivery)
+        delivery["channel_event_id"] = event_id
         return delivery
 
     def send_email(
@@ -1130,6 +1227,7 @@ class AgentOrchestrator:
         subject: str,
         text: str,
         approved: bool = False,
+        approval_id: str | None = None,
         session_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -1138,8 +1236,20 @@ class AgentOrchestrator:
             raise PermissionError("email outbound channel is disabled")
         if not config.smtp_host or not config.from_address or not config.to_addresses:
             raise ValueError("email outbound channel requires smtp_host, from_address, and to_addresses")
-        if not approved:
-            return {"ok": False, "status": "approval_required", "reason": "live email delivery requires explicit approval"}
+        target = _email_send_target(config.smtp_host, config.from_address, config.to_addresses)
+        binding = _channel_send_binding(channel="email", action="send_email", session_id=session_id, metadata=metadata or {}, target=target, subject=subject, text=text)
+        approval, approval_response = self._channel_send_approval(binding=binding, approval_id=approval_id, approved=approved)
+        if approval_response is not None:
+            return approval_response
+        assert approval is not None
+        rate_limit = self._channel_rate_limit(
+            channel="email",
+            target_key=target["target_sha256"],
+            limit=config.outbound_rate_limit_per_minute,
+            approval_id=approval["id"],
+        )
+        if not rate_limit["allowed"]:
+            return {"ok": False, "status": "rate_limited", "approval_id": approval["id"], "channel": "email", "rate_limit": rate_limit, "raw_channel_content_included": False}
         username = None
         password = None
         if config.username_secret:
@@ -1167,6 +1277,9 @@ class AgentOrchestrator:
             "metadata": metadata or {},
             "delivery_id": delivery_id,
             "sent_at": now_utc(),
+            "approval_id": approval["id"],
+            "approval_binding_sha256": binding["binding_sha256"],
+            "approval_payload_sha256": binding["payload_sha256"],
         }
         delivery = deliver_smtp_email(
             host=config.smtp_host,
@@ -1181,7 +1294,18 @@ class AgentOrchestrator:
             use_tls=config.use_tls,
             delivery_id=delivery_id,
         )
-        self.channels.record_outbound_delivery(channel="email", session_id=session_id, payload=payload, delivery=delivery)
+        delivery.update(
+            {
+                "approval_id": approval["id"],
+                "approval_binding_sha256": binding["binding_sha256"],
+                "approval_payload_sha256": binding["payload_sha256"],
+                "rate_limit": rate_limit,
+                "raw_channel_content_included": False,
+                "raw_secret_values_included": False,
+            }
+        )
+        event_id = self.channels.record_outbound_delivery(channel="email", session_id=session_id, payload=payload, delivery=delivery)
+        delivery["channel_event_id"] = event_id
         return delivery
 
     def send_chat_webhook(
@@ -1189,6 +1313,7 @@ class AgentOrchestrator:
         *,
         text: str,
         approved: bool = False,
+        approval_id: str | None = None,
         session_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -1197,8 +1322,20 @@ class AgentOrchestrator:
             raise PermissionError("chat webhook outbound channel is disabled")
         if not config.url_secret:
             raise ValueError("chat webhook outbound channel requires url_secret")
-        if not approved:
-            return {"ok": False, "status": "approval_required", "reason": "live chat webhook delivery requires explicit approval"}
+        target = _chat_webhook_send_target(config.url_secret, config.payload_format)
+        binding = _channel_send_binding(channel="chat_webhook", action="send_chat_webhook", session_id=session_id, metadata=metadata or {}, target=target, text=text)
+        approval, approval_response = self._channel_send_approval(binding=binding, approval_id=approval_id, approved=approved)
+        if approval_response is not None:
+            return approval_response
+        assert approval is not None
+        rate_limit = self._channel_rate_limit(
+            channel="chat_webhook",
+            target_key=target["target_sha256"],
+            limit=config.outbound_rate_limit_per_minute,
+            approval_id=approval["id"],
+        )
+        if not rate_limit["allowed"]:
+            return {"ok": False, "status": "rate_limited", "approval_id": approval["id"], "channel": "chat_webhook", "rate_limit": rate_limit, "raw_channel_content_included": False}
         delivery_id = str(uuid4())
         payload = {
             "channel": "chat_webhook",
@@ -1208,6 +1345,9 @@ class AgentOrchestrator:
             "delivery_id": delivery_id,
             "sent_at": now_utc(),
             "payload_format": config.payload_format,
+            "approval_id": approval["id"],
+            "approval_binding_sha256": binding["binding_sha256"],
+            "approval_payload_sha256": binding["payload_sha256"],
         }
         handle = self.secrets_broker.request_handle(
             name=config.url_secret,
@@ -1225,7 +1365,18 @@ class AgentOrchestrator:
             session_id=session_id,
             metadata=metadata or {},
         )
-        self.channels.record_outbound_delivery(channel="chat_webhook", session_id=session_id, payload=payload, delivery=delivery)
+        delivery.update(
+            {
+                "approval_id": approval["id"],
+                "approval_binding_sha256": binding["binding_sha256"],
+                "approval_payload_sha256": binding["payload_sha256"],
+                "rate_limit": rate_limit,
+                "raw_channel_content_included": False,
+                "raw_secret_values_included": False,
+            }
+        )
+        event_id = self.channels.record_outbound_delivery(channel="chat_webhook", session_id=session_id, payload=payload, delivery=delivery)
+        delivery["channel_event_id"] = event_id
         return delivery
 
     def channel_live_activation_status(self) -> dict[str, Any]:
@@ -4172,6 +4323,99 @@ def _approval_session_id(approval: dict[str, Any], store: LocalStore) -> str | N
         if isinstance(arguments, dict) and isinstance(arguments.get("session_id"), str):
             return arguments["session_id"]
     return None
+
+
+def _channel_send_binding(
+    *,
+    channel: str,
+    action: str,
+    session_id: str | None,
+    metadata: dict[str, Any],
+    target: dict[str, Any],
+    text: str,
+    subject: str | None = None,
+) -> dict[str, Any]:
+    payload_fingerprint: dict[str, Any] = {
+        "text_sha256": _sha256_text(str(text)),
+        "text_chars": len(str(text)),
+    }
+    if subject is not None:
+        payload_fingerprint["subject_sha256"] = _sha256_text(str(subject))
+        payload_fingerprint["subject_chars"] = len(str(subject))
+    safe_metadata = _channel_send_safe_metadata(metadata)
+    payload_sha256 = _sha256_json(payload_fingerprint)
+    binding_base = {
+        "action": action,
+        "channel": channel,
+        "session_id": session_id,
+        "target_sha256": target["target_sha256"],
+        "payload_sha256": payload_sha256,
+        "metadata_sha256": _sha256_json(safe_metadata),
+    }
+    return {
+        "receipt_schema": "aegis.channel.send_approval.v1",
+        "action": action,
+        "channel": channel,
+        "session_id": session_id,
+        "target": target,
+        "target_sha256": target["target_sha256"],
+        "payload_fingerprint": payload_fingerprint,
+        "payload_sha256": payload_sha256,
+        "metadata_keys": sorted(safe_metadata),
+        "metadata_sha256": binding_base["metadata_sha256"],
+        "binding_sha256": _sha256_json(binding_base),
+        "raw_channel_content_included": False,
+        "raw_secret_values_included": False,
+    }
+
+
+def _webhook_send_target(outbound_url: str) -> dict[str, Any]:
+    parsed = urlparse(outbound_url)
+    target = {
+        "kind": "signed_webhook",
+        "domain": (parsed.hostname or "").lower(),
+        "scheme": parsed.scheme.lower(),
+        "url_sha256": _sha256_text(outbound_url),
+    }
+    return {**target, "target_sha256": _sha256_json(target)}
+
+
+def _email_send_target(smtp_host: str, from_address: str, to_addresses: tuple[str, ...]) -> dict[str, Any]:
+    recipients = tuple(address.strip().lower() for address in to_addresses if address.strip())
+    target = {
+        "kind": "smtp_email",
+        "smtp_host": smtp_host.strip().lower(),
+        "from_address_sha256": _sha256_text(from_address.strip().lower()),
+        "recipient_count": len(recipients),
+        "recipients_sha256": _sha256_json(recipients),
+    }
+    return {**target, "target_sha256": _sha256_json(target)}
+
+
+def _chat_webhook_send_target(url_secret: str, payload_format: str) -> dict[str, Any]:
+    target = {
+        "kind": "chat_webhook",
+        "url_secret_name": url_secret,
+        "payload_format": payload_format.strip().lower().replace("-", "_"),
+    }
+    return {**target, "target_sha256": _sha256_json(target)}
+
+
+def _channel_send_safe_metadata(metadata: dict[str, Any]) -> dict[str, str]:
+    safe: dict[str, str] = {}
+    for key, value in metadata.items():
+        if str(key).startswith("_"):
+            continue
+        safe[str(key)] = str(redact(str(value)))[:200]
+    return safe
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _sha256_json(value: Any) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
 
 
 def _checkpoint_approval_id(result: dict[str, Any]) -> str | None:

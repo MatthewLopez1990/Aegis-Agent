@@ -1029,25 +1029,31 @@ class AegisTui(cmd.Cmd):
             return
         if parts and parts[0] == "send-webhook":
             if len(parts) < 2:
-                print("usage: channel send-webhook <text> --approved")
+                print("usage: channel send-webhook <text> [--approval-id <id>]")
                 return
-            text = " ".join(part for part in parts[1:] if part != "--approved")
-            _print_json(self.orchestrator.send_webhook(text=text, approved="--approved" in parts, session_id=self.session["id"], metadata={"source": "tui"}))
+            approval_id = _option_value(parts, "--approval-id")
+            text_parts = _without_option(parts[1:], "--approval-id") if approval_id else parts[1:]
+            text = " ".join(part for part in text_parts if part != "--approved")
+            _print_json(self.orchestrator.send_webhook(text=text, approved="--approved" in parts, approval_id=approval_id, session_id=self.session["id"], metadata={"source": "tui"}))
             return
         if parts and parts[0] == "send-email":
             if len(parts) < 3:
-                print("usage: channel send-email <subject> <text> --approved")
+                print("usage: channel send-email <subject> <text> [--approval-id <id>]")
                 return
-            subject = parts[1]
-            text = " ".join(part for part in parts[2:] if part != "--approved")
-            _print_json(self.orchestrator.send_email(subject=subject, text=text, approved="--approved" in parts, session_id=self.session["id"], metadata={"source": "tui"}))
+            approval_id = _option_value(parts, "--approval-id")
+            email_parts = _without_option(parts[1:], "--approval-id") if approval_id else parts[1:]
+            subject = email_parts[0]
+            text = " ".join(part for part in email_parts[1:] if part != "--approved")
+            _print_json(self.orchestrator.send_email(subject=subject, text=text, approved="--approved" in parts, approval_id=approval_id, session_id=self.session["id"], metadata={"source": "tui"}))
             return
         if parts and parts[0] == "send-chat-webhook":
             if len(parts) < 2:
-                print("usage: channel send-chat-webhook <text> --approved")
+                print("usage: channel send-chat-webhook <text> [--approval-id <id>]")
                 return
-            text = " ".join(part for part in parts[1:] if part != "--approved")
-            _print_json(self.orchestrator.send_chat_webhook(text=text, approved="--approved" in parts, session_id=self.session["id"], metadata={"source": "tui"}))
+            approval_id = _option_value(parts, "--approval-id")
+            text_parts = _without_option(parts[1:], "--approval-id") if approval_id else parts[1:]
+            text = " ".join(part for part in text_parts if part != "--approved")
+            _print_json(self.orchestrator.send_chat_webhook(text=text, approved="--approved" in parts, approval_id=approval_id, session_id=self.session["id"], metadata={"source": "tui"}))
             return
         if len(parts) >= 3 and parts[0] == "receive":
             self.orchestrator.channels.receive(
@@ -1061,7 +1067,7 @@ class AegisTui(cmd.Cmd):
             _print_json({"message": self.orchestrator.channels.events(limit=1)[0]})
             return
         if len(parts) < 3 or parts[0] != "render":
-            print("usage: channel render <channel> <text> | channel receive <channel> <text> | channel resolve-approval <event_id> <approval_id> | channel send-webhook <text> --approved | channel send-email <subject> <text> --approved | channel send-chat-webhook <text> --approved | channel activation-packet | channel verify-activation-packet <packet> | channel activate-packet <packet> --approved | channel events [limit]")
+            print("usage: channel render <channel> <text> | channel receive <channel> <text> | channel resolve-approval <event_id> <approval_id> | channel send-webhook <text> [--approval-id <id>] | channel send-email <subject> <text> [--approval-id <id>] | channel send-chat-webhook <text> [--approval-id <id>] | channel activation-packet | channel verify-activation-packet <packet> | channel activate-packet <packet> --approved | channel events [limit]")
             return
         channel = parts[1]
         text = " ".join(parts[2:])
@@ -6708,7 +6714,7 @@ def _command_reference() -> str:
             "channel render <c> <t>  Render outbound channel payload",
             "channel receive <c> <t> Normalize inbound channel payload",
             "channel resolve-approval <event> <approval>",
-            "channel send-chat-webhook <text> --approved",
+            "channel send-chat-webhook <text> --approval-id <id>",
             "channel activate-packet <packet> --approved",
             "channel events [limit]  Recent channel activity",
             "models|model           Model providers",

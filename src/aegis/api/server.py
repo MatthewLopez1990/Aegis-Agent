@@ -1732,6 +1732,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     orchestrator.send_webhook(
                         text=str(_required(payload, "text")),
                         approved=bool(payload.get("approved", False)),
+                        approval_id=str(payload["approval_id"]) if payload.get("approval_id") else None,
                         session_id=str(payload["session_id"]) if payload.get("session_id") else None,
                         metadata={"source": "api"},
                     )
@@ -1744,6 +1745,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                         subject=str(_required(payload, "subject")),
                         text=str(_required(payload, "text")),
                         approved=bool(payload.get("approved", False)),
+                        approval_id=str(payload["approval_id"]) if payload.get("approval_id") else None,
                         session_id=str(payload["session_id"]) if payload.get("session_id") else None,
                         metadata={"source": "api"},
                     )
@@ -1755,6 +1757,7 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     orchestrator.send_chat_webhook(
                         text=str(_required(payload, "text")),
                         approved=bool(payload.get("approved", False)),
+                        approval_id=str(payload["approval_id"]) if payload.get("approval_id") else None,
                         session_id=str(payload["session_id"]) if payload.get("session_id") else None,
                         metadata={"source": "api"},
                     )

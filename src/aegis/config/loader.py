@@ -27,6 +27,7 @@ class WebhookChannelConfig:
     allow_task_submission: bool = False
     outbound_enabled: bool = False
     outbound_url: str | None = None
+    outbound_rate_limit_per_minute: int = 30
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,7 @@ class EmailChannelConfig:
     password_secret: str | None = None
     from_address: str | None = None
     to_addresses: tuple[str, ...] = ()
+    outbound_rate_limit_per_minute: int = 30
 
 
 @dataclass(frozen=True)
@@ -46,6 +48,7 @@ class ChatWebhookChannelConfig:
     outbound_enabled: bool = False
     url_secret: str | None = None
     payload_format: str = "generic"
+    outbound_rate_limit_per_minute: int = 30
 
 
 @dataclass(frozen=True)
@@ -202,6 +205,7 @@ def load_config(data_dir: str | Path | None = None, config_path: str | Path | No
         allow_task_submission=bool(webhook.get("allow_task_submission", False)),
         outbound_enabled=bool(webhook.get("outbound_enabled", False)),
         outbound_url=str(webhook["outbound_url"]) if webhook.get("outbound_url") else None,
+        outbound_rate_limit_per_minute=_positive_int(webhook.get("outbound_rate_limit_per_minute", 30), default=30),
     )
     email_config = EmailChannelConfig(
         outbound_enabled=bool(email.get("outbound_enabled", False)),
@@ -212,11 +216,13 @@ def load_config(data_dir: str | Path | None = None, config_path: str | Path | No
         password_secret=str(email["password_secret"]) if email.get("password_secret") else None,
         from_address=str(email["from_address"]) if email.get("from_address") else None,
         to_addresses=_string_tuple(email.get("to_addresses", ()), field_name="channels.email.to_addresses"),
+        outbound_rate_limit_per_minute=_positive_int(email.get("outbound_rate_limit_per_minute", 30), default=30),
     )
     chat_webhook_config = ChatWebhookChannelConfig(
         outbound_enabled=bool(chat_webhook.get("outbound_enabled", False)),
         url_secret=str(chat_webhook["url_secret"]) if chat_webhook.get("url_secret") else None,
         payload_format=str(chat_webhook.get("payload_format", "generic")),
+        outbound_rate_limit_per_minute=_positive_int(chat_webhook.get("outbound_rate_limit_per_minute", 30), default=30),
     )
     policy_profile = PolicyProfile.secure_default(
         read_only=default_read_only,
@@ -352,10 +358,12 @@ def write_default_config(data_dir: str | Path | None = None) -> Path:
                     "timestamp_tolerance_seconds = 300",
                     "allow_task_submission = false",
                     "outbound_enabled = false",
+                    "outbound_rate_limit_per_minute = 30",
                     "# outbound_url = \"https://example.com/aegis-webhook\"",
                     "",
                     "[channels.email]",
                     "outbound_enabled = false",
+                    "outbound_rate_limit_per_minute = 30",
                     "# smtp_host = \"smtp.example.com\"",
                     "# smtp_port = 587",
                     "# use_tls = true",
@@ -366,6 +374,7 @@ def write_default_config(data_dir: str | Path | None = None) -> Path:
                     "",
                     "[channels.chat_webhook]",
                     "outbound_enabled = false",
+                    "outbound_rate_limit_per_minute = 30",
                     "# url_secret = \"AEGIS_CHAT_WEBHOOK_URL\"",
                     "# payload_format = \"slack\"  # generic, slack, discord, teams",
                     "",
