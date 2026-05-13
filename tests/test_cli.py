@@ -87,6 +87,56 @@ class CliTests(unittest.TestCase):
             self.assertTrue(verified["receipt"]["checksum_matches"])
             self.assertFalse(verified["receipt"]["raw_packet_payload_included"])
 
+    def test_model_auth_readiness_packet_commands_create_and_verify_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            data_dir = Path(temp) / ".aegis"
+            created = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "models",
+                        "auth",
+                        "readiness-packet",
+                        "--actor",
+                        "cli-auth",
+                    ]
+                )
+            )
+
+            self.assertTrue(created["ok"])
+            self.assertEqual(created["receipt"]["receipt_schema"], "aegis.model.auth_readiness_packet.v1")
+            self.assertEqual(created["receipt"]["actor"], "cli-auth")
+            self.assertGreater(created["receipt"]["operator_login_required_count"], 0)
+            self.assertEqual(created["receipt"]["implementation_gap_count"], 0)
+            self.assertFalse(created["receipt"]["raw_secret_values_included"])
+            packet_path = Path(created["receipt"]["artifact"])
+            self.assertTrue(packet_path.exists())
+            self.assertEqual(stat.S_IMODE(packet_path.stat().st_mode), 0o600)
+
+            verified = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "models",
+                        "auth",
+                        "verify-readiness-packet",
+                        created["receipt"]["packet_id"],
+                        "--actor",
+                        "cli-auth-reviewer",
+                    ]
+                )
+            )
+
+            self.assertTrue(verified["ok"])
+            self.assertEqual(verified["receipt"]["receipt_schema"], "aegis.model.auth_readiness_packet_verification.v1")
+            self.assertEqual(verified["receipt"]["actor"], "cli-auth-reviewer")
+            self.assertTrue(verified["receipt"]["packet_integrity_ok"])
+            self.assertTrue(verified["receipt"]["checksum_matches"])
+            self.assertFalse(verified["receipt"]["raw_packet_payload_included"])
+
     def test_dashboard_command_reports_product_posture(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             parser = build_parser()

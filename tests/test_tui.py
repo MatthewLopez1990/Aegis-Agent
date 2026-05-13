@@ -46,6 +46,14 @@ class TuiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             tui = AegisTui(data_dir=root / ".aegis", workspace=root)
+            readiness_packet_output = io.StringIO()
+            with redirect_stdout(readiness_packet_output):
+                tui.onecmd("models auth readiness-packet")
+            readiness_packet = json.loads(readiness_packet_output.getvalue())
+            verify_readiness_packet_output = io.StringIO()
+            with redirect_stdout(verify_readiness_packet_output):
+                tui.onecmd(f"models auth verify-readiness-packet {readiness_packet['receipt']['packet_id']}")
+            verified_readiness_packet = json.loads(verify_readiness_packet_output.getvalue())
             output = io.StringIO()
 
             with redirect_stdout(output):
@@ -309,6 +317,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn("methods", tui.complete_models("me", "models auth me", len("models auth "), len("models auth me")))
             self.assertIn("targets", tui.complete_models("ta", "models auth ta", len("models auth "), len("models auth ta")))
             self.assertIn("doctor", tui.complete_models("do", "models auth do", len("models auth "), len("models auth do")))
+            self.assertIn("readiness-packet", tui.complete_models("rea", "models auth rea", len("models auth "), len("models auth rea")))
+            self.assertIn("verify-readiness-packet", tui.completedefault("verify", "/models auth verify", len("/models auth "), len("/models auth verify")))
             self.assertIn("resume", tui.complete_task("res", "task res", len("task "), len("task res")))
             self.assertIn("resume", tui.completedefault("res", "/task res", len("/task "), len("/task res")))
             self.assertIn("doctor", tui.completedefault("do", "/models auth do", len("/models auth "), len("/models auth do")))
@@ -1671,6 +1681,15 @@ class TuiTests(unittest.TestCase):
             tui = AegisTui(data_dir=root / ".aegis", workspace=root)
             tui.orchestrator.models.record_usage(identifier="ollama/llama3", input_tokens=10, output_tokens=5)
             output = io.StringIO()
+            readiness_packet_output = io.StringIO()
+
+            with redirect_stdout(readiness_packet_output):
+                tui.onecmd("models auth readiness-packet")
+            readiness_packet = json.loads(readiness_packet_output.getvalue())
+            verify_readiness_packet_output = io.StringIO()
+            with redirect_stdout(verify_readiness_packet_output):
+                tui.onecmd(f"models auth verify-readiness-packet {readiness_packet['receipt']['packet_id']}")
+            verified_readiness_packet = json.loads(verify_readiness_packet_output.getvalue())
 
             with redirect_stdout(output):
                 tui.onecmd("models")
@@ -1723,6 +1742,13 @@ class TuiTests(unittest.TestCase):
             self.assertIn('"status": "external_login_required"', rendered)
             self.assertIn('"auth_configured": true', rendered)
             self.assertIn('"auth_configured": false', rendered)
+            self.assertEqual(readiness_packet["receipt"]["receipt_schema"], "aegis.model.auth_readiness_packet.v1")
+            self.assertEqual(readiness_packet["receipt"]["actor"], "tui-operator")
+            self.assertGreater(readiness_packet["receipt"]["operator_login_required_count"], 0)
+            self.assertFalse(readiness_packet["receipt"]["raw_secret_values_included"])
+            self.assertEqual(verified_readiness_packet["receipt"]["receipt_schema"], "aegis.model.auth_readiness_packet_verification.v1")
+            self.assertTrue(verified_readiness_packet["receipt"]["packet_integrity_ok"])
+            self.assertFalse(verified_readiness_packet["receipt"]["raw_packet_payload_included"])
             self.assertNotIn("sk-test-secret", rendered)
             self.assertNotIn("sk-test-secret", json.dumps(tui.orchestrator.audit_logger.tail(20), sort_keys=True))
             self.assertIn("model route failed", rendered)

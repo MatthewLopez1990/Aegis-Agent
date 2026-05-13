@@ -686,6 +686,13 @@ class ApiServerSecurityTests(unittest.TestCase):
                 model_providers_after_login = _json_get(port, "/model-providers", token=token)
                 model_auth_targets = _json_get(port, "/models/auth/targets", token=token)
                 model_auth_doctor = _json_get(port, "/models/auth/doctor", token=token)
+                model_auth_packet = _json_post(port, "/models/auth/readiness-packet", {"actor": "api-auth"}, token=token)
+                model_auth_packet_verified = _json_post(
+                    port,
+                    "/models/auth/verify-readiness-packet",
+                    {"packet": model_auth_packet["receipt"]["packet_id"], "actor": "api-auth-reviewer"},
+                    token=token,
+                )
                 model_auth_logout = _json_post(port, "/models/auth/logout", {"provider": "openai"}, token=token)
                 model_providers_after_logout = _json_get(port, "/model-providers", token=token)
                 model_usage = _json_get(port, "/model-usage", token=token)
@@ -1305,6 +1312,16 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertTrue("github-copilot" in model_auth_doctor_checks["GitHub Copilot"]["login_command"])
                 self.assertEqual(model_auth_doctor_checks["Google Vertex AI / Gemini cloud identity"]["activation_state"], "config_required")
                 self.assertIn("models.google_vertex_project", model_auth_doctor_checks["Google Vertex AI / Gemini cloud identity"]["activation"]["missing_config"])
+                self.assertTrue(model_auth_packet["ok"])
+                self.assertEqual(model_auth_packet["receipt"]["receipt_schema"], "aegis.model.auth_readiness_packet.v1")
+                self.assertEqual(model_auth_packet["receipt"]["actor"], "api-auth")
+                self.assertGreater(model_auth_packet["receipt"]["operator_login_required_count"], 0)
+                self.assertFalse(model_auth_packet["receipt"]["raw_secret_values_included"])
+                self.assertTrue(model_auth_packet_verified["ok"])
+                self.assertEqual(model_auth_packet_verified["receipt"]["receipt_schema"], "aegis.model.auth_readiness_packet_verification.v1")
+                self.assertEqual(model_auth_packet_verified["receipt"]["actor"], "api-auth-reviewer")
+                self.assertTrue(model_auth_packet_verified["receipt"]["packet_integrity_ok"])
+                self.assertFalse(model_auth_packet_verified["receipt"]["raw_packet_payload_included"])
                 self.assertNotIn("sk-api-secret", json.dumps(model_auth_login, sort_keys=True))
                 self.assertNotIn("sk-api-secret", json.dumps(model_auth_logout, sort_keys=True))
                 self.assertNotIn("sk-api-secret", json.dumps(model_auth_doctor, sort_keys=True))

@@ -560,6 +560,11 @@ def build_parser() -> argparse.ArgumentParser:
     model_auth_methods.add_argument("provider", nargs="?")
     model_auth_sub.add_parser("targets", help="Show Hermes/Claude provider auth parity targets")
     model_auth_sub.add_parser("doctor", help="Show local provider-login readiness and next commands")
+    model_auth_readiness_packet = model_auth_sub.add_parser("readiness-packet", help="Create a private model auth readiness packet")
+    model_auth_readiness_packet.add_argument("--actor", default="operator")
+    model_auth_verify_readiness_packet = model_auth_sub.add_parser("verify-readiness-packet", help="Verify a private model auth readiness packet")
+    model_auth_verify_readiness_packet.add_argument("packet")
+    model_auth_verify_readiness_packet.add_argument("--actor", default="operator")
     model_auth_provider_choices = _model_auth_provider_choices()
     model_auth_login = model_auth_sub.add_parser("login", help="Store an API key or start a guarded provider-native login handoff")
     model_auth_login.add_argument(
@@ -1903,6 +1908,10 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 return {"auth_targets": registry.auth_targets()}
             if args.auth_command == "doctor":
                 return {"auth_doctor": registry.auth_doctor()}
+            if args.auth_command == "readiness-packet":
+                return registry.create_auth_readiness_packet(actor=args.actor)
+            if args.auth_command == "verify-readiness-packet":
+                return registry.verify_auth_readiness_packet(args.packet, actor=args.actor)
             if args.auth_command == "login":
                 method = "subscription" if getattr(args, "subscription", False) else str(args.method)
                 if method in {"subscription", "oauth", "oauth-device", "cloud-identity"}:

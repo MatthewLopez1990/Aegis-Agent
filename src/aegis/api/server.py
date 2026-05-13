@@ -1218,6 +1218,19 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     }
                 )
                 return
+            if path == "/models/auth/readiness-packet":
+                payload = self._read_json()
+                self._json(orchestrator.models.create_auth_readiness_packet(actor=str(payload.get("actor", "api-operator"))))
+                return
+            if path == "/models/auth/verify-readiness-packet":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.models.verify_auth_readiness_packet(
+                        str(_required(payload, "packet")),
+                        actor=str(payload.get("actor", "api-operator")),
+                    )
+                )
+                return
             if path == "/models/auth/logout":
                 payload = self._read_json()
                 self._json(

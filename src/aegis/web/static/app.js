@@ -1637,12 +1637,22 @@ const renderModelRouteOutput = (payload) => {
 
 const renderModelAuthOutput = (payload) => {
   const auth = payload.auth || payload;
+  const packet = payload.packet && typeof payload.packet === "object" ? payload.packet : {};
+  const receipt = payload.receipt && typeof payload.receipt === "object" ? payload.receipt : {};
+  const readinessPacketRef = packet.packet_id || receipt.packet_id || payload.packet_id || "";
   const label = auth.external_command
     ? `${auth.status || "auth"} · ${auth.external_command}`
     : auth.provider || auth.status || "Model auth";
+  const readinessActions = `
+    <div class="item-actions">
+      <button type="button" class="secondary" data-model-auth-readiness-packet="1">Create Readiness Packet</button>
+      ${readinessPacketRef ? `<button type="button" class="secondary" data-model-auth-verify-readiness-packet="${escapeHtml(readinessPacketRef)}">Verify Readiness Packet</button>` : ""}
+    </div>
+  `;
   const node = document.getElementById("model-auth-output");
   node.innerHTML = `
     <strong>${text(label)}</strong>
+    ${readinessActions}
     <code>${text(JSON.stringify(payload, null, 2))}</code>
   `;
 };
@@ -2509,6 +2519,30 @@ document.getElementById("model-auth-logout").addEventListener("click", async () 
 document.getElementById("model-auth-doctor-run").addEventListener("click", async () => {
   renderModelAuthOutput({ auth_doctor: await api("/models/auth/doctor") });
   await refresh();
+});
+
+document.getElementById("model-auth-readiness-packet").addEventListener("click", async () => {
+  renderModelAuthOutput(await api("/models/auth/readiness-packet", { method: "POST", body: JSON.stringify({ actor: "web-operator" }) }));
+  await refresh();
+});
+
+document.getElementById("model-auth-output").addEventListener("click", async (event) => {
+  const createPacket = event.target.closest("[data-model-auth-readiness-packet]");
+  if (createPacket) {
+    renderModelAuthOutput(await api("/models/auth/readiness-packet", { method: "POST", body: JSON.stringify({ actor: "web-operator" }) }));
+    await refresh();
+    return;
+  }
+  const verifyPacket = event.target.closest("[data-model-auth-verify-readiness-packet]");
+  if (verifyPacket) {
+    renderModelAuthOutput(
+      await api("/models/auth/verify-readiness-packet", {
+        method: "POST",
+        body: JSON.stringify({ packet: verifyPacket.dataset.modelAuthVerifyReadinessPacket, actor: "web-operator" }),
+      })
+    );
+    await refresh();
+  }
 });
 
 document.getElementById("model-route-form").addEventListener("submit", async (event) => {

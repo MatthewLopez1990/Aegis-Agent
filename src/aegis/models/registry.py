@@ -17,6 +17,7 @@ import tempfile
 import sys
 import threading
 import time
+from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -28,6 +29,7 @@ from aegis.audit.logger import AuditLogger
 from aegis.memory.store import LocalStore
 from aegis.security.secrets_broker import SecretsBroker
 from aegis.security.taint import now_utc
+from aegis.storage.state import ensure_private_dir, ensure_private_file
 
 
 @dataclass(frozen=True)
@@ -411,6 +413,98 @@ class ModelRegistry:
                 "Use verify_command after signing in directly with an official provider CLI.",
                 "Do not paste browser cookies, OAuth tokens, refresh tokens, CLI credential files, or subscription session values into Aegis.",
             ],
+        }
+
+    def create_auth_readiness_packet(self, *, actor: str = "operator") -> dict[str, Any]:
+        packet_id = str(uuid4())
+        created_at = now_utc()
+        data_dir = Path(self.store.database_path).parent
+        packet_dir = ensure_private_dir(data_dir / "model-auth-readiness-packets")
+        packet_path = ensure_private_file(packet_dir / f"{packet_id}.json")
+        checksum_path = ensure_private_file(packet_dir / f"{packet_id}.sha256")
+        packet = _model_auth_readiness_packet(
+            packet_id=packet_id,
+            actor=actor,
+            created_at=created_at,
+            targets=self.auth_targets(),
+            doctor=self.auth_doctor(),
+        )
+        packet_path.write_text(json.dumps(packet, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        packet_path.chmod(0o600)
+        artifact_sha256 = hashlib.sha256(packet_path.read_bytes()).hexdigest()
+        checksum_path.write_text(f"{artifact_sha256}\n", encoding="utf-8")
+        checksum_path.chmod(0o600)
+        receipt = {
+            "receipt_schema": "aegis.model.auth_readiness_packet.v1",
+            "event_type": "model.auth_readiness_packet_created",
+            "packet_id": packet_id,
+            "actor": _model_auth_safe_text(actor, limit=80),
+            "artifact": str(packet_path),
+            "artifact_sha256": artifact_sha256,
+            "checksum": str(checksum_path),
+            "checksum_sha256": hashlib.sha256(checksum_path.read_bytes()).hexdigest(),
+            "status": packet["status"],
+            "target_provider_count": packet["target_provider_count"],
+            "checked_login_target_count": packet["checked_login_target_count"],
+            "operator_login_required_count": packet["operator_login_required_count"],
+            "implementation_gap_count": packet["implementation_gap_count"],
+            "raw_secret_values_included": False,
+            "raw_token_values_included": False,
+            "model_invocation_performed": False,
+            "created_at": created_at,
+        }
+        audit_entry = self.audit_logger.append("model.auth_readiness_packet_created", receipt)
+        return {
+            "ok": True,
+            "packet": packet,
+            "receipt": receipt,
+            "audit_event_hash": audit_entry["event_hash"],
+        }
+
+    def verify_auth_readiness_packet(self, packet: str, *, actor: str = "operator") -> dict[str, Any]:
+        packet_path, checksum_path = _model_auth_readiness_packet_paths(Path(self.store.database_path).parent, packet)
+        packet_bytes = packet_path.read_bytes()
+        artifact_sha256 = hashlib.sha256(packet_bytes).hexdigest()
+        checksum_value = checksum_path.read_text(encoding="utf-8").strip() if checksum_path.exists() else ""
+        try:
+            decoded = json.loads(packet_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            decoded = {}
+        packet_payload = decoded if isinstance(decoded, dict) else {}
+        controls = packet_payload.get("controls") if isinstance(packet_payload.get("controls"), dict) else {}
+        checks = packet_payload.get("checks") if isinstance(packet_payload.get("checks"), list) else []
+        checksum_matches = bool(checksum_value) and checksum_value == artifact_sha256
+        packet_schema_valid = packet_payload.get("packet_schema") == "aegis.model.auth_readiness_packet.v1"
+        controls_valid = _model_auth_readiness_controls_valid(controls)
+        checks_valid = _model_auth_readiness_checks_valid(packet_payload, checks)
+        forbidden_keys_present = _model_auth_readiness_forbidden_keys_present(packet_payload)
+        receipt = {
+            "receipt_schema": "aegis.model.auth_readiness_packet_verification.v1",
+            "event_type": "model.auth_readiness_packet_verified",
+            "packet_id": str(packet_payload.get("packet_id") or packet_path.stem),
+            "actor": _model_auth_safe_text(actor, limit=80),
+            "artifact": str(packet_path),
+            "artifact_sha256": artifact_sha256,
+            "checksum": str(checksum_path),
+            "checksum_present": bool(checksum_value),
+            "checksum_matches": checksum_matches,
+            "packet_schema_valid": packet_schema_valid,
+            "controls_valid": controls_valid,
+            "checks_valid": checks_valid,
+            "forbidden_raw_keys_present": forbidden_keys_present,
+            "packet_integrity_ok": bool(packet_schema_valid and checksum_matches and controls_valid and checks_valid and not forbidden_keys_present),
+            "raw_secret_values_included": False,
+            "raw_token_values_included": False,
+            "raw_packet_payload_included": False,
+            "model_invocation_performed": False,
+            "verified_at": now_utc(),
+        }
+        audit_entry = self.audit_logger.append("model.auth_readiness_packet_verified", receipt)
+        return {
+            "ok": bool(receipt["packet_integrity_ok"]),
+            "packet": _model_auth_readiness_packet_summary(packet_payload),
+            "receipt": receipt,
+            "audit_event_hash": audit_entry["event_hash"],
         }
 
     def _auth_activation_preflight(self, row: dict[str, Any], *, method: str, verified: bool, command_available: bool) -> dict[str, Any]:
@@ -1191,6 +1285,199 @@ class ModelRegistry:
         if matching:
             self._persist_external_auth_links()
         return len(matching)
+
+
+_MODEL_AUTH_PACKET_FALSE_CONTROLS = (
+    "raw_secret_values_included",
+    "raw_token_values_included",
+    "browser_cookie_import_allowed",
+    "credential_file_import_allowed",
+    "model_invocation_performed",
+)
+
+_MODEL_AUTH_PACKET_TRUE_CONTROLS = (
+    "official_provider_login_flow_required",
+    "local_operator_verification_required",
+    "secret_broker_storage_required",
+    "provider_domain_allowlist_required",
+)
+
+
+def _model_auth_readiness_packet(*, packet_id: str, actor: str, created_at: str, targets: dict[str, Any], doctor: dict[str, Any]) -> dict[str, Any]:
+    checks = [_model_auth_readiness_check_summary(check) for check in doctor.get("checks", []) if isinstance(check, dict)]
+    return {
+        "packet_schema": "aegis.model.auth_readiness_packet.v1",
+        "packet_id": packet_id,
+        "created_at": created_at,
+        "actor": _model_auth_safe_text(actor, limit=80),
+        "taint": "MODEL_AUTH_READINESS_METADATA",
+        "status": doctor.get("status"),
+        "target_provider_count": int(targets.get("target_provider_count") or 0),
+        "checked_login_target_count": len(checks),
+        "verified_external_auth_count": int(targets.get("verified_external_auth_count") or 0),
+        "operator_login_required_count": int(doctor.get("operator_login_required_count") or 0),
+        "operator_login_required_targets": [_model_auth_safe_text(item, limit=120) for item in doctor.get("operator_login_required_targets", [])],
+        "missing_external_commands": [_model_auth_safe_text(item, limit=80) for item in doctor.get("missing_external_commands", [])],
+        "activation_state_counts": dict(doctor.get("activation_state_counts") or {}),
+        "implementation_gap_count": int(targets.get("implementation_gap_count") or 0),
+        "required_controls": list(targets.get("required_controls") or []),
+        "verification_gates": list(targets.get("verification_gates") or []),
+        "checks": checks,
+        "controls": {
+            **{control: False for control in _MODEL_AUTH_PACKET_FALSE_CONTROLS},
+            **{control: True for control in _MODEL_AUTH_PACKET_TRUE_CONTROLS},
+        },
+        "next_steps": [_model_auth_safe_text(item, limit=300) for item in doctor.get("next_steps", [])],
+    }
+
+
+def _model_auth_readiness_check_summary(check: dict[str, Any]) -> dict[str, Any]:
+    activation = check.get("activation") if isinstance(check.get("activation"), dict) else {}
+    blockers = activation.get("blockers") if isinstance(activation.get("blockers"), list) else []
+    command_argv = check.get("external_command_argv") if isinstance(check.get("external_command_argv"), list) else []
+    return {
+        "target": _model_auth_safe_text(check.get("target"), limit=160),
+        "provider": _model_auth_safe_text(check.get("provider"), limit=80),
+        "method": _model_auth_safe_text(check.get("method"), limit=40),
+        "status": _model_auth_safe_text(check.get("status"), limit=80),
+        "verified": bool(check.get("verified", False)),
+        "activation_state": _model_auth_safe_text(check.get("activation_state"), limit=80),
+        "external_command_name": _model_auth_safe_text(command_argv[0] if command_argv else "", limit=80),
+        "external_command_available": bool(check.get("external_command_available", False)),
+        "setup_required": _model_auth_safe_text(check.get("setup_required"), limit=160) if check.get("setup_required") else None,
+        "login_command": _model_auth_safe_text(check.get("login_command"), limit=320),
+        "verify_command": _model_auth_safe_text(check.get("verify_command"), limit=320),
+        "token_captured": False,
+        "raw_secret_values_included": False,
+        "activation": {
+            "activation_state": _model_auth_safe_text(activation.get("activation_state"), limit=80),
+            "final_ready": bool(activation.get("final_ready", False)),
+            "required_controls": list(activation.get("required_controls") or []),
+            "configured_controls": list(activation.get("configured_controls") or []),
+            "required_config": list(activation.get("required_config") or []),
+            "configured_config": list(activation.get("configured_config") or []),
+            "missing_config": list(activation.get("missing_config") or []),
+            "blocker_controls": [_model_auth_safe_text(blocker.get("control"), limit=80) for blocker in blockers if isinstance(blocker, dict)],
+            "invocation_bridge": _model_auth_safe_text(activation.get("invocation_bridge"), limit=120) if activation.get("invocation_bridge") else None,
+            "raw_secret_values_included": False,
+        },
+    }
+
+
+def _model_auth_readiness_packet_paths(data_dir: Path, packet: str) -> tuple[Path, Path]:
+    packet_dir = ensure_private_dir(data_dir / "model-auth-readiness-packets")
+    packet_ref = str(packet or "").strip()
+    if not packet_ref:
+        raise ValueError("model auth readiness packet id or path is required")
+    candidate = Path(packet_ref)
+    packet_path = candidate if candidate.is_absolute() or candidate.parent != Path(".") else packet_dir / (packet_ref if packet_ref.endswith(".json") else f"{packet_ref}.json")
+    resolved_dir = packet_dir.resolve()
+    resolved_packet = packet_path.resolve()
+    try:
+        resolved_packet.relative_to(resolved_dir)
+    except ValueError as exc:
+        raise ValueError("model auth readiness packet path must stay inside the private model auth packet directory") from exc
+    if resolved_packet.suffix != ".json":
+        raise ValueError("model auth readiness packet artifact must be a .json file")
+    if not resolved_packet.exists():
+        raise FileNotFoundError(str(resolved_packet))
+    return resolved_packet, resolved_packet.with_suffix(".sha256")
+
+
+def _model_auth_readiness_controls_valid(controls: dict[str, Any]) -> bool:
+    expected = {*_MODEL_AUTH_PACKET_FALSE_CONTROLS, *_MODEL_AUTH_PACKET_TRUE_CONTROLS}
+    if set(controls) != expected:
+        return False
+    return all(controls.get(control) is False for control in _MODEL_AUTH_PACKET_FALSE_CONTROLS) and all(
+        controls.get(control) is True for control in _MODEL_AUTH_PACKET_TRUE_CONTROLS
+    )
+
+
+def _model_auth_readiness_checks_valid(packet: dict[str, Any], checks: list[Any]) -> bool:
+    if packet.get("checked_login_target_count") != len(checks):
+        return False
+    pending = 0
+    for check in checks:
+        if not isinstance(check, dict):
+            return False
+        if check.get("token_captured") is not False or check.get("raw_secret_values_included") is not False:
+            return False
+        if check.get("method") not in {"subscription", "oauth_device", "oauth", "cloud_identity"}:
+            return False
+        activation = check.get("activation") if isinstance(check.get("activation"), dict) else {}
+        if activation.get("raw_secret_values_included") is not False:
+            return False
+        required_controls = set(str(item) for item in activation.get("required_controls") or [])
+        if not {"official_provider_login_flow", "local_operator_verification", "no_raw_token_import"}.issubset(required_controls):
+            return False
+        if check.get("verified") is not True:
+            pending += 1
+    return packet.get("operator_login_required_count") == pending
+
+
+def _model_auth_readiness_packet_summary(packet: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "packet_schema": packet.get("packet_schema"),
+        "packet_id": packet.get("packet_id"),
+        "created_at": packet.get("created_at"),
+        "status": packet.get("status"),
+        "target_provider_count": packet.get("target_provider_count"),
+        "checked_login_target_count": packet.get("checked_login_target_count"),
+        "verified_external_auth_count": packet.get("verified_external_auth_count"),
+        "operator_login_required_count": packet.get("operator_login_required_count"),
+        "implementation_gap_count": packet.get("implementation_gap_count"),
+        "missing_external_commands": list(packet.get("missing_external_commands") or []),
+        "activation_state_counts": dict(packet.get("activation_state_counts") or {}),
+        "raw_secret_values_included": False,
+        "raw_token_values_included": False,
+        "model_invocation_performed": False,
+    }
+
+
+def _model_auth_readiness_forbidden_keys_present(value: Any) -> bool:
+    forbidden = {
+        "access_token",
+        "refresh_token",
+        "id_token",
+        "api_key",
+        "raw_api_key",
+        "client_secret",
+        "session_cookie",
+        "browser_cookie",
+        "cookie",
+        "credential_file",
+        "adc_json",
+        "raw_secret",
+        "secret_value",
+    }
+    allowed_false_keys = {
+        "raw_secret_values_included",
+        "raw_token_values_included",
+        "token_captured",
+        "model_invocation_performed",
+        "browser_cookie_import_allowed",
+        "credential_file_import_allowed",
+    }
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized_key = str(key)
+            if normalized_key in allowed_false_keys and item is not False:
+                return True
+            if normalized_key not in allowed_false_keys and (normalized_key in forbidden or normalized_key.startswith("raw_")):
+                return True
+            if _model_auth_readiness_forbidden_keys_present(item):
+                return True
+    if isinstance(value, list):
+        return any(_model_auth_readiness_forbidden_keys_present(item) for item in value)
+    return False
+
+
+def _model_auth_safe_text(value: Any, *, limit: int) -> str:
+    text = str(value or "")
+    sanitized = "".join(ch if ch.isprintable() else " " for ch in text).strip()
+    if len(sanitized) > limit:
+        return sanitized[: limit - 3] + "..."
+    return sanitized
 
 
 def _accumulate_usage(bucket: dict[str, dict[str, Any]], key: str, row: dict[str, Any]) -> None:

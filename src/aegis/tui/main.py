@@ -206,7 +206,7 @@ TOP_LEVEL_COMMANDS = (
 MEMORY_COMMANDS = ("search", "health", "session-preview", "session-commit", "create", "review-queue", "review-digest", "review-action", "review-batch", "recertify", "update", "merge", "resolve-conflict", "expire", "cleanup-expired", "explain", "export", "delete")
 MIGRATE_COMMANDS = ("openclaw", "hermes", "openclaw-memory-preview", "hermes-memory-preview", "openclaw-memory-commit", "hermes-memory-commit")
 MODEL_COMMANDS = ("list", "route", "alias", "fallbacks", "usage", "auth", "providers")
-MODEL_AUTH_COMMANDS = ("login", "logout", "methods", "targets", "doctor")
+MODEL_AUTH_COMMANDS = ("login", "logout", "methods", "targets", "doctor", "readiness-packet", "verify-readiness-packet")
 TOOLS_COMMANDS = ("list", "run", "disable", "enable")
 BACKEND_COMMANDS = ("list", "doctor", "select")
 SKILLS_COMMANDS = ("hub", "search", "browse", "inspect", "install", "disable", "enable")
@@ -1059,6 +1059,15 @@ class AegisTui(cmd.Cmd):
                 if len(parts) >= 2 and parts[1] == "doctor":
                     _print_json({"auth_doctor": self.orchestrator.models.auth_doctor()})
                     return
+                if len(parts) >= 2 and parts[1] == "readiness-packet":
+                    _print_json(self.orchestrator.models.create_auth_readiness_packet(actor="tui-operator"))
+                    return
+                if len(parts) >= 2 and parts[1] == "verify-readiness-packet":
+                    if len(parts) < 3:
+                        print("usage: models auth verify-readiness-packet <packet-id-or-path>")
+                        return
+                    _print_json(self.orchestrator.models.verify_auth_readiness_packet(parts[2], actor="tui-operator"))
+                    return
                 if len(parts) >= 2 and parts[1] == "targets":
                     _print_json({"auth_targets": self.orchestrator.models.auth_targets()})
                     return
@@ -1093,7 +1102,7 @@ class AegisTui(cmd.Cmd):
                 print(f"model auth invalid: {exc}")
             return
         if command != "providers":
-            print("usage: models list|providers|route <identifier>|alias <alias> <identifier>|fallbacks <identifier> <fallback> [fallback...]|usage|auth [provider]|auth methods [provider]|auth targets|auth doctor|auth login <provider> [subscription|oauth|oauth-device|cloud-identity] [--run-external] [--verify-external]|auth logout <provider>")
+            print("usage: models list|providers|route <identifier>|alias <alias> <identifier>|fallbacks <identifier> <fallback> [fallback...]|usage|auth [provider]|auth methods [provider]|auth targets|auth doctor|auth readiness-packet|auth verify-readiness-packet <packet>|auth login <provider> [subscription|oauth|oauth-device|cloud-identity] [--run-external] [--verify-external]|auth logout <provider>")
             return
         print(
             _table(
@@ -6234,7 +6243,7 @@ def _command_reference() -> str:
             "commands|keybindings   Slash command and terminal keybinding surfaces",
             "provider|usage         Model provider and usage aliases",
             "gquota [model]         Google Gemini Code Assist quota metadata",
-            "models auth methods|targets|doctor|login|logout <provider>",
+            "models auth methods|targets|doctor|readiness-packet|verify-readiness-packet|login|logout <provider>",
             "tools                  Governed tool catalog",
             "toolsets               Group tools by permission and risk",
             "allowed-tools|bashes   Policy-visible tools and shell posture",

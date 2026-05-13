@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from email.message import Message
+import hashlib
 import os
 import json
 import stat
@@ -1452,6 +1453,95 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(by_target["Ollama"]["status"], "local_ready")
             self.assertFalse(any(row["raw_tokens_captured"] for row in targets["targets"]))
             self.assertIn("raw_token_capture_rejection", targets["verification_gates"])
+
+    def test_model_auth_readiness_packet_is_private_and_verifier_rejects_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
+            root = Path(temp)
+            registry = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(root / ".aegis" / "audit.jsonl"))
+
+            created = registry.create_auth_readiness_packet(actor="auth-operator")
+            self.assertTrue(created["ok"])
+            self.assertEqual(created["packet"]["packet_schema"], "aegis.model.auth_readiness_packet.v1")
+            self.assertEqual(created["receipt"]["receipt_schema"], "aegis.model.auth_readiness_packet.v1")
+            self.assertEqual(created["receipt"]["actor"], "auth-operator")
+            self.assertGreater(created["receipt"]["operator_login_required_count"], 0)
+            self.assertEqual(created["receipt"]["implementation_gap_count"], 0)
+            self.assertFalse(created["receipt"]["raw_secret_values_included"])
+            self.assertFalse(created["receipt"]["raw_token_values_included"])
+            self.assertFalse(created["receipt"]["model_invocation_performed"])
+
+            packet_path = Path(created["receipt"]["artifact"])
+            checksum_path = Path(created["receipt"]["checksum"])
+            self.assertTrue(packet_path.exists())
+            self.assertTrue(checksum_path.exists())
+            self.assertEqual(stat.S_IMODE(packet_path.parent.stat().st_mode), 0o700)
+            self.assertEqual(stat.S_IMODE(packet_path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(checksum_path.stat().st_mode), 0o600)
+            self.assertEqual(created["receipt"]["artifact_sha256"], checksum_path.read_text(encoding="utf-8").strip())
+            packet_text = packet_path.read_text(encoding="utf-8")
+            payload = json.loads(packet_text)
+            packet_keys: set[str] = set()
+
+            def collect_keys(value: object) -> None:
+                if isinstance(value, dict):
+                    packet_keys.update(str(key) for key in value)
+                    for child in value.values():
+                        collect_keys(child)
+                elif isinstance(value, list):
+                    for child in value:
+                        collect_keys(child)
+
+            collect_keys(payload)
+            self.assertNotIn("access_token", packet_keys)
+            self.assertNotIn("refresh_token", packet_keys)
+            self.assertNotIn("client_secret", packet_keys)
+
+            verified = registry.verify_auth_readiness_packet(created["receipt"]["packet_id"], actor="auth-reviewer")
+            self.assertTrue(verified["ok"])
+            self.assertEqual(verified["receipt"]["receipt_schema"], "aegis.model.auth_readiness_packet_verification.v1")
+            self.assertEqual(verified["receipt"]["actor"], "auth-reviewer")
+            self.assertTrue(verified["receipt"]["checksum_matches"])
+            self.assertTrue(verified["receipt"]["packet_schema_valid"])
+            self.assertTrue(verified["receipt"]["controls_valid"])
+            self.assertTrue(verified["receipt"]["checks_valid"])
+            self.assertTrue(verified["receipt"]["packet_integrity_ok"])
+            self.assertFalse(verified["receipt"]["raw_packet_payload_included"])
+
+            with self.assertRaises(ValueError):
+                registry.verify_auth_readiness_packet("../outside.json")
+
+            def write_packet(name: str, packet: dict, *, checksum: str | None = None) -> str:
+                artifact = packet_path.parent / f"{name}.json"
+                artifact.write_text(json.dumps(packet, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                artifact.chmod(0o600)
+                artifact_sha256 = hashlib.sha256(artifact.read_bytes()).hexdigest()
+                checksum_file = packet_path.parent / f"{name}.sha256"
+                checksum_file.write_text(f"{checksum if checksum is not None else artifact_sha256}\n", encoding="utf-8")
+                checksum_file.chmod(0o600)
+                return name
+
+            unsafe_controls = json.loads(json.dumps(payload))
+            unsafe_controls["controls"]["raw_token_values_included"] = True
+            unsafe_result = registry.verify_auth_readiness_packet(write_packet("unsafe-controls", unsafe_controls))
+            self.assertFalse(unsafe_result["ok"])
+            self.assertFalse(unsafe_result["receipt"]["controls_valid"])
+
+            unsafe_check = json.loads(json.dumps(payload))
+            unsafe_check["checks"][0]["token_captured"] = True
+            unsafe_check_result = registry.verify_auth_readiness_packet(write_packet("unsafe-check", unsafe_check))
+            self.assertFalse(unsafe_check_result["ok"])
+            self.assertFalse(unsafe_check_result["receipt"]["checks_valid"])
+
+            raw_payload = json.loads(json.dumps(payload))
+            raw_payload["access_token"] = "raw-secret-token"
+            raw_result = registry.verify_auth_readiness_packet(write_packet("raw-token", raw_payload))
+            self.assertFalse(raw_result["ok"])
+            self.assertTrue(raw_result["receipt"]["forbidden_raw_keys_present"])
+            self.assertNotIn("raw-secret-token", json.dumps(raw_result, sort_keys=True))
+
+            checksum_result = registry.verify_auth_readiness_packet(write_packet("checksum-mismatch", payload, checksum="0" * 64))
+            self.assertFalse(checksum_result["ok"])
+            self.assertFalse(checksum_result["receipt"]["checksum_matches"])
 
     def test_azure_foundry_api_key_provider_uses_configured_v1_endpoint(self) -> None:
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {}, clear=True):
