@@ -509,16 +509,17 @@ def _live_gap_backlog(
         {
             "area": "browser_and_media_depth",
             "platforms": ["OpenClaw"],
-            "status": "live_readonly_and_facade_hardening_required",
-            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, approved static-anchor navigation, private Playwright/Chromium live-browser activation packet review artifacts, and an opt-in approved headless Chromium read-only snapshot adapter are available; provider-backed media artifacts, transcription, and video jobs can run through allowlisted HTTPS adapters with media_sandbox_profile_v1 receipts, including OpenAI-style image JSON, multipart image edit, TTS, audio transcription, and video generation adapters, while real selector mutation, page JavaScript automation, and broader provider-specific media depth still require expansion.",
+            "status": "live_selector_mutation_and_facade_hardening_required",
+            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, approved static-anchor navigation, private Playwright/Chromium live-browser activation packet review artifacts, an opt-in approved headless Chromium read-only snapshot adapter, and an opt-in approved Chromium CDP selector mutation adapter are available; provider-backed media artifacts, transcription, and video jobs can run through allowlisted HTTPS adapters with media_sandbox_profile_v1 receipts, including OpenAI-style image JSON, multipart image edit, TTS, audio transcription, and video generation adapters, while downloads/uploads, arbitrary JavaScript evaluation, persistent browser state, raw DOM capture, and broader provider-specific media depth still require expansion.",
             "sample_tools": facade_tools[:8],
             "next_steps": [
                 "Use the live-browser read-only adapter only for approved allowlisted screenshot evidence with ephemeral state.",
-                "Extend rendering toward real selector automation only after mutation, download/upload, cookie, and JavaScript boundaries are enforceable.",
+                "Use the live selector mutation adapter only for approved allowlisted click/fill/submit operations with ephemeral state.",
+                "Extend browser automation toward downloads/uploads and arbitrary JavaScript evaluation only after raw DOM, file chooser, network body, cookie, and storage boundaries are enforceable.",
                 "Extend provider-backed media execution toward provider-specific image, audio, and video adapters after redacted receipt coverage is proven.",
                 "Gate any page mutation, recording, or generated media write behind approval.",
             ],
-            "required_controls": ["sandbox_isolation", "taint_preservation", "artifact_hashing", "human_approval", "activation_packet_verification", "live_browser_readonly_approval"],
+            "required_controls": ["sandbox_isolation", "taint_preservation", "artifact_hashing", "human_approval", "activation_packet_verification", "live_browser_readonly_approval", "live_browser_selector_mutation_approval"],
             "verification_gates": [
                 "unsupported_selector_truthfulness",
                 "artifact_hash_stability",
@@ -527,6 +528,7 @@ def _live_gap_backlog(
                 "live_browser_activation_packet_schema",
                 "live_browser_activation_packet_verification",
                 "approved_live_browser_readonly_snapshot",
+                "approved_live_browser_selector_mutation",
                 "playwright_chromium_adapter_preflight",
                 "disabled_live_browser_denial",
             ],
@@ -580,6 +582,10 @@ def _live_gap_backlog(
                     "evidence": "approved live_navigate and live_screenshot actions can run headless Chromium with an ephemeral profile, main-frame allowlist checks, disabled JavaScript/images, private PNG artifacts, and no raw DOM/cookie/storage return",
                 },
                 {
+                    "control": "approved_live_browser_selector_mutation_adapter",
+                    "evidence": "approved live_click, live_fill, and live_submit actions can run through a Chromium CDP ephemeral profile with allowlisted navigation, private PNG/evidence artifacts, no persistent cookies/storage, no downloads/uploads, and no raw DOM/cookie/storage return",
+                },
+                {
                     "control": "platform_media_sandbox_profiles_v1",
                     "evidence": "local and provider-backed media paths return media_sandbox_profile_v1 receipts covering execution, network, filesystem, device, secret, content, and artifact boundaries",
                 },
@@ -625,7 +631,7 @@ def _live_gap_backlog(
                 },
             ],
             "remaining_depth_work": [
-                "live_browser_mutation_and_js_automation_adapter",
+                "live_browser_download_upload_and_arbitrary_js_adapter",
                 "provider_specific_media_adapter_expansion",
             ],
             "evaluation_scenarios": [
@@ -633,6 +639,7 @@ def _live_gap_backlog(
                 "browser.live_activation_packet_preflight",
                 "browser.live_activation_packet_verification",
                 "browser.live_readonly_snapshot",
+                "browser.live_selector_mutation",
                 "browser.live_automation_denied_until_adapter_ready",
             ],
             "operator_checklist": _browser_media_operator_checklist(
@@ -650,6 +657,7 @@ def _live_gap_backlog(
                     "playwright_chromium_adapter_preflight",
                     "live_browser_activation_packet_verification",
                     "approved_live_browser_readonly_adapter",
+                    "approved_live_browser_selector_mutation_adapter",
                     "openai_style_image_provider_adapter",
                     "openai_style_image_edit_provider_adapter",
                     "openai_style_tts_provider_adapter",
@@ -661,7 +669,7 @@ def _live_gap_backlog(
                     "disabled_live_browser_denial",
                 ],
                 remaining_depth_work=[
-                    "live_browser_mutation_and_js_automation_adapter",
+                    "live_browser_download_upload_and_arbitrary_js_adapter",
                     "provider_specific_media_adapter_expansion",
                 ],
             ),
@@ -961,14 +969,19 @@ def _browser_media_operator_checklist(implemented_controls: list[str], remaining
             "detail": "Approved live_navigate and live_screenshot can capture allowlisted pages with headless Chromium, an ephemeral profile, private PNG evidence, and no raw DOM/cookie/storage return.",
         },
         {
+            "control": "live_browser_selector_mutation_adapter",
+            "state": "available_opt_in" if "approved_live_browser_selector_mutation_adapter" in implemented else "pending",
+            "detail": "Approved live_click, live_fill, and live_submit can mutate allowlisted pages with Chromium CDP through an ephemeral profile while downloads/uploads, persistent state, and raw DOM capture stay blocked.",
+        },
+        {
             "control": "media_worker_sandbox",
             "state": "available" if {"sandboxed_media_worker_process", "os_level_media_worker_limits"}.issubset(implemented) else "partial",
             "detail": "Local media artifacts run in an isolated subprocess with OS limits where supported.",
         },
         {
             "control": "live_browser_automation",
-            "state": "read_only_available_mutation_blocked" if "approved_live_browser_readonly_adapter" in implemented and "live_browser_mutation_and_js_automation_adapter" in remaining else "blocked_with_preflight" if "disabled_live_browser_denial" in implemented else "not_started" if "live_browser_mutation_and_js_automation_adapter" in remaining else "ready_for_review",
-            "detail": "Read-only live screenshot capture is available when explicitly configured; real selector mutation and page JavaScript automation stay blocked until deeper boundaries are enforceable.",
+            "state": "selector_mutation_available_depth_remaining" if "approved_live_browser_selector_mutation_adapter" in implemented and "live_browser_download_upload_and_arbitrary_js_adapter" in remaining else "read_only_available_mutation_blocked" if "approved_live_browser_readonly_adapter" in implemented else "blocked_with_preflight" if "disabled_live_browser_denial" in implemented else "not_started",
+            "detail": "Read-only live screenshot capture and approved selector click/fill/submit mutation are available when explicitly configured; downloads/uploads, persistent browser state, raw DOM capture, and arbitrary JavaScript evaluation remain blocked.",
         },
         {
             "control": "provider_media_depth",

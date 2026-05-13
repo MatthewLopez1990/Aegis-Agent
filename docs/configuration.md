@@ -97,6 +97,7 @@ Secure defaults:
 
 - Filesystem connector is read-only.
 - HTTP connector is mock-mode unless `live_http_reads = true` is configured.
+- Live browser reads are disabled unless `live_browser_reads = true`; live selector click/fill/submit mutation is disabled unless `live_browser_mutations = true`. Both paths still require approval, the network allowlist, private artifacts, and ephemeral browser state; downloads/uploads, persistent cookies/storage, raw DOM capture, raw network body capture, and arbitrary JavaScript evaluation remain blocked.
 - Generic REST/media live writes use `live_rest_writes`; provider connectors use narrower per-adapter flags such as `live_github_writes`, `live_gitlab_writes`, `live_graph_calendar_writes`, `live_graph_email_writes`, `live_graph_contact_writes`, `live_service_desk_writes`, and `live_messaging_writes`.
 - Shell commands are parsed without a shell, must match the allowlist, and are additionally checked against conservative per-command argument rules. The shell connector blocks interactive Python, `python -c`, `python -m`, absolute or parent-directory listing paths, and mutating `find` actions such as `-exec` and `-delete`.
 - Data, audit logs, and brokered model auth secrets stay local.

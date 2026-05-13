@@ -118,6 +118,7 @@ class AgentOrchestrator:
             audit_logger,
             config.data_dir / "browser",
             live_browser_reads=config.live_browser_reads,
+            live_browser_mutations=config.live_browser_mutations,
             network_allowlist=config.network_allowlist,
         )
         self.models = ModelRegistry(

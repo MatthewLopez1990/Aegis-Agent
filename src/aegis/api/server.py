@@ -1412,9 +1412,10 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 payload = self._read_json()
                 session_id = str(_required(payload, "session_id"))
                 selector = str(_required(payload, "selector"))
+                live = bool(payload.get("live", False))
                 approval = _browser_action_approval(
                     orchestrator,
-                    action="click",
+                    action="live_click" if live else "click",
                     session_id=session_id,
                     selector=selector,
                     approval_id=payload.get("approval_id"),
@@ -1422,7 +1423,8 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 if not approval["approved"]:
                     self._json(approval["response"])
                     return
-                self._json(orchestrator.browser.click(session_id=session_id, selector=selector, approved=True))
+                result = orchestrator.browser.live_click(session_id=session_id, selector=selector, approved=True) if live else orchestrator.browser.click(session_id=session_id, selector=selector, approved=True)
+                self._json(_with_browser_artifact_urls(orchestrator, result) if live else result)
                 return
             if path == "/browser/fill":
                 payload = self._read_json()
@@ -1430,9 +1432,10 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 fields = payload.get("fields", {})
                 if not isinstance(fields, dict):
                     raise ValueError("browser fill fields must be a JSON object")
+                live = bool(payload.get("live", False))
                 approval = _browser_action_approval(
                     orchestrator,
-                    action="fill",
+                    action="live_fill" if live else "fill",
                     session_id=session_id,
                     fields=fields,
                     approval_id=payload.get("approval_id"),
@@ -1440,15 +1443,17 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 if not approval["approved"]:
                     self._json(approval["response"])
                     return
-                self._json(orchestrator.browser.fill(session_id=session_id, fields=fields, approved=True))
+                result = orchestrator.browser.live_fill(session_id=session_id, fields=fields, approved=True) if live else orchestrator.browser.fill(session_id=session_id, fields=fields, approved=True)
+                self._json(_with_browser_artifact_urls(orchestrator, result) if live else result)
                 return
             if path == "/browser/submit":
                 payload = self._read_json()
                 session_id = str(_required(payload, "session_id"))
                 selector = str(payload["selector"]) if payload.get("selector") else None
+                live = bool(payload.get("live", False))
                 approval = _browser_action_approval(
                     orchestrator,
-                    action="submit",
+                    action="live_submit" if live else "submit",
                     session_id=session_id,
                     selector=selector,
                     approval_id=payload.get("approval_id"),
@@ -1456,7 +1461,8 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 if not approval["approved"]:
                     self._json(approval["response"])
                     return
-                self._json(orchestrator.browser.submit(session_id=session_id, selector=selector, approved=True))
+                result = orchestrator.browser.live_submit(session_id=session_id, selector=selector, approved=True) if live else orchestrator.browser.submit(session_id=session_id, selector=selector, approved=True)
+                self._json(_with_browser_artifact_urls(orchestrator, result) if live else result)
                 return
             if path == "/channels/render":
                 payload = self._read_json()

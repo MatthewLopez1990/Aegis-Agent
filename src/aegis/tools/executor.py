@@ -2111,7 +2111,22 @@ class BuiltinToolExecutor:
             if session_id is None:
                 raise ToolExecutionError("live browser screenshot requires session_id")
             return self.browser.live_screenshot(session_id=session_id, approved=approved)
-        live_actions = {"live_click", "live_fill", "live_submit", "live_evaluate"}
+        if action == "live_click" or (bool(params.get("live")) and action == "click"):
+            if session_id is None:
+                raise ToolExecutionError("live browser click requires session_id")
+            return self.browser.live_click(session_id=session_id, selector=str(params["selector"]), approved=approved)
+        if action == "live_fill" or (bool(params.get("live")) and action == "fill"):
+            if session_id is None:
+                raise ToolExecutionError("live browser fill requires session_id")
+            fields = params.get("fields", {})
+            if not isinstance(fields, dict):
+                raise ToolExecutionError("live browser fill fields must be an object")
+            return self.browser.live_fill(session_id=session_id, fields=fields, approved=approved)
+        if action == "live_submit" or (bool(params.get("live")) and action == "submit"):
+            if session_id is None:
+                raise ToolExecutionError("live browser submit requires session_id")
+            return self.browser.live_submit(session_id=session_id, selector=str(params["selector"]) if params.get("selector") else None, approved=approved)
+        live_actions = {"live_evaluate"}
         if action in live_actions or bool(params.get("live")):
             selector = str(params["selector"]) if params.get("selector") else None
             return self.browser.deny_live_automation(action=action, session_id=session_id, selector=selector)

@@ -74,7 +74,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(implementation_statuses["video_analyze"], "local_metadata")
             self.assertEqual(implementation_statuses["video_generate"], "allowlisted_live_or_local")
             self.assertEqual(implementation_statuses["voice_transcribe"], "allowlisted_live_or_local")
-            self.assertEqual(implementation_statuses["browser_screenshot"], "local_png_snapshot")
+            self.assertEqual(implementation_statuses["browser_screenshot"], "local_or_opt_in_live_png_snapshot")
             self.assertEqual(implementation_statuses["tts"], "allowlisted_live_or_local")
             self.assertEqual(implementation_statuses["voice_record"], "local_wav_silence")
             self.assertEqual(implementation_statuses["package_install"], "backend_gate")
@@ -1317,6 +1317,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("live_browser_activation_packet_schema", backlog["browser_and_media_depth"]["verification_gates"])
             self.assertIn("live_browser_activation_packet_verification", backlog["browser_and_media_depth"]["verification_gates"])
             self.assertIn("approved_live_browser_readonly_snapshot", backlog["browser_and_media_depth"]["verification_gates"])
+            self.assertIn("approved_live_browser_selector_mutation", backlog["browser_and_media_depth"]["verification_gates"])
             self.assertIn("playwright_chromium_adapter_preflight", backlog["browser_and_media_depth"]["verification_gates"])
             self.assertIn("disabled_live_browser_denial", backlog["browser_and_media_depth"]["verification_gates"])
             browser_hardening_controls = {control["control"] for control in backlog["browser_and_media_depth"]["implemented_hardening_controls"]}
@@ -1338,18 +1339,20 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("playwright_chromium_adapter_preflight", browser_hardening_controls)
             self.assertIn("live_browser_activation_packet_verification", browser_hardening_controls)
             self.assertIn("approved_live_browser_readonly_adapter", browser_hardening_controls)
+            self.assertIn("approved_live_browser_selector_mutation_adapter", browser_hardening_controls)
             self.assertIn("static_dom_snapshot_no_js", browser_hardening_controls)
             self.assertIn("approved_static_form_fill", browser_hardening_controls)
             self.assertIn("approved_static_form_submit", browser_hardening_controls)
             self.assertIn("approved_static_anchor_navigation", browser_hardening_controls)
             self.assertIn("disabled_live_browser_denial", browser_hardening_controls)
-            self.assertIn("live_browser_mutation_and_js_automation_adapter", backlog["browser_and_media_depth"]["remaining_depth_work"])
+            self.assertIn("live_browser_download_upload_and_arbitrary_js_adapter", backlog["browser_and_media_depth"]["remaining_depth_work"])
             self.assertNotIn("stricter_platform_media_sandbox_profiles", backlog["browser_and_media_depth"]["remaining_depth_work"])
             self.assertIn("provider_specific_media_adapter_expansion", backlog["browser_and_media_depth"]["remaining_depth_work"])
             self.assertIn("artifact_integrity.browser_media_receipts", backlog["browser_and_media_depth"]["evaluation_scenarios"])
             self.assertIn("browser.live_activation_packet_preflight", backlog["browser_and_media_depth"]["evaluation_scenarios"])
             self.assertIn("browser.live_activation_packet_verification", backlog["browser_and_media_depth"]["evaluation_scenarios"])
             self.assertIn("browser.live_readonly_snapshot", backlog["browser_and_media_depth"]["evaluation_scenarios"])
+            self.assertIn("browser.live_selector_mutation", backlog["browser_and_media_depth"]["evaluation_scenarios"])
             self.assertIn("browser.live_automation_denied_until_adapter_ready", backlog["browser_and_media_depth"]["evaluation_scenarios"])
             browser_checklist = {item["control"]: item for item in backlog["browser_and_media_depth"]["operator_checklist"]}
             self.assertEqual(browser_checklist["browser_boundary_receipts"]["state"], "available")
@@ -1361,8 +1364,9 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(browser_checklist["playwright_chromium_adapter_preflight"]["state"], "blocked_adapter_candidate")
             self.assertEqual(browser_checklist["live_browser_activation_packet_verification"]["state"], "verified_adapter_blocked")
             self.assertEqual(browser_checklist["live_browser_readonly_adapter"]["state"], "available_opt_in")
+            self.assertEqual(browser_checklist["live_browser_selector_mutation_adapter"]["state"], "available_opt_in")
             self.assertEqual(browser_checklist["media_worker_sandbox"]["state"], "available")
-            self.assertEqual(browser_checklist["live_browser_automation"]["state"], "read_only_available_mutation_blocked")
+            self.assertEqual(browser_checklist["live_browser_automation"]["state"], "selector_mutation_available_depth_remaining")
             self.assertEqual(browser_checklist["provider_media_depth"]["state"], "partial")
             self.assertEqual(browser_checklist["platform_media_sandbox_profiles"]["state"], "ready_for_review")
             self.assertIn("disabled_backend_denial", backlog["remote_backend_activation"]["verification_gates"])
@@ -1652,6 +1656,75 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(blocked_domain["status"], "live_browser_navigation_blocked")
             self.assertIn("not allowlisted", blocked_domain["reason"])
             self.assertEqual(live_capture.call_args.kwargs["allowlist"], ("example.com",))
+
+    def test_browser_live_selector_mutation_adapter_is_approval_gated_and_private(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "[security]",
+                        "live_browser_mutations = true",
+                        'network_allowlist = ["example.com"]',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+
+            with (
+                patch.object(browser_controller_module, "_find_chrome_executable", return_value="/usr/bin/google-chrome"),
+                patch.object(browser_controller_module, "_private_network_error", return_value=None),
+                patch.object(browser_controller_module, "_capture_live_chromium_snapshot", side_effect=_fake_live_chrome_snapshot),
+                patch.object(browser_controller_module, "_capture_live_chromium_mutation", side_effect=_fake_live_chrome_mutation) as live_mutation,
+            ):
+                status = orchestrator.browser.live_activation_status()
+                live_nav = orchestrator.tools.execute("browser", {"action": "live_navigate", "url": "https://example.com/form"}, approved=True)
+                browser_session_id = live_nav["session"]["id"]
+                approval_required = orchestrator.tools.execute("browser_click", {"session_id": browser_session_id, "selector": "#submit", "live": True}, approved=False)
+                approval_payload = orchestrator.browser.action_approval_payload(
+                    action="live_fill",
+                    session_id=browser_session_id,
+                    fields={"#email": "token=abc123"},
+                )
+                live_click = orchestrator.tools.execute("browser_click", {"session_id": browser_session_id, "selector": "#submit", "live": True}, approved=True)
+                live_fill = orchestrator.tools.execute("browser_fill", {"session_id": browser_session_id, "fields": {"#email": "token=abc123"}, "live": True}, approved=True)
+                live_submit = orchestrator.tools.execute("browser_submit", {"session_id": browser_session_id, "selector": "#form", "live": True}, approved=True)
+
+            self.assertEqual(status["activation"]["status"], "live_browser_mutation_adapter_enabled")
+            self.assertEqual(status["activation"]["preflight_status"], "ready_mutation_adapter_enabled")
+            self.assertEqual(status["activation"]["selected_adapter"], "chromium-cdp-ephemeral-mutation")
+            self.assertTrue(status["live_browser_adapter_enabled"])
+            self.assertTrue(status["live_browser_mutation_adapter_enabled"])
+            self.assertEqual(approval_required["status"], "approval_required")
+            self.assertNotIn("abc123", json.dumps(approval_payload, sort_keys=True))
+            self.assertEqual(approval_payload["field_selectors"], ["#email"])
+            self.assertEqual(live_click["status"], "mutated")
+            self.assertEqual(live_click["mode"], "live_chromium_cdp_ephemeral_mutation")
+            self.assertTrue(live_click["javascript_executed"])
+            self.assertTrue(live_click["real_selector_events_dispatched"])
+            self.assertTrue(live_click["real_page_mutation_allowed"])
+            self.assertFalse(live_click["cookies_persisted"])
+            self.assertFalse(live_click["raw_browser_content_included"])
+            self.assertEqual(live_click["sandbox_receipt"]["sandbox_profile"], "live_chromium_cdp_ephemeral_mutation")
+            self.assertEqual(live_click["sandbox_receipt"]["remote_subresources_loaded"], "allowlisted_only")
+            self.assertFalse(live_click["sandbox_receipt"]["downloads_allowed"])
+            self.assertTrue(Path(live_click["artifact_path"]).read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertEqual(stat.S_IMODE(Path(live_click["artifact_path"]).stat().st_mode), 0o600)
+            mutation_evidence = json.loads(Path(live_click["evidence_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(mutation_evidence["evidence_schema"], "aegis.browser.live_mutation_evidence.v1")
+            self.assertEqual(mutation_evidence["automation_boundaries"]["capture_surface"], "live_browser_mutation_snapshot")
+            self.assertEqual(mutation_evidence["automation_boundaries"]["remote_subresources_loaded"], "allowlisted_only")
+            self.assertTrue(mutation_evidence["automation_boundaries"]["real_page_mutation_allowed"])
+            self.assertFalse(mutation_evidence["raw_cookie_values_included"])
+            self.assertNotIn("abc123", json.dumps(live_fill, sort_keys=True))
+            self.assertEqual(live_fill["field_selectors"], ["#email"])
+            self.assertEqual(live_submit["action"], "live_submit")
+            self.assertEqual(live_mutation.call_args.kwargs["allowlist"], ("example.com",))
 
     def test_browser_static_form_submit_uses_http_connector_without_js(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -3184,6 +3257,47 @@ def _fake_live_chrome_snapshot(
     del executable, url, artifact_dir, allowlist
     output_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-live-render")
     return {"ok": True, "width": width, "height": height, "exit_code": 0, "error": None}
+
+
+def _fake_live_chrome_mutation(
+    *,
+    executable: str,
+    url: str,
+    action: str,
+    selector: str | None,
+    fields: dict[str, str],
+    output_path: Path,
+    artifact_dir: Path,
+    allowlist: tuple[str, ...],
+    width: int = 1280,
+    height: int = 900,
+) -> dict[str, object]:
+    del executable, artifact_dir, allowlist
+    output_path.write_bytes(b"\x89PNG\r\n\x1a\nfake-live-mutation")
+    action_result: dict[str, object] = {"ok": True, "status": "clicked", "selector": selector or "", "url_after": url}
+    if action == "live_fill":
+        action_result = {
+            "ok": True,
+            "status": "filled",
+            "field_count": len(fields),
+            "filled_count": len(fields),
+            "results": [{"selector": field_selector, "status": "filled", "element": {"tag": "input", "id": field_selector.strip("#")}} for field_selector in sorted(fields)],
+            "url_after": url,
+        }
+    if action == "live_submit":
+        action_result = {"ok": True, "status": "submitted", "selector": selector or "", "url_after": f"{url}?submitted=1"}
+    return {
+        "ok": True,
+        "status": str(action_result["status"]),
+        "width": width,
+        "height": height,
+        "exit_code": 0,
+        "url_after": str(action_result.get("url_after") or url),
+        "title": "Fake live mutation",
+        "action_result": action_result,
+        "download_policy_applied": True,
+        "error": None,
+    }
 
 
 if __name__ == "__main__":
