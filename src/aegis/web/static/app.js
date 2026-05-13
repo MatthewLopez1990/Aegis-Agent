@@ -3214,6 +3214,22 @@ document.getElementById("browser-fill").addEventListener("click", async () => {
   await refresh();
 });
 
+document.getElementById("browser-submit").addEventListener("click", async () => {
+  if (!state.browserSessionId) {
+    renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
+    return;
+  }
+  const selector = document.getElementById("browser-selector").value.trim();
+  state.pendingBrowserAction = { action: "submit", session_id: state.browserSessionId, selector: selector || undefined };
+  renderBrowserOutput(
+    await api("/browser/submit", {
+      method: "POST",
+      body: JSON.stringify({ session_id: state.browserSessionId, selector: selector || undefined }),
+    })
+  );
+  await refresh();
+});
+
 document.getElementById("browser-output").addEventListener("click", async (event) => {
   const elementButton = event.target.closest("[data-browser-selector]");
   if (elementButton) {
@@ -3227,10 +3243,12 @@ document.getElementById("browser-output").addEventListener("click", async (event
   const approvalId = event.target.dataset.browserRunApproved;
   if (!approvalId || !state.pendingBrowserAction || state.pendingBrowserAction.approval_id !== approvalId) return;
   const action = state.pendingBrowserAction;
-  const path = action.action === "fill" ? "/browser/fill" : "/browser/click";
+  const path = action.action === "fill" ? "/browser/fill" : action.action === "submit" ? "/browser/submit" : "/browser/click";
   const body =
     action.action === "fill"
       ? { session_id: action.session_id, fields: action.fields, approval_id: approvalId }
+      : action.action === "submit"
+        ? { session_id: action.session_id, selector: action.selector, approval_id: approvalId }
       : { session_id: action.session_id, selector: action.selector, approval_id: approvalId };
   const result = await api(path, { method: "POST", body: JSON.stringify(body) });
   if (result.ok) {

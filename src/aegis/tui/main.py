@@ -1988,7 +1988,7 @@ class AegisTui(cmd.Cmd):
             print(f"evaluation review failed: {exc}")
 
     def do_browser(self, arg: str) -> None:
-        """browser status|connect|disconnect|session|sessions|close|navigate|extract|inspect|dom|table|screenshot|render|click|fill -- operate the governed browser sandbox."""
+        """browser status|connect|disconnect|session|sessions|close|navigate|extract|inspect|dom|table|screenshot|render|click|fill|submit -- operate the governed browser sandbox."""
         raw_parts = arg.strip().split(maxsplit=1)
         raw_command = raw_parts[0] if raw_parts else "session"
         parts = [raw_command, raw_parts[1]] if raw_command == "fill" and len(raw_parts) > 1 else shlex.split(arg)
@@ -2092,6 +2092,15 @@ class AegisTui(cmd.Cmd):
                     _print_json(approval["response"])
                     return
                 _print_json(self.orchestrator.browser.fill(session_id=self.browser_session_id, fields=fields, approved=True))
+                return
+            if command == "submit":
+                approval_id = _option_value(parts, "--approval-id")
+                selector = parts[1] if len(parts) > 1 and parts[1] != "--approval-id" else None
+                approval = _browser_action_approval(self.orchestrator, action="submit", session_id=self.browser_session_id, selector=selector, approval_id=approval_id)
+                if not approval.get("approved"):
+                    _print_json(approval["response"])
+                    return
+                _print_json(self.orchestrator.browser.submit(session_id=self.browser_session_id, selector=selector, approved=True))
                 return
             print(f"unknown browser command: {command}")
         except json.JSONDecodeError:
@@ -6178,7 +6187,7 @@ def _command_reference() -> str:
             "voice|radio            Guarded voice and external media readiness",
             "stickers               Non-runtime merchandise boundary",
             "browser status|connect|disconnect|session|sessions|close|navigate <url>",
-            "browser extract|inspect|dom [selector]|screenshot|render|click <selector>|fill <json>",
+            "browser extract|inspect|dom [selector]|screenshot|render|click <selector>|fill <json>|submit [selector]",
             "boards                 Work boards and cards",
             "backends|sandbox       Execution backend sandbox posture",
             "terminal-setup|vim|mouse Terminal keybinding, vim, and mouse readiness",

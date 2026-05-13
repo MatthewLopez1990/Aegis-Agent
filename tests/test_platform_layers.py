@@ -1236,6 +1236,9 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("os_level_media_worker_limits", browser_hardening_controls)
             self.assertIn("provider_backed_media_artifacts", browser_hardening_controls)
             self.assertIn("browser_automation_boundary_receipts", browser_hardening_controls)
+            self.assertIn("static_dom_snapshot_no_js", browser_hardening_controls)
+            self.assertIn("approved_static_form_fill", browser_hardening_controls)
+            self.assertIn("approved_static_form_submit", browser_hardening_controls)
             self.assertIn("approved_static_anchor_navigation", browser_hardening_controls)
             self.assertIn("disabled_live_browser_denial", browser_hardening_controls)
             self.assertIn("live_browser_automation_adapter", backlog["browser_and_media_depth"]["remaining_depth_work"])
@@ -1359,6 +1362,91 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertEqual(browser_docs["evidence"]["url_after"], "https://example.com/docs")
             self.assertTrue(browser_docs["evidence"]["content_changed"])
             self.assertEqual(read_urls, ["https://example.com", "https://evil.test/path", "https://example.com/docs"])
+
+    def test_browser_static_form_submit_uses_http_connector_without_js(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            read_urls: list[str] = []
+
+            def fake_http_read(request):
+                url = request.params["url"]
+                read_urls.append(url)
+                if url == "https://example.com":
+                    return ConnectorResult(
+                        "http",
+                        "read",
+                        True,
+                        {
+                            "url": url,
+                            "domain": "example.com",
+                            "content": (
+                                "<html><title>Search</title>"
+                                '<form id="search-form" action="/search" method="get">'
+                                '<input name="q" value="aegis">'
+                                '<textarea name="note">safe note</textarea>'
+                                '<button id="submit">Search</button>'
+                                "</form>"
+                                '<form id="post-form" action="/post" method="post"><input name="q" value="blocked"></form>'
+                                "</html>"
+                            ),
+                        },
+                    )
+                if url == "https://example.com/search?q=codex&note=safe+note":
+                    return ConnectorResult(
+                        "http",
+                        "read",
+                        True,
+                        {
+                            "url": url,
+                            "domain": "example.com",
+                            "content": "<html><title>Results</title><p>Result page</p></html>",
+                        },
+                    )
+                return ConnectorResult("http", "read", False, {}, error=f"domain for {url!r} is not allowlisted")
+
+            with patch.object(orchestrator.connectors.get("http"), "read", side_effect=fake_http_read):
+                browser_nav = orchestrator.tools.execute("browser", {"action": "navigate", "url": "https://example.com"}, approved=True)
+                browser_session_id = browser_nav["session"]["id"]
+                browser_fill = orchestrator.tools.execute("browser_fill", {"session_id": browser_session_id, "fields": {'input[name="q"]': "codex"}}, approved=True)
+                approval_payload = orchestrator.browser.action_approval_payload(action="submit", session_id=browser_session_id, selector="#search-form")
+                browser_ambiguous = orchestrator.tools.execute("browser_submit", {"session_id": browser_session_id}, approved=True)
+                browser_post = orchestrator.tools.execute("browser_submit", {"session_id": browser_session_id, "selector": "#post-form"}, approved=True)
+                browser_unsupported = orchestrator.tools.execute("browser_submit", {"session_id": browser_session_id, "selector": "form input"}, approved=True)
+                browser_submit = orchestrator.tools.execute("browser_submit", {"session_id": browser_session_id, "selector": "#search-form"}, approved=True)
+
+            self.assertEqual(browser_fill["mode"], "static_dom_form_fill_no_js")
+            self.assertEqual(approval_payload["submit_effect"], "static_form_submit")
+            self.assertEqual(approval_payload["method"], "GET")
+            self.assertEqual(approval_payload["field_names"], ["note", "q"])
+            self.assertEqual(approval_payload["field_count"], 2)
+            self.assertEqual(approval_payload["target_origin"], "https://example.com")
+            self.assertEqual(approval_payload["target_path"], "/search")
+            self.assertRegex(approval_payload["target_url_sha256"], r"^[0-9a-f]{64}$")
+            self.assertNotIn("codex", json.dumps(approval_payload))
+            self.assertFalse(browser_ambiguous["ok"])
+            self.assertEqual(browser_ambiguous["reason"], "ambiguous")
+            self.assertFalse(browser_post["ok"])
+            self.assertEqual(browser_post["reason"], "unsupported_method")
+            self.assertFalse(browser_unsupported["ok"])
+            self.assertEqual(browser_unsupported["reason"], "unsupported_selector")
+            self.assertTrue(browser_submit["ok"])
+            self.assertEqual(browser_submit["effect"], "static_form_submit")
+            self.assertEqual(browser_submit["mode"], "approved_static_form_submit_no_js")
+            self.assertEqual(browser_submit["url"], "https://example.com/search?q=codex&note=safe+note")
+            self.assertEqual(browser_submit["title"], "Results")
+            self.assertEqual(browser_submit["field_names"], ["note", "q"])
+            self.assertEqual(browser_submit["field_count"], 2)
+            self.assertFalse(browser_submit["javascript_executed"])
+            self.assertFalse(browser_submit["dom_mutated"])
+            self.assertFalse(browser_submit["real_selector_events_dispatched"])
+            self.assertFalse(browser_submit["cookies_persisted"])
+            self.assertEqual(browser_submit["evidence"]["action"], "static_form_submit")
+            self.assertEqual(browser_submit["evidence"]["mode"], "approved_static_form_submit_no_js")
+            self.assertTrue(browser_submit["evidence"]["content_changed"])
+            self.assertEqual(read_urls, ["https://example.com", "https://example.com/search?q=codex&note=safe+note"])
 
     def test_provider_backed_media_artifact_uses_allowlisted_brokered_receipts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

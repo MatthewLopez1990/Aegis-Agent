@@ -1350,6 +1350,22 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     return
                 self._json(orchestrator.browser.fill(session_id=session_id, fields=fields, approved=True))
                 return
+            if path == "/browser/submit":
+                payload = self._read_json()
+                session_id = str(_required(payload, "session_id"))
+                selector = str(payload["selector"]) if payload.get("selector") else None
+                approval = _browser_action_approval(
+                    orchestrator,
+                    action="submit",
+                    session_id=session_id,
+                    selector=selector,
+                    approval_id=payload.get("approval_id"),
+                )
+                if not approval["approved"]:
+                    self._json(approval["response"])
+                    return
+                self._json(orchestrator.browser.submit(session_id=session_id, selector=selector, approved=True))
+                return
             if path == "/channels/render":
                 payload = self._read_json()
                 hints = payload.get("channel_hints", {})

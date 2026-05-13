@@ -13,7 +13,7 @@ import struct
 import subprocess
 import tempfile
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlencode, urljoin, urlparse
 from uuid import uuid4
 import zlib
 
@@ -37,6 +37,8 @@ _STATIC_DOM_ATTR_ALLOWLIST = {
     "aria-label",
     "placeholder",
     "href",
+    "action",
+    "method",
     "value",
     "title",
     "data-testid",
@@ -288,6 +290,28 @@ class BrowserController:
             encoded = json.dumps(safe_fields, sort_keys=True, separators=(",", ":")).encode("utf-8")
             payload["field_selectors"] = sorted(safe_fields)
             payload["fields_sha256"] = hashlib.sha256(encoded).hexdigest()
+            return payload
+        if action == "submit":
+            session = self._require_session(session_id)
+            payload["selector"] = selector or ""
+            form_match = _matching_static_form(session, selector)
+            if form_match["status"] != "matched":
+                payload["submit_effect"] = "blocked_static_form_submit"
+                payload["blocked_reason"] = form_match["status"]
+                return payload
+            target = _static_form_submission_target(session, form_match["form"])
+            if not target["ok"]:
+                payload["submit_effect"] = "blocked_static_form_submit"
+                payload["blocked_reason"] = str(target["reason"])
+                return payload
+            target_url = str(target["url"])
+            payload["submit_effect"] = "static_form_submit"
+            payload["method"] = target["method"]
+            payload["field_names"] = target["field_names"]
+            payload["field_count"] = target["field_count"]
+            payload["target_origin"] = _url_origin(target_url)
+            payload["target_path"] = _url_path(target_url)
+            payload["target_url_sha256"] = hashlib.sha256(target_url.encode("utf-8", errors="replace")).hexdigest()
             return payload
         raise ValueError(f"unsupported browser approval action: {action}")
 
@@ -562,6 +586,64 @@ class BrowserController:
             "evidence": evidence,
         }
         self.audit_logger.append("browser.fill_recorded", response)
+        return response
+
+    def submit(self, *, session_id: str, selector: str | None = None, approved: bool = False) -> dict[str, Any]:
+        session = self._require_session(session_id)
+        requested_selector = _redacted_string(selector, limit=500) if selector is not None else None
+        if not approved:
+            return {"status": "approval_required", "session_id": session_id, "selector": requested_selector, "reason": "browser form submit requires approval"}
+        url_before = _session_url(session)
+        content_hash_before = _content_hash(session)
+        form_match = _matching_static_form(session, selector)
+        if form_match["status"] != "matched":
+            response = _static_form_submit_blocked(session, session_id=session_id, selector=selector, reason=form_match["status"], detail=str(form_match["detail"]))
+            self.audit_logger.append("browser.static_form_submit_blocked", response)
+            return response
+        target = _static_form_submission_target(session, form_match["form"])
+        if not target["ok"]:
+            response = _static_form_submit_blocked(session, session_id=session_id, selector=selector, reason=str(target["reason"]), detail=str(target["detail"]))
+            self.audit_logger.append("browser.static_form_submit_blocked", response)
+            return response
+        navigation = self.navigate(session_id=session_id, url=str(target["url"]))
+        if not navigation.get("ok"):
+            response = {
+                **navigation,
+                "status": "static_form_submit_failed",
+                "effect": "static_form_submit_failed",
+                "selector": requested_selector,
+                "method": target["method"],
+                "target_origin": _url_origin(str(target["url"])),
+                "target_path": _url_path(str(target["url"])),
+                "field_names": target["field_names"],
+                "field_count": target["field_count"],
+                "mode": "approved_static_form_submit_no_js",
+                "javascript_executed": False,
+                "dom_mutated": False,
+                "real_selector_events_dispatched": False,
+                "cookies_persisted": False,
+            }
+            self.audit_logger.append("browser.static_form_submit_failed", response)
+            return response
+        current = self._require_session(session_id)
+        evidence = _browser_evidence(current, action="static_form_submit", url_before=url_before, content_hash_before=content_hash_before)
+        response = {
+            **navigation,
+            "effect": "static_form_submit",
+            "selector": requested_selector,
+            "method": target["method"],
+            "target_origin": _url_origin(str(target["url"])),
+            "target_path": _url_path(str(target["url"])),
+            "field_names": target["field_names"],
+            "field_count": target["field_count"],
+            "mode": "approved_static_form_submit_no_js",
+            "javascript_executed": False,
+            "dom_mutated": False,
+            "real_selector_events_dispatched": False,
+            "cookies_persisted": False,
+            "evidence": evidence,
+        }
+        self.audit_logger.append("browser.static_form_submitted", response)
         return response
 
     def _session_or_create(self, session_id: str | None) -> dict[str, Any]:
@@ -978,7 +1060,7 @@ def _redacted_dom_attrs(attrs: dict[str, str]) -> dict[str, str]:
     for key, value in attrs.items():
         normalized = key.lower()
         if normalized in _STATIC_DOM_ATTR_ALLOWLIST or normalized.startswith("aria-"):
-            if normalized in {"href", "placeholder", "title", "value"} or normalized.startswith("aria-"):
+            if normalized in {"href", "action", "placeholder", "title", "value"} or normalized.startswith("aria-"):
                 safe[normalized] = _redacted_dom_value(value, limit=300)
             else:
                 safe[normalized] = _redacted_string(value, limit=300)
@@ -1073,6 +1155,7 @@ def _unsupported_live_browser_actions() -> list[str]:
         "network_subresource_loading",
         "dom_event_dispatch",
         "real_page_mutation",
+        "live_form_submit",
     ]
 
 
@@ -1281,6 +1364,168 @@ def _static_anchor_navigation_target(session: dict[str, Any], element: dict[str,
     return {"ok": True, "url": target_url}
 
 
+def _matching_static_form(session: dict[str, Any], selector: str | None) -> dict[str, Any]:
+    forms = _extract_static_forms(str(session.get("last_content", "")))
+    requested_selector = _redacted_string(selector, limit=500) if selector is not None else ""
+    if selector:
+        matcher = _dom_selector_matcher(requested_selector)
+        if matcher is None:
+            return {"status": "unsupported_selector", "detail": "selector is outside the static form parser subset"}
+        matches = [form for form in forms if matcher({"type": "element", "tag": "form", "attrs": form["attrs"]})]
+    else:
+        matches = forms
+    if not matches:
+        return {"status": "no_match", "detail": "no matching static form was found"}
+    if len(matches) > 1:
+        return {"status": "ambiguous", "detail": "selector matched multiple static forms"}
+    return {"status": "matched", "form": matches[0]}
+
+
+def _extract_static_forms(content: str, *, limit: int = 25) -> list[dict[str, Any]]:
+    if "<" not in content:
+        return []
+    parser = _StaticFormParser(limit=limit)
+    try:
+        parser.feed(content[:_MAX_PERSISTED_CONTENT_CHARS])
+        parser.close()
+    except Exception:
+        return []
+    return parser.forms[:limit]
+
+
+class _StaticFormParser(HTMLParser):
+    def __init__(self, *, limit: int) -> None:
+        super().__init__(convert_charrefs=True)
+        self.limit = limit
+        self.forms: list[dict[str, Any]] = []
+        self._current_form: dict[str, Any] | None = None
+        self._textarea: dict[str, Any] | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        attrs_dict = {key.lower(): value or "" for key, value in attrs}
+        if tag == "form" and len(self.forms) < self.limit:
+            self._current_form = {"attrs": _redacted_dom_attrs(attrs_dict), "fields": []}
+            return
+        if self._current_form is None:
+            return
+        if tag == "input":
+            field = _static_form_input_field(attrs_dict)
+            if field is not None:
+                self._current_form["fields"].append(field)
+            return
+        if tag == "textarea":
+            name = attrs_dict.get("name", "")
+            if name:
+                self._textarea = {"name": _redacted_string(name, limit=200), "value_parts": []}
+            return
+        if tag == "select":
+            name = attrs_dict.get("name", "")
+            if name:
+                self._current_form["fields"].append({"name": _redacted_string(name, limit=200), "value": _redacted_dom_value(attrs_dict.get("value", ""), limit=500)})
+
+    def handle_data(self, data: str) -> None:
+        if self._textarea is not None:
+            self._textarea["value_parts"].append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag == "textarea" and self._textarea is not None and self._current_form is not None:
+            self._current_form["fields"].append(
+                {
+                    "name": self._textarea["name"],
+                    "value": _redacted_dom_value("".join(self._textarea["value_parts"]), limit=500),
+                }
+            )
+            self._textarea = None
+            return
+        if tag == "form" and self._current_form is not None:
+            attrs = self._current_form["attrs"]
+            self._current_form["selector_hint"] = _redacted_string(_selector_hint("form", attrs), limit=500)
+            self.forms.append(self._current_form)
+            self._current_form = None
+            self._textarea = None
+
+
+def _static_form_input_field(attrs: dict[str, str]) -> dict[str, str] | None:
+    name = attrs.get("name", "")
+    if not name:
+        return None
+    input_type = attrs.get("type", "").lower()
+    if input_type in {"button", "submit", "reset", "image", "file"}:
+        return None
+    if input_type in {"checkbox", "radio"} and "checked" not in attrs:
+        return None
+    return {"name": _redacted_string(name, limit=200), "value": _redacted_dom_value(attrs.get("value", ""), limit=500)}
+
+
+def _static_form_submission_target(session: dict[str, Any], form: dict[str, Any]) -> dict[str, Any]:
+    attrs = form.get("attrs") if isinstance(form.get("attrs"), dict) else {}
+    method = str(attrs.get("method") or "get").strip().lower()
+    if method != "get":
+        return {"ok": False, "reason": "unsupported_method", "detail": "only static GET form submits are supported by the governed HTTP connector"}
+    base_url = _session_url(session)
+    if not base_url:
+        return {"ok": False, "reason": "missing_base_url", "detail": "browser session has no current URL"}
+    action = str(attrs.get("action") or base_url).strip() or base_url
+    parsed_action = urlparse(action)
+    if parsed_action.scheme and parsed_action.scheme.lower() not in {"http", "https"}:
+        return {"ok": False, "reason": "unsupported_scheme", "detail": f"static form action scheme {parsed_action.scheme!r} is not supported"}
+    target_url = urljoin(base_url, action)
+    parsed_target = urlparse(target_url)
+    if parsed_target.scheme.lower() not in {"http", "https"} or not parsed_target.netloc:
+        return {"ok": False, "reason": "unsupported_target_url", "detail": "resolved static form target is not an HTTP(S) URL"}
+    fields = [(str(field.get("name") or ""), str(field.get("value") or "")) for field in form.get("fields", []) if isinstance(field, dict) and field.get("name")]
+    query = urlencode(fields, doseq=True)
+    if query:
+        separator = "&" if parsed_target.query else "?"
+        target_url = f"{target_url}{separator}{query}"
+    return {
+        "ok": True,
+        "url": target_url,
+        "method": "GET",
+        "field_names": sorted({name for name, _value in fields}),
+        "field_count": len(fields),
+    }
+
+
+def _static_form_submit_blocked(
+    session: dict[str, Any],
+    *,
+    session_id: str,
+    selector: str | None,
+    reason: str,
+    detail: str,
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "status": "static_form_submit_blocked",
+        "session_id": session_id,
+        "selector": _redacted_string(selector, limit=500) if selector is not None else None,
+        "url": _session_url(session),
+        "reason": reason,
+        "detail": _redacted_string(detail, limit=500),
+        "effect": "blocked_static_form_submit",
+        "mode": "approved_static_form_submit_no_js",
+        "javascript_executed": False,
+        "dom_mutated": False,
+        "real_selector_events_dispatched": False,
+        "cookies_persisted": False,
+    }
+
+
+def _url_origin(url: str) -> str:
+    parsed = urlparse(url)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def _url_path(url: str) -> str:
+    parsed = urlparse(url)
+    return parsed.path or "/"
+
+
 def _static_anchor_navigation_blocked(
     session: dict[str, Any],
     *,
@@ -1384,6 +1629,8 @@ def _browser_evidence(
             if action in {"click", "fill"}
             else "approved_static_anchor_navigation_no_js"
             if action == "static_anchor_navigation"
+            else "approved_static_form_submit_no_js"
+            if action == "static_form_submit"
             else "http_content_static_dom_no_js"
             if action == "dom_snapshot"
             else "local_png_session_snapshot_no_dom_render"

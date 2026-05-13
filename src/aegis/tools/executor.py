@@ -218,7 +218,7 @@ class BuiltinToolExecutor:
             result = self._execute_service_ticket_read(params=params)
         elif name == "service_ticket_write":
             result = self._execute_service_ticket_write(params=params, approved=approved)
-        elif name in {"browser", "browser_click", "browser_fill", "browser_screenshot", "browser_render_screenshot", "browser_extract_table", "browser_dom_snapshot", "browser_close"}:
+        elif name in {"browser", "browser_click", "browser_fill", "browser_submit", "browser_screenshot", "browser_render_screenshot", "browser_extract_table", "browser_dom_snapshot", "browser_close"}:
             if self.browser is None:
                 raise ToolExecutionError("browser controller is not configured")
             result = self._execute_browser(name, params, approved=approved)
@@ -1671,6 +1671,7 @@ class BuiltinToolExecutor:
             "browser": "navigate",
             "browser_click": "click",
             "browser_fill": "fill",
+            "browser_submit": "submit",
             "browser_screenshot": "screenshot",
             "browser_render_screenshot": "render_screenshot",
             "browser_extract_table": "extract_table",
@@ -1679,7 +1680,7 @@ class BuiltinToolExecutor:
         }[name]
         action = str(params.get("action", default_action))
         session_id = str(params["session_id"]) if params.get("session_id") else None
-        live_actions = {"live_navigate", "live_click", "live_fill", "live_screenshot", "live_render_screenshot", "live_evaluate"}
+        live_actions = {"live_navigate", "live_click", "live_fill", "live_submit", "live_screenshot", "live_render_screenshot", "live_evaluate"}
         if action in live_actions or bool(params.get("live")):
             selector = str(params["selector"]) if params.get("selector") else None
             return self.browser.deny_live_automation(action=action, session_id=session_id, selector=selector)
@@ -1719,6 +1720,10 @@ class BuiltinToolExecutor:
             if session_id is None:
                 raise ToolExecutionError("browser fill requires session_id")
             return self.browser.fill(session_id=session_id, fields=dict(params.get("fields", {})), approved=approved)
+        if action == "submit":
+            if session_id is None:
+                raise ToolExecutionError("browser submit requires session_id")
+            return self.browser.submit(session_id=session_id, selector=str(params["selector"]) if params.get("selector") else None, approved=approved)
         if action == "close":
             if session_id is None:
                 raise ToolExecutionError("browser close requires session_id")
