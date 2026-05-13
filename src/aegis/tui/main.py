@@ -7113,9 +7113,15 @@ def _complete_subcommand(options: tuple[str, ...], text: str, line: str, begidx:
 
 def _live_input_block(prompt: str, buffer: str, width: int) -> tuple[str, int]:
     prompt = _strip_readline_markers(prompt)
-    suggestion_lines = _live_slash_hint_lines(buffer, width)
+    suggestion_lines = _live_key_hint_lines(buffer, width) + _live_slash_hint_lines(buffer, width)
     input_lines = _wrapped_prompt_lines(prompt, buffer, width)
     return "\n".join([*suggestion_lines, *input_lines]), len(suggestion_lines) + len(input_lines)
+
+
+def _live_key_hint_lines(buffer: str, width: int) -> list[str]:
+    if buffer:
+        return []
+    return [_paint(textwrap.shorten("keys     Enter send  Ctrl+V newline  Tab complete", width=max(20, width), placeholder=" ..."), "2;36")]
 
 
 def _live_slash_hint_lines(buffer: str, width: int) -> list[str]:
@@ -7131,9 +7137,10 @@ def _live_slash_hint_lines(buffer: str, width: int) -> list[str]:
 
 def _wrapped_prompt_lines(prompt: str, buffer: str, width: int) -> list[str]:
     width = max(20, width)
+    usable_width = max(19, width - 1)
     prompt_len = _visible_length(prompt)
-    first_width = max(8, width - prompt_len)
-    continuation = " " * min(prompt_len, max(0, width - 8))
+    first_width = max(8, usable_width - prompt_len)
+    continuation = " " * min(prompt_len, max(0, usable_width - 8))
     if not buffer:
         return [prompt]
     lines: list[str] = []
@@ -7145,7 +7152,7 @@ def _wrapped_prompt_lines(prompt: str, buffer: str, width: int) -> list[str]:
             prefix = continuation
             continue
         while remaining:
-            chunk_width = first_width if prefix == prompt else max(8, width - len(continuation))
+            chunk_width = first_width if prefix == prompt else max(8, usable_width - len(continuation))
             chunk, remaining = remaining[:chunk_width], remaining[chunk_width:]
             lines.append(prefix + chunk)
             prefix = continuation

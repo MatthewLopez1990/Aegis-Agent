@@ -16,7 +16,7 @@ from aegis.memory.models import MemoryType
 from aegis.research.harness import ResearchHarness
 from aegis.security.taint import RiskLevel, TrustClass
 from aegis.skills.manifest import SkillManifest
-from aegis.tui.main import AegisTui, _apply_live_completion, _complete_slash, _live_completion_context, _live_input_block
+from aegis.tui.main import AegisTui, _apply_live_completion, _complete_slash, _live_completion_context, _live_input_block, _visible_length
 
 from tests.test_mcp import FAKE_MCP_SERVER
 from tests.test_plugins import _write_plugin_catalog, _write_plugin_fixture
@@ -645,9 +645,14 @@ class TuiTests(unittest.TestCase):
             self.assertIn('"newline_keybinding": "Ctrl+V"', alias_commands)
             self.assertIn('"mode": "metadata_only"', alias_commands)
             self.assertIn('"mode": "session_ui_metadata"', alias_commands)
+            empty_prompt, empty_prompt_height = _live_input_block("aegis> ", "", 80)
+            self.assertEqual(empty_prompt_height, 2)
+            self.assertIn("Ctrl+V newline", empty_prompt)
+            self.assertIn("Tab complete", empty_prompt)
             wrapped, height = _live_input_block("aegis> ", "x" * 80, 24)
             self.assertGreater(height, 3)
             self.assertIn("\n", wrapped)
+            self.assertTrue(all(_visible_length(line) < 24 for line in wrapped.splitlines()))
             multiline, multiline_height = _live_input_block("aegis> ", "first line\nsecond line", 80)
             self.assertEqual(multiline_height, 2)
             self.assertIn("aegis> first line", multiline)
