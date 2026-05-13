@@ -606,7 +606,13 @@
             <input id="schedule-name" placeholder="Daily report">
             <input id="schedule-cron" placeholder="@daily">
             <input id="schedule-task" placeholder="Summarize my project">
+            <input id="schedule-context-from" placeholder="@docs/status.md">
+            <input id="schedule-deliver-to" placeholder="slack, email">
             <button type="submit">Create</button>
+          </form>
+          <form id="schedule-script-form" class="inline-form two-col">
+            <input id="schedule-script-command" placeholder='["python3","-c","print(\"ok\")"]'>
+            <button type="submit" class="secondary">Schedule Script</button>
           </form>
           <button id="schedule-memory-digest" type="button" class="secondary">Schedule Memory Digest</button>
           <button id="schedule-memory-escalation" type="button" class="secondary">Schedule Memory Escalation</button>

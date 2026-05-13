@@ -358,6 +358,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn("resolve-approval", tui.complete_channel("resolve", "channel resolve", len("channel "), len("channel resolve")))
             self.assertIn("activation-packet", tui.complete_channel("activation", "channel activation", len("channel "), len("channel activation")))
             self.assertIn("run-due", tui.complete_schedule("run", "schedule run", len("schedule "), len("schedule run")))
+            self.assertIn("script", tui.complete_schedule("scr", "schedule scr", len("schedule "), len("schedule scr")))
+            self.assertIn("no-agent", tui.complete_schedule("no", "schedule no", len("schedule "), len("schedule no")))
             self.assertIn("evaluation-run", tui.complete_schedule("evaluation", "schedule evaluation", len("schedule "), len("schedule evaluation")))
             self.assertIn("evaluation-suite", tui.complete_schedule("evaluation", "schedule evaluation", len("schedule "), len("schedule evaluation")))
             self.assertIn("review", tui.complete_evaluation("rev", "evaluation rev", len("evaluation "), len("evaluation rev")))
@@ -2031,8 +2033,10 @@ class TuiTests(unittest.TestCase):
             )
 
             with redirect_stdout(output):
-                tui.onecmd('schedule create Hourly @hourly "Summarize local project" --natural-language "Check status" --channel terminal')
+                tui.onecmd('schedule create Hourly @hourly "Summarize local project" --natural-language "Check status" --channel terminal --context-from @docs/status.md --deliver-to slack')
                 schedule = tui.orchestrator.schedules.list_schedules()[0]
+                tui.onecmd('schedule script "No agent" @daily --context-from @AGENTS.md --deliver-to slack -- python3 -c "print(\'ok\')"')
+                script_schedule = [row for row in tui.orchestrator.schedules.list_schedules() if row["metadata"].get("kind") == "no_agent_hook"][0]
                 tui.onecmd('schedule memory-review-digest "Memory digest" @daily --channel slack --limit 5')
                 digest_schedule = [row for row in tui.orchestrator.schedules.list_schedules() if row["metadata"].get("kind") == "memory_review_digest"][0]
                 tui.onecmd('schedule memory-review-escalation "Memory escalation" @daily --channel slack --max-age-days 8 --limit 4 --route memory-ops')
@@ -2074,11 +2078,16 @@ class TuiTests(unittest.TestCase):
 
             rendered = output.getvalue()
             self.assertIn("Hourly", rendered)
+            self.assertIn("No agent", rendered)
             self.assertIn("Memory digest", rendered)
             self.assertIn("Memory escalation", rendered)
             self.assertIn("Nightly evaluation", rendered)
             self.assertIn("Security suite", rendered)
             self.assertEqual(digest_schedule["metadata"]["limit"], 5)
+            self.assertEqual(schedule["metadata"]["context_from"], ["@docs/status.md"])
+            self.assertEqual(schedule["metadata"]["delivery_targets"], ["slack"])
+            self.assertEqual(script_schedule["metadata"]["kind"], "no_agent_hook")
+            self.assertFalse(script_schedule["metadata"]["raw_command_included"])
             self.assertEqual(escalation_schedule["metadata"]["max_age_days"], 8)
             self.assertEqual(escalation_schedule["metadata"]["route"], "memory-ops")
             self.assertEqual(evaluation_schedule["metadata"]["scenario"], "policy regression")

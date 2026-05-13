@@ -1343,9 +1343,16 @@ if (payload.actor !== "security-admin" || payload.reason !== "Reviewed live writ
         self.assertIn("data-memory-review-select", script)
         self.assertIn("data-memory-review-batch", script)
         self.assertIn('id="schedule-memory-escalation"', markup)
+        self.assertIn('id="schedule-context-from"', markup)
+        self.assertIn('id="schedule-deliver-to"', markup)
+        self.assertIn('id="schedule-script-form"', markup)
         self.assertIn('document.getElementById("schedule-memory-escalation").addEventListener("click"', script)
+        self.assertIn('document.getElementById("schedule-script-form").addEventListener("submit"', script)
         self.assertIn('api("/schedules/memory-review-escalation"', script)
+        self.assertIn('api("/schedules/script"', script)
+        self.assertIn("context_from: fieldList", script)
         self.assertIn("memory_review_escalation", script)
+        self.assertIn("no_agent_hook", script)
 
     def test_headless_chrome_loads_gui_and_renders_api_backed_state(self) -> None:
         chrome = _chrome_binary()

@@ -165,6 +165,12 @@ const escapeHtml = (value) =>
 
 const text = (value) => escapeHtml(Array.isArray(value) ? value.join(", ") : value);
 
+const fieldList = (id) =>
+  String(document.getElementById(id)?.value || "")
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
 const copyButton = (label, value) =>
   value ? `<button type="button" class="secondary" data-copy-command="${escapeHtml(value)}">${text(label)}</button>` : "";
 
@@ -742,7 +748,9 @@ const refresh = async () => {
               ? `Evaluation run for ${x.metadata.scenario || "scheduled evaluation"}`
               : x.metadata?.kind === "evaluation_suite"
                 ? `Evaluation suite ${x.metadata.suite || "security"} for ${x.metadata.reviewer || "scheduler"}`
-                : x.task_request,
+                : x.metadata?.kind === "no_agent_hook"
+                  ? `No-agent hook ${x.metadata.hook_id || "scheduled hook"}`
+                  : x.task_request,
       meta: `${x.status} · ${x.cron} · next ${x.next_run_at}`,
       tone: "attention",
       actions: `
@@ -4353,6 +4361,26 @@ document.getElementById("schedule-form").addEventListener("submit", async (event
       cron: document.getElementById("schedule-cron").value || "@daily",
       task_request: document.getElementById("schedule-task").value || "Summarize my project",
       channel: "web",
+      context_from: fieldList("schedule-context-from"),
+      delivery_targets: fieldList("schedule-deliver-to"),
+    }),
+  });
+  renderScheduleOutput(result);
+  await refresh();
+});
+
+document.getElementById("schedule-script-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const command = JSON.parse(document.getElementById("schedule-script-command").value || '["python3","-c","print(\\"ok\\")"]');
+  const result = await api("/schedules/script", {
+    method: "POST",
+    body: JSON.stringify({
+      name: document.getElementById("schedule-name").value || "No-agent script",
+      cron: document.getElementById("schedule-cron").value || "@daily",
+      command,
+      channel: "web",
+      context_from: fieldList("schedule-context-from"),
+      delivery_targets: fieldList("schedule-deliver-to"),
     }),
   });
   renderScheduleOutput(result);

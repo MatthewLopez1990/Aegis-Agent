@@ -110,7 +110,8 @@ Commands:
 - `session [new <title>|open <session_id>|rename <title>|set-model <model>|set-personality <name>|activate|archive|pause|append <content> [--role user|assistant] [--trust-class CLASS]|history [session_id] [--limit N]|tasks [--limit N]|compact [keep_last]]`
 - `sessions [--limit N]`
 - `schedules`
-- `schedule create <name> <cron> <task_request> [--natural-language text] [--channel name]`
+- `schedule create <name> <cron> <task_request> [--natural-language text] [--channel name] [--context-from ref] [--deliver-to channel]`
+- `schedule script|no-agent <name> <cron> [--channel name] [--context-from ref] [--deliver-to channel] -- <argv...>`
 - `schedule memory-review-digest <name> <cron> [--channel name] [--limit N] [--scope scope]`
 - `schedule memory-review-escalation <name> <cron> [--channel name] [--max-age-days N] [--limit N] [--scope scope] [--route name]`
 - `schedule evaluation-run <name> <cron> <scenario> [steps...] [--channel name] [--reviewer name]`
@@ -307,6 +308,8 @@ The API is a local control plane and does not implement user authentication. Bin
 - `POST /hooks/:id/remove`
 - `GET /schedules`
 - `GET /schedules/due`
+- `POST /schedules`
+- `POST /schedules/script`
 - `POST /schedules/memory-review-digest`
 - `POST /schedules/memory-review-escalation`
 - `POST /schedules/evaluation-run`
@@ -395,7 +398,6 @@ The API is a local control plane and does not implement user authentication. Bin
 - `POST /improvements/{proposal_id}/candidates/{candidate_id}/apply`
 - `POST /improvements/{proposal_id}/candidates/{candidate_id}/rollback`
 - `POST /improvements/{proposal_id}/attempts`
-- `POST /schedules`
 - `GET /kanban/boards`
 - `POST /kanban/boards`
 - `GET /kanban/boards/{board_id}/cards`

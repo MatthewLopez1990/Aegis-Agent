@@ -695,6 +695,18 @@ def build_parser() -> argparse.ArgumentParser:
     schedule_create.add_argument("task_request")
     schedule_create.add_argument("--natural-language", default="")
     schedule_create.add_argument("--channel", default="terminal")
+    schedule_create.add_argument("--context-from", action="append", default=[])
+    schedule_create.add_argument("--deliver-to", action="append", default=[])
+    schedule_script = schedule_sub.add_parser("script", aliases=("no-agent",), help="Create a paused no-agent script schedule backed by a governed hook")
+    schedule_script.add_argument("name")
+    schedule_script.add_argument("cron")
+    schedule_script.add_argument("--channel", default="terminal")
+    schedule_script.add_argument("--context-from", action="append", default=[])
+    schedule_script.add_argument("--deliver-to", action="append", default=[])
+    schedule_script.add_argument("--hook-id")
+    schedule_script.add_argument("--timeout", type=int, default=10)
+    schedule_script.add_argument("--max-output-bytes", type=int, default=4096)
+    schedule_script.add_argument("argv", nargs=argparse.REMAINDER)
     schedule_digest = schedule_sub.add_parser("memory-review-digest", help="Create a paused schedule that renders memory review digests")
     schedule_digest.add_argument("name")
     schedule_digest.add_argument("cron")
@@ -1088,6 +1100,29 @@ def _parser_options(parser: argparse.ArgumentParser) -> tuple[str, ...]:
                 continue
             options.append(option)
     return tuple(options)
+
+
+def _cli_option_value(parts: list[str], option: str) -> str | None:
+    if option not in parts:
+        return None
+    index = parts.index(option)
+    if index + 1 >= len(parts):
+        raise ValueError(f"{option} requires a value")
+    return parts[index + 1]
+
+
+def _cli_option_values(parts: list[str], option: str) -> list[str]:
+    values: list[str] = []
+    index = 0
+    while index < len(parts):
+        if parts[index] == option:
+            if index + 1 >= len(parts):
+                raise ValueError(f"{option} requires a value")
+            values.append(parts[index + 1])
+            index += 2
+            continue
+        index += 1
+    return values
 
 
 def _parser_positional_choices(parser: argparse.ArgumentParser) -> tuple[str, ...]:
@@ -2243,6 +2278,29 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
                 cron=args.cron,
                 task_request=args.task_request,
                 channel=args.channel,
+                context_from=tuple(args.context_from),
+                delivery_targets=tuple(args.deliver_to),
+            )
+        if args.schedule_command in {"script", "no-agent"}:
+            raw_argv = list(args.argv)
+            option_parts: list[str] = []
+            if "--" in raw_argv:
+                separator = raw_argv.index("--")
+                option_parts = raw_argv[:separator]
+                command = raw_argv[separator + 1 :]
+            else:
+                command = raw_argv
+            orchestrator = build_orchestrator(data_dir=args.data_dir)
+            return orchestrator.create_script_schedule(
+                name=args.name,
+                cron=args.cron,
+                command=command,
+                channel=_cli_option_value(option_parts, "--channel") or args.channel,
+                hook_id=_cli_option_value(option_parts, "--hook-id") or args.hook_id,
+                context_from=tuple([*args.context_from, *_cli_option_values(option_parts, "--context-from")]),
+                delivery_targets=tuple([*args.deliver_to, *_cli_option_values(option_parts, "--deliver-to")]),
+                timeout_seconds=int(_cli_option_value(option_parts, "--timeout") or args.timeout),
+                max_output_bytes=int(_cli_option_value(option_parts, "--max-output-bytes") or args.max_output_bytes),
             )
         if args.schedule_command == "memory-review-digest":
             return manager.create_memory_review_digest_schedule(

@@ -53,6 +53,20 @@ class HookManagerTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 manager.register_hook(event="manual", command=["bash", "-lc", "echo no"], hook_id="bad")
 
+    def test_run_hook_executes_one_manual_hook_by_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            manager = HookManager(root / "hooks.json", AuditLogger(root / "audit.jsonl"), allowed_executables=("python3",), workspace=root)
+            manager.register_hook(event="manual", command=["python3", "-c", "print('first')"], hook_id="first", enabled=True, approval_required=False)
+            manager.register_hook(event="manual", command=["python3", "-c", "print('second')"], hook_id="second", enabled=True, approval_required=False)
+
+            result = manager.run_hook("second", context={"source": "schedule"}, approved=True)
+
+            self.assertEqual(result["hook_id"], "second")
+            self.assertEqual(result["status"], "completed")
+            self.assertIn("second", result["stdout"])
+            self.assertNotIn("first", result["stdout"])
+
     @unittest.skipUnless(os.name == "posix", "POSIX mode assertions only apply on POSIX")
     def test_hook_store_is_private(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

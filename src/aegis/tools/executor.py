@@ -988,6 +988,8 @@ class BuiltinToolExecutor:
             task_request=str(params["task"]),
             channel=str(params.get("channel", "tool")),
             metadata={"source_tool": "cron_schedule"},
+            context_from=tuple(params.get("context_from", ())) if isinstance(params.get("context_from", ()), (list, tuple)) else (),
+            delivery_targets=tuple(params.get("delivery_targets", ())) if isinstance(params.get("delivery_targets", ()), (list, tuple)) else (),
         )
         return {"ok": True, "schedule_id": schedule["id"], "status": schedule["status"], "next_run_at": schedule["next_run_at"]}
 

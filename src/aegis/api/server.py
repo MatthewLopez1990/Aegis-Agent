@@ -2228,6 +2228,27 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                         cron=str(_required(payload, "cron")),
                         task_request=str(_required(payload, "task_request")),
                         channel=str(payload.get("channel", "web")),
+                        context_from=_string_list_payload(payload.get("context_from", [])),
+                        delivery_targets=_string_list_payload(payload.get("delivery_targets", [])),
+                    )
+                )
+                return
+            if path == "/schedules/script":
+                payload = self._read_json()
+                command = payload.get("command", [])
+                if not isinstance(command, list):
+                    command = [str(command)]
+                self._json(
+                    orchestrator.create_script_schedule(
+                        name=str(_required(payload, "name")),
+                        cron=str(_required(payload, "cron")),
+                        command=[str(part) for part in command],
+                        channel=str(payload.get("channel", "web")),
+                        hook_id=str(payload["hook_id"]) if payload.get("hook_id") else None,
+                        context_from=_string_list_payload(payload.get("context_from", [])),
+                        delivery_targets=_string_list_payload(payload.get("delivery_targets", [])),
+                        timeout_seconds=int(payload.get("timeout_seconds", 10)),
+                        max_output_bytes=int(payload.get("max_output_bytes", 4096)),
                     )
                 )
                 return
@@ -3019,6 +3040,16 @@ def _optional_int(payload: dict[str, Any], key: str) -> int | None:
     if key not in payload or payload[key] is None:
         return None
     return int(payload[key])
+
+
+def _string_list_payload(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, list):
+        raise ValueError("value must be a JSON array")
+    return [str(item) for item in value]
 
 
 def _optional_str_list(payload: dict[str, Any], key: str) -> list[str] | None:

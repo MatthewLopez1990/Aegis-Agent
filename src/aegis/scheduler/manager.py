@@ -26,7 +26,14 @@ class ScheduleManager:
         task_request: str,
         channel: str = "terminal",
         metadata: dict[str, Any] | None = None,
+        context_from: list[str] | tuple[str, ...] = (),
+        delivery_targets: list[str] | tuple[str, ...] = (),
     ) -> dict[str, Any]:
+        normalized_metadata = _schedule_metadata(
+            metadata or {},
+            context_from=context_from,
+            delivery_targets=delivery_targets,
+        )
         row = {
             "id": str(uuid4()),
             "name": name,
@@ -39,7 +46,7 @@ class ScheduleManager:
             "last_run_at": None,
             "created_at": now_utc(),
             "updated_at": now_utc(),
-            "metadata": metadata or {},
+            "metadata": normalized_metadata,
         }
         self.store.insert_schedule(row)
         self.audit_logger.append("schedule.created", row)
@@ -141,6 +148,32 @@ class ScheduleManager:
             },
         )
 
+    def create_no_agent_hook_schedule(
+        self,
+        *,
+        name: str,
+        cron: str,
+        hook_id: str,
+        channel: str = "terminal",
+        context_from: list[str] | tuple[str, ...] = (),
+        delivery_targets: list[str] | tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        return self.create_schedule(
+            name=name,
+            natural_language=f"Run governed no-agent hook {hook_id}",
+            cron=cron,
+            task_request=f"Run no-agent hook {hook_id}",
+            channel=channel,
+            metadata={
+                "kind": "no_agent_hook",
+                "hook_id": str(hook_id),
+                "action": "argv_hook",
+                "raw_command_included": False,
+            },
+            context_from=context_from,
+            delivery_targets=delivery_targets,
+        )
+
     def list_schedules(self) -> list[dict[str, Any]]:
         return [_decode(row) for row in self.store.list_schedules()]
 
@@ -240,3 +273,46 @@ def _decode(row: dict[str, Any]) -> dict[str, Any]:
     decoded = dict(row)
     decoded["metadata"] = json.loads(decoded.pop("metadata_json", "{}"))
     return decoded
+
+
+def _schedule_metadata(
+    metadata: dict[str, Any],
+    *,
+    context_from: list[str] | tuple[str, ...],
+    delivery_targets: list[str] | tuple[str, ...],
+) -> dict[str, Any]:
+    normalized = dict(metadata)
+    context_sources = _string_list(context_from or normalized.get("context_from", ()), max_items=12, max_chars=240)
+    if context_sources:
+        normalized["context_from"] = context_sources
+    else:
+        normalized.pop("context_from", None)
+    targets = _string_list(delivery_targets or normalized.get("delivery_targets", ()), max_items=8, max_chars=80)
+    if targets:
+        normalized["delivery_targets"] = targets
+    else:
+        normalized.pop("delivery_targets", None)
+    return normalized
+
+
+def _string_list(value: Any, *, max_items: int, max_chars: int) -> list[str]:
+    if isinstance(value, str):
+        candidates = [value]
+    elif isinstance(value, (list, tuple)):
+        candidates = [str(item) for item in value]
+    else:
+        candidates = []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        cleaned = " ".join(str(item).replace("\r", " ").replace("\n", " ").split()).strip()
+        if not cleaned:
+            continue
+        cleaned = cleaned[:max_chars]
+        if cleaned in seen:
+            continue
+        seen.add(cleaned)
+        normalized.append(cleaned)
+        if len(normalized) >= max_items:
+            break
+    return normalized

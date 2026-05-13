@@ -174,6 +174,25 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertEqual(listed["hooks"][0]["id"], "api_notify")
                 self.assertEqual(ran["ran_count"], 1)
                 self.assertIn("api hello", ran["results"][0]["stdout"])
+
+                scheduled = _json_post(
+                    port,
+                    "/schedules/script",
+                    {
+                        "name": "API no-agent",
+                        "cron": "@hourly",
+                        "command": ["python3", "-c", "print('api schedule')"],
+                        "context_from": ["@AGENTS.md"],
+                        "delivery_targets": ["slack"],
+                    },
+                    token=token,
+                )
+                listed_schedules = _json_get(port, "/schedules", token=token)["schedules"]
+                self.assertEqual(scheduled["metadata"]["kind"], "no_agent_hook")
+                self.assertEqual(scheduled["metadata"]["context_from"], ["@AGENTS.md"])
+                self.assertEqual(scheduled["metadata"]["delivery_targets"], ["slack"])
+                self.assertFalse(scheduled["metadata"]["raw_command_included"])
+                self.assertTrue(any(row["id"] == scheduled["id"] for row in listed_schedules))
             finally:
                 process.terminate()
                 try:

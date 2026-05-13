@@ -243,7 +243,7 @@ SKILLS_COMMANDS = ("hub", "search", "browse", "inspect", "install", "disable", "
 PLUGIN_COMMANDS = ("list", "install", "enable", "disable", "remove", "reload", "marketplace", "updates", "fetch-manifest", "fetch-bundle", "install-bundle", "install-marketplace", "update-marketplace", "prepare-update", "apply-prepared-update")
 CURATOR_COMMANDS = ("status", "run", "pin", "unpin", "archive", "restore", "pause", "resume")
 REPAIR_COMMANDS = ("readiness", "review", "approve", "reject", "candidate", "generate-candidate", "synthesis-prompt", "synthesize-candidate", "review-candidate", "apply-candidate", "rollback-candidate", "attempt")
-SCHEDULE_COMMANDS = ("create", "memory-review-digest", "memory-review-escalation", "evaluation-run", "evaluation-suite", "due", "approve", "activate", "pause", "run-due")
+SCHEDULE_COMMANDS = ("create", "script", "no-agent", "memory-review-digest", "memory-review-escalation", "evaluation-run", "evaluation-suite", "due", "approve", "activate", "pause", "run-due")
 BROWSER_COMMANDS = (
     "status",
     "connect",
@@ -1904,7 +1904,7 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_schedule(self, arg: str) -> None:
-        """schedule create|memory-review-digest|memory-review-escalation|evaluation-run|evaluation-suite|due|approve|activate|pause|run-due -- manage scheduled automations."""
+        """schedule create|script|memory-review-digest|memory-review-escalation|evaluation-run|evaluation-suite|due|approve|activate|pause|run-due -- manage scheduled automations."""
         parts = shlex.split(arg)
         if not parts:
             print("schedule command required")
@@ -1913,13 +1913,13 @@ class AegisTui(cmd.Cmd):
         try:
             if command == "create":
                 if len(parts) < 4:
-                    print("usage: schedule create <name> <cron> <task_request> [--natural-language text] [--channel name]")
+                    print("usage: schedule create <name> <cron> <task_request> [--natural-language text] [--channel name] [--context-from ref] [--deliver-to channel]")
                     return
                 channel = _option_value(parts, "--channel") or "terminal"
                 natural_language = _flag_joined_value(parts, "--natural-language")
-                positional = _positional_without_flags(parts[1:], {"--natural-language": 1, "--channel": 1})
+                positional = _positional_without_flags(parts[1:], {"--natural-language": 1, "--channel": 1, "--context-from": 1, "--deliver-to": 1})
                 if len(positional) < 3:
-                    print("usage: schedule create <name> <cron> <task_request> [--natural-language text] [--channel name]")
+                    print("usage: schedule create <name> <cron> <task_request> [--natural-language text] [--channel name] [--context-from ref] [--deliver-to channel]")
                     return
                 name, cron = positional[0], positional[1]
                 task_request = " ".join(positional[2:])
@@ -1930,6 +1930,33 @@ class AegisTui(cmd.Cmd):
                         cron=cron,
                         task_request=task_request,
                         channel=channel,
+                        context_from=tuple(_option_values(parts, "--context-from")),
+                        delivery_targets=tuple(_option_values(parts, "--deliver-to")),
+                    )
+                )
+                return
+            if command in {"script", "no-agent"}:
+                if "--" not in parts:
+                    print("usage: schedule script <name> <cron> [--channel name] [--context-from ref] [--deliver-to channel] -- <argv...>")
+                    return
+                separator = parts.index("--")
+                options = parts[1:separator]
+                argv = parts[separator + 1 :]
+                positional = _positional_without_flags(options, {"--channel": 1, "--context-from": 1, "--deliver-to": 1, "--hook-id": 1, "--timeout": 1, "--max-output-bytes": 1})
+                if len(positional) < 2 or not argv:
+                    print("usage: schedule script <name> <cron> [--channel name] [--context-from ref] [--deliver-to channel] -- <argv...>")
+                    return
+                _print_json(
+                    self.orchestrator.create_script_schedule(
+                        name=positional[0],
+                        cron=positional[1],
+                        command=argv,
+                        channel=_option_value(options, "--channel") or "terminal",
+                        hook_id=_option_value(options, "--hook-id"),
+                        context_from=tuple(_option_values(options, "--context-from")),
+                        delivery_targets=tuple(_option_values(options, "--deliver-to")),
+                        timeout_seconds=int(_option_value(options, "--timeout") or "10"),
+                        max_output_bytes=int(_option_value(options, "--max-output-bytes") or "4096"),
                     )
                 )
                 return
@@ -6558,7 +6585,8 @@ def _command_reference() -> str:
             "repair apply-candidate|rollback-candidate <id> <candidate_id>",
             "repair attempt <id> <outcome> [--candidate-id id] [--test-command cmd]",
             "schedules              Scheduled automations",
-            "schedule create <n> <c> <task>",
+            "schedule create <n> <c> <task> [--context-from ref]",
+            "schedule script <n> <c> -- <argv>",
             "schedule memory-review-digest <n> <c>",
             "schedule evaluation-run <n> <c> <scenario>",
             "schedule evaluation-suite <n> <c>",
@@ -7114,6 +7142,9 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("q", "session"): ("--limit", "--status"),
     ("busy", "queue"): ("--limit", "--status"),
     ("session", "new"): ("--model", "--personality"),
+    ("schedule", "create"): ("--natural-language", "--channel", "--context-from", "--deliver-to"),
+    ("schedule", "script"): ("--channel", "--context-from", "--deliver-to", "--hook-id", "--timeout", "--max-output-bytes"),
+    ("schedule", "no-agent"): ("--channel", "--context-from", "--deliver-to", "--hook-id", "--timeout", "--max-output-bytes"),
     ("schedule", "run-due"): ("--limit", "--now"),
     ("hooks", "add"): ("--id", "--enabled", "--approval-required", "--no-approval-required", "--timeout", "--max-output-bytes"),
     ("hooks", "run"): ("--approved", "--context-json"),

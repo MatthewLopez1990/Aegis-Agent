@@ -2966,6 +2966,55 @@ class CliTests(unittest.TestCase):
             self.assertEqual(scheduled["metadata"]["kind"], "memory_review_digest")
             self.assertEqual(scheduled["metadata"]["limit"], 7)
 
+            task_schedule = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "schedule",
+                        "create",
+                        "Context report",
+                        "@daily",
+                        "Summarize context",
+                        "--context-from",
+                        "@docs/status.md",
+                        "--deliver-to",
+                        "slack",
+                    ]
+                )
+            )
+
+            self.assertEqual(task_schedule["metadata"]["context_from"], ["@docs/status.md"])
+            self.assertEqual(task_schedule["metadata"]["delivery_targets"], ["slack"])
+
+            script = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "schedule",
+                        "script",
+                        "Script report",
+                        "@hourly",
+                        "--context-from",
+                        "@AGENTS.md",
+                        "--deliver-to",
+                        "slack",
+                        "--",
+                        "python3",
+                        "-c",
+                        "print('ok')",
+                        "token=abc123",
+                    ]
+                )
+            )
+
+            self.assertEqual(script["metadata"]["kind"], "no_agent_hook")
+            self.assertEqual(script["metadata"]["context_from"], ["@AGENTS.md"])
+            self.assertFalse(script["metadata"]["raw_command_included"])
+            self.assertNotIn("command", script["metadata"])
+            self.assertEqual(script["hook"]["command"][-1], "token=[REDACTED_VALUE]")
+
             escalation = dispatch(
                 parser.parse_args(
                     [
