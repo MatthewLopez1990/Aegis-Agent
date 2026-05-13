@@ -541,7 +541,18 @@ class BuiltinToolExecutor:
         prompt = str(params.get("prompt", ""))
         text = str(params.get("text", ""))
         source_path = str(params.get("source_path") or params.get("image_path") or "")
-        request_payload = _live_media_request_payload(name=name, prompt=prompt, text=text, source_path=source_path)
+        provider_adapter = _live_media_provider_adapter(name=name, params=params)
+        if provider_adapter["error"]:
+            return {
+                "ok": False,
+                "tool": name,
+                "mode": "live_media_provider",
+                "status": "unsupported_provider_adapter",
+                "reason": provider_adapter["error"],
+                "required_controls": _live_media_required_controls(),
+            }
+        adapter_name = str(provider_adapter["name"] or "generic")
+        request_payload = _live_media_request_payload(name=name, prompt=prompt, text=text, source_path=source_path, params=params, provider_adapter=adapter_name)
         live_result = _send_live_media_provider_request(url=provider_url, token=token, tool=name, payload=request_payload)
         if not live_result["ok"]:
             return {
@@ -552,7 +563,8 @@ class BuiltinToolExecutor:
                 "domain": domain,
                 "http_status": live_result["http_status"],
                 "error": live_result.get("error"),
-                "provider_receipt": _live_media_provider_receipt(domain=domain, http_status=live_result["http_status"], request_payload=request_payload, handle_present=handle.present),
+                "provider_adapter": adapter_name,
+                "provider_receipt": _live_media_provider_receipt(domain=domain, http_status=live_result["http_status"], request_payload=request_payload, handle_present=handle.present, provider_adapter=adapter_name),
             }
         media_bytes = live_result["content"]
         extension, mime_type = _live_media_extension_and_mime(name=name, declared_mime=str(live_result.get("mime_type", "")), content=media_bytes)
@@ -560,13 +572,14 @@ class BuiltinToolExecutor:
         path.write_bytes(media_bytes)
         path.chmod(0o600)
         artifact_receipt = _artifact_receipt(path)
-        sandbox_receipt = _media_sandbox_receipt(tool=name, mode=f"live_provider_{extension}", worker_result={"provider_domain": domain})
-        provider_receipt = _live_media_provider_receipt(domain=domain, http_status=live_result["http_status"], request_payload=request_payload, handle_present=handle.present)
+        sandbox_receipt = _media_sandbox_receipt(tool=name, mode=f"live_provider_{extension}", worker_result={"provider_domain": domain, "provider_adapter": adapter_name})
+        provider_receipt = _live_media_provider_receipt(domain=domain, http_status=live_result["http_status"], request_payload=request_payload, handle_present=handle.present, provider_adapter=adapter_name)
         details = {
             "mime_type": mime_type,
             "prompt_length": len(prompt),
             "text_length": len(text),
             "source_present": bool(source_path),
+            "provider_adapter": adapter_name,
             "provider_receipt": provider_receipt,
         }
         if name in {"image_generate", "image_edit"}:
@@ -591,6 +604,7 @@ class BuiltinToolExecutor:
             **artifact_receipt,
             "sandbox_receipt": sandbox_receipt,
             "provider_receipt": provider_receipt,
+            "provider_adapter": adapter_name,
             "mode": f"live_provider_{extension}",
             "mime_type": mime_type,
             "domain": domain,
@@ -2701,6 +2715,7 @@ def _media_sandbox_receipt(*, tool: str, mode: str, worker_result: dict[str, Any
         "writes_confined_to": ".aegis/tool-artifacts",
         "live_provider_used": live_provider_used,
         "provider_domain": worker_result.get("provider_domain"),
+        "provider_adapter": worker_result.get("provider_adapter"),
         "limitations": [
             "Provider-backed media execution stores only the returned local artifact and redacted receipts.",
             "No microphone, speaker, camera, browser capture device, raw prompt/text persistence, raw provider response body, or raw secret value is used.",
@@ -2717,7 +2732,34 @@ def _live_media_required_controls() -> list[str]:
     return ["human_approval", "live_rest_writes_enabled", "network_allowlist", "secret_broker", "artifact_hashing", "redacted_receipts"]
 
 
-def _live_media_request_payload(*, name: str, prompt: str, text: str, source_path: str) -> dict[str, Any]:
+def _live_media_provider_adapter(*, name: str, params: dict[str, Any]) -> dict[str, str | None]:
+    raw = str(params.get("provider_adapter") or params.get("adapter") or "generic").strip().lower().replace("-", "_")
+    if raw in {"", "generic", "generic_json", "aegis_generic"}:
+        return {"name": "generic", "error": None}
+    if raw in {"openai_image", "openai_images", "openai_images_json", "openai_compatible_images"}:
+        if name != "image_generate":
+            return {"name": raw, "error": "openai_images provider adapter currently supports image_generate only"}
+        return {"name": "openai_images", "error": None}
+    return {"name": raw[:80], "error": f"unsupported media provider adapter: {raw[:80]}"}
+
+
+def _live_media_request_payload(*, name: str, prompt: str, text: str, source_path: str, params: dict[str, Any], provider_adapter: str) -> dict[str, Any]:
+    if provider_adapter == "openai_images":
+        payload: dict[str, Any] = {
+            "model": str(params.get("model") or "gpt-image-1")[:200],
+            "prompt": prompt,
+            "n": 1,
+        }
+        size = str(params.get("size") or "").strip()
+        if size:
+            payload["size"] = size[:80]
+        quality = str(params.get("quality") or "").strip()
+        if quality:
+            payload["quality"] = quality[:80]
+        background = str(params.get("background") or "").strip()
+        if background:
+            payload["background"] = background[:80]
+        return payload
     payload: dict[str, Any] = {"tool": name}
     if name in {"image_generate", "image_edit"}:
         payload["prompt"] = prompt
@@ -2729,10 +2771,11 @@ def _live_media_request_payload(*, name: str, prompt: str, text: str, source_pat
     return payload
 
 
-def _live_media_provider_receipt(*, domain: str, http_status: int, request_payload: dict[str, Any], handle_present: bool) -> dict[str, Any]:
+def _live_media_provider_receipt(*, domain: str, http_status: int, request_payload: dict[str, Any], handle_present: bool, provider_adapter: str = "generic") -> dict[str, Any]:
     encoded = json.dumps(request_payload, sort_keys=True, default=str).encode("utf-8")
     return {
         "receipt_schema": "redacted_media_provider_receipt_v1",
+        "provider_adapter": provider_adapter,
         "domain": domain,
         "http_status": http_status,
         "payload_sha256": hashlib.sha256(encoded).hexdigest(),
@@ -2815,6 +2858,15 @@ def _media_base64_from_provider_json(decoded: dict[str, Any], *, tool: str) -> s
         first = images[0]
         if isinstance(first, dict):
             for key in ("b64_json", "image_base64", "data"):
+                value = first.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    data_items = decoded.get("data")
+    if isinstance(data_items, list) and data_items:
+        first = data_items[0]
+        if isinstance(first, dict):
+            keys = ("data", "audio_base64", "b64_json") if tool == "tts" else ("b64_json", "image_base64", "data")
+            for key in keys:
                 value = first.get(key)
                 if isinstance(value, str) and value.strip():
                     return value.strip()

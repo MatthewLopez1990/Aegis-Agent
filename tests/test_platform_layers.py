@@ -1235,6 +1235,7 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertIn("sandboxed_media_worker_process", browser_hardening_controls)
             self.assertIn("os_level_media_worker_limits", browser_hardening_controls)
             self.assertIn("provider_backed_media_artifacts", browser_hardening_controls)
+            self.assertIn("openai_style_image_provider_adapter", browser_hardening_controls)
             self.assertIn("browser_automation_boundary_receipts", browser_hardening_controls)
             self.assertIn("static_dom_snapshot_no_js", browser_hardening_controls)
             self.assertIn("approved_static_form_fill", browser_hardening_controls)
@@ -1537,6 +1538,91 @@ class PlatformLayerTests(unittest.TestCase):
             )
             self.assertFalse(denied["ok"])
             self.assertEqual(denied["status"], "scope_rejected")
+
+    def test_openai_style_image_provider_adapter_uses_redacted_receipts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            data_dir.mkdir()
+            (data_dir / "config.toml").write_text(
+                "\n".join(
+                    [
+                        "[runtime]",
+                        f'data_dir = "{data_dir}"',
+                        "",
+                        "[security]",
+                        "default_read_only = false",
+                        "live_rest_writes = true",
+                        'network_allowlist = ["media.example.com"]',
+                        "",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            orchestrator = build_orchestrator(data_dir=data_dir, workspace=root)
+            orchestrator.secrets_broker.store_secret(name="AEGIS_MEDIA_PROVIDER_TOKEN", value="secret-media-token")
+            png_bytes = (
+                b"\x89PNG\r\n\x1a\n"
+                b"\x00\x00\x00\rIHDR"
+                b"\x00\x00\x00\x02\x00\x00\x00\x03"
+                b"\x08\x02\x00\x00\x00"
+                b"\x00\x00\x00\x00"
+                b"\x00\x00\x00\x00IEND\xaeB`\x82"
+            )
+            captured: dict[str, str] = {}
+
+            class FakeResponse:
+                status = 200
+                headers = {"Content-Type": "application/json"}
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+                def read(self, limit: int) -> bytes:
+                    return json.dumps({"data": [{"b64_json": base64.b64encode(png_bytes).decode("ascii")}]}).encode("utf-8")
+
+            def fake_open(request, timeout):
+                captured["url"] = request.full_url
+                captured["authorization"] = request.headers.get("Authorization", "")
+                captured["body"] = request.data.decode("utf-8")
+                return FakeResponse()
+
+            with patch("aegis.tools.executor._private_network_error", return_value=None), patch("aegis.tools.executor._open_without_redirects", fake_open):
+                generated = orchestrator.tools.execute(
+                    "image_generate",
+                    {
+                        "prompt": "draw a private roadmap token=abc123",
+                        "provider_url": "https://media.example.com/v1/images/generations",
+                        "provider_adapter": "openai_images",
+                        "model": "gpt-image-1",
+                        "size": "1024x1024",
+                    },
+                    approved=True,
+                )
+
+            body = json.loads(captured["body"])
+            metadata_text = Path(generated["metadata_path"]).read_text(encoding="utf-8")
+            self.assertTrue(generated["ok"])
+            self.assertEqual(generated["provider_adapter"], "openai_images")
+            self.assertEqual(generated["mode"], "live_provider_png")
+            self.assertEqual(Path(generated["asset_path"]).read_bytes(), png_bytes)
+            self.assertEqual(body["model"], "gpt-image-1")
+            self.assertEqual(body["prompt"], "draw a private roadmap token=abc123")
+            self.assertEqual(body["size"], "1024x1024")
+            self.assertEqual(body["n"], 1)
+            self.assertNotIn("tool", body)
+            self.assertEqual(captured["authorization"], "Bearer secret-media-token")
+            self.assertEqual(generated["provider_receipt"]["provider_adapter"], "openai_images")
+            self.assertEqual(generated["provider_receipt"]["payload_keys"], ["model", "n", "prompt", "size"])
+            self.assertFalse(generated["provider_receipt"]["raw_prompt_or_text_included"])
+            self.assertFalse(generated["provider_receipt"]["raw_secret_values_included"])
+            self.assertEqual(generated["sandbox_receipt"]["provider_adapter"], "openai_images")
+            self.assertNotIn("draw a private roadmap", metadata_text)
+            self.assertNotIn("abc123", metadata_text)
+            self.assertNotIn("secret-media-token", metadata_text)
 
     def test_product_dashboard_surfaces_configured_live_connector_adapters_without_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

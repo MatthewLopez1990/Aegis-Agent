@@ -504,7 +504,7 @@ def _live_gap_backlog(
             "area": "browser_and_media_depth",
             "platforms": ["OpenClaw"],
             "status": "facade_hardening_required",
-            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, and approved static-anchor navigation are available for stored HTTP-content sessions; provider-backed media artifacts can run through allowlisted HTTPS adapters, while real page automation and provider-specific media depth still require stronger sandboxing.",
+            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, and approved static-anchor navigation are available for stored HTTP-content sessions; provider-backed media artifacts can run through allowlisted HTTPS adapters, including an OpenAI-style image JSON adapter, while real page automation and broader provider-specific media depth still require stronger sandboxing.",
             "sample_tools": facade_tools[:8],
             "next_steps": [
                 "Extend rendering toward real browser automation only after network, cookie, and JavaScript boundaries are enforceable.",
@@ -553,6 +553,10 @@ def _live_gap_backlog(
                     "evidence": "browser snapshot and render evidence records cookie, storage, script, subresource, network, and mutation boundaries before live automation is enabled",
                 },
                 {
+                    "control": "openai_style_image_provider_adapter",
+                    "evidence": "approved provider-backed image generation can send an OpenAI-style image JSON request and persist returned data[].b64_json artifacts without storing raw prompt, response body, or secret values",
+                },
+                {
                     "control": "static_dom_snapshot_no_js",
                     "evidence": "browser DOM snapshots parse bounded redacted stored HTTP content without JavaScript, cookies, storage, remote subresources, or selector-event dispatch",
                 },
@@ -589,6 +593,7 @@ def _live_gap_backlog(
                     "os_level_media_worker_limits",
                     "provider_backed_media_artifacts",
                     "browser_automation_boundary_receipts",
+                    "openai_style_image_provider_adapter",
                     "static_dom_snapshot_no_js",
                     "approved_static_form_fill",
                     "approved_static_form_submit",
@@ -801,7 +806,7 @@ def _browser_media_operator_checklist(implemented_controls: list[str], remaining
         {
             "control": "provider_media_depth",
             "state": "partial" if "provider_backed_media_artifacts" in implemented else "not_started",
-            "detail": "Provider-backed image and TTS artifacts exist; provider-specific image, audio, and video adapters still need expansion.",
+            "detail": "Provider-backed image and TTS artifacts exist, including a first OpenAI-style image JSON adapter; provider-specific audio, video, edit-upload, and additional image adapters still need expansion.",
         },
         {
             "control": "platform_media_sandbox_profiles",
