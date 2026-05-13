@@ -153,6 +153,8 @@ class ApiServerSecurityTests(unittest.TestCase):
             try:
                 _wait_for_server(port)
                 token = _json_get(port, "/auth")["token"]
+                process_status = _json_get(port, "/processes", token=token)
+                process_gated = _json_post(port, "/processes/start", {"argv": ["python3", "-c", "print('blocked')"]}, token=token)
 
                 added = _json_post(
                     port,
@@ -169,6 +171,9 @@ class ApiServerSecurityTests(unittest.TestCase):
                 listed = _json_get(port, "/hooks", token=token)
                 ran = _json_post(port, "/hooks/run", {"event": "manual", "context": {"message": "api hello"}}, token=token)
 
+                self.assertEqual(process_status["status"], "process_registry_ready")
+                self.assertEqual(process_gated["status"], "approval_required")
+                self.assertFalse(process_gated["raw_command_included"])
                 self.assertEqual(added["hook"]["id"], "api_notify")
                 self.assertEqual(listed["status"], "governed_local_ready")
                 self.assertEqual(listed["hooks"][0]["id"], "api_notify")
@@ -412,6 +417,9 @@ class ApiServerSecurityTests(unittest.TestCase):
                 with self.assertRaises(HTTPError) as commands_error:
                     _json_get(port, "/commands")
                 self.assertEqual(commands_error.exception.code, 403)
+                with self.assertRaises(HTTPError) as processes_error:
+                    _json_get(port, "/processes")
+                self.assertEqual(processes_error.exception.code, 403)
 
                 token = _json_get(port, "/auth")["token"]
                 remote_status_initial = _json_get(port, "/remote-control/status", token=token)

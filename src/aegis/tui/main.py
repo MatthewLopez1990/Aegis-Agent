@@ -142,6 +142,8 @@ TOP_LEVEL_COMMANDS = (
     "personality",
     "passes",
     "profile",
+    "process",
+    "processes",
     "plugin",
     "plugins",
     "powerup",
@@ -275,6 +277,7 @@ BROWSER_COMMANDS = (
 MCP_COMMANDS = ("list", "register", "auth", "call")
 HOOK_COMMANDS = ("list", "add", "enable", "disable", "remove", "run")
 AGENTS_COMMANDS = ("status", "autonomy-preflight", "profiles", "profile-create", "profile-disable", "delegate", "handoff", "review-packet", "verify-packet", "model-review", "run", "run-batch")
+PROCESS_COMMANDS = ("list", "start", "stop", "logs")
 REMOTE_CONTROL_COMMANDS = ("pair", "directory", "revoke", "relay", "relay-directory", "relay-notify", "push-targets", "push-register", "push-disable", "push-rotate", "push", "relay-outbox", "relay-retry", "relay-confirm", "relay-pull", "relay-action")
 SESSION_COMMANDS = ("new", "open", "rename", "set-model", "set-personality", "activate", "archive", "pause", "append", "history", "tasks", "compact")
 TASK_COMMANDS = ("status", "resume", "pause", "cancel", "events", "timeline", "submit", "list", "all", "session")
@@ -4894,18 +4897,72 @@ class AegisTui(cmd.Cmd):
         )
 
     def do_bashes(self, arg: str) -> None:
-        """bashes -- show governed shell command posture."""
-        shell = next((row for row in self.orchestrator.connectors.status() if row.get("name") == "shell"), None)
-        _print_json(
-            {
-                "status": "metadata_only",
-                "shell_connector": shell,
-                "allowed_commands": list(self.orchestrator.config.allowed_shell_commands),
-                "raw_shell_history_included": False,
-                "raw_secret_values_included": False,
-                "next_actions": ["tools run shell '{\"command\":\"pwd\"}'", "permissions", "sandbox"],
-            }
-        )
+        """bashes [list|start|stop|logs] -- manage governed background processes."""
+        try:
+            parts = shlex.split(arg)
+        except ValueError as exc:
+            _print_json({"ok": False, "error": str(exc)})
+            return
+        command = parts[0] if parts else "list"
+        rest = parts[1:] if parts else []
+        try:
+            if command in {"list", "status"}:
+                _print_json(self.orchestrator.processes.status())
+                return
+            if command == "start":
+                approved = False
+                actor = "operator"
+                label = ""
+                argv: list[str] = []
+                index = 0
+                while index < len(rest):
+                    part = rest[index]
+                    if part == "--":
+                        argv = rest[index + 1 :]
+                        break
+                    if part == "--approved":
+                        approved = True
+                        index += 1
+                        continue
+                    if part == "--actor":
+                        actor = _next_required(rest, index, "--actor")
+                        index += 2
+                        continue
+                    if part == "--label":
+                        label = _next_required(rest, index, "--label")
+                        index += 2
+                        continue
+                    argv = rest[index:]
+                    break
+                _print_json(self.orchestrator.processes.start(argv, approved=approved, actor=actor, label=label))
+                return
+            if command == "stop":
+                if not rest:
+                    _print_json({"ok": False, "error": "usage: bashes stop <process-id>"})
+                    return
+                _print_json(self.orchestrator.processes.stop(rest[0]))
+                return
+            if command == "logs":
+                if not rest:
+                    _print_json({"ok": False, "error": "usage: bashes logs <process-id> [--max-bytes N]"})
+                    return
+                max_bytes = 4096
+                if len(rest) >= 3 and rest[1] == "--max-bytes":
+                    max_bytes = int(rest[2])
+                _print_json(self.orchestrator.processes.logs(rest[0], max_bytes=max_bytes))
+                return
+        except Exception as exc:  # noqa: BLE001 - TUI command should report structured local errors.
+            _print_json({"ok": False, "error": str(exc), "raw_secret_values_included": False})
+            return
+        _print_json({"ok": False, "error": "usage: bashes [list|start|stop|logs]", "raw_secret_values_included": False})
+
+    def do_processes(self, arg: str) -> None:
+        """processes -- alias for bashes."""
+        self.do_bashes(arg)
+
+    def do_process(self, arg: str) -> None:
+        """process -- alias for bashes."""
+        self.do_bashes(arg)
 
     def do_pr_comments(self, arg: str) -> None:
         """pr_comments -- show pull request comment integration readiness."""
@@ -6577,7 +6634,7 @@ def _command_reference() -> str:
             "models auth methods|targets|doctor|readiness-packet|verify-readiness-packet|login|logout <provider>",
             "tools                  Governed tool catalog",
             "toolsets               Group tools by permission and risk",
-            "allowed-tools|bashes   Policy-visible tools and shell posture",
+            "allowed-tools|bashes|processes Policy-visible tools and governed process controls",
             "tools list|run|enable|disable  Governed tool catalog and policy-owned preferences",
             "agents status|autonomy-preflight|profiles|delegate|handoff|review-packet|verify-packet|model-review|run|run-batch  Subagent coordination and runtime preflight",
             "skills hub|search|browse|inspect|install  Governed skills and virtual Skill Hub",
@@ -6711,7 +6768,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("statusbar|statusline|sb|theme|skin|color|verbose", "UI preference and status metadata"),
             ("commands|keybindings|powerup|focus|ide", "slash command, feature discovery, and terminal integration surfaces"),
             ("claude-api", "Claude API migration and managed-agent reference readiness"),
-            ("allowed-tools|bashes", "policy-visible tools and shell posture"),
+            ("allowed-tools|bashes|processes", "policy-visible tools and governed process controls"),
             ("tools list|run|enable|disable", "safe tool execution and policy-owned preferences"),
             ("toolsets", "tool catalog grouped by permission and risk"),
             ("skills hub|search|browse|inspect|install", "governed skill hub"),
@@ -7049,7 +7106,8 @@ def _next_command_hint(command: str) -> str:
         "commands": "/commands all",
         "keybindings": "/terminal-setup",
         "allowed-tools": "/toolsets",
-        "bashes": "/sandbox",
+        "bashes": "/bashes start --approved --",
+        "processes": "/processes list",
         "tools": "/tools run <name> <json>",
         "skills": "/skills hub <query>",
         "curator": "/curator run --dry-run",
@@ -7108,6 +7166,9 @@ SLASH_SUBCOMMANDS: dict[str, tuple[str, ...]] = {
     "mcp": MCP_COMMANDS,
     "hooks": HOOK_COMMANDS,
     "agents": AGENTS_COMMANDS,
+    "bashes": PROCESS_COMMANDS,
+    "process": PROCESS_COMMANDS,
+    "processes": PROCESS_COMMANDS,
     "remote-control": REMOTE_CONTROL_COMMANDS,
     "remote_control": REMOTE_CONTROL_COMMANDS,
     "rc": REMOTE_CONTROL_COMMANDS,
@@ -7163,6 +7224,12 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("agents", "model-review"): ("--approved",),
     ("agents", "run"): ("--approved",),
     ("agents", "run-batch"): ("--approved", "--limit", "--card-id"),
+    ("bashes", "start"): ("--approved", "--actor", "--label"),
+    ("bashes", "logs"): ("--max-bytes",),
+    ("process", "start"): ("--approved", "--actor", "--label"),
+    ("process", "logs"): ("--max-bytes",),
+    ("processes", "start"): ("--approved", "--actor", "--label"),
+    ("processes", "logs"): ("--max-bytes",),
     ("mcp", "call"): ("--approved",),
     ("mcp", "register"): ("--discover", "--transport", "--token-secret", "--tool", "--exclude-tool", "--no-resources", "--no-prompts", "--enable", "--no-approval"),
     ("plugins", "fetch-manifest"): ("--catalog-path",),

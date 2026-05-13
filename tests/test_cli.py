@@ -3509,6 +3509,72 @@ class CliTests(unittest.TestCase):
             self.assertEqual(ran["ran_count"], 1)
             self.assertIn("hello", ran["results"][0]["stdout"])
 
+    def test_processes_cli_controls_governed_background_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            data_dir = root / ".aegis"
+            workspace = root / "workspace"
+            workspace.mkdir()
+            parser = build_parser()
+            process_id = ""
+
+            listed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "processes", "--workspace", str(workspace), "list"]))
+            gated = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "bashes",
+                        "--workspace",
+                        str(workspace),
+                        "start",
+                        "--",
+                        "python3",
+                        "-c",
+                        "print('blocked')",
+                    ]
+                )
+            )
+            started = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "processes",
+                        "--workspace",
+                        str(workspace),
+                        "start",
+                        "--approved",
+                        "--label",
+                        "CLI process",
+                        "--",
+                        "python3",
+                        "-c",
+                        "import time; print('cli process', flush=True); time.sleep(30)",
+                    ]
+                )
+            )
+            process_id = started["process"]["id"]
+            try:
+                logs = dispatch(parser.parse_args(["--data-dir", str(data_dir), "process", "--workspace", str(workspace), "logs", process_id]))
+                stopped = dispatch(parser.parse_args(["--data-dir", str(data_dir), "processes", "--workspace", str(workspace), "stop", process_id]))
+
+                self.assertEqual(listed["status"], "process_registry_ready")
+                self.assertEqual(gated["status"], "approval_required")
+                self.assertTrue(started["ok"])
+                self.assertFalse(started["process"]["raw_command_included"])
+                self.assertIn("private_redacted_logs", started["processes"]["implemented_controls"])
+                self.assertTrue(logs["ok"])
+                self.assertNotIn("time.sleep(30)", json.dumps(started, sort_keys=True))
+                self.assertTrue(stopped["ok"])
+                self.assertEqual(stopped["receipt"]["receipt_schema"], "aegis.process.v1")
+            finally:
+                if process_id:
+                    try:
+                        dispatch(parser.parse_args(["--data-dir", str(data_dir), "processes", "--workspace", str(workspace), "stop", process_id]))
+                    except Exception:
+                        pass
+
     def test_plugin_cli_installs_and_removes_local_plugin(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

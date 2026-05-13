@@ -19,6 +19,7 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
     channels = orchestrator.channels.list_channels()
     tools = orchestrator.tool_catalog.list()
     backends = orchestrator.execution_backends.list()
+    processes = orchestrator.processes.status(limit=12)
     providers = orchestrator.models.list_providers()
     schedules = orchestrator.schedules.list_schedules()
     sessions = orchestrator.sessions.list_sessions()
@@ -70,6 +71,8 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
             "backend_gate_tools": len(backend_gate_tools),
             "limited_or_facade_tools": limited_or_facade_tools,
             "execution_backends": len(backends),
+            "background_processes": processes["process_count"],
+            "active_background_processes": processes["active_process_count"],
             "model_providers": len(providers),
             "configured_or_local_providers": len(configured_providers),
             "sessions": len(sessions),
@@ -170,8 +173,8 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
             {
                 "name": "Execution backends",
                 "state": "policy_visible",
-                "coverage": f"{len(backends)} backend definitions",
-                "detail": "Local, Docker, SSH, Singularity, Modal, Daytona, and Vercel Sandbox are represented for policy decisions.",
+                "coverage": f"{len(backends)} backend definitions, {processes['active_process_count']} active background process(es)",
+                "detail": "Local, Docker, SSH, Singularity, Modal, Daytona, and Vercel Sandbox are represented for policy decisions; governed argv-only background processes expose approval-gated start, stop, status, and redacted private logs.",
             },
         ],
         "competitive_targets": competitive_targets,
@@ -185,10 +188,12 @@ def build_product_dashboard(orchestrator: Any) -> dict[str, Any]:
             live_connector_adapters,
             available_live_connector_adapters,
             backends,
+            processes,
             subagent_delegations,
         ),
         "implementation_readiness": implementation_readiness,
         "subagent_delegations": subagent_delegations,
+        "background_processes": processes,
         "enterprise_readiness": enterprise_readiness,
         "memory_readiness": memory_readiness,
         "self_improvement_readiness": self_improvement_readiness,
@@ -403,6 +408,7 @@ def _live_gap_backlog(
     live_connector_adapters: list[dict[str, Any]],
     available_live_connector_adapters: list[dict[str, Any]],
     backends: list[dict[str, Any]],
+    processes: dict[str, Any],
     subagent_delegations: dict[str, Any],
 ) -> list[dict[str, Any]]:
     readiness_by_state = {row["state"]: row for row in readiness}
@@ -750,22 +756,31 @@ def _live_gap_backlog(
             "detail": (
                 "Some nonlocal execution adapters are enabled with receipts; hosted sandbox backends still require provider-specific activation work."
                 if implemented_backends
-                else "Nonlocal execution adapters exist but are disabled by default; configure scoped credentials, allowlists, and rollback posture before use."
+                else "Local governed background processes are available for argv-only runs; nonlocal execution adapters exist but are disabled by default and require scoped credentials, allowlists, and rollback posture before use."
                 if available_backends
                 else "Enable backend-gated execution paths only after sandbox credentials, scope limits, rollback, and receipts are implemented."
             ),
             "sample_tools": backend_tools[:8],
+            "local_process_registry": {
+                "status": processes.get("status"),
+                "active_process_count": processes.get("active_process_count"),
+                "implemented_controls": processes.get("implemented_controls", []),
+                "remaining_depth_work": processes.get("remaining_depth_work", []),
+                "raw_command_included": False,
+                "raw_secret_values_included": False,
+            },
             "implemented_backend_adapters": implemented_backends,
             "available_backend_adapters": available_backends,
-            "operator_checklist": _remote_backend_operator_checklist(implemented_backends, available_backends),
+            "operator_checklist": _remote_backend_operator_checklist(implemented_backends, available_backends, processes),
             "next_steps": [
+                "Add interactive PTY attach, stdin streaming, and resize events on top of the existing local process registry.",
                 "Add backend-specific auth checks through brokered handles.",
                 "Enforce workspace, network, resource, and rollback limits before dispatch.",
                 "Record activation, execution, and cleanup receipts for every remote run.",
             ],
-            "required_controls": ["brokered_backend_auth", "scope_limits", "resource_limits", "rollback_receipts"],
-            "verification_gates": ["disabled_backend_denial", "approved_activation", "cleanup_receipt", "scope_escape_rejection"],
-            "evaluation_scenarios": ["backend_activation.remote_execution_disabled"],
+            "required_controls": ["approval_required_process_start", "executable_allowlist", "private_redacted_process_logs", "brokered_backend_auth", "scope_limits", "resource_limits", "rollback_receipts"],
+            "verification_gates": ["process_start_approval_gate", "process_log_redaction", "disabled_backend_denial", "approved_activation", "cleanup_receipt", "scope_escape_rejection"],
+            "evaluation_scenarios": ["processes.governed_background_registry", "backend_activation.remote_execution_disabled"],
             "configured_provider_count": len(configured_providers),
         },
     ]
@@ -1233,8 +1248,18 @@ def _available_backend_adapters(backends: list[dict[str, Any]]) -> list[dict[str
     return adapters
 
 
-def _remote_backend_operator_checklist(implemented_backends: list[dict[str, Any]], available_backends: list[dict[str, Any]]) -> list[dict[str, str]]:
+def _remote_backend_operator_checklist(
+    implemented_backends: list[dict[str, Any]],
+    available_backends: list[dict[str, Any]],
+    processes: dict[str, Any] | None = None,
+) -> list[dict[str, str]]:
+    process_controls = set((processes or {}).get("implemented_controls", []))
     return [
+        {
+            "control": "local_background_process_registry",
+            "state": "enforced" if {"approval_required_start", "private_redacted_logs", "stop_receipts"}.issubset(process_controls) else "pending",
+            "detail": "Local background processes use argv-only execution, executable allowlists, explicit approval, private redacted logs, and stop receipts before deeper PTY attach is added.",
+        },
         {
             "control": "explicit_backend_enablement",
             "state": "required_per_backend",

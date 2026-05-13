@@ -543,6 +543,13 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
             if path == "/backends":
                 self._json({"backends": orchestrator.execution_backends.list()})
                 return
+            if path == "/processes":
+                self._json(orchestrator.processes.status(limit=_limit(query, default=20)))
+                return
+            match_process_logs = re.fullmatch(r"/processes/([^/]+)/logs", path)
+            if match_process_logs:
+                self._json(orchestrator.processes.logs(unquote(match_process_logs.group(1)), max_bytes=int(query.get("max_bytes", ["4096"])[0])))
+                return
             if path == "/browser/sessions":
                 self._json({"sessions": orchestrator.browser.list_sessions()})
                 return
@@ -2031,6 +2038,28 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 if not isinstance(context, dict):
                     raise ValueError("context must be a JSON object")
                 self._json(orchestrator.hooks.run_event(str(_required(payload, "event")), context=context, approved=bool(payload.get("approved", False))))
+                return
+            if path == "/processes/start":
+                payload = self._read_json()
+                argv = payload.get("argv")
+                if not isinstance(argv, list):
+                    raise ValueError("argv must be a JSON array")
+                approved = payload.get("approved", False)
+                if not isinstance(approved, bool):
+                    raise ValueError("approved must be a JSON boolean")
+                self._json(
+                    orchestrator.processes.start(
+                        [str(part) for part in argv],
+                        approved=approved,
+                        actor=str(payload.get("actor") or "web-operator"),
+                        label=str(payload.get("label") or ""),
+                    )
+                )
+                return
+            match_process_stop = re.fullmatch(r"/processes/([^/]+)/stop", path)
+            if match_process_stop:
+                payload = self._read_json()
+                self._json(orchestrator.processes.stop(unquote(match_process_stop.group(1)), actor=str(payload.get("actor") or "web-operator")))
                 return
             match_hook_action = re.fullmatch(r"/hooks/([^/]+)/(enable|disable|remove)", path)
             if match_hook_action:

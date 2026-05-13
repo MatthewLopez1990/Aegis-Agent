@@ -171,6 +171,23 @@ const fieldList = (id) =>
     .map((item) => item.trim())
     .filter(Boolean);
 
+const processArgvValue = () => {
+  const raw = String(document.getElementById("process-argv")?.value || "").trim();
+  if (!raw) return [];
+  if (raw.startsWith("[")) {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) throw new Error("Process argv JSON must be an array.");
+    return parsed.map(String);
+  }
+  return (raw.match(/"([^"\\]*(?:\\.[^"\\]*)*)"|'([^']*)'|\S+/g) || []).map((part) =>
+    part.startsWith('"') && part.endsWith('"')
+      ? part.slice(1, -1).replace(/\\"/g, '"')
+      : part.startsWith("'") && part.endsWith("'")
+        ? part.slice(1, -1)
+        : part
+  );
+};
+
 const copyButton = (label, value) =>
   value ? `<button type="button" class="secondary" data-copy-command="${escapeHtml(value)}">${text(label)}</button>` : "";
 
@@ -488,6 +505,7 @@ const refresh = async () => {
       modelUsage,
       tools,
       backends,
+      processes,
       browserSessions,
       skillHub,
       skills,
@@ -529,6 +547,7 @@ const refresh = async () => {
       api("/model-usage"),
       api("/tools"),
       api("/backends"),
+      api("/processes"),
       api("/browser/sessions"),
       api(`/skill-hub?q=${encodeURIComponent(state.skillHubQuery)}`),
       api("/skills"),
@@ -677,6 +696,20 @@ const refresh = async () => {
       meta: `${x.risk_level} · ${x.enabled ? "enabled" : "disabled"} · ${x.activation?.status || "unknown"} · ${x.activation?.preflight_status || "unknown"}`,
       tone: x.enabled ? "ready" : "",
     }));
+    setList("processes", processes.processes || [], (x) => ({
+      title: x.label || shortId(x.id),
+      detail: `${x.executable || "process"} · argv ${x.argv_count || 0} · ${x.pty_attached ? "pty attached" : "background log"}`,
+      meta: `${x.status || "unknown"} · ${shortId(x.id)} · raw command ${formatBool(x.raw_command_included)}`,
+      tone: x.status === "running" ? "ready" : x.status === "stop_requested" ? "attention" : "",
+      actions: `
+        <button type="button" class="secondary" data-process-logs="${escapeHtml(x.id)}">Logs</button>
+        ${
+          ["running", "stop_requested"].includes(x.status)
+            ? `<button type="button" class="secondary" data-process-stop="${escapeHtml(x.id)}">Stop</button>`
+            : ""
+        }
+      `,
+    }), "No background processes");
     if (!state.browserSessionId && browserSessions.sessions.length) {
       state.browserSessionId = browserSessions.sessions[0].id;
     }
@@ -2233,6 +2266,14 @@ const renderToolRunOutput = (payload) => {
   `;
 };
 
+const renderProcessOutput = (payload) => {
+  const node = document.getElementById("process-output");
+  node.innerHTML = `
+    <strong>${text(payload.status || (payload.ok ? "process result" : "process notice"))}</strong>
+    <code>${text(JSON.stringify(payload, null, 2))}</code>
+  `;
+};
+
 const installToolRunPresets = () => {
   const node = document.getElementById("tool-run-presets");
   if (!node) return;
@@ -3701,6 +3742,45 @@ document.getElementById("tool-run-presets").addEventListener("click", (event) =>
   document.getElementById("tool-run-name").value = preset.name;
   document.getElementById("tool-run-params").value = JSON.stringify(preset.params, null, 2);
   renderToolRunOutput({ status: "preset_loaded", tool: preset.name, params: preset.params });
+});
+
+document.getElementById("process-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  let argv = [];
+  try {
+    argv = processArgvValue();
+  } catch (error) {
+    renderProcessOutput({ status: "bad_argv", reason: error.message });
+    return;
+  }
+  const result = await api("/processes/start", {
+    method: "POST",
+    body: JSON.stringify({
+      argv,
+      label: document.getElementById("process-label").value || "",
+      actor: "web-operator",
+      approved: true,
+    }),
+  });
+  renderProcessOutput(result);
+  await refresh();
+});
+
+document.getElementById("processes").addEventListener("click", async (event) => {
+  const logId = event.target.dataset.processLogs;
+  if (logId) {
+    const result = await api(`/processes/${encodeURIComponent(logId)}/logs?max_bytes=4096`);
+    renderProcessOutput(result);
+    return;
+  }
+  const stopId = event.target.dataset.processStop;
+  if (!stopId) return;
+  const result = await api(`/processes/${encodeURIComponent(stopId)}/stop`, {
+    method: "POST",
+    body: JSON.stringify({ actor: "web-operator" }),
+  });
+  renderProcessOutput(result);
+  await refresh();
 });
 
 document.getElementById("tool-run-output").addEventListener("click", async (event) => {

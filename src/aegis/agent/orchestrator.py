@@ -46,6 +46,7 @@ from aegis.models.client import LiveModelClient
 from aegis.models.registry import ModelRegistry
 from aegis.personality.context import ContextFileLoader
 from aegis.plugins.manager import PluginManager
+from aegis.processes.manager import ProcessRegistry
 from aegis.research.harness import ResearchHarness
 from aegis.scheduler.manager import ScheduleManager
 from aegis.security.context_firewall import ContextFirewall
@@ -138,6 +139,13 @@ class AgentOrchestrator:
         )
         self.model_client = LiveModelClient(self.models.secrets_broker, auth_metadata_recorder=self.models.record_external_auth_metadata)
         self.hooks = HookManager(config.data_dir / "hooks.json", audit_logger, allowed_executables=config.allowed_shell_commands, workspace=self.workspace)
+        self.processes = ProcessRegistry(
+            config.data_dir / "processes.json",
+            audit_logger,
+            allowed_executables=config.allowed_shell_commands,
+            workspace=self.workspace,
+            policy_gate=self.policy_gate,
+        )
         self.schedules = ScheduleManager(store, audit_logger)
         self.kanban = KanbanManager(store, audit_logger)
         self.mcp = McpRegistry(store, audit_logger, self.secrets_broker)

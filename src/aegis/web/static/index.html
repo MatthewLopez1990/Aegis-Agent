@@ -414,6 +414,22 @@
         <section class="panel span-2" data-section="tools">
           <div class="panel-header">
             <div>
+              <p class="eyebrow">Terminal</p>
+              <h3>Processes</h3>
+            </div>
+          </div>
+          <form id="process-form" class="inline-form two-col">
+            <input id="process-label" placeholder="label">
+            <input id="process-argv" placeholder='["python3","-c","print(\"ok\")"]'>
+            <button type="submit">Start</button>
+          </form>
+          <div id="process-output" class="evidence-block"></div>
+          <div id="processes" class="list compact-list"></div>
+        </section>
+
+        <section class="panel span-2" data-section="tools">
+          <div class="panel-header">
+            <div>
               <p class="eyebrow">Web Control</p>
               <h3>Browser Sandbox</h3>
             </div>

@@ -826,6 +826,23 @@ def build_parser() -> argparse.ArgumentParser:
     agents_profile_disable.add_argument("--actor", default="operator")
     agents_profile_disable.add_argument("--limit", type=int, default=20)
 
+    processes = subcommands.add_parser("processes", aliases=("process", "bashes"), help="Manage governed local background processes")
+    processes.add_argument("--workspace", default=".")
+    processes_sub = processes.add_subparsers(dest="processes_command", required=True)
+    processes_list = processes_sub.add_parser("list", help="List governed background processes")
+    processes_list.add_argument("--limit", type=int, default=20)
+    processes_start = processes_sub.add_parser("start", help="Start an approval-gated argv-only background process")
+    processes_start.add_argument("--approved", action="store_true")
+    processes_start.add_argument("--actor", default="operator")
+    processes_start.add_argument("--label", default="")
+    processes_start.add_argument("argv", nargs=argparse.REMAINDER)
+    processes_stop = processes_sub.add_parser("stop", help="Request a running background process to stop")
+    processes_stop.add_argument("process_id")
+    processes_stop.add_argument("--actor", default="operator")
+    processes_logs = processes_sub.add_parser("logs", help="Read a redacted tail of private process logs")
+    processes_logs.add_argument("process_id")
+    processes_logs.add_argument("--max-bytes", type=int, default=4096)
+
     mcp = subcommands.add_parser("mcp", help="Manage governed MCP server registrations")
     mcp_sub = mcp.add_subparsers(dest="mcp_command", required=True)
     mcp_register = mcp_sub.add_parser("register", help="Register an MCP server disabled by default")
@@ -2433,6 +2450,17 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
         if args.agents_command == "profile-disable":
             result = orchestrator.kanban.disable_subagent_profile(args.profile_id, actor=args.actor)
             return {**result, "subagents": orchestrator.kanban.subagent_status(limit=args.limit)}
+
+    if args.command in {"processes", "process", "bashes"}:
+        orchestrator = build_orchestrator(data_dir=args.data_dir, workspace=args.workspace)
+        if args.processes_command == "list":
+            return orchestrator.processes.status(limit=args.limit)
+        if args.processes_command == "start":
+            return orchestrator.processes.start(args.argv, approved=args.approved, actor=args.actor, label=args.label)
+        if args.processes_command == "stop":
+            return orchestrator.processes.stop(args.process_id, actor=args.actor)
+        if args.processes_command == "logs":
+            return orchestrator.processes.logs(args.process_id, max_bytes=args.max_bytes)
 
     if args.command == "mcp":
         registry = _mcp_registry(config)
