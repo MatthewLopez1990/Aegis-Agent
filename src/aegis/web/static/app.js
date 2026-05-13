@@ -769,7 +769,7 @@ const refresh = async () => {
     setList("mcp-servers", mcpServers.servers, (x) => ({
       title: x.name,
       detail: x.command,
-      meta: `${x.metadata?.transport || "stdio"} · ${x.enabled ? "enabled" : "disabled"} · ${x.approval_required ? "approval required" : "approval optional"} · ${x.allowed_tools.join(", ") || "no tools"}`,
+      meta: `${x.metadata?.transport || "stdio"} · auth ${x.metadata?.auth?.type || "none"} · oauth ${x.metadata?.oauth?.status || "none"} · ${x.enabled ? "enabled" : "disabled"} · ${x.approval_required ? "approval required" : "approval optional"} · ${x.allowed_tools.join(", ") || "no tools"}`,
     }), "No MCP servers");
     setList("schedules", schedules.schedules, (x) => ({
       title: x.name,
@@ -3518,6 +3518,26 @@ document.getElementById("mcp-server-form").addEventListener("submit", async (eve
       allowed_tools: tools,
       enabled: false,
       approval_required: true,
+    }),
+  });
+  await refresh();
+});
+
+document.getElementById("mcp-oauth-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const scopes = document
+    .getElementById("mcp-oauth-scopes")
+    .value.split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  await api("/mcp/auth/oauth", {
+    method: "POST",
+    body: JSON.stringify({
+      server: document.getElementById("mcp-oauth-server").value || "remote-mcp",
+      resource_metadata: document.getElementById("mcp-oauth-resource").value || undefined,
+      authorization_server: document.getElementById("mcp-oauth-authorization").value || undefined,
+      token_secret: document.getElementById("mcp-oauth-token-secret").value || undefined,
+      scopes,
     }),
   });
   await refresh();

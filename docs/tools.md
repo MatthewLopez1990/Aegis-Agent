@@ -19,6 +19,8 @@ Aegis has a governed tool catalog with 73 policy-visible entries:
 - `video_generate`
 - `subagent_delegate` (approval-gated durable delegation cards with tainted-instruction status, parent-bound review receipts, model-ready review packets, approved sanitized model reviews, approved autonomy step plans, approved isolated autonomy loop rehearsals, not autonomous recursion)
 - `mcp_call`
+
+Streamable HTTP MCP registrations can attach brokered bearer secrets directly or through `mcp auth oauth <server>`, which stores sanitized OAuth protected-resource metadata, authorization-server hints, requested scopes, and an optional brokered OAuth bearer secret without storing raw tokens or browser cookies. A 401 `WWW-Authenticate` challenge is recorded as sanitized server metadata for operator review, and approved MCP calls still require tool allowlists, policy approval, and output quarantine.
 - Web extraction, browser click/fill/submit/screenshot/static DOM snapshot/table extraction/session close.
 - Code execution, Python REPL, Git/GitHub, database, calendar, email, contact search/write.
 - Service-desk ticket read/search, approved ticket write actions, and approved messaging send/rollback actions.

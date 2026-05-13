@@ -2254,6 +2254,24 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 payload = self._read_json()
                 self._json(orchestrator.mcp.configure_auth_token(str(_required(payload, "server")), token_secret=str(_required(payload, "token_secret"))))
                 return
+            if path == "/mcp/auth/oauth":
+                payload = self._read_json()
+                scopes = payload.get("scopes", payload.get("scope", []))
+                if isinstance(scopes, str):
+                    scopes = [scopes]
+                if not isinstance(scopes, list):
+                    raise ValueError("scopes must be a JSON array")
+                self._json(
+                    orchestrator.mcp.configure_oauth_authorization(
+                        str(_required(payload, "server")),
+                        resource_metadata_url=_optional_str(payload, "resource_metadata"),
+                        authorization_server=_optional_str(payload, "authorization_server"),
+                        token_secret=_optional_str(payload, "token_secret"),
+                        scopes=tuple(str(scope) for scope in scopes),
+                        network_allowlist=orchestrator.config.network_allowlist,
+                    )
+                )
+                return
             if path == "/mcp/call":
                 payload = self._read_json()
                 server = str(_required(payload, "server"))

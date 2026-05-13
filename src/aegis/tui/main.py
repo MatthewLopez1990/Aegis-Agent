@@ -1648,7 +1648,7 @@ class AegisTui(cmd.Cmd):
         print("usage: memory search|session-preview|session-commit|create|review-queue|review-digest|review-escalation|review-action|review-batch|recertify|update|merge|resolve-conflict|expire|cleanup-expired|explain|export|delete")
 
     def do_mcp(self, arg: str) -> None:
-        """mcp list|register|call -- inspect, register, discover, or call governed MCP servers."""
+        """mcp list|register|auth|call -- inspect, register, authorize, or call governed MCP servers."""
         parts = shlex.split(arg)
         command = parts[0] if parts else "list"
         if command == "list":
@@ -1723,9 +1723,21 @@ class AegisTui(cmd.Cmd):
             if len(parts) >= 4 and parts[1] == "token":
                 _print_json(self.orchestrator.mcp.configure_auth_token(parts[2], token_secret=parts[3]))
                 return
-            print("usage: mcp auth token <server> <token-secret>")
+            if len(parts) >= 3 and parts[1] == "oauth":
+                _print_json(
+                    self.orchestrator.mcp.configure_oauth_authorization(
+                        parts[2],
+                        resource_metadata_url=(_option_values(parts, "--resource-metadata") or [None])[0],
+                        authorization_server=(_option_values(parts, "--authorization-server") or [None])[0],
+                        token_secret=(_option_values(parts, "--token-secret") or [None])[0],
+                        scopes=tuple(_option_values(parts, "--scope")),
+                        network_allowlist=self.orchestrator.config.network_allowlist,
+                    )
+                )
+                return
+            print("usage: mcp auth token <server> <token-secret> | mcp auth oauth <server> [--resource-metadata url] [--authorization-server url] [--token-secret name] [--scope scope]")
             return
-        print("usage: mcp list | mcp register <name> <command-or-endpoint> <tool,tool>|--discover [--transport stdio|streamable-http] [--token-secret name] [--tool name] [--exclude-tool name] [--no-resources] [--no-prompts] [--enable] [--no-approval] | mcp auth token <server> <token-secret> | mcp call <server> <tool> <json-arguments> [--approved]")
+        print("usage: mcp list | mcp register <name> <command-or-endpoint> <tool,tool>|--discover [--transport stdio|streamable-http] [--token-secret name] [--tool name] [--exclude-tool name] [--no-resources] [--no-prompts] [--enable] [--no-approval] | mcp auth token <server> <token-secret> | mcp auth oauth <server> [--resource-metadata url] [--authorization-server url] [--token-secret name] [--scope scope] | mcp call <server> <tool> <json-arguments> [--approved]")
 
     def do_repairs(self, arg: str) -> None:
         """repairs [status] -- list self-repair proposals."""
@@ -6710,7 +6722,7 @@ def _command_reference() -> str:
             "plugins list|install|enable|disable|remove|reload|marketplace|updates|fetch-manifest|fetch-bundle|install-bundle|install-marketplace|update-marketplace|prepare-update|apply-prepared-update",
             "plugin|reload|reload-plugins|reload-skills|reload_skills  Extension inventory aliases",
             "memory health|search|session-preview|create|update|merge|expire",
-            "mcp list|register|call Governed MCP registry",
+            "mcp list|register|auth|call Governed MCP registry",
             "reload-mcp             Refresh governed one-shot MCP registry status",
             "repairs [status]       List self-repair proposals",
             "repair <id>            Inspect self-repair proposal evidence",
@@ -7308,6 +7320,7 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("processes", "resize"): ("--rows", "--cols"),
     ("mcp", "call"): ("--approved",),
     ("mcp", "register"): ("--discover", "--transport", "--token-secret", "--tool", "--exclude-tool", "--no-resources", "--no-prompts", "--enable", "--no-approval"),
+    ("mcp", "auth"): ("--resource-metadata", "--authorization-server", "--token-secret", "--scope"),
     ("plugins", "fetch-manifest"): ("--catalog-path",),
     ("plugin", "fetch-manifest"): ("--catalog-path",),
     ("plugins", "fetch-bundle"): ("--catalog-path", "--key-name"),

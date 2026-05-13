@@ -1018,6 +1018,29 @@ class ApiServerSecurityTests(unittest.TestCase):
                 with self.assertRaises(HTTPError) as disabled_email_send:
                     _json_post(port, "/channels/email/send", {"subject": "Review", "text": "Ready for review"}, token=token)
                 mcp_registered = _json_post(port, "/mcp/servers", {"name": "web-mcp", "command": "python3 /tmp/server.py", "allowed_tools": ["echo"]}, token=token)
+                mcp_remote_registered = _json_post(
+                    port,
+                    "/mcp/servers",
+                    {
+                        "name": "web-remote-mcp",
+                        "command": "http://127.0.0.1:1/mcp",
+                        "allowed_tools": ["echo"],
+                        "transport": "streamable-http",
+                    },
+                    token=token,
+                )
+                mcp_oauth = _json_post(
+                    port,
+                    "/mcp/auth/oauth",
+                    {
+                        "server": "web-remote-mcp",
+                        "resource_metadata": "http://127.0.0.1:1/.well-known/oauth-protected-resource?access_token=raw-secret",
+                        "authorization_server": "http://127.0.0.1:1/oauth/authorize?client_secret=raw-secret",
+                        "token_secret": "MCP_OAUTH_TOKEN",
+                        "scopes": ["tools:read", "tools:call"],
+                    },
+                    token=token,
+                )
                 mcp_servers = _json_get(port, "/mcp/servers", token=token)
                 skill_hub_search = _json_get(port, "/skill-hub?q=browser", token=token)
                 installed_skills = _json_get(port, "/skills", token=token)
@@ -1626,6 +1649,10 @@ class ApiServerSecurityTests(unittest.TestCase):
                 self.assertFalse(mcp_registered["enabled"])
                 self.assertTrue(mcp_registered["approval_required"])
                 self.assertEqual(mcp_registered["allowed_tools"], ["echo"])
+                self.assertEqual(mcp_remote_registered["metadata"]["transport"], "streamable_http")
+                self.assertEqual(mcp_oauth["metadata"]["auth"]["type"], "oauth_bearer_token")
+                self.assertEqual(mcp_oauth["metadata"]["oauth"]["requested_scopes"], ["tools:read", "tools:call"])
+                self.assertNotIn("raw-secret", json.dumps(mcp_oauth, sort_keys=True))
                 self.assertTrue(any(server["name"] == "web-mcp" for server in mcp_servers["servers"]))
                 self.assertEqual(skill_hub_search["mode"], "virtual_catalog_no_code_download")
                 self.assertTrue(any(entry["id"] == "hub.browser-research" for entry in skill_hub_search["entries"]))

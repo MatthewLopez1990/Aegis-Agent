@@ -816,11 +816,36 @@ class CliTests(unittest.TestCase):
                 )
             )
             configured = dispatch(parser.parse_args(["--data-dir", str(data_dir), "mcp", "auth", "token", "remote", "MCP_REMOTE_TOKEN"]))
+            oauth_configured = dispatch(
+                parser.parse_args(
+                    [
+                        "--data-dir",
+                        str(data_dir),
+                        "mcp",
+                        "auth",
+                        "oauth",
+                        "remote",
+                        "--resource-metadata",
+                        "http://127.0.0.1:1/.well-known/oauth-protected-resource?access_token=raw-secret",
+                        "--authorization-server",
+                        "http://127.0.0.1:1/oauth/authorize?client_secret=raw-secret",
+                        "--token-secret",
+                        "MCP_OAUTH_TOKEN",
+                        "--scope",
+                        "tools:read",
+                        "--scope",
+                        "tools:call",
+                    ]
+                )
+            )
             listed = dispatch(parser.parse_args(["--data-dir", str(data_dir), "mcp", "list"]))
 
             self.assertEqual(registered["metadata"]["transport"], "streamable_http")
             self.assertEqual(configured["metadata"]["auth"]["token_secret"], "MCP_REMOTE_TOKEN")
-            self.assertEqual(listed["servers"][0]["metadata"]["auth"]["type"], "bearer_token")
+            self.assertEqual(oauth_configured["metadata"]["auth"]["type"], "oauth_bearer_token")
+            self.assertEqual(oauth_configured["metadata"]["oauth"]["requested_scopes"], ["tools:read", "tools:call"])
+            self.assertNotIn("raw-secret", json.dumps(oauth_configured, sort_keys=True))
+            self.assertEqual(listed["servers"][0]["metadata"]["auth"]["type"], "oauth_bearer_token")
 
     def test_remote_control_relay_command_reports_blocked_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

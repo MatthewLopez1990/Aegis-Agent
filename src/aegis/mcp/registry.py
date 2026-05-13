@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import shlex
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
 from aegis.audit.logger import AuditLogger, redact
@@ -269,6 +269,77 @@ class McpRegistry:
         )
         return self.get_server(row["id"])
 
+    def configure_oauth_authorization(
+        self,
+        server: str,
+        *,
+        resource_metadata_url: str | None = None,
+        authorization_server: str | None = None,
+        token_secret: str | None = None,
+        scopes: tuple[str, ...] = (),
+        network_allowlist: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        row = self.get_server(server)
+        metadata = row.get("metadata", {}) if isinstance(row.get("metadata", {}), dict) else {}
+        if str(metadata.get("transport") or "stdio") != "streamable_http":
+            raise ValueError("MCP OAuth authorization is only supported for Streamable HTTP MCP servers")
+        oauth = metadata.get("oauth", {}) if isinstance(metadata.get("oauth", {}), dict) else {}
+        challenge = metadata.get("last_http_auth_challenge", {}) if isinstance(metadata.get("last_http_auth_challenge", {}), dict) else {}
+        challenge_params = challenge.get("parameters", {}) if isinstance(challenge.get("parameters", {}), dict) else {}
+        resource_url = (resource_metadata_url or str(oauth.get("resource_metadata_url") or "") or str(challenge_params.get("resource_metadata") or "")).strip()
+        if resource_url:
+            resource_url = _validated_oauth_metadata_url(
+                resource_url,
+                network_allowlist=network_allowlist,
+                enforce_allowlist=bool(network_allowlist),
+            )
+        auth_server = (authorization_server or str(oauth.get("authorization_server") or "")).strip()
+        if auth_server:
+            auth_server = _validated_oauth_metadata_url(
+                auth_server,
+                network_allowlist=network_allowlist,
+                enforce_allowlist=bool(network_allowlist),
+            )
+        auth = metadata.get("auth", {}) if isinstance(metadata.get("auth", {}), dict) else {}
+        requested_scopes = _safe_oauth_scopes(scopes)
+        if not requested_scopes and isinstance(oauth.get("requested_scopes", []), list):
+            requested_scopes = _safe_oauth_scopes(tuple(str(scope) for scope in oauth.get("requested_scopes", [])))
+        token_secret_configured = bool(token_secret or auth.get("token_secret"))
+        updated_oauth = {
+            **oauth,
+            "type": "oauth2_protected_resource",
+            "status": "oauth_bearer_ready" if token_secret_configured else "oauth_metadata_ready",
+            "resource_metadata_url": resource_url,
+            "authorization_server": auth_server,
+            "requested_scopes": requested_scopes,
+            "token_secret_configured": token_secret_configured,
+            "raw_tokens_captured": False,
+            "raw_browser_cookie_import": False,
+            "updated_at": now_utc(),
+        }
+        updated_metadata = {**metadata, "oauth": updated_oauth}
+        if token_secret:
+            updated_metadata["auth"] = {
+                "type": "oauth_bearer_token",
+                "token_secret": token_secret,
+                "source": "brokered_local_secret",
+                "oauth_protected_resource": True,
+                "raw_secret_values_stored_in_registry": False,
+            }
+        updated = {**row, "metadata": updated_metadata}
+        self.store.insert_mcp_server(updated)
+        self.audit_logger.append(
+            "mcp.oauth_configured",
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "transport": updated_metadata["transport"],
+                "oauth": _oauth_audit_summary(updated_metadata),
+                "auth": _auth_audit_summary(updated_metadata),
+            },
+        )
+        return self.get_server(row["id"])
+
     def virtual_tools(self) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for server in self.list_servers():
@@ -368,6 +439,7 @@ class McpRegistry:
         try:
             result = _call_mcp_utility(client, str(tool_metadata.get("utility")), arguments) if tool_metadata.get("utility") else client.call_tool(tool, arguments)
         except McpHttpAuthError as exc:
+            self._record_http_auth_challenge(row, exc.challenge)
             self.audit_logger.append(
                 "mcp.http_auth_required",
                 {"server": row["name"], "tool": tool, **audit_target, **exc.to_dict()},
@@ -388,6 +460,32 @@ class McpRegistry:
             task_id=task_id,
         )
         return call
+
+    def _record_http_auth_challenge(self, row: dict[str, Any], challenge: dict[str, Any]) -> None:
+        metadata = row.get("metadata", {}) if isinstance(row.get("metadata", {}), dict) else {}
+        sanitized_challenge = _sanitize_http_auth_challenge(challenge)
+        oauth = metadata.get("oauth", {}) if isinstance(metadata.get("oauth", {}), dict) else {}
+        params = sanitized_challenge.get("parameters", {}) if isinstance(sanitized_challenge.get("parameters", {}), dict) else {}
+        resource_metadata_url = str(params.get("resource_metadata") or "").strip()
+        if resource_metadata_url:
+            oauth = {
+                **oauth,
+                "type": "oauth2_protected_resource",
+                "status": "oauth_metadata_required",
+                "resource_metadata_url": resource_metadata_url,
+                "raw_tokens_captured": False,
+                "raw_browser_cookie_import": False,
+                "updated_at": now_utc(),
+            }
+        updated = {
+            **row,
+            "metadata": {
+                **metadata,
+                "last_http_auth_challenge": {**sanitized_challenge, "recorded_at": now_utc()},
+                "oauth": oauth,
+            },
+        }
+        self.store.insert_mcp_server(updated)
 
 
 def _client_for_row(
@@ -452,6 +550,43 @@ def _auth_audit_summary(metadata: dict[str, Any]) -> dict[str, Any]:
     return {"type": str(auth.get("type")), "source": str(auth.get("source") or ""), "token_secret_configured": bool(auth.get("token_secret"))}
 
 
+def _oauth_audit_summary(metadata: dict[str, Any]) -> dict[str, Any]:
+    oauth = metadata.get("oauth", {}) if isinstance(metadata, dict) else {}
+    if not isinstance(oauth, dict) or not oauth.get("type"):
+        return {"type": "none", "token_secret_configured": False}
+    return {
+        "type": str(oauth.get("type")),
+        "status": str(oauth.get("status") or ""),
+        "resource_metadata_url_configured": bool(oauth.get("resource_metadata_url")),
+        "authorization_server_configured": bool(oauth.get("authorization_server")),
+        "scope_count": len(oauth.get("requested_scopes", [])) if isinstance(oauth.get("requested_scopes", []), list) else 0,
+        "token_secret_configured": bool(oauth.get("token_secret_configured")),
+        "raw_tokens_captured": False,
+    }
+
+
+def _safe_oauth_scopes(scopes: tuple[str, ...]) -> list[str]:
+    safe: list[str] = []
+    for scope in scopes:
+        normalized = re.sub(r"[^a-zA-Z0-9:._/\-]+", "", str(scope).strip())[:120]
+        if normalized and normalized not in safe:
+            safe.append(normalized)
+    return safe[:30]
+
+
+def _sanitize_http_auth_challenge(challenge: dict[str, Any]) -> dict[str, Any]:
+    parameters = challenge.get("parameters", {}) if isinstance(challenge.get("parameters", {}), dict) else {}
+    sanitized_parameters = redact({str(key): str(value)[:240] for key, value in parameters.items()})
+    if not isinstance(sanitized_parameters, dict):
+        sanitized_parameters = {}
+    return {
+        "present": bool(challenge.get("present", True)),
+        "scheme": re.sub(r"[^A-Za-z0-9_.-]+", "", str(challenge.get("scheme") or "unknown"))[:40] or "unknown",
+        "parameters": sanitized_parameters,
+        "raw_header_included": False,
+    }
+
+
 def _resolve_mcp_bearer_token(secrets_broker: SecretsBroker, *, auth_token_secret: str | None, requester: str) -> str | None:
     if not auth_token_secret:
         return None
@@ -498,6 +633,22 @@ def _parse_mcp_http_endpoint(
         if private_error:
             raise PermissionError(private_error.replace("live HTTP reads", "MCP Streamable HTTP"))
     return endpoint
+
+
+def _validated_oauth_metadata_url(
+    endpoint_url: str,
+    *,
+    network_allowlist: tuple[str, ...],
+    enforce_allowlist: bool,
+) -> str:
+    endpoint = _parse_mcp_http_endpoint(
+        endpoint_url,
+        network_allowlist=network_allowlist,
+        enforce_allowlist=enforce_allowlist,
+        verify_network=True,
+    )
+    parsed = urlparse(endpoint)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
 
 
 def _allowed_domain(domain: str, allowlist: tuple[str, ...]) -> bool:

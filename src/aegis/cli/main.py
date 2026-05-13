@@ -892,6 +892,12 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_auth_token = mcp_auth_sub.add_parser("token", help="Attach a brokered bearer-token secret to a Streamable HTTP MCP server")
     mcp_auth_token.add_argument("server")
     mcp_auth_token.add_argument("token_secret")
+    mcp_auth_oauth = mcp_auth_sub.add_parser("oauth", help="Attach OAuth protected-resource metadata and an optional brokered bearer secret to Streamable HTTP MCP")
+    mcp_auth_oauth.add_argument("server")
+    mcp_auth_oauth.add_argument("--resource-metadata")
+    mcp_auth_oauth.add_argument("--authorization-server")
+    mcp_auth_oauth.add_argument("--token-secret")
+    mcp_auth_oauth.add_argument("--scope", action="append", default=[])
     mcp_sub.add_parser("list", help="List MCP servers")
 
     hooks = subcommands.add_parser("hooks", help="Manage governed local lifecycle hooks")
@@ -2540,6 +2546,15 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
         if args.mcp_command == "auth":
             if args.mcp_auth_command == "token":
                 return registry.configure_auth_token(args.server, token_secret=args.token_secret)
+            if args.mcp_auth_command == "oauth":
+                return registry.configure_oauth_authorization(
+                    args.server,
+                    resource_metadata_url=args.resource_metadata,
+                    authorization_server=args.authorization_server,
+                    token_secret=args.token_secret,
+                    scopes=tuple(args.scope),
+                    network_allowlist=config.network_allowlist,
+                )
         if args.mcp_command == "call":
             orchestrator = build_orchestrator(data_dir=args.data_dir)
             return orchestrator.tools.execute(

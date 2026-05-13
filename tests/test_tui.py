@@ -432,6 +432,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("--transport", tui.completedefault("--", "/mcp register fake python3 --", len("/mcp register fake python3 "), len("/mcp register fake python3 --")))
             self.assertIn("--no-resources", tui.completedefault("--", "/mcp register fake python3 --", len("/mcp register fake python3 "), len("/mcp register fake python3 --")))
             self.assertIn("--no-prompts", tui.completedefault("--", "/mcp register fake python3 --", len("/mcp register fake python3 "), len("/mcp register fake python3 --")))
+            self.assertIn("--resource-metadata", tui.completedefault("--", "/mcp auth oauth remote --", len("/mcp auth oauth remote "), len("/mcp auth oauth remote --")))
             self.assertIn("schedule-bundle", tui.complete_security("schedule", "security schedule", len("security "), len("security schedule")))
             self.assertIn("activate-due", tui.complete_security("activate", "security activate", len("security "), len("security activate")))
             self.assertIn("rollouts", tui.complete_security("roll", "security roll", len("security "), len("security roll")))
@@ -1298,6 +1299,7 @@ class TuiTests(unittest.TestCase):
             with redirect_stdout(output):
                 tui.onecmd("mcp register fake 'python3 /tmp/fake_mcp.py' echo,search")
                 tui.onecmd("mcp register remote http://127.0.0.1:1/mcp echo --transport streamable-http --token-secret MCP_REMOTE_TOKEN")
+                tui.onecmd("mcp auth oauth remote --resource-metadata http://127.0.0.1:1/.well-known/oauth-protected-resource?access_token=raw-secret --authorization-server http://127.0.0.1:1/oauth/authorize?client_secret=raw-secret --token-secret MCP_OAUTH_TOKEN --scope tools:read --scope tools:call")
                 tui.onecmd("mcp list")
 
             rendered = output.getvalue()
@@ -1309,7 +1311,10 @@ class TuiTests(unittest.TestCase):
             self.assertEqual(by_name["fake"]["allowed_tools"], ["echo", "search"])
             self.assertEqual(by_name["fake"]["metadata"]["transport"], "stdio")
             self.assertEqual(by_name["remote"]["metadata"]["transport"], "streamable_http")
-            self.assertEqual(by_name["remote"]["metadata"]["auth"]["token_secret"], "MCP_REMOTE_TOKEN")
+            self.assertEqual(by_name["remote"]["metadata"]["auth"]["type"], "oauth_bearer_token")
+            self.assertEqual(by_name["remote"]["metadata"]["auth"]["token_secret"], "MCP_OAUTH_TOKEN")
+            self.assertEqual(by_name["remote"]["metadata"]["oauth"]["requested_scopes"], ["tools:read", "tools:call"])
+            self.assertNotIn("raw-secret", rendered)
             self.assertIn('"name": "fake"', rendered)
             self.assertIn('"name": "remote"', rendered)
             self.assertIn('"enabled": false', rendered)

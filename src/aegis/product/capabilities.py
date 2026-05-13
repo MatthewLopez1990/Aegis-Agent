@@ -319,9 +319,10 @@ def _competitive_targets() -> list[dict[str, Any]]:
                 "approved remote-control relay action proxy",
                 "scoped remote-control directory",
                 "allowlisted brokered-bearer Streamable HTTP MCP",
+                "remote MCP OAuth protected-resource metadata and brokered OAuth bearer configuration",
             ],
             "security_delta": "Aegis treats all external outputs as tainted data and requires approval for high-impact actions by default.",
-            "live_gap": "API-key-ready Hermes providers including Hugging Face, NVIDIA NIM, Vercel AI Gateway, OpenCode, Kilo Code, Ollama Cloud, Arcee, GMI, StepFun, Xiaomi, Tencent TokenHub, Kimi China, and MiniMax China are routable alongside brokered Nous Portal OAuth, MiniMax Token Plan, brokered MiniMax OAuth, brokered Google Gemini OAuth / Code Assist, verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, Google Vertex AI, AWS Bedrock, and Azure Foundry cloud-identity bridges; remaining work is local operator sign-in/configuration for unverified accounts and future provider-native bridges beyond the tracked target set.",
+            "live_gap": "API-key-ready Hermes providers including Hugging Face, NVIDIA NIM, Vercel AI Gateway, OpenCode, Kilo Code, Ollama Cloud, Arcee, GMI, StepFun, Xiaomi, Tencent TokenHub, Kimi China, and MiniMax China are routable alongside brokered Nous Portal OAuth, MiniMax Token Plan, brokered MiniMax OAuth, brokered Google Gemini OAuth / Code Assist, verified Codex/Claude/Qwen Code/Gemini CLI/Copilot subscription, Google Vertex AI, AWS Bedrock, Azure Foundry cloud-identity bridges, and remote MCP OAuth protected-resource metadata/brokered bearer configuration; remaining work is local operator sign-in/configuration for unverified accounts and future provider-native bridges beyond the tracked target set.",
             "target_requirements": [
                 "provider_native_oauth_and_device_flows",
                 "subscription_login_bridge",
