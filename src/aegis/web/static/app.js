@@ -580,12 +580,7 @@ const refresh = async () => {
     renderMetrics(dashboard);
     renderRemoteControlRelay(remoteControlRelay);
     renderRemoteControlOutbox(remoteControlOutbox);
-    setList("remote-control-push-targets", remoteControl.native_push_targets || [], (x) => ({
-      title: x.label || x.id,
-      detail: `${x.provider || "provider"} · auth ${x.push_auth_secret_configured ? "configured" : "missing"} · device ${x.device_token_secret_configured ? "configured" : "missing"}`,
-      meta: `${x.status} · rotated ${x.rotation_count || 0} · ${x.last_push_delivery_state || "not pushed"}${x.last_push_at ? ` · ${x.last_push_at}` : ""}`,
-      tone: x.status === "active" ? "ready" : "attention",
-    }), "No native push targets");
+    setList("remote-control-push-targets", remoteControl.native_push_targets || [], remoteControlPushTargetItem, "No native push targets");
     setList("remote-control-pairings", remoteControl.pairings || [], (x) => ({
       title: x.label || x.id,
       detail: `Session ${x.session_id || "any"} · task ${x.task_id || "any"} · actions ${(x.allowed_actions || []).join(", ") || "none"}`,
@@ -2040,7 +2035,7 @@ const remoteControlSlashRequest = (request) => {
     if (part.startsWith("--") && parts[index + 1] && !parts[index + 1].startsWith("--")) {
       options[part] = parts[index + 1];
       const queryKey = part.slice(2).replaceAll("-", "_");
-      if (["pairing_id", "limit", "relay_url", "status"].includes(queryKey)) {
+      if (["pairing_id", "limit", "relay_url", "status", "target_id"].includes(queryKey)) {
         query.set(queryKey, parts[index + 1]);
       }
       index += 1;
@@ -2066,6 +2061,8 @@ const executeRemoteControlSlashCommand = async (parsed) => {
     path = `/remote-control/relay${query ? `?${query}` : ""}`;
   } else if (action === "relay-outbox") {
     path = `/remote-control/relay/outbox${query ? `?${query}` : ""}`;
+  } else if (action === "push-targets") {
+    path = `/remote-control/push/targets${query ? `?${query}` : ""}`;
   } else if (action === "pair") {
     const allowedActions = (options["--allowed-actions"] || document.getElementById("remote-control-actions").value)
       .split(",")
@@ -2108,6 +2105,7 @@ const executeRemoteControlSlashCommand = async (parsed) => {
   const payload = await api(path);
   if (action === "relay") renderRemoteControlRelay(payload);
   if (action === "relay-outbox") renderRemoteControlOutbox(payload);
+  if (action === "push-targets") renderRemoteControlPushTargets(payload);
   renderRemoteControlOutput(payload);
   renderTaskNotice(parsed.label || "/remote-control", `Remote control ${action} loaded.`);
   return true;
@@ -2337,6 +2335,19 @@ const renderRemoteControlOutput = (payload) => {
     <strong>${text(payload.pairing?.label || payload.pairing?.id || payload.status || "Remote control")}</strong>
     <code>${text(JSON.stringify(payload, null, 2))}</code>
   `;
+};
+
+const remoteControlPushTargetItem = (target) => ({
+  title: target.label || target.id,
+  detail: `${target.provider || "provider"} · auth ${target.push_auth_secret_configured ? "configured" : "missing"} · device ${target.device_token_secret_configured ? "configured" : "missing"}`,
+  meta: `${target.status} · rotated ${target.rotation_count || 0} · ${target.last_push_delivery_state || "not pushed"}${target.last_push_at ? ` · ${target.last_push_at}` : ""}`,
+  tone: target.status === "active" ? "ready" : "attention",
+});
+
+const renderRemoteControlPushTargets = (payload = {}) => {
+  if (Array.isArray(payload.targets)) {
+    setList("remote-control-push-targets", payload.targets, remoteControlPushTargetItem, "No native push targets");
+  }
 };
 
 const renderRemoteControlRelay = (payload = {}) => {

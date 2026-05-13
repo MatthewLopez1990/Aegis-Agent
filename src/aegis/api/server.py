@@ -141,10 +141,10 @@ def _web_command_catalog(orchestrator: Any) -> dict[str, Any]:
     if "remote-control" in command_rows:
         remote_args = list(command_rows["remote-control"].get("args") or [])
         remote_flags = list(command_rows["remote-control"].get("flags") or [])
-        for arg in ("status",):
+        for arg in ("status", "push-targets"):
             if arg not in remote_args:
                 remote_args.append(arg)
-        for flag in ("--relay-url", "--status"):
+        for flag in ("--relay-url", "--status", "--target-id"):
             if flag not in remote_flags:
                 remote_flags.append(flag)
         command_rows["remote-control"].update(
@@ -162,6 +162,7 @@ def _web_command_catalog(orchestrator: Any) -> dict[str, Any]:
                     {"input": "directory", "method": "GET", "path": "/remote-control/directory", "mutates": False},
                     {"input": "relay", "method": "GET", "path": "/remote-control/relay", "mutates": False},
                     {"input": "relay-outbox", "method": "GET", "path": "/remote-control/relay/outbox", "mutates": False},
+                    {"input": "push-targets", "method": "GET", "path": "/remote-control/push/targets", "mutates": False},
                     {"input": "pair", "method": "POST", "path": "/remote-control/pair", "mutates": True},
                     {"input": "revoke", "method": "POST", "path": "/remote-control/revoke", "mutates": True},
                 ],

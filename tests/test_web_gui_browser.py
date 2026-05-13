@@ -386,7 +386,7 @@ if (!release.includes("settings")) {
 api.merge([
   { command: "debug", label: "/debug", detail: "TUI diagnostics", kind: "palette", source: "tui" },
   { command: "submit", label: "/submit duplicate", detail: "duplicate should be ignored", kind: "palette" },
-  { command: "remote-control", label: "/remote-control", detail: "Remote action metadata", kind: "remote-control", section: "automation", source: "tui", surfaces: ["tui", "web_palette"], args: ["status", "directory", "pair", "revoke", "relay-outbox"], flags: ["--pairing-id", "--limit", "--label"], requires_local_token: true, requires_remote_token: false, mutates: true, web_actions: [{ input: "status", method: "GET", path: "/remote-control/status", mutates: false }, { input: "pair", method: "POST", path: "/remote-control/pair", mutates: true }] },
+  { command: "remote-control", label: "/remote-control", detail: "Remote action metadata", kind: "remote-control", section: "automation", source: "tui", surfaces: ["tui", "web_palette"], args: ["status", "directory", "pair", "revoke", "relay-outbox", "push-targets"], flags: ["--pairing-id", "--limit", "--label", "--target-id"], requires_local_token: true, requires_remote_token: false, mutates: true, web_actions: [{ input: "status", method: "GET", path: "/remote-control/status", mutates: false }, { input: "push-targets", method: "GET", path: "/remote-control/push/targets", mutates: false }, { input: "pair", method: "POST", path: "/remote-control/pair", mutates: true }] },
   { command: "q", label: "/queue|/q [status|all|session|submit]", detail: "Queue control metadata", kind: "queue-control", section: "activity", source: "tui", surfaces: ["tui", "web_palette", "web_action"], args: ["status", "all", "session", "submit", "request"], flags: ["--limit", "--status"], requires_local_token: true, mutates: true, web_actions: [{ input: "status", method: "GET", path: "/tasks", mutates: false }, { input: "submit", method: "POST", path: "/tasks", mutates: true }] },
   { command: "pause", label: "/pause [task_id]", detail: "Pause task metadata", kind: "task-control", section: "activity", source: "tui", args: ["task_id"], requires_local_token: true, mutates: true, web_actions: [{ input: "pause", method: "POST", path_template: "/tasks/{task_id}/pause", mutates: true }] },
   { command: "approve", label: "/approve <approval_id>", detail: "Approve metadata", kind: "approval-control", section: "security", source: "tui", args: ["approval_id"], flags: ["--actor", "--reason", "--admin"], requires_local_token: true, mutates: true, web_actions: [{ input: "approve", method: "POST", path_template: "/approvals/{approval_id}/approve", mutates: true }] },
@@ -415,6 +415,10 @@ if (!remoteArgs.includes("status")) {
 const remoteBlankArgs = api.context("/remote-control ").map((entry) => entry.completionValue);
 if (!remoteBlankArgs.includes("status") || !remoteBlankArgs.includes("directory")) {
   throw new Error(`/remote-control blank subcommand completion missing: ${JSON.stringify(remoteBlankArgs)}`);
+}
+const remotePushArgs = api.context("/remote-control pu").map((entry) => entry.completionValue);
+if (!remotePushArgs.includes("push-targets")) {
+  throw new Error(`/remote-control push-targets completion missing: ${JSON.stringify(remotePushArgs)}`);
 }
 const remoteFlags = api.context("/remote-control directory --pa").map((entry) => entry.completionValue);
 if (!remoteFlags.includes("--pairing-id")) {
@@ -490,11 +494,13 @@ const document = {
 const renderRemoteControlOutput = (payload) => calls.push(["remote-output", payload.status || payload.pairing?.id || "payload"]);
 const renderRemoteControlRelay = (payload) => calls.push(["remote-relay", payload.status || "payload"]);
 const renderRemoteControlOutbox = (payload) => calls.push(["remote-outbox", payload.status || "payload"]);
+const renderRemoteControlPushTargets = (payload) => calls.push(["remote-push-targets", payload.status || "payload"]);
 const api = async (path, options = {}) => {
   calls.push(["api", path, options.method || "GET", options.body || ""]);
   if (path === "/tasks" && options.method === "POST") return { id: "task-new-123", status: "planned" };
   if (path === "/remote-control/pair" && options.method === "POST") return { pairing: { id: "pair-new" }, outbox_id: "outbox-new" };
   if (path === "/remote-control/revoke" && options.method === "POST") return { status: "remote_pairing_revoked" };
+  if (path.startsWith("/remote-control/push/targets")) return { status: "native_push_target", target: { id: "push-1" } };
   if (path.startsWith("/remote-control/relay/outbox")) return { status: "relay_outbox" };
   if (path.startsWith("/remote-control/relay?")) return { status: "relay_preflight" };
   return { status: path.includes("/directory") ? "scoped_directory" : "remote_control_status" };
@@ -515,6 +521,7 @@ eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = execute
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "directory --pairing-id pair-1 --limit 3" });
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay --relay-url https://relay.example/aegis" });
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay-outbox --status pending --limit 2" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "push-targets --target-id push-1" });
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "pair --label phone --session-id session-2 --task-id task-9 --allowed-actions status,events --expires-in-seconds 120" });
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "revoke pair-1" });
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", detail: "Open remote control", request: "" });
@@ -564,6 +571,11 @@ eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = execute
     ["remote-outbox", "relay_outbox"],
     ["remote-output", "relay_outbox"],
     ["notice", "/remote-control", "Remote control relay-outbox loaded.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/push/targets?target_id=push-1", "GET", ""],
+    ["remote-push-targets", "native_push_target"],
+    ["remote-output", "native_push_target"],
+    ["notice", "/remote-control", "Remote control push-targets loaded.", "automation"],
     ["section", "automation"],
     ["api", "/remote-control/pair", "POST", JSON.stringify({ label: "phone", session_id: "session-2", task_id: "task-9", allowed_actions: ["status", "events"], expires_in_seconds: 120 })],
     ["remote-output", "pair-new"],
