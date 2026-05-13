@@ -1782,6 +1782,17 @@ const modelAuthOutputSummary = (payload = {}) => {
     return modelAuthDoctorSummary(doctor);
   }
   const auth = payload.auth || payload;
+  if (auth && auth.method === "none") {
+    return `
+      <dl class="task-facts">
+        <div><dt>Provider</dt><dd>${text(auth.provider || "unknown")}</dd></div>
+        <div><dt>Method</dt><dd>No auth / local</dd></div>
+        <div><dt>State</dt><dd>${text(auth.status || "no_auth_required")}</dd></div>
+        <div><dt>Token Capture</dt><dd>not used</dd></div>
+      </dl>
+      <div class="next-action">This provider is local and does not require a stored API key or subscription login.</div>
+    `;
+  }
   if (!auth || !["subscription", "oauth", "oauth_device", "cloud_identity"].includes(auth.method)) {
     return "";
   }
@@ -2859,13 +2870,31 @@ document.getElementById("repair-rollback-form").addEventListener("submit", async
   await refresh();
 });
 
+const localNoAuthModelProviders = new Set(["ollama", "lmstudio"]);
+
+const syncModelAuthMethodForProvider = () => {
+  const provider = document.getElementById("model-provider").value;
+  const method = document.getElementById("model-auth-method");
+  if (localNoAuthModelProviders.has(provider) && method.value === "api_key") {
+    method.value = "none";
+  } else if (!localNoAuthModelProviders.has(provider) && method.value === "none") {
+    method.value = "api_key";
+  }
+};
+
+document.getElementById("model-provider").addEventListener("change", syncModelAuthMethodForProvider);
+syncModelAuthMethodForProvider();
+
 document.getElementById("model-auth-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  syncModelAuthMethodForProvider();
   const provider = document.getElementById("model-provider").value;
   const method = document.getElementById("model-auth-method").value;
   const apiKey = document.getElementById("model-api-key").value;
   const payload = { provider, method };
-  if (method === "api_key") {
+  if (method === "none") {
+    // Local providers should never send placeholder key material.
+  } else if (method === "api_key") {
     payload.api_key = apiKey;
   } else {
     payload.verify_external = document.getElementById("model-auth-verify-external").checked;

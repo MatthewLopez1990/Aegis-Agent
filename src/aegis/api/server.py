@@ -1375,7 +1375,20 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                 payload = self._read_json()
                 provider = str(_required(payload, "provider"))
                 method = str(payload.get("method") or "api_key").replace("-", "_")
-                if method in {"subscription", "oauth", "oauth_device", "cloud_identity"}:
+                if method == "none":
+                    if payload.get("api_key"):
+                        raise ValueError("none login does not accept API key input")
+                    auth_status = orchestrator.models.auth_status(provider)
+                    if not isinstance(auth_status, dict) or auth_status.get("auth_required", True):
+                        raise ValueError(f"provider {provider!r} requires an explicit auth method")
+                    auth = {
+                        **auth_status,
+                        "method": "none",
+                        "status": "no_auth_required",
+                        "auth_configured": True,
+                        "auth_source": "local_runtime",
+                    }
+                elif method in {"subscription", "oauth", "oauth_device", "cloud_identity"}:
                     if payload.get("api_key"):
                         raise ValueError(f"{method} login does not accept API key input")
                     auth = orchestrator.models.login_provider_external(provider, method=method, verify_external=bool(payload.get("verify_external")) and not bool(payload.get("run_external")))

@@ -33,7 +33,10 @@ class WebGuiBrowserSmokeTests(unittest.TestCase):
         self.assertIn('id="model-auth-doctor-run"', markup)
         self.assertIn('id="model-auth-readiness-packet"', markup)
         self.assertIn('id="model-auth-output"', markup)
+        self.assertIn('value="none"', markup)
         self.assertIn('value="oauth_device"', markup)
+        self.assertIn('value="ollama"', markup)
+        self.assertIn('value="lmstudio"', markup)
         self.assertIn('value="github-copilot"', markup)
         self.assertIn('value="google-gemini-oauth"', markup)
         self.assertIn('id="subagent-form"', markup)
@@ -63,6 +66,9 @@ class WebGuiBrowserSmokeTests(unittest.TestCase):
         self.assertIn("data-model-auth-verify-readiness-packet", app_js)
         self.assertIn("activation_state", app_js)
         self.assertIn("missing_config", app_js)
+        self.assertIn('const localNoAuthModelProviders = new Set(["ollama", "lmstudio"])', app_js)
+        self.assertIn('document.getElementById("model-provider").addEventListener("change", syncModelAuthMethodForProvider)', app_js)
+        self.assertIn('if (method === "none")', app_js)
         self.assertIn('if (method === "api_key")', app_js)
         self.assertIn("payload.verify_external", app_js)
         self.assertIn("payload.run_external", app_js)
@@ -157,6 +163,17 @@ renderModelAuthOutput({
 });
 if (!node.innerHTML.includes("Web requests never execute interactive provider login") || !node.innerHTML.includes("operator_login_required") || !node.innerHTML.includes("Create Readiness Packet")) {
   throw new Error(`doctor summary missing terminal-only readiness content: ${node.innerHTML}`);
+}
+renderModelAuthOutput({
+  auth: {
+    provider: "ollama",
+    method: "none",
+    status: "no_auth_required",
+    auth_required: false,
+  },
+});
+if (!node.innerHTML.includes("No auth / local") || !node.innerHTML.includes("does not require a stored API key")) {
+  throw new Error(`local no-auth summary missing: ${node.innerHTML}`);
 }
 renderModelAuthOutput({
   auth: {
