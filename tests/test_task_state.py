@@ -1098,6 +1098,45 @@ class TaskStateTests(unittest.TestCase):
             self.assertIn("my name is Matthew Lopez", prompt_text)
             self.assertIn("what is my name", prompt_text)
 
+    def test_progressive_project_context_files_are_included_in_live_model_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            package = root / "packages" / "agent"
+            package.mkdir(parents=True)
+            (root / "AGENTS.md").write_text("Root developer context.", encoding="utf-8")
+            (root / "CLAUDE.md").write_text("Root Claude context.", encoding="utf-8")
+            (root / "packages" / "AGENTS.md").write_text("Package developer context.", encoding="utf-8")
+            (root / "other").mkdir()
+            (root / "other" / "AGENTS.md").write_text("Unrelated context.", encoding="utf-8")
+            target = package / "main.py"
+            target.write_text("print('ok')\n", encoding="utf-8")
+            orchestrator = build_orchestrator(data_dir=root / ".aegis", workspace=root)
+            captured: dict[str, object] = {}
+
+            class FakeModelClient:
+                def chat(self, route, messages, *, temperature=0.2):
+                    captured["messages"] = messages
+                    return ModelInvocationResult(
+                        provider=route.provider.provider,
+                        model=route.model,
+                        content="Project context loaded.",
+                        input_tokens=10,
+                        output_tokens=5,
+                        raw_usage={"prompt_tokens": 10, "completion_tokens": 5},
+                    )
+
+            orchestrator.models.set_alias("smart", "ollama/llama3")
+            orchestrator.model_client = FakeModelClient()
+            result = orchestrator.submit_task("inspect @packages/agent/main.py", path="packages/agent/main.py")
+
+            self.assertEqual(result["receipt"]["model_response"]["content"], "Project context loaded.")
+            prompt_text = "\n".join(message["content"] for message in captured["messages"])
+            self.assertIn("Project context files loaded from the workspace root", prompt_text)
+            self.assertIn("Root developer context.", prompt_text)
+            self.assertIn("Root Claude context.", prompt_text)
+            self.assertIn("Package developer context.", prompt_text)
+            self.assertNotIn("Unrelated context.", prompt_text)
+
     def test_live_model_prompt_applies_context_budget_to_long_session_history(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

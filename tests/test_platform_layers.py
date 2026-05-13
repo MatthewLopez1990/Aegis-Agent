@@ -3252,9 +3252,28 @@ class PlatformLayerTests(unittest.TestCase):
             root = Path(temp)
             (root / "SOUL.md").write_text("Be concise.", encoding="utf-8")
             (root / "AGENTS.md").write_text("Developer context.", encoding="utf-8")
+            (root / "CLAUDE.md").write_text("Claude-compatible project context.", encoding="utf-8")
+            package = root / "packages" / "agent"
+            package.mkdir(parents=True)
+            (root / "packages" / "AGENTS.md").write_text("Package developer context.", encoding="utf-8")
+            (package / "TOOLS.md").write_text("Package tool context.", encoding="utf-8")
+            (root / "other").mkdir()
+            (root / "other" / "AGENTS.md").write_text("Unrelated context.", encoding="utf-8")
 
             items = ContextFileLoader(root).load()
-            self.assertEqual(len(items), 2)
+            self.assertEqual(len(items), 3)
+            progressive_items = ContextFileLoader(root).load(package / "main.py")
+            progressive_sources = [Path(item.taint.source).relative_to(root).as_posix() for item in progressive_items]
+            self.assertEqual(
+                progressive_sources,
+                ["SOUL.md", "AGENTS.md", "CLAUDE.md", "packages/AGENTS.md", "packages/agent/TOOLS.md"],
+            )
+            self.assertNotIn("other/AGENTS.md", progressive_sources)
+            self.assertEqual(progressive_items[1].taint.trust_class.value, "DEVELOPER_TRUSTED")
+            self.assertEqual(progressive_items[-1].taint.trust_class.value, "USER_DIRECTIVE")
+            manifest = ContextFileLoader(root).manifest(package / "main.py")
+            self.assertEqual([Path(path).relative_to(root).as_posix() for path in manifest["sources"]], progressive_sources)
+            self.assertFalse(manifest["raw_content_included"])
             self.assertTrue(inspect_openclaw_home(root)["exists"])
             self.assertTrue(inspect_hermes_home(root)["exists"])
             self.assertEqual(inspect_openclaw_home(root)["secrets_import"], "blocked_by_default_use_secrets_broker")

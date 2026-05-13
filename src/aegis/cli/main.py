@@ -854,8 +854,9 @@ def build_parser() -> argparse.ArgumentParser:
     personality = subcommands.add_parser("personality", help="Inspect built-in personalities and context files")
     personality_sub = personality.add_subparsers(dest="personality_command", required=True)
     personality_sub.add_parser("list", help="List built-in personalities")
-    personality_load = personality_sub.add_parser("context", help="Load SOUL/AGENTS/TOOLS context files safely")
+    personality_load = personality_sub.add_parser("context", help="Load SOUL/AGENTS/CLAUDE/TOOLS context files safely")
     personality_load.add_argument("--workspace", default=".")
+    personality_load.add_argument("--path", help="Optional workspace-relative target path for progressive context loading")
 
     migrate = subcommands.add_parser("migrate", help="Dry-run migration inspections")
     migrate_sub = migrate.add_subparsers(dest="migrate_command", required=True)
@@ -2427,7 +2428,7 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             return {"personalities": list(PERSONALITY_NAMES)}
         if args.personality_command == "context":
             loader = ContextFileLoader(args.workspace)
-            return {"items": [item.to_dict() for item in loader.load()]}
+            return {"manifest": loader.manifest(args.path), "items": [item.to_dict() for item in loader.load(args.path)]}
 
     if args.command == "migrate":
         if args.migrate_command == "openclaw":

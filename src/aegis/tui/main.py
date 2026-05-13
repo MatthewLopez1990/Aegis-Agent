@@ -23,6 +23,7 @@ from aegis.channels.base import ChannelResponse
 from aegis.hooks.manager import HOOK_EVENTS
 from aegis.memory.models import MemoryType
 from aegis.migration.openclaw import inspect_hermes_home, inspect_openclaw_home, preview_hermes_memory_import, preview_openclaw_memory_import
+from aegis.personality.context import ContextFileLoader
 from aegis.product.capabilities import build_product_dashboard
 from aegis.product.setup import build_setup_readiness
 from aegis.remote_control import (
@@ -4271,6 +4272,7 @@ class AegisTui(cmd.Cmd):
     def do_context(self, arg: str) -> None:
         """context -- show active session context metadata without raw transcript content."""
         session = self.orchestrator.sessions.get_session(self.session["id"])
+        project_context = ContextFileLoader(self.workspace).manifest()
         _print_json(
             {
                 "status": "metadata_only",
@@ -4287,6 +4289,7 @@ class AegisTui(cmd.Cmd):
                 "ui_preferences": session.get("metadata", {}).get("tui_preferences", {}),
                 "workspace": str(self.workspace),
                 "additional_dirs": [str(path) for path in self.additional_dirs],
+                "project_context_files": project_context,
                 "trust_boundary": "raw transcript content stays behind session history and context firewall processing",
                 "raw_message_content_included": False,
                 "raw_steering_instruction_included": False,

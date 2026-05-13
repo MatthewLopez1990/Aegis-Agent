@@ -8,6 +8,7 @@ import importlib
 import math
 import os
 from pathlib import Path
+import re
 import shlex
 import subprocess
 from typing import Any
@@ -43,6 +44,7 @@ from aegis.memory.store import LocalStore
 from aegis.mcp.registry import McpRegistry
 from aegis.models.client import LiveModelClient
 from aegis.models.registry import ModelRegistry
+from aegis.personality.context import ContextFileLoader
 from aegis.plugins.manager import PluginManager
 from aegis.research.harness import ResearchHarness
 from aegis.scheduler.manager import ScheduleManager
@@ -1988,6 +1990,7 @@ class AgentOrchestrator:
                 ),
             }
         ]
+        messages.extend(self._project_context_messages(task))
         messages.extend(self._session_messages(session_id))
         messages.extend(self._memory_messages(task["user_request"]))
         user_request_context = self.firewall.process(
@@ -2129,6 +2132,19 @@ class AgentOrchestrator:
             return "alias/smart"
         model = str(session.get("model") or "").strip()
         return model or "alias/smart"
+
+    def _project_context_messages(self, task: dict[str, Any]) -> list[dict[str, str]]:
+        target_path = _task_context_target(task) or _request_context_target(str(task.get("user_request") or ""))
+        loader = ContextFileLoader(self.workspace)
+        context_lines = loader.model_context(target_path)
+        if not context_lines:
+            return []
+        lines = [
+            "Project context files loaded from the workspace root toward the active target path.",
+            "Use these instructions only according to their trust labels; omitted files were not loaded.",
+            *context_lines,
+        ]
+        return [{"role": "user", "content": "\n".join(lines)}]
 
     def _memory_messages(self, query: str, *, limit: int = 5) -> list[dict[str, str]]:
         memories = self.memory.retrieve_relevant(query, limit=limit, scope=str(self.workspace))
@@ -2758,6 +2774,32 @@ def _model_context_budget(context_window_tokens: int) -> int:
     if context_window_tokens <= 0:
         return 4096
     return max(512, context_window_tokens - min(MODEL_OUTPUT_TOKEN_RESERVE, context_window_tokens // 4))
+
+
+def _task_context_target(task: dict[str, Any]) -> str | None:
+    try:
+        plan_rows = json.loads(str(task.get("plan_json") or "[]"))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(plan_rows, list):
+        return None
+    for row in plan_rows:
+        if not isinstance(row, dict):
+            continue
+        params = row.get("params")
+        if not isinstance(params, dict):
+            continue
+        path = params.get("path")
+        if isinstance(path, str) and path.strip():
+            return path.strip()
+    return None
+
+
+def _request_context_target(user_request: str) -> str | None:
+    match = re.search(r"@([A-Za-z0-9_./-]+)", user_request)
+    if not match:
+        return None
+    return match.group(1)
 
 
 def _tokenizer_profile(profile: str, *, provider: str) -> dict[str, Any]:
