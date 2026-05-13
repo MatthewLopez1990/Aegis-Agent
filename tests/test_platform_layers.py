@@ -2024,10 +2024,16 @@ class PlatformLayerTests(unittest.TestCase):
             try:
                 selected = orchestrator.tools.execute("terminal_backend", {"backend": "modal"}, approved=True)
                 run = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "modal", "command": "python3 script.py"}, approved=True)
+                status = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "modal", "action": "status", "job_id": "job-123"}, approved=True)
+                logs = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "modal", "action": "logs", "job_id": "job-123"}, approved=True)
+                artifact = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "modal", "action": "artifact", "job_id": "job-123"}, approved=True)
+                cancel = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "modal", "action": "cancel", "job_id": "job-123"}, approved=True)
+                rollback = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "modal", "action": "rollback", "job_id": "job-123"}, approved=True)
             finally:
                 executor_module._open_without_redirects = original_open
                 executor_module._private_network_error = original_private_check
 
+            requests = captured["requests"]
             self.assertTrue(selected["ok"])
             self.assertTrue(run["ok"])
             self.assertEqual(run["status"], "submitted")
@@ -2036,10 +2042,32 @@ class PlatformLayerTests(unittest.TestCase):
             self.assertFalse(run["activation_receipt"]["raw_secret_values_included"])
             self.assertFalse(run["execution_receipt"]["raw_command_logged"])
             self.assertFalse(run["execution_receipt"]["raw_response_body_included"])
-            self.assertEqual(run["cleanup_receipt"]["status"], "provider_managed")
+            self.assertEqual(run["cleanup_receipt"]["status"], "generic_lifecycle_available")
+            self.assertIn("cancel", run["cleanup_receipt"]["supported_actions"])
             self.assertEqual(captured["authorization"], "Bearer hosted_raw_secret")
-            self.assertIn("command_args", json.loads(str(captured["body"])))
+            self.assertIn("command_args", json.loads(str(requests[0]["body"])))
             self.assertNotIn("hosted_raw_secret", json.dumps(run, sort_keys=True))
+            self.assertTrue(status["ok"])
+            self.assertEqual(status["lifecycle_action"], "status")
+            self.assertEqual(status["lifecycle_receipt"]["receipt_schema"], "hosted_sandbox_lifecycle_receipt_v1")
+            self.assertFalse(status["lifecycle_receipt"]["raw_response_body_included"])
+            self.assertFalse(status["lifecycle_receipt"]["raw_secret_values_included"])
+            self.assertTrue(logs["ok"])
+            self.assertEqual(logs["lifecycle_action"], "logs")
+            self.assertEqual(logs["log_line_count"], 2)
+            self.assertNotIn("abc123", json.dumps(logs, sort_keys=True))
+            self.assertTrue(artifact["ok"])
+            self.assertEqual(artifact["lifecycle_action"], "artifact")
+            self.assertEqual(Path(artifact["artifact_path"]).read_bytes(), b"hosted artifact")
+            self.assertEqual(artifact["artifact_receipt"]["artifact_bytes"], len(b"hosted artifact"))
+            self.assertTrue(cancel["ok"])
+            self.assertEqual(cancel["cleanup_receipt"]["status"], "cancel_requested")
+            self.assertTrue(rollback["ok"])
+            self.assertEqual(rollback["rollback_receipt"]["status"], "rollback_requested")
+            self.assertFalse(rollback["rollback_receipt"]["raw_secret_values_included"])
+            lifecycle_payloads = [json.loads(str(request["body"])) for request in requests[1:]]
+            self.assertEqual([payload["action"] for payload in lifecycle_payloads], ["status", "logs", "artifact", "cancel", "rollback"])
+            self.assertTrue(all(payload["job_id"] == "job-123" for payload in lifecycle_payloads))
             dashboard = build_product_dashboard(orchestrator)
             live_gap = next(item for item in dashboard["live_gap_backlog"] if item["area"] == "remote_backend_activation")
             self.assertEqual(live_gap["status"], "remote_backends_partially_live")
@@ -2049,8 +2077,10 @@ class PlatformLayerTests(unittest.TestCase):
             implemented_backends = {adapter["name"]: adapter for adapter in live_gap["implemented_backend_adapters"]}
             self.assertEqual(implemented_backends["modal"]["activation"]["preflight_status"], "ready")
             self.assertIn("hosted_sandbox_allowed_hosts", implemented_backends["modal"]["activation"]["configured_controls"])
+            self.assertIn("hosted_sandbox_lifecycle", implemented_backends["modal"]["capabilities"])
             backend_checklist = {item["control"]: item for item in live_gap["operator_checklist"]}
             self.assertEqual(backend_checklist["provider_lifecycle_depth"]["state"], "partial")
+            self.assertIn("generic status, logs, cancel, artifact, and rollback", backend_checklist["provider_lifecycle_depth"]["detail"])
             self.assertEqual(backend_checklist["rollback_receipts"]["state"], "enforced")
 
             rejected = orchestrator.tools.execute("hosted_sandbox_exec", {"backend": "modal", "command": "python3 -m http.server"}, approved=True)
@@ -2453,11 +2483,26 @@ class PlatformLayerTests(unittest.TestCase):
 
 class _FakeSandboxResponse:
     def __init__(self, request, timeout: float, captured: dict[str, object]) -> None:  # noqa: ANN001
+        body = request.data.decode("utf-8")
         captured["authorization"] = request.headers.get("Authorization")
-        captured["body"] = request.data.decode("utf-8")
+        captured["body"] = body
         captured["timeout"] = timeout
+        requests = captured.setdefault("requests", [])
+        assert isinstance(requests, list)
+        requests.append({"body": body, "timeout": timeout})
+        payload = json.loads(body)
+        action = payload.get("action", "submit") if isinstance(payload, dict) else "submit"
+        if action == "logs":
+            self._body = json.dumps({"status": "running", "logs": ["starting job", "token=abc123"]}).encode("utf-8")
+        elif action == "artifact":
+            self._body = json.dumps({"status": "ready", "artifact_name": "result.txt", "mime_type": "text/plain", "artifact_base64": base64.b64encode(b"hosted artifact").decode("ascii")}).encode("utf-8")
+        elif action in {"status", "cancel", "rollback"}:
+            self._body = json.dumps({"status": "accepted" if action in {"cancel", "rollback"} else "running", "state": action, "message": f"{action} queued", "secret": "response_secret_should_not_surface"}).encode("utf-8")
+        else:
+            self._body = b'{"job_id":"job-123","secret":"response_secret_should_not_surface"}'
         self.status = 202
         self.code = 202
+        self.headers = {"Content-Type": "application/json"}
 
     def __enter__(self) -> "_FakeSandboxResponse":
         return self
@@ -2466,7 +2511,7 @@ class _FakeSandboxResponse:
         return False
 
     def read(self, limit: int = -1) -> bytes:
-        return b'{"job_id":"job-123","secret":"response_secret_should_not_surface"}'
+        return self._body
 
 
 def _fake_chrome_render(*, executable: str, html_path: Path, output_path: Path, artifact_dir: Path, width: int = 960, height: int = 720) -> dict[str, object]:

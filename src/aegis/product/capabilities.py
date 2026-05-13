@@ -966,6 +966,8 @@ def _implemented_backend_adapters(backends: list[dict[str, Any]]) -> list[dict[s
             "name": str(backend.get("name", "")),
             "status": "enabled",
             "local": bool(backend.get("local")),
+            "persistent": bool(backend.get("persistent")),
+            "capabilities": list(_LIVE_BACKEND_CAPABILITIES.get(str(backend.get("name", "")), ())),
             "activation": backend.get("activation", {}),
             "raw_secret_values_included": False,
         }
@@ -1030,7 +1032,7 @@ def _remote_backend_operator_checklist(implemented_backends: list[dict[str, Any]
         {
             "control": "provider_lifecycle_depth",
             "state": "partial" if implemented_backends else "not_started" if available_backends else "needs_adapter",
-            "detail": f"{len(implemented_backends)} nonlocal backends enabled; {len(available_backends)} opt-in adapters still available.",
+            "detail": f"{len(implemented_backends)} nonlocal backends enabled; {len(available_backends)} opt-in adapters still available. Hosted sandbox adapters expose generic status, logs, cancel, artifact, and rollback lifecycle requests when configured.",
         },
     ]
 
@@ -1038,9 +1040,9 @@ def _remote_backend_operator_checklist(implemented_backends: list[dict[str, Any]
 _LIVE_BACKEND_CAPABILITIES = {
     "docker": ("container_limits", "network_none", "cleanup_receipt"),
     "ssh": ("brokered_private_key", "allowlisted_hosts", "temporary_key_cleanup"),
-    "modal": ("hosted_sandbox_submission", "brokered_token", "allowlisted_https_api"),
-    "daytona": ("hosted_sandbox_submission", "brokered_token", "allowlisted_https_api"),
-    "vercel_sandbox": ("hosted_sandbox_submission", "brokered_token", "allowlisted_https_api"),
+    "modal": ("hosted_sandbox_submission", "hosted_sandbox_lifecycle", "brokered_token", "allowlisted_https_api"),
+    "daytona": ("hosted_sandbox_submission", "hosted_sandbox_lifecycle", "brokered_token", "allowlisted_https_api"),
+    "vercel_sandbox": ("hosted_sandbox_submission", "hosted_sandbox_lifecycle", "brokered_token", "allowlisted_https_api"),
 }
 
 

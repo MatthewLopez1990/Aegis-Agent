@@ -951,6 +951,9 @@ class BuiltinToolExecutor:
         config = dict(backend.get("adapter_config", {}))
         backend_name = str(backend.get("name", params.get("backend", "")))
         activation = _backend_activation_requirements(name=name, backend=backend_name, backend_record=backend)
+        action = _hosted_sandbox_action(params)
+        if action is None:
+            return {"ok": False, "status": "scope_rejected", "tool": name, "backend": backend_name, "reason": "hosted sandbox action must be one of: submit, status, logs, cancel, artifact, rollback", "verification_gates": ["scope_escape_rejection"]}
         url = str(params.get("provider_url") or params.get("api_url") or config.get("api_url") or "")
         parsed = urlparse(url)
         domain = parsed.hostname or ""
@@ -963,16 +966,67 @@ class BuiltinToolExecutor:
         private_error = _private_network_error(domain)
         if private_error:
             return {"ok": False, "status": "scope_rejected", "tool": name, "backend": backend_name, "reason": private_error, "verification_gates": ["scope_escape_rejection"]}
-        try:
-            command_args = _safe_remote_command_args(str(params.get("command", "")))
-        except ToolExecutionError as exc:
-            return {"ok": False, "status": "scope_rejected", "tool": name, "backend": backend_name, "reason": str(exc), "verification_gates": ["scope_escape_rejection"]}
+        command_args: list[str] = []
+        if action == "submit":
+            try:
+                command_args = _safe_remote_command_args(str(params.get("command", "")))
+            except ToolExecutionError as exc:
+                return {"ok": False, "status": "scope_rejected", "tool": name, "backend": backend_name, "reason": str(exc), "verification_gates": ["scope_escape_rejection"]}
         token_secret = str(params.get("token_secret") or config.get("token_secret") or "AEGIS_HOSTED_SANDBOX_TOKEN")
         handle = self.secrets_broker.request_handle(name=token_secret, requester="hosted_sandbox_backend", reason=f"{backend_name} sandbox execution", scopes=(f"{backend_name}:execute",))
         if not handle.present:
             return {"ok": False, "status": "not_configured", "tool": name, "backend": backend_name, "reason": f"secret {token_secret!r} is not configured", **activation}
         token = self.secrets_broker.resolve_for_authorized_tool(handle, requester="hosted_sandbox_backend")
         timeout = int(config.get("timeout_seconds", 60))
+        if action != "submit":
+            job_id = str(params.get("job_id") or params.get("id") or "").strip()
+            if not _safe_hosted_sandbox_job_id(job_id):
+                return {"ok": False, "status": "scope_rejected", "tool": name, "backend": backend_name, "reason": "hosted sandbox lifecycle actions require a simple job_id", "verification_gates": ["scope_escape_rejection"]}
+            live_result = _send_hosted_sandbox_lifecycle_request(url=url, token=token, backend=backend_name, action=action, job_id=job_id, timeout=timeout)
+            lifecycle_receipt = _hosted_sandbox_lifecycle_receipt(
+                backend=backend_name,
+                action=action,
+                domain=domain,
+                job_id=job_id,
+                http_status=live_result["http_status"],
+                handle_present=handle.present,
+                response_summary=live_result.get("response_summary", {}),
+            )
+            result: dict[str, Any] = {
+                "ok": bool(live_result["ok"]),
+                "status": "lifecycle_completed" if live_result["ok"] else "failed",
+                "tool": name,
+                "backend": backend_name,
+                "domain": domain,
+                "http_status": live_result["http_status"],
+                "job_id": job_id,
+                "lifecycle_action": action,
+                "lifecycle_receipt": lifecycle_receipt,
+                "provider_status": live_result.get("provider_status"),
+                "taint": "TOOL_OUTPUT",
+                "error": live_result.get("error"),
+            }
+            if action == "logs":
+                result["log_tail"] = live_result.get("log_tail", [])
+                result["log_line_count"] = live_result.get("log_line_count", 0)
+            if action == "cancel":
+                result["cleanup_receipt"] = {"status": "cancel_requested" if live_result["ok"] else "cancel_failed", "raw_response_body_included": False}
+            if action == "rollback":
+                result["rollback_receipt"] = {"status": "rollback_requested" if live_result["ok"] else "rollback_failed", "raw_response_body_included": False, "raw_secret_values_included": False}
+            if action == "artifact":
+                content = live_result.get("artifact_content")
+                if not isinstance(content, bytes) or not content:
+                    result.update({"ok": False, "status": "failed", "error": live_result.get("error") or "hosted sandbox artifact response did not include downloadable content"})
+                    return result
+                artifact_dir = _workspace_root(self.connectors) / ".aegis" / "backend-artifacts"
+                artifact_dir.mkdir(parents=True, exist_ok=True)
+                artifact_dir.chmod(0o700)
+                extension = _hosted_sandbox_artifact_extension(str(live_result.get("artifact_name") or ""), str(live_result.get("artifact_mime") or ""))
+                artifact_path = artifact_dir / f"{backend_name}-{uuid4()}.{extension}"
+                artifact_path.write_bytes(content)
+                artifact_path.chmod(0o600)
+                result.update({"artifact_path": str(artifact_path), "artifact_receipt": _artifact_receipt(artifact_path), "mime_type": live_result.get("artifact_mime") or "application/octet-stream"})
+            return result
         command_hash = hashlib.sha256("\0".join([backend_name, *command_args]).encode("utf-8")).hexdigest()
         started = now_utc()
         live_result = _send_hosted_sandbox_request(url=url, token=token, backend=backend_name, command_args=command_args, command_hash=command_hash, timeout=timeout)
@@ -1001,8 +1055,9 @@ class BuiltinToolExecutor:
                 "raw_response_body_included": False,
             },
             "cleanup_receipt": {
-                "status": "provider_managed",
-                "rollback": "cancel or delete the hosted sandbox job with the provider-specific console/API",
+                "status": "generic_lifecycle_available",
+                "supported_actions": ["status", "logs", "cancel", "artifact", "rollback"],
+                "rollback": "run hosted_sandbox_exec with action=cancel or action=rollback and the provider job_id",
             },
             "error": live_result.get("error"),
         }
@@ -3160,6 +3215,164 @@ def _send_hosted_sandbox_request(
     except json.JSONDecodeError:
         job_id = ""
     return {"ok": 200 <= status < 300, "http_status": status, "job_id": job_id or None, "error": None if 200 <= status < 300 else f"hosted sandbox request failed with status {status}"}
+
+
+def _hosted_sandbox_action(params: dict[str, Any]) -> str | None:
+    raw = str(params.get("action") or params.get("operation") or "submit").strip().lower().replace("-", "_")
+    aliases = {
+        "": "submit",
+        "run": "submit",
+        "submit": "submit",
+        "execute": "submit",
+        "status": "status",
+        "poll": "status",
+        "logs": "logs",
+        "log": "logs",
+        "tail": "logs",
+        "cancel": "cancel",
+        "stop": "cancel",
+        "artifact": "artifact",
+        "download": "artifact",
+        "download_artifact": "artifact",
+        "rollback": "rollback",
+        "delete": "rollback",
+        "cleanup": "rollback",
+    }
+    return aliases.get(raw)
+
+
+def _safe_hosted_sandbox_job_id(job_id: str) -> bool:
+    return bool(job_id and len(job_id) <= 200 and re.fullmatch(r"[A-Za-z0-9._:@+-]+", job_id))
+
+
+def _send_hosted_sandbox_lifecycle_request(*, url: str, token: str, backend: str, action: str, job_id: str, timeout: int) -> dict[str, Any]:
+    payload = {
+        "backend": backend,
+        "action": action,
+        "job_id": job_id,
+        "job_id_sha256": hashlib.sha256(job_id.encode("utf-8")).hexdigest(),
+        "requested_at": now_utc(),
+    }
+    body = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    request = Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "Aegis-Agent/0.1",
+        },
+    )
+    try:
+        response_context = _open_without_redirects(request, timeout=timeout)
+    except HTTPError as exc:
+        if 300 <= exc.code < 400:
+            return {"ok": False, "http_status": exc.code, "error": "HTTP redirects are not followed by the governed hosted sandbox lifecycle adapter", "response_summary": {}}
+        return {"ok": False, "http_status": exc.code, "error": f"hosted sandbox lifecycle request failed with status {exc.code}", "response_summary": {}}
+    except URLError as exc:
+        return {"ok": False, "http_status": 0, "error": f"hosted sandbox lifecycle request failed: {exc.reason}", "response_summary": {}}
+    with response_context as response:
+        status = int(getattr(response, "status", getattr(response, "code", 0)) or 0)
+        content_type = str(getattr(response, "headers", {}).get("Content-Type", ""))
+        raw_body = response.read(12 * 1024 * 1024 if action == "artifact" else 64 * 1024)
+    decoded: dict[str, Any] = {}
+    if "json" in content_type.lower() or raw_body.strip().startswith(b"{"):
+        try:
+            candidate = json.loads(raw_body.decode("utf-8"))
+            if isinstance(candidate, dict):
+                decoded = candidate
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            decoded = {}
+    response_summary = _hosted_sandbox_response_summary(decoded, action=action)
+    result: dict[str, Any] = {
+        "ok": 200 <= status < 300,
+        "http_status": status,
+        "provider_status": response_summary.get("state") or response_summary.get("status"),
+        "response_summary": response_summary,
+        "error": None if 200 <= status < 300 else f"hosted sandbox lifecycle request failed with status {status}",
+    }
+    if action == "logs":
+        log_tail = _hosted_sandbox_log_tail(decoded.get("logs") or decoded.get("log_tail") or decoded.get("stdout") or "")
+        result.update({"log_tail": log_tail, "log_line_count": len(log_tail)})
+    if action == "artifact":
+        artifact_content, artifact_name, artifact_mime = _hosted_sandbox_artifact_from_response(decoded, raw_body=raw_body, content_type=content_type)
+        if artifact_content:
+            result.update({"artifact_content": artifact_content, "artifact_name": artifact_name, "artifact_mime": artifact_mime})
+    return result
+
+
+def _hosted_sandbox_response_summary(decoded: dict[str, Any], *, action: str) -> dict[str, Any]:
+    summary: dict[str, Any] = {"action": action, "response_keys": sorted(str(key)[:80] for key in decoded)}
+    for key in ("status", "state", "message", "artifact_id", "artifact_name", "created_at", "started_at", "completed_at"):
+        value = decoded.get(key)
+        if value is not None:
+            summary[key] = str(redact(str(value)))[:500]
+    if action == "logs":
+        summary["log_line_count"] = len(_hosted_sandbox_log_tail(decoded.get("logs") or decoded.get("log_tail") or decoded.get("stdout") or ""))
+    return summary
+
+
+def _hosted_sandbox_log_tail(value: Any) -> list[str]:
+    if isinstance(value, list):
+        lines = [str(item) for item in value]
+    else:
+        lines = str(value or "").splitlines()
+    return [str(redact(line))[:500] for line in lines[-20:]]
+
+
+def _hosted_sandbox_artifact_from_response(decoded: dict[str, Any], *, raw_body: bytes, content_type: str) -> tuple[bytes | None, str, str]:
+    artifact_name = str(decoded.get("artifact_name") or decoded.get("filename") or "artifact.bin")[:120]
+    artifact_mime = str(decoded.get("mime_type") or decoded.get("content_type") or "application/octet-stream")[:120]
+    for key in ("artifact_base64", "data_base64", "content_base64"):
+        value = decoded.get(key)
+        if isinstance(value, str) and value.strip():
+            try:
+                content = base64.b64decode(value.strip(), validate=True)
+            except ValueError:
+                return None, artifact_name, artifact_mime
+            if len(content) <= 10 * 1024 * 1024:
+                return content, artifact_name, artifact_mime
+            return None, artifact_name, artifact_mime
+    if content_type and "json" not in content_type.lower() and raw_body:
+        if len(raw_body) > 10 * 1024 * 1024:
+            return None, artifact_name, artifact_mime
+        return raw_body, artifact_name, content_type.split(";", 1)[0].strip().lower() or artifact_mime
+    return None, artifact_name, artifact_mime
+
+
+def _hosted_sandbox_lifecycle_receipt(*, backend: str, action: str, domain: str, job_id: str, http_status: int, handle_present: bool, response_summary: dict[str, Any]) -> dict[str, Any]:
+    encoded = json.dumps(response_summary, sort_keys=True, default=str).encode("utf-8")
+    return {
+        "receipt_schema": "hosted_sandbox_lifecycle_receipt_v1",
+        "backend": backend,
+        "action": action,
+        "domain": domain,
+        "http_status": http_status,
+        "job_id_sha256": hashlib.sha256(job_id.encode("utf-8")).hexdigest(),
+        "response_summary_sha256": hashlib.sha256(encoded).hexdigest(),
+        "response_keys": response_summary.get("response_keys", []),
+        "secret_handle_present": handle_present,
+        "raw_job_id_logged": False,
+        "raw_command_logged": False,
+        "raw_secret_values_included": False,
+        "raw_response_body_included": False,
+    }
+
+
+def _hosted_sandbox_artifact_extension(artifact_name: str, mime_type: str) -> str:
+    suffix = Path(artifact_name).suffix.lower().lstrip(".")
+    if suffix and re.fullmatch(r"[a-z0-9]{1,12}", suffix):
+        return suffix
+    normalized = mime_type.split(";", 1)[0].strip().lower()
+    return {
+        "application/json": "json",
+        "text/plain": "txt",
+        "application/zip": "zip",
+        "application/gzip": "gz",
+        "image/png": "png",
+        "image/jpeg": "jpg",
+    }.get(normalized, "bin")
 
 
 def _docker_args_for_tool(*, name: str, params: dict[str, Any], config: dict[str, Any]) -> list[str]:
