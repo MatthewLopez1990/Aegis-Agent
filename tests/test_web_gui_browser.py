@@ -484,6 +484,20 @@ const elements = {
   "remote-control-task-id": { value: "" },
   "remote-control-relay-outbox-id": { value: "" },
   "remote-control-relay-pairing-id": { value: "pair-form" },
+  "remote-control-relay-url": { value: "" },
+  "remote-control-relay-secret": { value: "" },
+  "remote-control-relay-event": { value: "directory-updated" },
+  "remote-control-relay-task-id": { value: "" },
+  "remote-control-relay-approved": { checked: false },
+  "remote-control-relay-dry-run": { checked: false },
+  "remote-control-push-target-id": { value: "" },
+  "remote-control-push-label": { value: "native push" },
+  "remote-control-push-provider": { value: "fcm" },
+  "remote-control-push-secret": { value: "" },
+  "remote-control-device-secret": { value: "" },
+  "remote-control-push-approved": { checked: false },
+  "remote-control-apns-topic": { value: "" },
+  "remote-control-fcm-project": { value: "" },
 };
 const document = {
   getElementById(id) {
@@ -495,11 +509,22 @@ const renderRemoteControlOutput = (payload) => calls.push(["remote-output", payl
 const renderRemoteControlRelay = (payload) => calls.push(["remote-relay", payload.status || "payload"]);
 const renderRemoteControlOutbox = (payload) => calls.push(["remote-outbox", payload.status || "payload"]);
 const renderRemoteControlPushTargets = (payload) => calls.push(["remote-push-targets", payload.status || "payload"]);
+const renderRemoteControlRelayPull = (payload) => calls.push(["remote-relay-pull", payload.status || "payload"]);
 const api = async (path, options = {}) => {
   calls.push(["api", path, options.method || "GET", options.body || ""]);
   if (path === "/tasks" && options.method === "POST") return { id: "task-new-123", status: "planned" };
   if (path === "/remote-control/pair" && options.method === "POST") return { pairing: { id: "pair-new" }, outbox_id: "outbox-new" };
   if (path === "/remote-control/revoke" && options.method === "POST") return { status: "remote_pairing_revoked" };
+  if (path === "/remote-control/relay" && options.method === "POST") return { status: "relay_registered" };
+  if (path === "/remote-control/relay/directory" && options.method === "POST") return { status: "relay_directory_published" };
+  if (path === "/remote-control/relay/notify" && options.method === "POST") return { status: "relay_notification_published" };
+  if (path === "/remote-control/relay/retry" && options.method === "POST") return { status: "relay_retry" };
+  if (path === "/remote-control/relay/confirm" && options.method === "POST") return { status: "relay_confirmed" };
+  if (path === "/remote-control/relay/pull" && options.method === "POST") return { status: "relay_action_preview" };
+  if (path === "/remote-control/push/register" && options.method === "POST") return { status: "native_push_target_registered" };
+  if (path === "/remote-control/push/disable" && options.method === "POST") return { status: "native_push_target_disabled" };
+  if (path === "/remote-control/push/rotate" && options.method === "POST") return { status: "native_push_target_rotated" };
+  if (path === "/remote-control/push" && options.method === "POST") return { status: "native_push_published" };
   if (path.startsWith("/remote-control/push/targets")) return { status: "native_push_target", target: { id: "push-1" } };
   if (path.startsWith("/remote-control/relay/outbox")) return { status: "relay_outbox" };
   if (path.startsWith("/remote-control/relay?")) return { status: "relay_preflight" };
@@ -520,8 +545,18 @@ eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = execute
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "status" });
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "directory --pairing-id pair-1 --limit 3" });
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay --relay-url https://relay.example/aegis" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay --relay-url https://relay.example/aegis --pairing-id pair-1 --relay-auth-secret RELAY_SECRET --approved" });
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay-outbox --status pending --limit 2" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay-directory --pairing-id pair-1 --relay-auth-secret RELAY_SECRET --approved --limit 4" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay-notify --pairing-id pair-1 --relay-auth-secret RELAY_SECRET --approved --event task-updated --task-id task-8" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay-retry --pairing-id pair-1 --relay-auth-secret RELAY_SECRET --approved --limit 5" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay-confirm --pairing-id pair-1 --relay-auth-secret RELAY_SECRET --approved --outbox-id outbox-1" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "relay-pull --pairing-id pair-1 --relay-auth-secret RELAY_SECRET --approved --dry-run --limit 6" });
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "push-targets --target-id push-1" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "push-register --label phone --provider fcm --push-auth-secret PUSH_SECRET --device-token-secret DEVICE_SECRET --approved --fcm-project-id aegis-project" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "push-rotate --target-id push-1 --push-auth-secret PUSH_SECRET_2 --device-token-secret DEVICE_SECRET_2 --approved --fcm-project-id aegis-project-2" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "push-disable --target-id push-1 --approved" });
+  await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "push --pairing-id pair-1 --target-id push-1 --approved --event task-updated --task-id task-8" });
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "pair --label phone --session-id session-2 --task-id task-9 --allowed-actions status,events --expires-in-seconds 120" });
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", request: "revoke pair-1" });
   await executeLocalSlashCommand({ kind: "remote-control", command: "remote-control", label: "/remote-control", section: "automation", detail: "Open remote control", request: "" });
@@ -567,22 +602,72 @@ eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = execute
     ["remote-output", "relay_preflight"],
     ["notice", "/remote-control", "Remote control relay loaded.", "automation"],
     ["section", "automation"],
+    ["api", "/remote-control/relay", "POST", JSON.stringify({ pairing_id: "pair-1", relay_auth_secret: "RELAY_SECRET", approved: true, relay_url: "https://relay.example/aegis" })],
+    ["remote-output", "relay_registered"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control relay executed.", "automation"],
+    ["section", "automation"],
     ["api", "/remote-control/relay/outbox?status=pending&limit=2", "GET", ""],
     ["remote-outbox", "relay_outbox"],
     ["remote-output", "relay_outbox"],
     ["notice", "/remote-control", "Remote control relay-outbox loaded.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/relay/directory", "POST", JSON.stringify({ pairing_id: "pair-1", relay_auth_secret: "RELAY_SECRET", approved: true, limit: 4 })],
+    ["remote-output", "relay_directory_published"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control relay-directory executed.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/relay/notify", "POST", JSON.stringify({ pairing_id: "pair-1", relay_auth_secret: "RELAY_SECRET", approved: true, event: "task-updated", task_id: "task-8" })],
+    ["remote-output", "relay_notification_published"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control relay-notify executed.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/relay/retry", "POST", JSON.stringify({ pairing_id: "pair-1", relay_auth_secret: "RELAY_SECRET", approved: true, limit: 5 })],
+    ["remote-output", "relay_retry"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control relay-retry executed.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/relay/confirm", "POST", JSON.stringify({ pairing_id: "pair-1", relay_auth_secret: "RELAY_SECRET", approved: true, outbox_id: "outbox-1" })],
+    ["remote-output", "relay_confirmed"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control relay-confirm executed.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/relay/pull", "POST", JSON.stringify({ pairing_id: "pair-1", relay_auth_secret: "RELAY_SECRET", approved: true, dry_run: true, limit: 6 })],
+    ["refresh"],
+    ["remote-relay-pull", "relay_action_preview"],
+    ["notice", "/remote-control", "Remote control relay-pull executed.", "automation"],
     ["section", "automation"],
     ["api", "/remote-control/push/targets?target_id=push-1", "GET", ""],
     ["remote-push-targets", "native_push_target"],
     ["remote-output", "native_push_target"],
     ["notice", "/remote-control", "Remote control push-targets loaded.", "automation"],
     ["section", "automation"],
+    ["api", "/remote-control/push/register", "POST", JSON.stringify({ label: "phone", provider: "fcm", push_auth_secret: "PUSH_SECRET", device_token_secret: "DEVICE_SECRET", approved: true, fcm_project_id: "aegis-project" })],
+    ["remote-output", "native_push_target_registered"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control push-register executed.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/push/rotate", "POST", JSON.stringify({ target_id: "push-1", push_auth_secret: "PUSH_SECRET_2", device_token_secret: "DEVICE_SECRET_2", approved: true, fcm_project_id: "aegis-project-2" })],
+    ["remote-output", "native_push_target_rotated"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control push-rotate executed.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/push/disable", "POST", JSON.stringify({ target_id: "push-1", approved: true })],
+    ["remote-output", "native_push_target_disabled"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control push-disable executed.", "automation"],
+    ["section", "automation"],
+    ["api", "/remote-control/push", "POST", JSON.stringify({ pairing_id: "pair-1", target_id: "push-1", approved: true, event: "task-updated", task_id: "task-8" })],
+    ["remote-output", "native_push_published"],
+    ["refresh"],
+    ["notice", "/remote-control", "Remote control push executed.", "automation"],
+    ["section", "automation"],
     ["api", "/remote-control/pair", "POST", JSON.stringify({ label: "phone", session_id: "session-2", task_id: "task-9", allowed_actions: ["status", "events"], expires_in_seconds: 120 })],
     ["remote-output", "pair-new"],
     ["refresh"],
     ["notice", "/remote-control", "Remote control pair created.", "automation"],
     ["section", "automation"],
-    ["api", "/remote-control/revoke", "POST", JSON.stringify({ pairing_id: "pair-1" })],
+    ["api", "/remote-control/revoke", "POST", JSON.stringify({ pairing_id: "pair-1", approved: false })],
     ["remote-output", "remote_pairing_revoked"],
     ["refresh"],
     ["notice", "/remote-control", "Remote control pairing pair-1 revoked.", "automation"],

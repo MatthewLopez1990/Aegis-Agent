@@ -150,7 +150,7 @@ def _web_command_catalog(orchestrator: Any) -> dict[str, Any]:
         command_rows["remote-control"].update(
             {
                 "kind": "remote-control",
-                "detail": "Open remote pairing controls or run governed remote-control status, directory, pairing, relay, and outbox actions",
+                "detail": "Open remote pairing controls or run governed remote-control status, directory, relay, push, and outbox actions",
                 "section": "automation",
                 "args": remote_args,
                 "flags": remote_flags,
@@ -160,9 +160,18 @@ def _web_command_catalog(orchestrator: Any) -> dict[str, Any]:
                 "web_actions": [
                     {"input": "status", "method": "GET", "path": "/remote-control/status", "mutates": False},
                     {"input": "directory", "method": "GET", "path": "/remote-control/directory", "mutates": False},
-                    {"input": "relay", "method": "GET", "path": "/remote-control/relay", "mutates": False},
+                    {"input": "relay", "method": "GET|POST", "path": "/remote-control/relay", "mutates": True},
                     {"input": "relay-outbox", "method": "GET", "path": "/remote-control/relay/outbox", "mutates": False},
+                    {"input": "relay-directory", "method": "POST", "path": "/remote-control/relay/directory", "mutates": True},
+                    {"input": "relay-notify", "method": "POST", "path": "/remote-control/relay/notify", "mutates": True},
+                    {"input": "relay-retry", "method": "POST", "path": "/remote-control/relay/retry", "mutates": True},
+                    {"input": "relay-confirm", "method": "POST", "path": "/remote-control/relay/confirm", "mutates": True},
+                    {"input": "relay-pull", "method": "POST", "path": "/remote-control/relay/pull", "mutates": True},
                     {"input": "push-targets", "method": "GET", "path": "/remote-control/push/targets", "mutates": False},
+                    {"input": "push-register", "method": "POST", "path": "/remote-control/push/register", "mutates": True},
+                    {"input": "push-disable", "method": "POST", "path": "/remote-control/push/disable", "mutates": True},
+                    {"input": "push-rotate", "method": "POST", "path": "/remote-control/push/rotate", "mutates": True},
+                    {"input": "push", "method": "POST", "path": "/remote-control/push", "mutates": True},
                     {"input": "pair", "method": "POST", "path": "/remote-control/pair", "mutates": True},
                     {"input": "revoke", "method": "POST", "path": "/remote-control/revoke", "mutates": True},
                 ],

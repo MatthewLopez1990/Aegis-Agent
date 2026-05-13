@@ -2039,6 +2039,8 @@ const remoteControlSlashRequest = (request) => {
         query.set(queryKey, parts[index + 1]);
       }
       index += 1;
+    } else if (part.startsWith("--")) {
+      options[part] = true;
     } else if (!part.startsWith("--")) {
       positionals.push(part);
       if (action === "directory" && !query.has("pairing_id")) {
@@ -2047,6 +2049,67 @@ const remoteControlSlashRequest = (request) => {
     }
   }
   return { action, options, positionals, query: query.toString() };
+};
+
+const remoteControlElementValue = (id) => {
+  const element = document.getElementById(id);
+  return element && typeof element.value === "string" ? element.value.trim() : "";
+};
+
+const remoteControlOptionValue = (options, flag, elementId = "", fallback = "") => {
+  const value = options[flag];
+  if (value !== undefined && value !== true && value !== false) return String(value).trim();
+  return elementId ? remoteControlElementValue(elementId) || fallback : fallback;
+};
+
+const remoteControlBooleanOption = (options, flag, elementId = "") => {
+  const value = options[flag];
+  if (value === true) return true;
+  if (typeof value === "string") return ["1", "true", "yes", "approved"].includes(value.trim().toLowerCase());
+  const element = elementId ? document.getElementById(elementId) : null;
+  return Boolean(element && element.checked);
+};
+
+const remoteControlOptionalValue = (value) => {
+  const normalized = String(value || "").trim();
+  return normalized || undefined;
+};
+
+const remoteControlIntOption = (options, flag, fallback, defaultValue) => {
+  const parsed = Number.parseInt(remoteControlOptionValue(options, flag, "", String(fallback || defaultValue)), 10);
+  return Number.isFinite(parsed) ? parsed : defaultValue;
+};
+
+const remoteControlSlashRelayPayload = (options) => ({
+  pairing_id: remoteControlOptionValue(options, "--pairing-id", "remote-control-relay-pairing-id"),
+  relay_auth_secret: remoteControlOptionValue(options, "--relay-auth-secret", "remote-control-relay-secret"),
+  approved: remoteControlBooleanOption(options, "--approved", "remote-control-relay-approved"),
+});
+
+const remoteControlSlashPushPayload = (options) => ({
+  label: remoteControlOptionValue(options, "--label", "remote-control-push-label", "native push") || "native push",
+  target_id: remoteControlOptionalValue(remoteControlOptionValue(options, "--target-id", "remote-control-push-target-id")),
+  provider: remoteControlOptionValue(options, "--provider", "remote-control-push-provider"),
+  push_auth_secret: remoteControlOptionValue(options, "--push-auth-secret", "remote-control-push-secret"),
+  device_token_secret: remoteControlOptionValue(options, "--device-token-secret", "remote-control-device-secret"),
+  approved: remoteControlBooleanOption(options, "--approved", "remote-control-push-approved"),
+  apns_topic: remoteControlOptionalValue(remoteControlOptionValue(options, "--apns-topic", "remote-control-apns-topic")),
+  fcm_project_id: remoteControlOptionalValue(remoteControlOptionValue(options, "--fcm-project-id", "remote-control-fcm-project")),
+});
+
+const executeRemoteControlPostSlash = async (parsed, action, path, payload, render = "output") => {
+  state.activeSection = "automation";
+  applySectionVisibility();
+  const result = await api(path, { method: "POST", body: JSON.stringify(payload) });
+  if (render === "pull") {
+    await refresh();
+    renderRemoteControlRelayPull(result);
+  } else {
+    renderRemoteControlOutput(result);
+    await refresh();
+  }
+  renderTaskNotice(parsed.label || "/remote-control", `Remote control ${action} executed.`);
+  return true;
 };
 
 const executeRemoteControlSlashCommand = async (parsed) => {
@@ -2058,11 +2121,78 @@ const executeRemoteControlSlashCommand = async (parsed) => {
   } else if (action === "directory") {
     path = `/remote-control/directory${query ? `?${query}` : ""}`;
   } else if (action === "relay") {
+    if (options["--approved"] || options["--pairing-id"] || options["--relay-auth-secret"]) {
+      return executeRemoteControlPostSlash(parsed, action, "/remote-control/relay", {
+        ...remoteControlSlashRelayPayload(options),
+        relay_url: remoteControlOptionValue(options, "--relay-url", "remote-control-relay-url"),
+      });
+    }
     path = `/remote-control/relay${query ? `?${query}` : ""}`;
   } else if (action === "relay-outbox") {
     path = `/remote-control/relay/outbox${query ? `?${query}` : ""}`;
+  } else if (action === "relay-directory") {
+    return executeRemoteControlPostSlash(parsed, action, "/remote-control/relay/directory", {
+      ...remoteControlSlashRelayPayload(options),
+      limit: remoteControlIntOption(options, "--limit", "", 12),
+    });
+  } else if (action === "relay-notify") {
+    return executeRemoteControlPostSlash(parsed, action, "/remote-control/relay/notify", {
+      ...remoteControlSlashRelayPayload(options),
+      event: remoteControlOptionValue(options, "--event", "remote-control-relay-event", "directory-updated") || "directory-updated",
+      task_id: remoteControlOptionalValue(remoteControlOptionValue(options, "--task-id", "remote-control-relay-task-id")),
+    });
+  } else if (action === "relay-retry") {
+    return executeRemoteControlPostSlash(parsed, action, "/remote-control/relay/retry", {
+      ...remoteControlSlashRelayPayload(options),
+      limit: remoteControlIntOption(options, "--limit", "", 10),
+    });
+  } else if (action === "relay-confirm") {
+    return executeRemoteControlPostSlash(parsed, action, "/remote-control/relay/confirm", {
+      ...remoteControlSlashRelayPayload(options),
+      outbox_id: remoteControlOptionValue(options, "--outbox-id", "remote-control-relay-outbox-id"),
+    });
+  } else if (action === "relay-pull") {
+    return executeRemoteControlPostSlash(parsed, action, "/remote-control/relay/pull", {
+      ...remoteControlSlashRelayPayload(options),
+      dry_run: remoteControlBooleanOption(options, "--dry-run", "remote-control-relay-dry-run"),
+      limit: remoteControlIntOption(options, "--limit", "", 10),
+    }, "pull");
   } else if (action === "push-targets") {
     path = `/remote-control/push/targets${query ? `?${query}` : ""}`;
+  } else if (action === "push-register") {
+    return executeRemoteControlPostSlash(parsed, action, "/remote-control/push/register", remoteControlSlashPushPayload(options));
+  } else if (action === "push-disable") {
+    return executeRemoteControlPostSlash(parsed, action, "/remote-control/push/disable", {
+      target_id: remoteControlOptionValue(options, "--target-id", "remote-control-push-target-id"),
+      approved: remoteControlBooleanOption(options, "--approved", "remote-control-push-approved"),
+    });
+  } else if (action === "push-rotate") {
+    const pushPayload = remoteControlSlashPushPayload(options);
+    return executeRemoteControlPostSlash(parsed, action, "/remote-control/push/rotate", {
+      target_id: pushPayload.target_id,
+      push_auth_secret: remoteControlOptionalValue(pushPayload.push_auth_secret),
+      device_token_secret: remoteControlOptionalValue(pushPayload.device_token_secret),
+      approved: pushPayload.approved,
+      apns_topic: pushPayload.apns_topic,
+      fcm_project_id: pushPayload.fcm_project_id,
+    });
+  } else if (action === "push") {
+    const pushPayload = remoteControlSlashPushPayload(options);
+    const payload = {
+      pairing_id: remoteControlOptionValue(options, "--pairing-id", "remote-control-relay-pairing-id"),
+      target_id: pushPayload.target_id,
+      approved: pushPayload.approved,
+      event: remoteControlOptionValue(options, "--event", "remote-control-relay-event", "directory-updated") || "directory-updated",
+      task_id: remoteControlOptionalValue(remoteControlOptionValue(options, "--task-id", "remote-control-relay-task-id")),
+      apns_topic: pushPayload.apns_topic,
+      fcm_project_id: pushPayload.fcm_project_id,
+    };
+    if (!pushPayload.target_id) {
+      payload.provider = pushPayload.provider;
+      payload.push_auth_secret = pushPayload.push_auth_secret;
+      payload.device_token_secret = pushPayload.device_token_secret;
+    }
+    return executeRemoteControlPostSlash(parsed, action, "/remote-control/push", payload);
   } else if (action === "pair") {
     const allowedActions = (options["--allowed-actions"] || document.getElementById("remote-control-actions").value)
       .split(",")
@@ -2092,7 +2222,15 @@ const executeRemoteControlSlashCommand = async (parsed) => {
     }
     state.activeSection = "automation";
     applySectionVisibility();
-    const payloadResult = await api("/remote-control/revoke", { method: "POST", body: JSON.stringify({ pairing_id: pairingId }) });
+    const relayAuthSecret = remoteControlOptionValue(options, "--relay-auth-secret", "");
+    const payloadResult = await api("/remote-control/revoke", {
+      method: "POST",
+      body: JSON.stringify({
+        pairing_id: pairingId,
+        relay_auth_secret: remoteControlOptionalValue(relayAuthSecret),
+        approved: remoteControlBooleanOption(options, "--approved", "remote-control-relay-approved"),
+      }),
+    });
     renderRemoteControlOutput(payloadResult);
     await refresh();
     renderTaskNotice(parsed.label || "/remote-control", `Remote control pairing ${pairingId} revoked.`);
