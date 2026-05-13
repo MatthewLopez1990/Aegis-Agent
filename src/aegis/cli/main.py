@@ -924,7 +924,7 @@ def build_parser() -> argparse.ArgumentParser:
     personality = subcommands.add_parser("personality", help="Inspect built-in personalities and context files")
     personality_sub = personality.add_subparsers(dest="personality_command", required=True)
     personality_sub.add_parser("list", help="List built-in personalities")
-    personality_load = personality_sub.add_parser("context", help="Load SOUL/AGENTS/CLAUDE/TOOLS context files safely")
+    personality_load = personality_sub.add_parser("context", help="Load governed project context files safely")
     personality_load.add_argument("--workspace", default=".")
     personality_load.add_argument("--path", help="Optional workspace-relative target path for progressive context loading")
 

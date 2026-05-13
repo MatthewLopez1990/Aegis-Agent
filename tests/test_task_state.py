@@ -1146,9 +1146,16 @@ class TaskStateTests(unittest.TestCase):
             package.mkdir(parents=True)
             (root / "AGENTS.md").write_text("Root developer context.", encoding="utf-8")
             (root / "CLAUDE.md").write_text("Root Claude context.", encoding="utf-8")
+            (root / ".hermes.md").write_text("Root Hermes context.", encoding="utf-8")
+            (root / ".cursorrules").write_text("Root Cursor rule.", encoding="utf-8")
+            (root / ".cursor" / "rules").mkdir(parents=True)
+            (root / ".cursor" / "rules" / "root.mdc").write_text("Root Cursor MDC rule.", encoding="utf-8")
             (root / "packages" / "AGENTS.md").write_text("Package developer context.", encoding="utf-8")
+            (package / ".cursor" / "rules").mkdir(parents=True)
+            (package / ".cursor" / "rules" / "agent.mdc").write_text("Package Cursor MDC rule.", encoding="utf-8")
             (root / "other").mkdir()
             (root / "other" / "AGENTS.md").write_text("Unrelated context.", encoding="utf-8")
+            (root / "other" / ".cursorrules").write_text("Unrelated Cursor rule.", encoding="utf-8")
             target = package / "main.py"
             target.write_text("print('ok')\n", encoding="utf-8")
             orchestrator = build_orchestrator(data_dir=root / ".aegis", workspace=root)
@@ -1175,8 +1182,13 @@ class TaskStateTests(unittest.TestCase):
             self.assertIn("Project context files loaded from the workspace root", prompt_text)
             self.assertIn("Root developer context.", prompt_text)
             self.assertIn("Root Claude context.", prompt_text)
+            self.assertIn("Root Hermes context.", prompt_text)
+            self.assertIn("Root Cursor rule.", prompt_text)
+            self.assertIn("Root Cursor MDC rule.", prompt_text)
             self.assertIn("Package developer context.", prompt_text)
+            self.assertIn("Package Cursor MDC rule.", prompt_text)
             self.assertNotIn("Unrelated context.", prompt_text)
+            self.assertNotIn("Unrelated Cursor rule.", prompt_text)
 
     def test_live_model_prompt_applies_context_budget_to_long_session_history(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

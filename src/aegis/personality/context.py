@@ -30,8 +30,13 @@ CONTEXT_FILE_TRUST: tuple[tuple[str, TrustClass], ...] = (
     ("SOUL.md", TrustClass.USER_DIRECTIVE),
     ("AGENTS.md", TrustClass.DEVELOPER_TRUSTED),
     ("CLAUDE.md", TrustClass.DEVELOPER_TRUSTED),
+    (".hermes.md", TrustClass.DEVELOPER_TRUSTED),
+    ("HERMES.md", TrustClass.DEVELOPER_TRUSTED),
+    (".cursorrules", TrustClass.DEVELOPER_TRUSTED),
     ("TOOLS.md", TrustClass.USER_DIRECTIVE),
 )
+CURSOR_RULES_DIR = Path(".cursor") / "rules"
+CURSOR_RULES_PATTERN = "*.mdc"
 
 
 class ContextFileLoader:
@@ -60,10 +65,9 @@ class ContextFileLoader:
 
     def _raw_items(self, target_path: str | Path | None = None) -> list[ContextItem]:
         items: list[ContextItem] = []
-        trust_by_name = dict(CONTEXT_FILE_TRUST)
         for path in self._candidate_paths(target_path):
             content = self._read_bounded(path)
-            items.append(self.firewall.label_content(content, source=str(path), trust_class=trust_by_name[path.name]))
+            items.append(self.firewall.label_content(content, source=str(path), trust_class=self._trust_for_path(path)))
         return items
 
     def _candidate_paths(self, target_path: str | Path | None = None) -> list[Path]:
@@ -73,19 +77,36 @@ class ContextFileLoader:
             for filename, _trust in CONTEXT_FILE_TRUST:
                 if filename == "SOUL.md" and directory != self.workspace:
                     continue
-                path = directory / filename
-                if len(paths) >= self.max_files:
+                if self._append_candidate(paths, seen, directory / filename):
                     return paths
-                if path in seen or not path.exists() or not path.is_file():
-                    continue
-                try:
-                    resolved = path.resolve()
-                    resolved.relative_to(self.workspace)
-                except (OSError, ValueError):
-                    continue
-                paths.append(path)
-                seen.add(path)
+                if filename == ".cursorrules":
+                    rules_dir = directory / CURSOR_RULES_DIR
+                    for rule_path in sorted(rules_dir.glob(CURSOR_RULES_PATTERN)):
+                        if self._append_candidate(paths, seen, rule_path):
+                            return paths
         return paths
+
+    def _append_candidate(self, paths: list[Path], seen: set[Path], path: Path) -> bool:
+        if len(paths) >= self.max_files:
+            return True
+        if path in seen or not path.exists() or not path.is_file():
+            return False
+        try:
+            resolved = path.resolve()
+            resolved.relative_to(self.workspace)
+        except (OSError, ValueError):
+            return False
+        paths.append(path)
+        seen.add(path)
+        return len(paths) >= self.max_files
+
+    def _trust_for_path(self, path: Path) -> TrustClass:
+        trust_by_name = dict(CONTEXT_FILE_TRUST)
+        if path.name in trust_by_name:
+            return trust_by_name[path.name]
+        if path.suffix == ".mdc" and path.parent.name == "rules" and path.parent.parent.name == ".cursor":
+            return TrustClass.DEVELOPER_TRUSTED
+        raise ValueError(f"unsupported context file path: {path}")
 
     def _context_dirs(self, target_path: str | Path | None = None) -> list[Path]:
         target_dir = self._resolve_target_dir(target_path)

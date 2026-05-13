@@ -3322,20 +3322,38 @@ class PlatformLayerTests(unittest.TestCase):
             (root / "SOUL.md").write_text("Be concise.", encoding="utf-8")
             (root / "AGENTS.md").write_text("Developer context.", encoding="utf-8")
             (root / "CLAUDE.md").write_text("Claude-compatible project context.", encoding="utf-8")
+            (root / ".hermes.md").write_text("Hermes hidden context.", encoding="utf-8")
+            (root / "HERMES.md").write_text("Hermes root context.", encoding="utf-8")
+            (root / ".cursorrules").write_text("Cursor root rule.", encoding="utf-8")
+            (root / ".cursor" / "rules").mkdir(parents=True)
+            (root / ".cursor" / "rules" / "root.mdc").write_text("Cursor root MDC rule.", encoding="utf-8")
             package = root / "packages" / "agent"
             package.mkdir(parents=True)
             (root / "packages" / "AGENTS.md").write_text("Package developer context.", encoding="utf-8")
+            (package / ".cursor" / "rules").mkdir(parents=True)
+            (package / ".cursor" / "rules" / "agent.mdc").write_text("Cursor package MDC rule.", encoding="utf-8")
             (package / "TOOLS.md").write_text("Package tool context.", encoding="utf-8")
             (root / "other").mkdir()
             (root / "other" / "AGENTS.md").write_text("Unrelated context.", encoding="utf-8")
 
             items = ContextFileLoader(root).load()
-            self.assertEqual(len(items), 3)
+            self.assertEqual(len(items), 7)
             progressive_items = ContextFileLoader(root).load(package / "main.py")
             progressive_sources = [Path(item.taint.source).relative_to(root).as_posix() for item in progressive_items]
             self.assertEqual(
                 progressive_sources,
-                ["SOUL.md", "AGENTS.md", "CLAUDE.md", "packages/AGENTS.md", "packages/agent/TOOLS.md"],
+                [
+                    "SOUL.md",
+                    "AGENTS.md",
+                    "CLAUDE.md",
+                    ".hermes.md",
+                    "HERMES.md",
+                    ".cursorrules",
+                    ".cursor/rules/root.mdc",
+                    "packages/AGENTS.md",
+                    "packages/agent/.cursor/rules/agent.mdc",
+                    "packages/agent/TOOLS.md",
+                ],
             )
             self.assertNotIn("other/AGENTS.md", progressive_sources)
             self.assertEqual(progressive_items[1].taint.trust_class.value, "DEVELOPER_TRUSTED")
