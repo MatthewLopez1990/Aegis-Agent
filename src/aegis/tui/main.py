@@ -7121,18 +7121,27 @@ def _live_input_block(prompt: str, buffer: str, width: int) -> tuple[str, int]:
 def _live_key_hint_lines(buffer: str, width: int) -> list[str]:
     if buffer:
         return []
-    return [_paint(textwrap.shorten("keys     Enter send  Ctrl+V newline  Tab complete", width=max(20, width), placeholder=" ..."), "2;36")]
+    return [_paint(_shorten_preserve_spaces("keys     Enter send  Ctrl+V newline  Tab complete", width=max(20, width)), "2;36")]
 
 
 def _live_slash_hint_lines(buffer: str, width: int) -> list[str]:
     if not buffer.startswith("/"):
         return []
-    prefix = buffer[1:].strip()
-    labels = _slash_completion_labels(prefix)
+    completion_text, begidx, endidx = _live_completion_context(buffer)
+    labels = _complete_slash(completion_text, buffer, begidx, endidx)
     if not labels:
         return [_paint("suggest  no slash matches", "2;33")]
-    line = "suggest  " + "  ".join(labels)
-    return [_paint(textwrap.shorten(line, width=max(20, width), placeholder=" ..."), "2;36")]
+    label = _live_completion_hint_label(labels, begidx)
+    line = f"{label:<7} " + "  ".join(labels)
+    return [_paint(_shorten_preserve_spaces(line, width=max(20, width)), "2;36")]
+
+
+def _live_completion_hint_label(labels: list[str], begidx: int) -> str:
+    if labels and all(label.startswith("--") for label in labels):
+        return "flags"
+    if labels and all(label.startswith("/") for label in labels) and begidx <= 1:
+        return "slash"
+    return "subcmd"
 
 
 def _wrapped_prompt_lines(prompt: str, buffer: str, width: int) -> list[str]:
@@ -7161,6 +7170,14 @@ def _wrapped_prompt_lines(prompt: str, buffer: str, width: int) -> list[str]:
 
 def _inline_completion_line(completions: list[str], *, width: int) -> str:
     return textwrap.shorten("complete " + "  ".join(completions[:12]), width=max(20, width), placeholder=" ...")
+
+
+def _shorten_preserve_spaces(text: str, *, width: int) -> str:
+    if len(text) <= width:
+        return text
+    if width <= 4:
+        return text[:width]
+    return text[: width - 4].rstrip() + " ..."
 
 
 def _read_tui_history_lines(path: Path) -> list[str]:

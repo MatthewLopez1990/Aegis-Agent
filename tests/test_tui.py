@@ -658,7 +658,11 @@ class TuiTests(unittest.TestCase):
             self.assertIn("aegis> first line", multiline)
             self.assertIn("       second line", multiline)
             slash_hint, _ = _live_input_block("aegis> ", "/su", 80)
-            self.assertIn("suggest /submit /resume", slash_hint)
+            self.assertIn("slash   /submit  /resume", slash_hint)
+            subcommand_hint, _ = _live_input_block("aegis> ", "/model au", 80)
+            self.assertIn("subcmd  auth", subcommand_hint)
+            flag_hint, _ = _live_input_block("aegis> ", "/plugins fetch-manifest remote.plugin --", 80)
+            self.assertIn("flags   --catalog-path", flag_hint)
 
     def test_tui_dispatches_configured_quick_commands(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
