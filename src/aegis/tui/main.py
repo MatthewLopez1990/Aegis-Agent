@@ -26,6 +26,7 @@ from aegis.migration.openclaw import inspect_hermes_home, inspect_openclaw_home,
 from aegis.personality.context import ContextFileLoader
 from aegis.product.capabilities import build_product_dashboard
 from aegis.product.setup import build_setup_readiness
+from aegis.product.update import UpdateSource, apply_platform_update, check_platform_update, update_audit_payload
 from aegis.remote_control import (
     RemoteControlPairingRegistry,
     build_remote_control_directory,
@@ -5210,8 +5211,28 @@ class AegisTui(cmd.Cmd):
         print("usage: hooks list | hooks add <event> [--id id] [--enabled] [--no-approval-required] -- <command...> | hooks enable|disable|remove <id> | hooks run <event> [--approved] [--context-json JSON]")
 
     def do_update(self, arg: str) -> None:
-        """update -- show guarded update readiness."""
-        _print_json({"status": "operator_action_required", "detail": "Package self-update is not automatic; review git changes and run the installer/update command explicitly."})
+        """update [--check|--apply --approved] -- check for or apply a governed platform update."""
+        try:
+            parts = shlex.split(arg)
+            apply_requested = "--apply" in parts or (parts[:1] == ["apply"])
+            method = _option_value(parts, "--method") or "auto"
+            source = UpdateSource(
+                manifest_url=_option_value(parts, "--manifest-url") or UpdateSource.manifest_url,
+                archive_url=_option_value(parts, "--archive-url") or UpdateSource.archive_url,
+                repository=_option_value(parts, "--repository") or UpdateSource.repository,
+            )
+            if apply_requested:
+                result = apply_platform_update(source=source, method=method, approved="--approved" in parts)
+                self.orchestrator.audit_logger.append(
+                    "runtime.update_applied" if result.get("apply_attempted") else "runtime.update_apply_blocked",
+                    update_audit_payload(result),
+                )
+            else:
+                result = check_platform_update(source=source)
+                self.orchestrator.audit_logger.append("runtime.update_checked", update_audit_payload(result))
+            _print_json(result)
+        except (OSError, ValueError) as exc:
+            print(f"update error: {exc}")
 
     def do_release_notes(self, arg: str) -> None:
         """release_notes -- show local release/version metadata."""
@@ -7361,6 +7382,7 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("memory", "review-digest"): ("--limit", "--owner", "--scope"),
     ("memory", "recertify"): ("--max-age-days", "--limit", "--dry-run", "--owner", "--scope"),
     ("task", "submit"): ("--path",),
+    ("update", ""): ("--check", "--apply", "--approved", "--method", "--manifest-url", "--archive-url", "--repository"),
     ("queue", "status"): ("--limit", "--status"),
     ("queue", "show"): ("--limit", "--status"),
     ("queue", "list"): ("--limit", "--status"),
@@ -7506,7 +7528,7 @@ def _complete_slash(text: str, line: str, begidx: int, endidx: int) -> list[str]
     if root in {"model", "models"} and len(parts) >= 2 and parts[1] == "auth":
         return _complete_options(MODEL_AUTH_COMMANDS, current)
     if current.startswith("--") or any(part.startswith("--") for part in parts[1:]):
-        subcommand = parts[1] if len(parts) > 1 else ""
+        subcommand = parts[1] if len(parts) > 1 and not parts[1].startswith("--") else ""
         return _complete_options(SLASH_FLAG_HINTS.get((root, subcommand), ()), current)
     subcommands = SLASH_SUBCOMMANDS.get(root, ())
     return _complete_options(subcommands, current)

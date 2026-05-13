@@ -57,6 +57,74 @@ class CliTests(unittest.TestCase):
             bash_script = build_completion_script("bash", program="aegis-dev")
             self.assertIn("complete -F _aegis_dev aegis-dev", bash_script)
 
+    def test_update_command_checks_remote_metadata_without_applying(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            data_dir = Path(temp) / ".aegis"
+            manifest = b'[project]\nname = "aegis-agent"\nversion = "0.2.0"\n'
+
+            with patch("aegis.product.update._fetch_bytes", return_value=manifest):
+                result = dispatch(
+                    parser.parse_args(
+                        [
+                            "--data-dir",
+                            str(data_dir),
+                            "update",
+                            "--check",
+                            "--manifest-url",
+                            "https://updates.example.test/pyproject.toml",
+                            "--archive-url",
+                            "https://updates.example.test/aegis.tar.gz",
+                        ]
+                    )
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["status"], "update_available")
+            self.assertEqual(result["current_version"], "0.1.0")
+            self.assertEqual(result["latest_version"], "0.2.0")
+            self.assertEqual(result["source"]["manifest_url"], "https://updates.example.test/pyproject.toml")
+            self.assertEqual(result["apply_command"], "aegis update --apply --approved")
+            audit_text = (data_dir / "audit.jsonl").read_text(encoding="utf-8")
+            self.assertIn("runtime.update_checked", audit_text)
+            self.assertNotIn("secret", audit_text.lower())
+
+    def test_update_apply_requires_approval_and_can_run_pip_update(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            data_dir = Path(temp) / ".aegis"
+            manifest = b'[project]\nname = "aegis-agent"\nversion = "0.2.0"\n'
+            args = [
+                "--data-dir",
+                str(data_dir),
+                "update",
+                "--apply",
+                "--method",
+                "pip",
+                "--manifest-url",
+                "https://updates.example.test/pyproject.toml",
+                "--archive-url",
+                "https://updates.example.test/aegis.tar.gz",
+            ]
+
+            with patch("aegis.product.update._fetch_bytes", return_value=manifest):
+                gated = dispatch(parser.parse_args(args))
+
+            completed = subprocess.CompletedProcess(("python", "-m", "pip"), 0, stdout="installed\n", stderr="")
+            with (
+                patch("aegis.product.update._fetch_bytes", return_value=manifest),
+                patch("aegis.product.update.subprocess.run", return_value=completed) as run,
+            ):
+                applied = dispatch(parser.parse_args([*args, "--approved"]))
+
+            self.assertEqual(gated["status"], "approval_required")
+            self.assertFalse(gated["apply_attempted"])
+            self.assertEqual(applied["status"], "updated")
+            self.assertEqual(applied["apply_method"], "pip")
+            self.assertEqual(applied["stdout_tail"], "installed\n")
+            self.assertTrue(run.called)
+            self.assertEqual(run.call_args.args[0][-1], "https://updates.example.test/aegis.tar.gz")
+
     def test_skill_create_template_is_disabled_and_approval_required(self) -> None:
         manifest = create_skill_template("example.skill", name="Example", description="Example skill")
 

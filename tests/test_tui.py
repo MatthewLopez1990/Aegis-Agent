@@ -338,6 +338,8 @@ class TuiTests(unittest.TestCase):
             self.assertIn("--enable", tui.completedefault("--", "/plugins install-marketplace remote.plugin --", len("/plugins install-marketplace remote.plugin "), len("/plugins install-marketplace remote.plugin --")))
             self.assertIn("--force", tui.completedefault("--", "/plugins update-marketplace remote.plugin --", len("/plugins update-marketplace remote.plugin "), len("/plugins update-marketplace remote.plugin --")))
             self.assertIn("--approved", tui.completedefault("--", "/plugins update-marketplace remote.plugin --", len("/plugins update-marketplace remote.plugin "), len("/plugins update-marketplace remote.plugin --")))
+            self.assertIn("--apply", tui.completedefault("--", "/update --", len("/update "), len("/update --")))
+            self.assertIn("--approved", tui.completedefault("--", "/update --apply --", len("/update --apply "), len("/update --apply --")))
             self.assertIn("queue", tui.completedefault("q", "/busy q", len("/busy "), len("/busy q")))
             self.assertIn("interrupt", tui.completedefault("i", "/busy i", len("/busy "), len("/busy i")))
             self.assertIn("pending", tui.completedefault("p", "/queue p", len("/queue "), len("/queue p")))
@@ -353,6 +355,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("methods", tui.complete_models("me", "models auth me", len("models auth "), len("models auth me")))
             self.assertIn("targets", tui.complete_models("ta", "models auth ta", len("models auth "), len("models auth ta")))
             self.assertIn("doctor", tui.complete_models("do", "models auth do", len("models auth "), len("models auth do")))
+
             self.assertIn("readiness-packet", tui.complete_models("rea", "models auth rea", len("models auth "), len("models auth rea")))
             self.assertIn("verify-readiness-packet", tui.completedefault("verify", "/models auth verify", len("/models auth "), len("/models auth verify")))
             self.assertIn("resume", tui.complete_task("res", "task res", len("task "), len("task res")))
@@ -740,6 +743,21 @@ class TuiTests(unittest.TestCase):
             self.assertIn("subcmd  auth", subcommand_hint)
             flag_hint, _ = _live_input_block("aegis> ", "/plugins fetch-manifest remote.plugin --", 80)
             self.assertIn("flags   --catalog-path", flag_hint)
+
+    def test_update_command_checks_remote_metadata_from_tui(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tui = AegisTui(data_dir=root / ".aegis", workspace=root)
+            manifest = b'[project]\nname = "aegis-agent"\nversion = "0.2.0"\n'
+            output = io.StringIO()
+
+            with patch("aegis.product.update._fetch_bytes", return_value=manifest), redirect_stdout(output):
+                tui.onecmd("update --check --manifest-url https://updates.example.test/pyproject.toml")
+
+            rendered = output.getvalue()
+            self.assertIn('"status": "update_available"', rendered)
+            self.assertIn('"latest_version": "0.2.0"', rendered)
+            self.assertIn('"apply_command": "aegis update --apply --approved"', rendered)
 
     def test_tui_dispatches_configured_quick_commands(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

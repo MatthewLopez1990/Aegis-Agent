@@ -30,6 +30,7 @@ from aegis.personality.context import ContextFileLoader, PERSONALITY_NAMES
 from aegis.plugins.manager import PluginManager
 from aegis.product.capabilities import build_product_dashboard
 from aegis.product.setup import build_setup_readiness
+from aegis.product.update import UpdateSource, apply_platform_update, check_platform_update, update_audit_payload
 from aegis.remote_control import (
     RemoteControlPairingRegistry,
     build_remote_control_directory,
@@ -90,6 +91,15 @@ def build_parser() -> argparse.ArgumentParser:
     completion.add_argument("shell", choices=("bash", "zsh", "fish"), help="Shell completion format to emit")
     completion.add_argument("--program", default="aegis", help="Installed command name")
     subcommands.add_parser("health", help="Show local runtime health")
+    update = subcommands.add_parser("update", help="Check for or apply a governed Aegis Agent platform update")
+    update_mode = update.add_mutually_exclusive_group()
+    update_mode.add_argument("--check", action="store_true", help="Check remote metadata without changing the install")
+    update_mode.add_argument("--apply", action="store_true", help="Apply the latest platform update")
+    update.add_argument("--approved", action="store_true", help="Approve applying the update")
+    update.add_argument("--method", choices=("auto", "git", "pip"), default="auto", help="Update method used with --apply")
+    update.add_argument("--manifest-url", help="Override the remote pyproject.toml metadata URL")
+    update.add_argument("--archive-url", help="Override the source archive URL used for pip updates")
+    update.add_argument("--repository", help="Override the repository URL shown in update reports")
     subcommands.add_parser("dashboard", help="Show product capability and security posture")
     subcommands.add_parser("capabilities", help="Show capability groups, readiness buckets, and live gaps")
     enterprise = subcommands.add_parser("enterprise-readiness", help="Show concise enterprise readiness flags")
@@ -1336,6 +1346,21 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
         audit = AuditLogger(config.audit_log_path)
         connectors = build_default_registry(config, audit)
         return {"ok": True, "data_dir": str(config.data_dir), "database": str(store.database_path), "audit_chain_ok": audit.verify_chain(), "connectors": connectors.status()}
+
+    if args.command == "update":
+        source = UpdateSource(
+            manifest_url=args.manifest_url or UpdateSource.manifest_url,
+            archive_url=args.archive_url or UpdateSource.archive_url,
+            repository=args.repository or UpdateSource.repository,
+        )
+        audit = AuditLogger(config.audit_log_path)
+        if args.apply:
+            result = apply_platform_update(source=source, method=args.method, approved=args.approved)
+            audit.append("runtime.update_applied" if result.get("apply_attempted") else "runtime.update_apply_blocked", update_audit_payload(result))
+            return result
+        result = check_platform_update(source=source)
+        audit.append("runtime.update_checked", update_audit_payload(result))
+        return result
 
     if args.command == "dashboard":
         orchestrator = build_orchestrator(data_dir=args.data_dir)
