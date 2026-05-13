@@ -139,6 +139,43 @@ def _web_command_catalog(orchestrator: Any) -> dict[str, Any]:
                 ],
             }
         )
+    for command, detail, action, mutates in (
+        ("approval", "Review an approval payload by id from the web console", "review", False),
+        ("approve", "Approve a pending approval by id with the web decision form metadata", "approve", True),
+        ("deny", "Deny a pending approval by id with the web decision form metadata", "deny", True),
+    ):
+        command_rows.setdefault(
+            command,
+            {
+                "command": command,
+                "label": f"/{command} <approval_id>",
+                "group": "govern",
+                "source": "web",
+            },
+        )
+        path_template = "/approvals/{approval_id}" if action == "review" else f"/approvals/{{approval_id}}/{action}"
+        command_rows[command].update(
+            {
+                "label": f"/{command} <approval_id>",
+                "detail": detail,
+                "kind": "approval-control",
+                "section": "security",
+                "surfaces": ["tui", "web_palette", "web_action"],
+                "args": ["approval_id"],
+                "flags": ["--actor", "--reason", "--admin"] if mutates else [],
+                "requires_local_token": True,
+                "requires_remote_token": False,
+                "mutates": mutates,
+                "web_actions": [
+                    {
+                        "input": action,
+                        "method": "GET" if action == "review" else "POST",
+                        "path_template": path_template,
+                        "mutates": mutates,
+                    }
+                ],
+            }
+        )
     for command, detail in (
         ("resume", "Resume a waiting or paused task by id, or the selected task from the web console"),
         ("pause", "Pause a non-terminal task by id, or the selected task from the web console"),

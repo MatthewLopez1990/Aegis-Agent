@@ -285,6 +285,18 @@ const stop = api.parse("/stop task-789");
 if (stop.kind !== "task-control" || stop.command !== "cancel" || stop.taskAction !== "cancel") {
   throw new Error(`stop alias did not resolve to cancel: ${JSON.stringify(stop)}`);
 }
+const approval = api.parse("/approval approval-123");
+if (approval.kind !== "approval-control" || approval.approvalAction !== "review" || approval.request !== "approval-123") {
+  throw new Error(`approval command parsed incorrectly: ${JSON.stringify(approval)}`);
+}
+const approve = api.parse("/approve approval-123");
+if (approve.kind !== "approval-control" || approve.approvalAction !== "approve" || approve.request !== "approval-123") {
+  throw new Error(`approve command parsed incorrectly: ${JSON.stringify(approve)}`);
+}
+const deny = api.parse("/deny approval-123");
+if (deny.kind !== "approval-control" || deny.approvalAction !== "deny" || deny.request !== "approval-123") {
+  throw new Error(`deny command parsed incorrectly: ${JSON.stringify(deny)}`);
+}
 const events = api.matches("ev").map((entry) => entry.command);
 if (!events.includes("events")) {
   throw new Error(`/events command did not fuzzy match: ${JSON.stringify(events)}`);
@@ -322,6 +334,7 @@ api.merge([
   { command: "submit", label: "/submit duplicate", detail: "duplicate should be ignored", kind: "palette" },
   { command: "remote-control", label: "/remote-control", detail: "Remote action metadata", kind: "remote-control", section: "automation", source: "tui", surfaces: ["tui", "web_palette"], args: ["status", "directory"], flags: ["--pairing-id", "--limit"], requires_local_token: true, requires_remote_token: false, mutates: false, web_actions: [{ input: "status", method: "GET", path: "/remote-control/status", mutates: false }] },
   { command: "pause", label: "/pause [task_id]", detail: "Pause task metadata", kind: "task-control", section: "activity", source: "tui", args: ["task_id"], requires_local_token: true, mutates: true, web_actions: [{ input: "pause", method: "POST", path_template: "/tasks/{task_id}/pause", mutates: true }] },
+  { command: "approve", label: "/approve <approval_id>", detail: "Approve metadata", kind: "approval-control", section: "security", source: "tui", args: ["approval_id"], flags: ["--actor", "--reason", "--admin"], requires_local_token: true, mutates: true, web_actions: [{ input: "approve", method: "POST", path_template: "/approvals/{approval_id}/approve", mutates: true }] },
   { command: "aegis-project-summary", label: "/aegis-project-summary", detail: "Skill command", kind: "palette", source: "skill" },
 ]);
 const debug = api.parse("/debug");
@@ -339,6 +352,10 @@ if (remote.kind !== "remote-control" || remote.request !== "status" || !remote.w
 const mergedPause = api.parse("/pause task-101");
 if (!mergedPause.webActions.length || mergedPause.mutates !== true || !mergedPause.args.includes("task_id")) {
   throw new Error(`/pause metadata did not merge: ${JSON.stringify(mergedPause)}`);
+}
+const mergedApprove = api.parse("/approve approval-101");
+if (!mergedApprove.webActions.length || mergedApprove.mutates !== true || !mergedApprove.flags.includes("--admin")) {
+  throw new Error(`/approve metadata did not merge: ${JSON.stringify(mergedApprove)}`);
 }
 const submitCount = api.commands().filter((entry) => entry.command === "submit").length;
 if (submitCount !== 1) {
@@ -374,13 +391,20 @@ const renderTaskError = (message) => calls.push(["error", message]);
 const resumeTask = async (taskId) => calls.push(["resume", taskId]);
 const pauseTask = async (taskId) => calls.push(["pause", taskId]);
 const cancelTask = async (taskId) => calls.push(["cancel", taskId]);
+const loadApprovalDetail = async (approvalId) => calls.push(["approval-detail", approvalId, state.activeSection]);
+const approvalDecisionPayload = () => ({ actor: "web-test", reason: "reviewed", admin: true });
+const refresh = async () => calls.push(["refresh"]);
+const document = { getElementById(id) { return { replaceChildren() { calls.push(["replace-children", id]); } }; } };
 const renderRemoteControlOutput = (payload) => calls.push(["remote-output", payload.status || payload.pairing?.id || "payload"]);
-const api = async (path) => {
-  calls.push(["api", path]);
+const api = async (path, options = {}) => {
+  calls.push(["api", path, options.method || "GET", options.body || ""]);
   return { status: path.includes("/directory") ? "scoped_directory" : "remote_control_status" };
 };
 eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = executeLocalSlashCommand;`);
 (async () => {
+  await executeLocalSlashCommand({ kind: "approval-control", command: "approval", approvalAction: "review", label: "/approval", request: "approval-1" });
+  await executeLocalSlashCommand({ kind: "approval-control", command: "approve", approvalAction: "approve", request: "approval-2" });
+  await executeLocalSlashCommand({ kind: "approval-control", command: "deny", approvalAction: "deny", request: "approval-3" });
   await executeLocalSlashCommand({ kind: "task-inspection", command: "status", taskView: "status", request: "task-1" });
   await executeLocalSlashCommand({ kind: "task-control", command: "resume", taskAction: "resume", request: "task-2" });
   await executeLocalSlashCommand({ kind: "task-control", command: "pause", taskAction: "pause", request: "" });
@@ -396,6 +420,19 @@ eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = execute
   state.lastEvidence = null;
   await executeLocalSlashCommand({ kind: "task-inspection", command: "status", label: "/status [task_id]", taskView: "status", request: "" });
   const expected = [
+    ["section", "security"],
+    ["approval-detail", "approval-1", "security"],
+    ["notice", "/approval", "Approval approval-1 loaded.", "security"],
+    ["section", "security"],
+    ["api", "/approvals/approval-2/approve", "POST", JSON.stringify({ actor: "web-test", reason: "reviewed", admin: true })],
+    ["replace-children", "approval-detail"],
+    ["refresh"],
+    ["notice", "/approve", "Approval approval-2 approved.", "security"],
+    ["section", "security"],
+    ["api", "/approvals/approval-3/deny", "POST", JSON.stringify({ actor: "web-test", reason: "reviewed", admin: true })],
+    ["replace-children", "approval-detail"],
+    ["refresh"],
+    ["notice", "/deny", "Approval approval-3 denied.", "security"],
     ["section", "activity"],
     ["status", "task-1", "activity"],
     ["resume", "task-2"],
@@ -405,11 +442,11 @@ eval(`${source.slice(start, end)}\nglobalThis.executeLocalSlashCommand = execute
     ["timeline", "task-3", "activity"],
     ["evidence", "task-4", "activity"],
     ["section", "automation"],
-    ["api", "/remote-control/status"],
+    ["api", "/remote-control/status", "GET", ""],
     ["remote-output", "remote_control_status"],
     ["notice", "/remote-control", "Remote control status loaded.", "automation"],
     ["section", "automation"],
-    ["api", "/remote-control/directory?pairing_id=pair-1&limit=3"],
+    ["api", "/remote-control/directory?pairing_id=pair-1&limit=3", "GET", ""],
     ["remote-output", "scoped_directory"],
     ["notice", "/remote-control", "Remote control directory loaded.", "automation"],
     ["section", "automation"],

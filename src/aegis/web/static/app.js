@@ -53,7 +53,10 @@ const WEB_SLASH_COMMANDS = [
   { command: "pause", label: "/pause [task_id]", detail: "Pause the selected non-terminal task", kind: "task-control", taskAction: "pause" },
   { command: "cancel", aliases: ["stop"], label: "/cancel|/stop [task_id]", detail: "Cancel the selected non-terminal task", kind: "task-control", taskAction: "cancel" },
   { command: "tasks", aliases: ["task", "list"], label: "/tasks", detail: "Open the task feed", kind: "section", section: "activity" },
-  { command: "approvals", aliases: ["approve", "permissions", "privacy-settings", "whoami", "yolo"], label: "/approvals", detail: "Open pending approval and privacy gates", kind: "section", section: "security" },
+  { command: "approval", label: "/approval <approval_id>", detail: "Review an approval request", kind: "approval-control", approvalAction: "review" },
+  { command: "approve", label: "/approve <approval_id>", detail: "Approve a pending approval", kind: "approval-control", approvalAction: "approve" },
+  { command: "deny", label: "/deny <approval_id>", detail: "Deny a pending approval", kind: "approval-control", approvalAction: "deny" },
+  { command: "approvals", aliases: ["permissions", "privacy-settings", "whoami", "yolo"], label: "/approvals", detail: "Open pending approval and privacy gates", kind: "section", section: "security" },
   { command: "models", aliases: ["model", "login", "logout", "setup-bedrock", "setup-vertex", "upgrade"], label: "/models", detail: "Open provider login and model routing controls", kind: "section", section: "models" },
   { command: "tools", aliases: ["tool", "allowed-tools"], label: "/tools", detail: "Open governed tool and MCP controls", kind: "section", section: "tools" },
   { command: "browser", aliases: ["chrome"], label: "/browser|/chrome", detail: "Open guarded browser controls", kind: "section", section: "tools" },
@@ -89,6 +92,7 @@ const normalizeWebSlashCommand = (entry) => {
     mutates: Boolean(entry.mutates),
     webActions: Array.isArray(entry.web_actions) ? entry.web_actions : Array.isArray(entry.webActions) ? entry.webActions : [],
     taskAction: entry.taskAction || entry.task_action || "",
+    approvalAction: entry.approvalAction || entry.approval_action || "",
     acceptsRequest: Boolean(entry.acceptsRequest),
   };
 };
@@ -117,6 +121,7 @@ const mergeWebSlashCommands = (commands = []) => {
           existing.mutates = entry.mutates;
           existing.webActions = entry.webActions;
           existing.taskAction = entry.taskAction || existing.taskAction;
+          existing.approvalAction = entry.approvalAction || existing.approvalAction;
         }
         return;
       }
@@ -1817,6 +1822,8 @@ const selectedTaskId = () =>
 
 const slashTaskId = (parsed) => String(parsed.request || "").trim().split(/\s+/, 1)[0] || selectedTaskId();
 
+const slashApprovalId = (parsed) => String(parsed.request || "").trim().split(/\s+/, 1)[0];
+
 const remoteControlSlashRequest = (request) => {
   const parts = String(request || "").trim().split(/\s+/).filter(Boolean);
   const action = (parts.shift() || "").toLowerCase();
@@ -1856,6 +1863,28 @@ const executeRemoteControlSlashCommand = async (parsed) => {
 };
 
 const executeLocalSlashCommand = async (parsed) => {
+  if (parsed.kind === "approval-control") {
+    const approvalId = slashApprovalId(parsed);
+    const action = parsed.approvalAction || parsed.command;
+    state.activeSection = "security";
+    applySectionVisibility();
+    if (!approvalId) {
+      renderTaskNotice(`/${parsed.command || action}`, `Include an approval id, then run /${parsed.command || action} again.`);
+      return;
+    }
+    if (action === "review") {
+      await loadApprovalDetail(approvalId);
+      renderTaskNotice(parsed.label || "/approval", `Approval ${approvalId} loaded.`);
+    } else if (action === "approve" || action === "deny") {
+      await api(`/approvals/${encodeURIComponent(approvalId)}/${action}`, { method: "POST", body: JSON.stringify(approvalDecisionPayload()) });
+      document.getElementById("approval-detail").replaceChildren();
+      await refresh();
+      renderTaskNotice(`/${action}`, `Approval ${approvalId} ${action === "approve" ? "approved" : "denied"}.`);
+    } else {
+      renderTaskError(`unsupported approval action: ${action}`);
+    }
+    return;
+  }
   if (parsed.kind === "task-control") {
     const taskId = slashTaskId(parsed);
     const action = parsed.taskAction || parsed.command;
