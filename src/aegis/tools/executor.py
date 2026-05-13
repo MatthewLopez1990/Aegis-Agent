@@ -609,7 +609,11 @@ class BuiltinToolExecutor:
             path.write_bytes(video_bytes)
             path.chmod(0o600)
             artifact_receipt = _artifact_receipt(path)
-            sandbox_receipt = _media_sandbox_receipt(tool="video_generate", mode=f"live_provider_{extension}", worker_result={"provider_domain": domain, "provider_adapter": adapter_name})
+            sandbox_receipt = _media_sandbox_receipt(
+                tool="video_generate",
+                mode=f"live_provider_{extension}",
+                worker_result={"provider_domain": domain, "provider_adapter": adapter_name},
+            )
             details = {
                 "mime_type": mime_type,
                 "provider_adapter": adapter_name,
@@ -652,6 +656,11 @@ class BuiltinToolExecutor:
             "status": str(job.get("status") or "status"),
             "delete": "deleted" if bool(job.get("deleted")) else str(job.get("status") or "delete_requested"),
         }[action]
+        sandbox_receipt = _media_sandbox_receipt(
+            tool="video_generate",
+            mode="live_provider_video_job",
+            worker_result={"provider_domain": domain, "provider_adapter": adapter_name, "artifact_write": False},
+        )
         return {
             "ok": True,
             "tool": "video_generate",
@@ -662,6 +671,7 @@ class BuiltinToolExecutor:
             "http_status": live_result["http_status"],
             "provider_adapter": adapter_name,
             "provider_receipt": provider_receipt,
+            "sandbox_receipt": sandbox_receipt,
             "job": job,
             "provider_job_id": job.get("id") or video_id,
             "provider_job_id_sha256": hashlib.sha256(str(job.get("id") or video_id).encode("utf-8")).hexdigest() if (job.get("id") or video_id) else None,
@@ -760,7 +770,16 @@ class BuiltinToolExecutor:
         path.write_bytes(media_bytes)
         path.chmod(0o600)
         artifact_receipt = _artifact_receipt(path)
-        sandbox_receipt = _media_sandbox_receipt(tool=name, mode=f"live_provider_{extension}", worker_result={"provider_domain": domain, "provider_adapter": adapter_name})
+        explicit_reads = []
+        if source_file is not None:
+            explicit_reads.append("source_image")
+        if mask_file is not None:
+            explicit_reads.append("mask_image")
+        sandbox_receipt = _media_sandbox_receipt(
+            tool=name,
+            mode=f"live_provider_{extension}",
+            worker_result={"provider_domain": domain, "provider_adapter": adapter_name, "explicit_workspace_reads": explicit_reads},
+        )
         provider_receipt = _live_media_provider_receipt(domain=domain, http_status=live_result["http_status"], request_payload=request_payload, handle_present=handle.present, provider_adapter=adapter_name)
         details = {
             "mime_type": mime_type,
@@ -892,6 +911,11 @@ class BuiltinToolExecutor:
             "source_audio_path_included": False,
             "raw_audio_included": False,
         }
+        sandbox_receipt = _media_sandbox_receipt(
+            tool="voice_transcribe",
+            mode="live_provider_transcription",
+            worker_result={"provider_domain": domain, "provider_adapter": adapter_name, "explicit_workspace_reads": ["source_audio"], "artifact_write": False},
+        )
         return {
             "ok": True,
             "tool": "voice_transcribe",
@@ -905,6 +929,7 @@ class BuiltinToolExecutor:
             "provider_adapter": adapter_name,
             "provider_receipt": provider_receipt,
             "audio_receipt": audio_receipt,
+            "sandbox_receipt": sandbox_receipt,
             "raw_audio_included": False,
             "raw_response_body_included": False,
         }
@@ -3081,8 +3106,27 @@ def _write_tool_artifact_metadata(
 def _media_sandbox_receipt(*, tool: str, mode: str, worker_result: dict[str, Any] | None = None) -> dict[str, Any]:
     worker_result = worker_result or {}
     live_provider_used = "provider_domain" in worker_result
+    artifact_write = bool(worker_result.get("artifact_write", True))
+    explicit_workspace_reads = [str(item) for item in worker_result.get("explicit_workspace_reads", []) if str(item)]
+    sandbox_profile = "live_provider_media_artifact" if live_provider_used else "local_artifact_worker_subprocess_no_provider"
+    network_boundary = "allowlisted_https_provider_only" if live_provider_used else "none"
+    if live_provider_used:
+        limitations = [
+            "Provider-backed media execution stores only the returned local artifact and redacted receipts."
+            if artifact_write
+            else "Provider-backed media lifecycle execution stores only redacted receipts.",
+            "No microphone, speaker, camera, browser capture device, raw prompt/text persistence, raw provider response body, or raw secret value is used.",
+        ]
+    else:
+        limitations = [
+            "Deterministic local artifact worker only.",
+            "No external media provider, microphone, speaker, camera, or browser capture device is invoked.",
+        ]
     return {
-        "sandbox_profile": "live_provider_media_artifact" if live_provider_used else "local_artifact_worker_subprocess_no_provider",
+        "receipt_schema": "media_sandbox_profile_v1",
+        "profile_version": 1,
+        "sandbox_profile": sandbox_profile,
+        "sandbox_profile_id": f"{sandbox_profile}_v1",
         "tool": tool,
         "mode": mode,
         "worker_process": worker_result.get("worker_process", "provider_https_request" if live_provider_used else "subprocess"),
@@ -3092,21 +3136,42 @@ def _media_sandbox_receipt(*, tool: str, mode: str, worker_result: dict[str, Any
         "os_resource_limits": bool(worker_result.get("os_resource_limits")),
         "process_session_isolated": bool(worker_result.get("process_session_isolated")),
         "ambient_workspace_read": False,
+        "explicit_workspace_reads": explicit_workspace_reads,
         "ambient_network": "allowlisted_https_provider_only" if live_provider_used else False,
         "raw_prompt_or_text_persisted": False,
-        "writes_confined_to": ".aegis/tool-artifacts",
+        "writes_confined_to": ".aegis/tool-artifacts" if artifact_write else None,
+        "artifact_write": artifact_write,
         "live_provider_used": live_provider_used,
         "provider_domain": worker_result.get("provider_domain"),
         "provider_adapter": worker_result.get("provider_adapter"),
-        "limitations": [
-            "Provider-backed media execution stores only the returned local artifact and redacted receipts.",
-            "No microphone, speaker, camera, browser capture device, raw prompt/text persistence, raw provider response body, or raw secret value is used.",
-        ]
-        if live_provider_used
-        else [
-            "Deterministic local artifact worker only.",
-            "No external media provider, microphone, speaker, camera, or browser capture device is invoked.",
+        "profile_boundaries": {
+            "execution": "allowlisted_provider_https_request" if live_provider_used else "local_subprocess_worker",
+            "network": network_boundary,
+            "filesystem": "explicit_workspace_reads_plus_private_artifact_dir" if explicit_workspace_reads else "private_artifact_dir_only" if artifact_write else "no_artifact_write",
+            "devices": {"microphone": False, "speaker": False, "camera": False, "browser_capture": False},
+            "secrets": {"brokered_handle_only": live_provider_used, "raw_secret_values_included": False},
+            "content": {
+                "raw_prompt_or_text_persisted": False,
+                "raw_response_body_persisted": False,
+                "source_bytes_persisted_in_receipt": False,
+            },
+            "artifacts": {
+                "private_directory": artifact_write,
+                "private_file_permissions": artifact_write,
+                "sha256_receipt_required": artifact_write,
+            },
+        },
+        "profile_controls": [
+            "private_artifact_directory",
+            "artifact_sha256_receipts",
+            "prompt_text_receipt_redaction",
+            "raw_response_body_redaction",
+            "device_capture_disabled",
+            "explicit_workspace_source_reads_only",
+            "brokered_secret_handles" if live_provider_used else "minimal_worker_environment",
+            "allowlisted_https_provider" if live_provider_used else "network_disabled",
         ],
+        "limitations": limitations,
     }
 
 

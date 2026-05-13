@@ -507,7 +507,7 @@ def _live_gap_backlog(
             "area": "browser_and_media_depth",
             "platforms": ["OpenClaw"],
             "status": "facade_hardening_required",
-            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, and approved static-anchor navigation are available for stored HTTP-content sessions; provider-backed media artifacts, transcription, and video jobs can run through allowlisted HTTPS adapters, including OpenAI-style image JSON, multipart image edit, TTS, audio transcription, and video generation adapters, while real page automation and broader provider-specific media depth still require stronger sandboxing.",
+            "detail": "Sanitized browser rendering, bounded static DOM snapshots, approved static form fills, approved static GET form submits, and approved static-anchor navigation are available for stored HTTP-content sessions; provider-backed media artifacts, transcription, and video jobs can run through allowlisted HTTPS adapters with media_sandbox_profile_v1 receipts, including OpenAI-style image JSON, multipart image edit, TTS, audio transcription, and video generation adapters, while real page automation and broader provider-specific media depth still require expansion.",
             "sample_tools": facade_tools[:8],
             "next_steps": [
                 "Extend rendering toward real browser automation only after network, cookie, and JavaScript boundaries are enforceable.",
@@ -556,6 +556,10 @@ def _live_gap_backlog(
                     "evidence": "browser snapshot and render evidence records cookie, storage, script, subresource, network, and mutation boundaries before live automation is enabled",
                 },
                 {
+                    "control": "platform_media_sandbox_profiles_v1",
+                    "evidence": "local and provider-backed media paths return media_sandbox_profile_v1 receipts covering execution, network, filesystem, device, secret, content, and artifact boundaries",
+                },
+                {
                     "control": "openai_style_image_provider_adapter",
                     "evidence": "approved provider-backed image generation can send an OpenAI-style image JSON request and persist returned data[].b64_json artifacts without storing raw prompt, response body, or secret values",
                 },
@@ -598,7 +602,6 @@ def _live_gap_backlog(
             ],
             "remaining_depth_work": [
                 "live_browser_automation_adapter",
-                "stricter_platform_media_sandbox_profiles",
                 "provider_specific_media_adapter_expansion",
             ],
             "evaluation_scenarios": ["artifact_integrity.browser_media_receipts"],
@@ -611,6 +614,7 @@ def _live_gap_backlog(
                     "sandboxed_media_worker_process",
                     "os_level_media_worker_limits",
                     "provider_backed_media_artifacts",
+                    "platform_media_sandbox_profiles_v1",
                     "browser_automation_boundary_receipts",
                     "openai_style_image_provider_adapter",
                     "openai_style_image_edit_provider_adapter",
@@ -624,7 +628,6 @@ def _live_gap_backlog(
                 ],
                 remaining_depth_work=[
                     "live_browser_automation_adapter",
-                    "stricter_platform_media_sandbox_profiles",
                     "provider_specific_media_adapter_expansion",
                 ],
             ),
@@ -910,8 +913,8 @@ def _browser_media_operator_checklist(implemented_controls: list[str], remaining
         },
         {
             "control": "platform_media_sandbox_profiles",
-            "state": "pending" if "stricter_platform_media_sandbox_profiles" in remaining else "ready_for_review",
-            "detail": "Stricter per-platform profiles are still required before broad media execution rollout.",
+            "state": "ready_for_review" if "platform_media_sandbox_profiles_v1" in implemented else "pending" if "stricter_platform_media_sandbox_profiles" in remaining else "ready_for_review",
+            "detail": "Versioned media_sandbox_profile_v1 receipts cover local worker and allowlisted provider media boundaries.",
         },
     ]
 

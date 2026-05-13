@@ -104,7 +104,7 @@ class TuiTests(unittest.TestCase):
             self.assertIn("provider_backed_media_artifacts", rendered)
             self.assertIn("browser_automation_boundary_receipts", rendered)
             self.assertIn("live_browser_automation_adapter", rendered)
-            self.assertIn("stricter_platform_media_sandbox_profiles", rendered)
+            self.assertNotIn("stricter_platform_media_sandbox_profiles", rendered)
             self.assertIn("provider_specific_media_adapter_expansion", rendered)
             self.assertIn("disabled_backend_denial", rendered)
             self.assertIn("live_connector_receipts.redacted_write_summary", rendered)
