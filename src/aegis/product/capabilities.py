@@ -504,7 +504,7 @@ def _live_gap_backlog(
             "area": "browser_and_media_depth",
             "platforms": ["OpenClaw"],
             "status": "facade_hardening_required",
-            "detail": "Sanitized browser rendering and approved static-anchor navigation are available for stored HTTP-content sessions; provider-backed media artifacts can run through allowlisted HTTPS adapters, while real page automation and provider-specific media depth still require stronger sandboxing.",
+            "detail": "Sanitized browser rendering, bounded static DOM snapshots, and approved static-anchor navigation are available for stored HTTP-content sessions; provider-backed media artifacts can run through allowlisted HTTPS adapters, while real page automation and provider-specific media depth still require stronger sandboxing.",
             "sample_tools": facade_tools[:8],
             "next_steps": [
                 "Extend rendering toward real browser automation only after network, cookie, and JavaScript boundaries are enforceable.",
@@ -553,6 +553,10 @@ def _live_gap_backlog(
                     "evidence": "browser snapshot and render evidence records cookie, storage, script, subresource, network, and mutation boundaries before live automation is enabled",
                 },
                 {
+                    "control": "static_dom_snapshot_no_js",
+                    "evidence": "browser DOM snapshots parse bounded redacted stored HTTP content without JavaScript, cookies, storage, remote subresources, or selector-event dispatch",
+                },
+                {
                     "control": "approved_static_anchor_navigation",
                     "evidence": "approved exact-match anchor clicks resolve safe HTTP(S) hrefs through the governed HTTP connector without JavaScript, cookies, or DOM events",
                 },
@@ -577,6 +581,7 @@ def _live_gap_backlog(
                     "os_level_media_worker_limits",
                     "provider_backed_media_artifacts",
                     "browser_automation_boundary_receipts",
+                    "static_dom_snapshot_no_js",
                     "disabled_live_browser_denial",
                 ],
                 remaining_depth_work=[

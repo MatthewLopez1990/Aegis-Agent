@@ -1295,6 +1295,15 @@ def serve(*, data_dir: str | Path, workspace: str | Path, host: str = "127.0.0.1
                     )
                 )
                 return
+            if path == "/browser/dom-snapshot":
+                payload = self._read_json()
+                self._json(
+                    orchestrator.browser.dom_snapshot(
+                        session_id=str(_required(payload, "session_id")),
+                        selector=str(payload["selector"]) if payload.get("selector") else None,
+                    )
+                )
+                return
             if path == "/browser/inspect":
                 payload = self._read_json()
                 self._json(orchestrator.browser.inspect(session_id=str(_required(payload, "session_id"))))

@@ -7,6 +7,7 @@ import json
 import hashlib
 from html.parser import HTMLParser
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
@@ -24,6 +25,23 @@ from aegis.storage.state import ensure_private_dir, ensure_private_file
 
 
 _MAX_PERSISTED_CONTENT_CHARS = 200_000
+_MAX_STATIC_DOM_NODES = 120
+_MAX_STATIC_DOM_DEPTH = 12
+_MAX_STATIC_DOM_TEXT_CHARS = 160
+_STATIC_DOM_ATTR_ALLOWLIST = {
+    "id",
+    "class",
+    "name",
+    "type",
+    "role",
+    "aria-label",
+    "placeholder",
+    "href",
+    "value",
+    "title",
+    "data-testid",
+}
+_DOM_SECRETISH_TOKEN_RE = re.compile(r"\b(?=[A-Za-z0-9_-]{6,}\b)(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{6,}\b")
 
 
 class BrowserController:
@@ -156,6 +174,49 @@ class BrowserController:
         self.audit_logger.append(
             "browser.table_extracted",
             {"session_id": session_id, "url": _session_url(session), "table_count": len(tables), "selector": _redacted_string(selector, limit=500)},
+        )
+        return response
+
+    def dom_snapshot(self, *, session_id: str, selector: str | None = None) -> dict[str, Any]:
+        session = self._require_session(session_id)
+        content = str(session.get("last_content", ""))
+        snapshot = _static_dom_snapshot(content, selector=selector)
+        response = {
+            "ok": True,
+            "session_id": session_id,
+            "url": _session_url(session),
+            "title": _redacted_string(session.get("title"), limit=200),
+            "selector": _redacted_string(selector, limit=500) if selector is not None else None,
+            "selector_status": snapshot["selector_status"],
+            "selector_note": snapshot["selector_note"],
+            "dom": snapshot["dom"],
+            "node_count": snapshot["node_count"],
+            "total_node_count": snapshot["total_node_count"],
+            "truncated": snapshot["truncated"],
+            "mode": "http_content_static_dom_no_js",
+            "taint": "WEB_CONTENT",
+            "javascript_executed": False,
+            "cookies_persisted": False,
+            "cookie_jar_persisted": False,
+            "local_storage_persisted": False,
+            "session_storage_persisted": False,
+            "remote_subresources_loaded": False,
+            "dom_mutated": False,
+            "real_selector_events_dispatched": False,
+            "automation_boundaries": _browser_automation_boundaries(rendered=False),
+            "evidence": _browser_evidence(session, action="dom_snapshot"),
+        }
+        self.audit_logger.append(
+            "browser.static_dom_snapshot",
+            {
+                "session_id": session_id,
+                "url": _session_url(session),
+                "selector": _redacted_string(selector, limit=500) if selector is not None else None,
+                "selector_status": snapshot["selector_status"],
+                "node_count": snapshot["node_count"],
+                "total_node_count": snapshot["total_node_count"],
+                "truncated": snapshot["truncated"],
+            },
         )
         return response
 
@@ -565,7 +626,7 @@ def _normalize_persisted_session(item: Any) -> dict[str, Any] | None:
 
 
 def _bounded_redacted_content(content: str) -> str:
-    return str(redact(content[:_MAX_PERSISTED_CONTENT_CHARS]))
+    return _redacted_dom_value(content, limit=_MAX_PERSISTED_CONTENT_CHARS)
 
 
 def _redacted_string(value: Any, *, limit: int) -> str:
@@ -643,6 +704,227 @@ def _selector_inventory(elements: list[dict[str, str]]) -> list[dict[str, Any]]:
             }
         )
     return inventory
+
+
+def _static_dom_snapshot(content: str, *, selector: str | None = None) -> dict[str, Any]:
+    parser = _StaticDomSnapshotParser(max_nodes=_MAX_STATIC_DOM_NODES, max_depth=_MAX_STATIC_DOM_DEPTH)
+    try:
+        parser.feed(content[:_MAX_PERSISTED_CONTENT_CHARS])
+        parser.close()
+    except Exception:
+        return {
+            "dom": [],
+            "node_count": 0,
+            "total_node_count": parser.total_node_count,
+            "truncated": True,
+            "selector_status": "parse_error",
+            "selector_note": "Static DOM parsing failed; no page JavaScript, cookies, or storage were used.",
+        }
+    matcher = _dom_selector_matcher(selector) if selector else None
+    if selector and matcher is None:
+        return {
+            "dom": [],
+            "node_count": 0,
+            "total_node_count": parser.total_node_count,
+            "truncated": parser.truncated,
+            "selector_status": "unsupported",
+            "selector_note": "Only tag, #id, .class, tag#id, tag.class, [name=value], and tag[name=value] selectors are supported by the dependency-light static DOM parser.",
+        }
+    if matcher is None:
+        nodes = parser.roots
+        selector_status = "not_provided"
+        selector_note = "The bounded static DOM tree was parsed from stored HTTP content without JavaScript, cookies, or storage."
+    else:
+        nodes = [node for node in parser.elements if matcher(node)]
+        selector_status = "matched" if nodes else "no_match"
+        selector_note = "Selector filtering used the dependency-light static DOM parser; no live DOM events were dispatched."
+    return {
+        "dom": nodes,
+        "node_count": _count_static_dom_nodes(nodes),
+        "total_node_count": parser.total_node_count,
+        "truncated": parser.truncated,
+        "selector_status": selector_status,
+        "selector_note": selector_note,
+    }
+
+
+def _count_static_dom_nodes(nodes: list[dict[str, Any]]) -> int:
+    count = 0
+    stack = list(nodes)
+    while stack:
+        node = stack.pop()
+        count += 1
+        children = node.get("children")
+        if isinstance(children, list):
+            stack.extend(child for child in children if isinstance(child, dict))
+    return count
+
+
+class _StaticDomSnapshotParser(HTMLParser):
+    def __init__(self, *, max_nodes: int, max_depth: int) -> None:
+        super().__init__(convert_charrefs=True)
+        self.max_nodes = max_nodes
+        self.max_depth = max_depth
+        self.roots: list[dict[str, Any]] = []
+        self.elements: list[dict[str, Any]] = []
+        self.stack: list[dict[str, Any]] = []
+        self.total_node_count = 0
+        self.emitted_node_count = 0
+        self.truncated = False
+        self._suppressed_text_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag = tag.lower()
+        if self._suppressed_text_depth:
+            if tag in {"script", "style", "noscript"}:
+                self._suppressed_text_depth += 1
+            return
+        if tag in {"script", "style", "noscript"}:
+            self._suppressed_text_depth = 1
+        attrs_dict = {key.lower(): value or "" for key, value in attrs}
+        self.total_node_count += 1
+        if self.emitted_node_count >= self.max_nodes or len(self.stack) >= self.max_depth:
+            self.truncated = True
+            return
+        node = {
+            "type": "element",
+            "tag": _redacted_string(tag, limit=80),
+            "attrs": _redacted_dom_attrs(attrs_dict),
+            "selector_hint": _redacted_string(_selector_hint(tag, attrs_dict), limit=500),
+            "path": _redacted_string(self._path_for(tag), limit=500),
+            "children": [],
+        }
+        self.emitted_node_count += 1
+        self.elements.append(node)
+        if self.stack:
+            self.stack[-1]["children"].append(node)
+        else:
+            self.roots.append(node)
+        if tag not in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "script", "source", "style", "track", "wbr", "noscript"}:
+            self.stack.append(node)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        if self.stack and self.stack[-1].get("tag") == tag.lower():
+            self.stack.pop()
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if self._suppressed_text_depth:
+            if tag in {"script", "style", "noscript"}:
+                self._suppressed_text_depth = max(0, self._suppressed_text_depth - 1)
+            return
+        while self.stack:
+            node = self.stack.pop()
+            if node.get("tag") == tag:
+                break
+
+    def handle_data(self, data: str) -> None:
+        if self._suppressed_text_depth or not self.stack:
+            return
+        text = " ".join(data.split())
+        if not text:
+            return
+        self.total_node_count += 1
+        if self.emitted_node_count >= self.max_nodes:
+            self.truncated = True
+            return
+        node = {
+            "type": "text",
+            "text": _redacted_dom_value(text, limit=_MAX_STATIC_DOM_TEXT_CHARS),
+            "path": _redacted_string(f"{self.stack[-1].get('path', '')}/text()", limit=500),
+        }
+        self.emitted_node_count += 1
+        self.stack[-1]["children"].append(node)
+
+    def _path_for(self, tag: str) -> str:
+        sibling_index = 1
+        siblings = self.roots if not self.stack else self.stack[-1]["children"]
+        for sibling in siblings:
+            if sibling.get("type") == "element" and sibling.get("tag") == tag:
+                sibling_index += 1
+        prefix = "" if not self.stack else f"{self.stack[-1].get('path', '')}/"
+        return f"{prefix}{tag}[{sibling_index}]"
+
+
+def _redacted_dom_attrs(attrs: dict[str, str]) -> dict[str, str]:
+    safe: dict[str, str] = {}
+    for key, value in attrs.items():
+        normalized = key.lower()
+        if normalized in _STATIC_DOM_ATTR_ALLOWLIST or normalized.startswith("aria-"):
+            if normalized in {"href", "placeholder", "title", "value"} or normalized.startswith("aria-"):
+                safe[normalized] = _redacted_dom_value(value, limit=300)
+            else:
+                safe[normalized] = _redacted_string(value, limit=300)
+    return safe
+
+
+def _redacted_dom_value(value: Any, *, limit: int) -> str:
+    redacted_value = _redacted_string(value, limit=limit)
+    return _DOM_SECRETISH_TOKEN_RE.sub("[REDACTED_VALUE]", redacted_value)
+
+
+def _dom_selector_matcher(selector: str | None):
+    raw = str(selector or "").strip()
+    if not raw:
+        return None
+    tag = ""
+    expected_id = ""
+    expected_class = ""
+    expected_name = ""
+    if raw.startswith("#") and _simple_selector_value(raw[1:]):
+        expected_id = raw[1:]
+    elif raw.startswith(".") and _simple_selector_value(raw[1:]):
+        expected_class = raw[1:]
+    elif raw.startswith("[name=") and raw.endswith("]"):
+        expected_name = _unquote_selector_value(raw[6:-1])
+        if not _simple_selector_value(expected_name):
+            return None
+    elif "[name=" in raw and raw.endswith("]"):
+        tag_part, name_part = raw.split("[name=", 1)
+        tag = tag_part.lower()
+        expected_name = _unquote_selector_value(name_part[:-1])
+        if not _simple_selector_value(tag) or not _simple_selector_value(expected_name):
+            return None
+    elif "#" in raw:
+        tag_part, id_part = raw.split("#", 1)
+        tag = tag_part.lower()
+        expected_id = id_part
+        if not _simple_selector_value(tag) or not _simple_selector_value(expected_id):
+            return None
+    elif "." in raw:
+        tag_part, class_part = raw.split(".", 1)
+        tag = tag_part.lower()
+        expected_class = class_part
+        if not _simple_selector_value(tag) or not _simple_selector_value(expected_class):
+            return None
+    elif _simple_selector_value(raw):
+        tag = raw.lower()
+    else:
+        return None
+
+    def matcher(node: dict[str, Any]) -> bool:
+        if node.get("type") != "element":
+            return False
+        attrs = node.get("attrs") if isinstance(node.get("attrs"), dict) else {}
+        if tag and node.get("tag") != tag:
+            return False
+        if expected_id and attrs.get("id") != expected_id:
+            return False
+        if expected_class and expected_class not in str(attrs.get("class", "")).split():
+            return False
+        if expected_name and attrs.get("name") != expected_name:
+            return False
+        return True
+
+    return matcher
+
+
+def _unquote_selector_value(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
 
 
 def _selector_action(tag: str, input_type: str) -> str:
@@ -971,7 +1253,15 @@ def _browser_evidence(
         "content_sha256_after": content_hash_after,
         "content_changed": (content_hash_before or content_hash_after) != content_hash_after,
         "dom_mutated": False,
-        "mode": "virtual_state_no_dom" if action in {"click", "fill"} else "approved_static_anchor_navigation_no_js" if action == "static_anchor_navigation" else "local_png_session_snapshot_no_dom_render",
+        "mode": (
+            "virtual_state_no_dom"
+            if action in {"click", "fill"}
+            else "approved_static_anchor_navigation_no_js"
+            if action == "static_anchor_navigation"
+            else "http_content_static_dom_no_js"
+            if action == "dom_snapshot"
+            else "local_png_session_snapshot_no_dom_render"
+        ),
         "click_count": len(session.get("clicks", [])),
         "form_field_count": len(session.get("form_state", {})),
     }
@@ -1138,7 +1428,7 @@ def _find_chrome_executable() -> str | None:
 
 def _renderable_sanitized_html(session: dict[str, Any]) -> str:
     content = str(session.get("last_content", ""))
-    text = " ".join(content.split())[:20_000]
+    text = _redacted_dom_value(" ".join(content.split()), limit=20_000)
     tables = _extract_html_tables(content).get("tables", [])[:5]
     rows = []
     for table in tables:
@@ -1178,7 +1468,7 @@ def _renderable_sanitized_html(session: dict[str, Any]) -> str:
     <div class="muted">{html.escape(_session_url(session) or "")}</div>
   </header>
   <main>
-    <section><h2>Sanitized Text</h2><p>{html.escape(str(redact(text)))}</p></section>
+    <section><h2>Sanitized Text</h2><p>{html.escape(text)}</p></section>
     <section><h2>Tables</h2>{''.join(rows) if rows else '<p>No tables detected.</p>'}</section>
     <section><h2>Approved Virtual State</h2>{state_html}</section>
   </main>

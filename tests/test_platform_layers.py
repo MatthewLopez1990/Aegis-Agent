@@ -150,7 +150,7 @@ class PlatformLayerTests(unittest.TestCase):
                     {
                         "url": "https://example.com",
                         "domain": "example.com",
-                        "content": '<html><title>Example</title><a id="docs-link" href="/docs">Docs</a><button id="submit">Submit</button><input name="email" placeholder="Email"><table id="main" class="results"><tr><th>Name</th><th>Status</th></tr><tr><td>Aegis</td><td>Ready</td></tr></table><table id="secondary"><tr><td>Other</td></tr></table></html>',
+                        "content": '<html><title>Example</title><main id="profile" class="card"><a id="docs-link" href="/docs">Docs</a><button id="submit">Submit</button><input name="email" placeholder="Email"><span data-testid="owner">Owner token=abc123</span><script>window.secret="abc123"</script><table id="main" class="results"><tr><th>Name</th><th>Status</th></tr><tr><td>Aegis</td><td>Ready</td></tr></table><table id="secondary"><tr><td>Other</td></tr></table></main></html>',
                     },
                 ),
             ):
@@ -199,6 +199,33 @@ class PlatformLayerTests(unittest.TestCase):
             browser_extract = orchestrator.tools.execute("browser", {"action": "extract", "session_id": browser_session_id}, approved=True)
             self.assertTrue(browser_extract["ok"])
             self.assertEqual(browser_extract["mode"], "http_content_no_js")
+            browser_dom = orchestrator.tools.execute("browser_dom_snapshot", {"session_id": browser_session_id})
+            self.assertTrue(browser_dom["ok"])
+            self.assertEqual(browser_dom["mode"], "http_content_static_dom_no_js")
+            self.assertEqual(browser_dom["selector_status"], "not_provided")
+            self.assertGreater(browser_dom["node_count"], 0)
+            self.assertGreater(browser_dom["total_node_count"], 0)
+            self.assertFalse(browser_dom["javascript_executed"])
+            self.assertFalse(browser_dom["cookies_persisted"])
+            self.assertFalse(browser_dom["local_storage_persisted"])
+            self.assertFalse(browser_dom["dom_mutated"])
+            self.assertFalse(browser_dom["real_selector_events_dispatched"])
+            self.assertEqual(browser_dom["evidence"]["action"], "dom_snapshot")
+            self.assertEqual(browser_dom["evidence"]["mode"], "http_content_static_dom_no_js")
+            self.assertNotIn("abc123", json.dumps(browser_dom))
+            browser_dom_filtered = orchestrator.tools.execute("browser", {"action": "dom_snapshot", "session_id": browser_session_id, "selector": "#profile"}, approved=True)
+            self.assertEqual(browser_dom_filtered["selector_status"], "matched")
+            self.assertGreater(browser_dom_filtered["node_count"], 1)
+            self.assertEqual(browser_dom_filtered["dom"][0]["tag"], "main")
+            self.assertEqual(browser_dom_filtered["dom"][0]["attrs"]["id"], "profile")
+            self.assertEqual(browser_dom_filtered["dom"][0]["attrs"]["class"], "card")
+            self.assertNotIn("abc123", json.dumps(browser_dom_filtered))
+            browser_dom_missing = orchestrator.tools.execute("browser_dom_snapshot", {"session_id": browser_session_id, "selector": "#missing"})
+            self.assertEqual(browser_dom_missing["selector_status"], "no_match")
+            self.assertEqual(browser_dom_missing["node_count"], 0)
+            browser_dom_unsupported = orchestrator.tools.execute("browser_dom_snapshot", {"session_id": browser_session_id, "selector": "main table"})
+            self.assertEqual(browser_dom_unsupported["selector_status"], "unsupported")
+            self.assertEqual(browser_dom_unsupported["node_count"], 0)
             browser_table = orchestrator.tools.execute("browser_extract_table", {"session_id": browser_session_id, "selector": "#main"})
             self.assertTrue(browser_table["ok"])
             self.assertEqual(browser_table["selector_status"], "matched")

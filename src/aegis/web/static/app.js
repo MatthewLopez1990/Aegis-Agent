@@ -3140,6 +3140,15 @@ document.getElementById("browser-inspect").addEventListener("click", async () =>
   renderBrowserOutput(await api("/browser/inspect", { method: "POST", body: JSON.stringify({ session_id: state.browserSessionId }) }));
 });
 
+document.getElementById("browser-dom-snapshot").addEventListener("click", async () => {
+  if (!state.browserSessionId) {
+    renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });
+    return;
+  }
+  const selector = document.getElementById("browser-selector").value.trim();
+  renderBrowserOutput(await api("/browser/dom-snapshot", { method: "POST", body: JSON.stringify({ session_id: state.browserSessionId, selector: selector || undefined }) }));
+});
+
 document.getElementById("browser-table").addEventListener("click", async () => {
   if (!state.browserSessionId) {
     renderBrowserOutput({ status: "no_session", reason: "Create or open a browser session first." });

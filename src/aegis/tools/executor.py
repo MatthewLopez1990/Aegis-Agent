@@ -218,7 +218,7 @@ class BuiltinToolExecutor:
             result = self._execute_service_ticket_read(params=params)
         elif name == "service_ticket_write":
             result = self._execute_service_ticket_write(params=params, approved=approved)
-        elif name in {"browser", "browser_click", "browser_fill", "browser_screenshot", "browser_render_screenshot", "browser_extract_table", "browser_close"}:
+        elif name in {"browser", "browser_click", "browser_fill", "browser_screenshot", "browser_render_screenshot", "browser_extract_table", "browser_dom_snapshot", "browser_close"}:
             if self.browser is None:
                 raise ToolExecutionError("browser controller is not configured")
             result = self._execute_browser(name, params, approved=approved)
@@ -1674,6 +1674,7 @@ class BuiltinToolExecutor:
             "browser_screenshot": "screenshot",
             "browser_render_screenshot": "render_screenshot",
             "browser_extract_table": "extract_table",
+            "browser_dom_snapshot": "dom_snapshot",
             "browser_close": "close",
         }[name]
         action = str(params.get("action", default_action))
@@ -1702,6 +1703,10 @@ class BuiltinToolExecutor:
             if session_id is None:
                 raise ToolExecutionError("browser table extraction requires session_id")
             return self.browser.extract_table(session_id=session_id, selector=str(params["selector"]) if params.get("selector") else None)
+        if action == "dom_snapshot":
+            if session_id is None:
+                raise ToolExecutionError("browser DOM snapshot requires session_id")
+            return self.browser.dom_snapshot(session_id=session_id, selector=str(params["selector"]) if params.get("selector") else None)
         if action == "inspect":
             if session_id is None:
                 raise ToolExecutionError("browser inspect requires session_id")
