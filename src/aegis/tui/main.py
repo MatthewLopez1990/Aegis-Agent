@@ -7822,16 +7822,14 @@ def _flag_completion_lines(labels: list[str], *, width: int, heading: str | None
     if not labels:
         return []
     width = max(20, width)
-    label_width = min(max(max(len(label) for label in labels[:8]), 12), 24)
+    label_width = min(max(max(len(label) for label in labels), 12), 24)
     rows: list[str] = []
     if heading:
         rows.append(_paint(heading, "2;36"))
-    for label in labels[:8]:
+    for label in labels:
         detail = SLASH_FLAG_DESCRIPTIONS.get(label, _generic_flag_description(label))
         line = f"  {label:<{label_width}}  {detail}"
         rows.append(_paint(_shorten_preserve_spaces(line, width=width), "2;36"))
-    if len(labels) > 8:
-        rows.append(_paint(f"  +{len(labels) - 8} more flags; keep typing to filter", "2;36"))
     return rows
 
 

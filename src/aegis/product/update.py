@@ -53,6 +53,11 @@ def check_platform_update(
 
     version_status = "update_available" if _version_newer(latest_version, current_version) else "current"
     update_command = f"{sys.executable} -m pip install --upgrade {source.archive_url}"
+    same_version_refresh_note = (
+        "The published version matches this install; --apply --approved can still refresh same-version source commits."
+        if version_status == "current"
+        else "A newer published version is available."
+    )
     return {
         "ok": True,
         "status": version_status,
@@ -70,9 +75,13 @@ def check_platform_update(
         "apply_requires_approval": True,
         "apply_command": "aegis update --apply --approved",
         "manual_update_command": update_command,
+        "source_refresh_supported": True,
+        "same_version_refresh_supported": True,
+        "same_version_refresh_recommended": version_status == "current",
         "notes": [
             "Update checks download metadata only until --apply --approved is used.",
             "Approved updates use git pull for a source checkout or pip install for packaged installs.",
+            same_version_refresh_note,
         ],
     }
 

@@ -750,6 +750,12 @@ class TuiTests(unittest.TestCase):
             self.assertIn("Operator-facing label.", multi_flag_hint)
             self.assertIn("  --task-id", multi_flag_hint)
             self.assertIn("Target task id.", multi_flag_hint)
+            full_flag_hint, _ = _live_input_block("aegis> ", "/remote-control push --", 120)
+            self.assertIn("  --pairing-id", full_flag_hint)
+            self.assertIn("Remote-control pairing id.", full_flag_hint)
+            self.assertIn("  --event", full_flag_hint)
+            self.assertIn("Remote notification event type.", full_flag_hint)
+            self.assertNotIn("more flags", full_flag_hint)
 
     def test_update_command_checks_remote_metadata_from_tui(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

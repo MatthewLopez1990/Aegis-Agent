@@ -125,6 +125,21 @@ class CliTests(unittest.TestCase):
             self.assertTrue(run.called)
             self.assertEqual(run.call_args.args[0][-1], "https://updates.example.test/aegis.tar.gz")
 
+    def test_update_check_explains_same_version_source_refreshes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            parser = build_parser()
+            data_dir = Path(temp) / ".aegis"
+            manifest = b'[project]\nname = "aegis-agent"\nversion = "0.1.0"\n'
+
+            with patch("aegis.product.update._fetch_bytes", return_value=manifest):
+                result = dispatch(parser.parse_args(["--data-dir", str(data_dir), "update", "--check"]))
+
+            self.assertEqual(result["status"], "current")
+            self.assertTrue(result["source_refresh_supported"])
+            self.assertTrue(result["same_version_refresh_supported"])
+            self.assertTrue(result["same_version_refresh_recommended"])
+            self.assertIn("same-version source commits", " ".join(result["notes"]))
+
     def test_skill_create_template_is_disabled_and_approval_required(self) -> None:
         manifest = create_skill_template("example.skill", name="Example", description="Example skill")
 
