@@ -6985,6 +6985,43 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     ),
 )
 
+SLASH_COMMAND_DESCRIPTIONS: dict[str, str] = {
+    "add-dir": "record an additional working directory for the active session",
+    "bg": "alias for /background",
+    "btw": "submit background work without leaving the current flow",
+    "rc": "alias for /remote-control",
+    "sb": "alias for /statusbar",
+    "tp": "alias for /teleport",
+    "app": "show desktop wrapper readiness",
+    "android": "show Android remote-control readiness",
+    "ios": "show iOS remote-control readiness",
+    "desktop": "show desktop wrapper readiness",
+    "mobile": "show mobile remote-control readiness",
+    "settings": "show local config paths and runtime flags",
+    "snap": "alias for /snapshot",
+    "snapshot": "show guarded rollback snapshot readiness",
+    "set-home": "show guarded home-channel readiness",
+    "remote-control": "manage guarded remote-control readiness",
+    "remote-env": "show remote environment readiness",
+    "web-setup": "show local web control-plane setup",
+    "terminal-setup": "show multiline and terminal keybinding readiness",
+    "allowed-tools": "show policy-visible tool inventory",
+    "security-review": "show security review surfaces",
+    "privacy-settings": "show local privacy and telemetry posture",
+    "fewer-permission-prompts": "show permission-hardening readiness",
+    "pr_comments": "show pull request comment integration readiness",
+    "pr-comments": "show pull request comment integration readiness",
+    "autofix-pr": "show governed PR autofix workflow",
+    "claude-api": "show Claude API migration readiness",
+    "extra-usage": "show account and usage boundary metadata",
+    "install-github-app": "show governed GitHub app setup boundary",
+    "install-slack-app": "show governed Slack app setup boundary",
+    "reload-mcp": "reload governed MCP registry metadata",
+    "reload-skills": "show governed skill inventory refresh readiness",
+    "reload-plugins": "reload private local plugin inventory",
+    "team-onboarding": "show sanitized onboarding export readiness",
+}
+
 
 def _command_palette_lines(*, compact: bool = False) -> list[str]:
     if compact:
@@ -7863,10 +7900,19 @@ def _slash_completion_lines(labels: list[str], *, width: int, heading: str | Non
 
 def _slash_completion_description(label: str) -> str:
     root = label.strip().lstrip("/")
+    explicit = SLASH_COMMAND_DESCRIPTIONS.get(root)
+    if explicit:
+        return explicit
+    canonical = SLASH_COMMAND_ALIASES.get(root, root.replace("-", "_"))
+    method = getattr(AegisTui, f"do_{canonical}", None)
+    if method is not None:
+        doc = (method.__doc__ or "").strip().splitlines()[0] if method.__doc__ else ""
+        if " -- " in doc:
+            return doc.split(" -- ", 1)[1].strip().rstrip(".")
     for group, commands in COMMAND_MENU_GROUPS:
         for command, detail in commands:
             if root in command.split()[0].split("|"):
-                return f"{group.lower()} - {detail}"
+                return detail
     if root == "menu":
         return "open a nested command lane"
     if root == "help":
