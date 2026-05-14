@@ -7790,6 +7790,8 @@ def _live_slash_hint_lines(buffer: str, width: int) -> list[str]:
         return [_paint("suggest  no slash matches", "2;33")]
     if labels and all(label.startswith("--") for label in labels):
         return _flag_completion_lines(labels, width=width, heading="flags")
+    if labels and all(label.startswith("/") for label in labels) and begidx <= 1:
+        return _slash_completion_lines(labels, width=width, heading="slash")
     label = _live_completion_hint_label(labels, begidx)
     line = f"{label:<7} " + "  ".join(labels)
     return [_paint(_shorten_preserve_spaces(line, width=max(20, width)), "2;36")]
@@ -7842,6 +7844,33 @@ def _generic_flag_description(flag: str) -> str:
     return f"Set {label} for this command."
 
 
+def _slash_completion_lines(labels: list[str], *, width: int, heading: str | None = None) -> list[str]:
+    if not labels:
+        return []
+    width = max(20, width)
+    label_width = min(max(max(len(label) for label in labels), 12), 28)
+    rows: list[str] = []
+    if heading:
+        rows.append(_paint(heading, "2;36"))
+    for label in labels:
+        line = f"  {label:<{label_width}}  {_slash_completion_description(label)}"
+        rows.append(_paint(_shorten_preserve_spaces(line, width=width), "2;36"))
+    return rows
+
+
+def _slash_completion_description(label: str) -> str:
+    root = label.strip().lstrip("/")
+    for group, commands in COMMAND_MENU_GROUPS:
+        for command, detail in commands:
+            if root in command.split()[0].split("|"):
+                return f"{group.lower()} - {detail}"
+    if root == "menu":
+        return "open a nested command lane"
+    if root == "help":
+        return "full command reference"
+    return "slash command"
+
+
 def _wrapped_prompt_lines(prompt: str, buffer: str, width: int) -> list[str]:
     width = max(20, width)
     usable_width = max(19, width - 1)
@@ -7869,6 +7898,8 @@ def _wrapped_prompt_lines(prompt: str, buffer: str, width: int) -> list[str]:
 def _inline_completion_line(completions: list[str], *, width: int) -> str:
     if completions and all(completion.startswith("--") for completion in completions):
         return "\n".join(_flag_completion_lines(completions, width=width, heading="complete"))
+    if completions and all(completion.startswith("/") for completion in completions):
+        return "\n".join(_slash_completion_lines(completions, width=width, heading="complete"))
     return textwrap.shorten("complete " + "  ".join(completions[:12]), width=max(20, width), placeholder=" ...")
 
 
