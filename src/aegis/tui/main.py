@@ -5589,11 +5589,11 @@ class AegisTui(cmd.Cmd):
         self.do_menu(arg)
 
     def do_exit(self, arg: str) -> bool:
-        """exit -- quit."""
+        """exit -- exit Aegis TUI gracefully."""
         return True
 
     def do_quit(self, arg: str) -> bool:
-        """quit -- quit."""
+        """quit -- alias for exit."""
         return True
 
     def do_EOF(self, arg: str) -> bool:  # noqa: N802 - cmd hook name.
@@ -6906,6 +6906,7 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         "Operate",
         (
             ("new|reset|clear", "session reset and screen controls"),
+            ("exit|quit", "exit the Aegis TUI gracefully"),
             ("add-dir <path>", "record extra working directory context"),
             ("submit <request>", "start a governed task"),
             ("background|bg|btw <request>", "start a governed task without leaving the deck"),
@@ -6989,6 +6990,8 @@ SLASH_COMMAND_DESCRIPTIONS: dict[str, str] = {
     "add-dir": "record an additional working directory for the active session",
     "bg": "alias for /background",
     "btw": "submit background work without leaving the current flow",
+    "exit": "exit Aegis TUI gracefully",
+    "quit": "alias for /exit",
     "rc": "alias for /remote-control",
     "sb": "alias for /statusbar",
     "tp": "alias for /teleport",
