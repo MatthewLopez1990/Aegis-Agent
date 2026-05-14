@@ -7493,6 +7493,86 @@ SLASH_FLAG_HINTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("rc", "relay-action"): ("--pairing-id", "--task-id", "--action", "--relay-auth-secret", "--session-id", "--reason"),
 }
 
+SLASH_FLAG_DESCRIPTIONS: dict[str, str] = {
+    "--action": "Remote-control action to preview or execute.",
+    "--actor": "Audit actor recorded for the operation.",
+    "--all": "Include every matching candidate.",
+    "--allowed-actions": "Restrict what a remote pairing can do.",
+    "--apns-topic": "Apple push notification topic.",
+    "--apply": "Apply the prepared platform update.",
+    "--approval-required": "Require approval before the hook runs.",
+    "--approved": "Confirm a gated or higher-risk action.",
+    "--archive-url": "Update archive source URL.",
+    "--authorization-server": "OAuth authorization server metadata URL.",
+    "--candidate-id": "Select one memory or repair candidate.",
+    "--card-id": "Limit an agent batch to one work card.",
+    "--catalog-path": "Local plugin catalog path.",
+    "--channel": "Delivery or execution channel.",
+    "--check": "Check update metadata without applying it.",
+    "--cols": "PTY column count.",
+    "--context-from": "Attach context from a local reference.",
+    "--context-json": "Hook runtime context as JSON.",
+    "--deliver-to": "Send schedule output to a target channel.",
+    "--description": "Human-readable description.",
+    "--device-token-secret": "Secret handle for the device token.",
+    "--disable": "Disable the target during update or install.",
+    "--discover": "Discover provider capabilities before registering.",
+    "--dry-run": "Preview actions without changing state.",
+    "--enable": "Enable the target after install or update.",
+    "--enabled": "Create or update the item as active.",
+    "--event": "Remote notification event type.",
+    "--exclude-tool": "Omit a discovered MCP tool.",
+    "--expires-in-seconds": "Pairing lifetime in seconds.",
+    "--fcm-project-id": "Firebase Cloud Messaging project id.",
+    "--force": "Bypass cache or overwrite an existing artifact.",
+    "--hook-id": "Hook identifier to invoke or bind.",
+    "--id": "Stable identifier for the created item.",
+    "--key-name": "Signing or verification key name.",
+    "--label": "Operator-facing label.",
+    "--limit": "Maximum number of rows to return.",
+    "--manifest-url": "Update manifest source URL.",
+    "--max-age-days": "Maximum age before review is required.",
+    "--max-bytes": "Maximum log bytes to return.",
+    "--max-output-bytes": "Maximum command output captured.",
+    "--max-steps": "Maximum autonomous steps to run.",
+    "--method": "Select update or authentication method.",
+    "--model": "Model id or alias for the session.",
+    "--name": "Operator-facing name.",
+    "--natural-language": "Parse the schedule from plain language.",
+    "--no-approval": "Register without an approval gate.",
+    "--no-approval-required": "Remove approval requirement for this hook.",
+    "--no-newline": "Send process input without a trailing newline.",
+    "--no-prompts": "Skip MCP prompt utility wrappers.",
+    "--no-resources": "Skip MCP resource utility wrappers.",
+    "--none": "Commit no candidates from the preview.",
+    "--now": "Evaluate due work at a supplied timestamp.",
+    "--observed-task": "Tie a curator draft to observed work.",
+    "--outbox-id": "Remote relay outbox item id.",
+    "--owner": "Filter memory records by owner.",
+    "--pairing-id": "Remote-control pairing id.",
+    "--path": "Workspace path to attach.",
+    "--personality": "Session personality profile.",
+    "--provider": "Push or connector provider.",
+    "--pty": "Start the process with a pseudo-terminal.",
+    "--push-auth-secret": "Secret handle for push-provider auth.",
+    "--reason": "Reason recorded in audit evidence.",
+    "--relay-auth-secret": "Secret handle for relay authentication.",
+    "--relay-url": "Allowlisted HTTPS relay URL.",
+    "--repository": "Repository source for platform updates.",
+    "--resource-metadata": "OAuth protected-resource metadata URL.",
+    "--reviewer": "Reviewer identity for the action.",
+    "--rows": "PTY row count.",
+    "--scope": "Filter or grant by scope.",
+    "--session-id": "Target session id.",
+    "--status": "Filter results by status.",
+    "--target-id": "Remote push target id.",
+    "--task-id": "Target task id.",
+    "--timeout": "Maximum run time in seconds.",
+    "--token-secret": "Secret handle for bearer or API token.",
+    "--tool": "Include a specific discovered MCP tool.",
+    "--transport": "MCP transport type.",
+}
+
 PATH_COMPLETION_FLAGS = {
     "--catalog-path",
     "--config",
@@ -7708,6 +7788,8 @@ def _live_slash_hint_lines(buffer: str, width: int) -> list[str]:
     labels = _complete_slash(completion_text, buffer, begidx, endidx)
     if not labels:
         return [_paint("suggest  no slash matches", "2;33")]
+    if labels and all(label.startswith("--") for label in labels):
+        return _flag_completion_lines(labels, width=width, heading="flags")
     label = _live_completion_hint_label(labels, begidx)
     line = f"{label:<7} " + "  ".join(labels)
     return [_paint(_shorten_preserve_spaces(line, width=max(20, width)), "2;36")]
@@ -7736,6 +7818,32 @@ def _live_completion_hint_label(labels: list[str], begidx: int) -> str:
     return "subcmd"
 
 
+def _flag_completion_lines(labels: list[str], *, width: int, heading: str | None = None) -> list[str]:
+    if not labels:
+        return []
+    width = max(20, width)
+    label_width = min(max(max(len(label) for label in labels[:8]), 12), 24)
+    rows: list[str] = []
+    if heading:
+        rows.append(_paint(heading, "2;36"))
+    for label in labels[:8]:
+        detail = SLASH_FLAG_DESCRIPTIONS.get(label, _generic_flag_description(label))
+        line = f"  {label:<{label_width}}  {detail}"
+        rows.append(_paint(_shorten_preserve_spaces(line, width=width), "2;36"))
+    if len(labels) > 8:
+        rows.append(_paint(f"  +{len(labels) - 8} more flags; keep typing to filter", "2;36"))
+    return rows
+
+
+def _generic_flag_description(flag: str) -> str:
+    label = flag.removeprefix("--").replace("-", " ").strip()
+    if label.startswith("no "):
+        return f"Disable {label[3:]} for this command."
+    if label.endswith(" id"):
+        return f"Target {label}."
+    return f"Set {label} for this command."
+
+
 def _wrapped_prompt_lines(prompt: str, buffer: str, width: int) -> list[str]:
     width = max(20, width)
     usable_width = max(19, width - 1)
@@ -7761,6 +7869,8 @@ def _wrapped_prompt_lines(prompt: str, buffer: str, width: int) -> list[str]:
 
 
 def _inline_completion_line(completions: list[str], *, width: int) -> str:
+    if completions and all(completion.startswith("--") for completion in completions):
+        return "\n".join(_flag_completion_lines(completions, width=width, heading="complete"))
     return textwrap.shorten("complete " + "  ".join(completions[:12]), width=max(20, width), placeholder=" ...")
 
 

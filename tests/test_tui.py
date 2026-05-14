@@ -741,8 +741,15 @@ class TuiTests(unittest.TestCase):
             self.assertIn("slash   /submit  /resume", slash_hint)
             subcommand_hint, _ = _live_input_block("aegis> ", "/model au", 80)
             self.assertIn("subcmd  auth", subcommand_hint)
-            flag_hint, _ = _live_input_block("aegis> ", "/plugins fetch-manifest remote.plugin --", 80)
-            self.assertIn("flags   --catalog-path", flag_hint)
+            flag_hint, flag_hint_height = _live_input_block("aegis> ", "/plugins fetch-manifest remote.plugin --", 80)
+            self.assertIn("flags\n  --catalog-path", flag_hint)
+            self.assertIn("Local plugin catalog path.", flag_hint)
+            self.assertGreaterEqual(flag_hint_height, 3)
+            multi_flag_hint, _ = _live_input_block("aegis> ", "/remote-control pair --", 100)
+            self.assertIn("  --label", multi_flag_hint)
+            self.assertIn("Operator-facing label.", multi_flag_hint)
+            self.assertIn("  --task-id", multi_flag_hint)
+            self.assertIn("Target task id.", multi_flag_hint)
 
     def test_update_command_checks_remote_metadata_from_tui(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
