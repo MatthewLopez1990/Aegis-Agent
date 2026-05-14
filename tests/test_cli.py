@@ -123,6 +123,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(applied["apply_method"], "pip")
             self.assertEqual(applied["stdout_tail"], "installed\n")
             self.assertTrue(run.called)
+            self.assertIn("--force-reinstall", run.call_args.args[0])
+            self.assertIn("--no-cache-dir", run.call_args.args[0])
             self.assertEqual(run.call_args.args[0][-1], "https://updates.example.test/aegis.tar.gz")
 
     def test_update_check_explains_same_version_source_refreshes(self) -> None:

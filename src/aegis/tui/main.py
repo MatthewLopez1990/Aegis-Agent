@@ -7791,7 +7791,7 @@ def _live_slash_hint_lines(buffer: str, width: int) -> list[str]:
     if labels and all(label.startswith("--") for label in labels):
         return _flag_completion_lines(labels, width=width, heading="flags")
     if labels and all(label.startswith("/") for label in labels) and begidx <= 1:
-        return _slash_completion_lines(labels, width=width, heading="slash")
+        return _slash_completion_lines(labels, width=width)
     label = _live_completion_hint_label(labels, begidx)
     line = f"{label:<7} " + "  ".join(labels)
     return [_paint(_shorten_preserve_spaces(line, width=max(20, width)), "2;36")]
@@ -7844,17 +7844,20 @@ def _generic_flag_description(flag: str) -> str:
     return f"Set {label} for this command."
 
 
-def _slash_completion_lines(labels: list[str], *, width: int, heading: str | None = None) -> list[str]:
+def _slash_completion_lines(labels: list[str], *, width: int, heading: str | None = None, max_items: int = 14) -> list[str]:
     if not labels:
         return []
     width = max(20, width)
-    label_width = min(max(max(len(label) for label in labels), 12), 28)
+    visible_labels = labels[:max_items]
+    label_width = min(max(max(len(label) for label in visible_labels), 12), 28)
     rows: list[str] = []
     if heading:
         rows.append(_paint(heading, "2;36"))
-    for label in labels:
+    for label in visible_labels:
         line = f"  {label:<{label_width}}  {_slash_completion_description(label)}"
         rows.append(_paint(_shorten_preserve_spaces(line, width=width), "2;36"))
+    if len(labels) > max_items:
+        rows.append(_paint(f"  +{len(labels) - max_items} more commands; keep typing to filter", "2;36"))
     return rows
 
 

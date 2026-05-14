@@ -52,7 +52,7 @@ def check_platform_update(
         raise ValueError("remote update manifest does not include a version")
 
     version_status = "update_available" if _version_newer(latest_version, current_version) else "current"
-    update_command = f"{sys.executable} -m pip install --upgrade {source.archive_url}"
+    update_command = f"{sys.executable} -m pip install --upgrade --force-reinstall --no-deps --no-cache-dir {source.archive_url}"
     same_version_refresh_note = (
         "The published version matches this install; --apply --approved can still refresh same-version source commits."
         if version_status == "current"
@@ -80,7 +80,7 @@ def check_platform_update(
         "same_version_refresh_recommended": version_status == "current",
         "notes": [
             "Update checks download metadata only until --apply --approved is used.",
-            "Approved updates use git pull for a source checkout or pip install for packaged installs.",
+            "Approved updates use git pull for a source checkout or a forced no-cache pip reinstall for packaged installs.",
             same_version_refresh_note,
         ],
     }
@@ -133,7 +133,7 @@ def _build_update_command(*, source: UpdateSource, method: str) -> tuple[list[st
         return ["git", "-C", str(source_root), "pull", "--ff-only"], "git"
     if method == "git":
         raise ValueError("git update requested, but this install is not running from a git checkout")
-    return [sys.executable, "-m", "pip", "install", "--upgrade", source.archive_url], "pip"
+    return [sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-deps", "--no-cache-dir", source.archive_url], "pip"
 
 
 def _source_checkout_root() -> Path | None:
