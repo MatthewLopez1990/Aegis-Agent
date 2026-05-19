@@ -16,7 +16,7 @@ from aegis.memory.models import MemoryType
 from aegis.research.harness import ResearchHarness
 from aegis.security.taint import RiskLevel, TrustClass
 from aegis.skills.manifest import SkillManifest
-from aegis.tui.interactive import build_interactive_panels
+from aegis.tui.interactive import _CursesAegisDeck, build_interactive_panels, normalize_interactive_command
 from aegis.tui.main import AegisTui, _apply_live_completion, _complete_slash, _live_completion_context, _live_input_block, _visible_length
 
 from tests.test_mcp import FAKE_MCP_SERVER
@@ -46,6 +46,53 @@ class TuiTests(unittest.TestCase):
             setup_panel = next(panel for panel in panels if panel.panel_id == "setup")
             self.assertTrue(any(item.command == "setup model-auth" for item in setup_panel.items))
             self.assertTrue(any(item.status for panel in panels for item in panel.items))
+
+    def test_interactive_tui_submenus_and_slash_commands_stay_live(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tui = AegisTui(data_dir=root / ".aegis", workspace=root)
+
+            setup_panels = build_interactive_panels(tui, active_menu="setup")
+            setup_panel = next(panel for panel in setup_panels if panel.panel_id == "setup")
+            self.assertEqual(setup_panel.title, "SETUP MENU")
+            self.assertTrue(any(item.menu == "overview" for item in setup_panel.items))
+            self.assertTrue(any(item.command == "setup next" for item in setup_panel.items))
+
+            tools_panels = build_interactive_panels(tui, active_menu="tools")
+            tools_panel = next(panel for panel in tools_panels if panel.panel_id == "setup")
+            self.assertEqual(tools_panel.title, "TOOLS MENU")
+            self.assertTrue(any(item.command == "tools list" for item in tools_panel.items))
+
+            self.assertEqual(normalize_interactive_command("/tasks"), "/tasks")
+            self.assertEqual(normalize_interactive_command("//tasks"), "/tasks")
+            self.assertEqual(normalize_interactive_command("tasks"), "tasks")
+
+    def test_interactive_tui_enter_drills_into_menu_and_slash_dispatches(self) -> None:
+        class FakeCurses:
+            A_BOLD = 0
+
+            @staticmethod
+            def color_pair(_number: int) -> int:
+                return 0
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tui = AegisTui(data_dir=root / ".aegis", workspace=root)
+            deck = _CursesAegisDeck(object(), tui, FakeCurses)
+            panels = list(build_interactive_panels(tui))
+            focusable = [panel.panel_id for panel in panels if panel.items]
+
+            deck.selected["nav"] = 6
+            deck._activate_selected(panels, focusable)
+
+            self.assertEqual(deck.active_menu, "setup")
+            self.assertEqual(deck.focus_index, focusable.index("setup"))
+            self.assertIn("Opened Setup", "\n".join(deck.output_lines))
+
+            deck._run_command("/tasks")
+
+            self.assertEqual(deck.output_lines[0], "$ /tasks")
+            self.assertFalse(deck.should_exit)
 
     def test_tui_persists_private_readline_history(self) -> None:
         try:

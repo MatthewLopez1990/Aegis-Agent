@@ -20,6 +20,7 @@ class InteractiveItem:
     detail: str
     command: str = ""
     status: str = ""
+    menu: str = ""
 
 
 @dataclass(frozen=True)
@@ -38,7 +39,7 @@ class PanelBounds:
     w: int
 
 
-def build_interactive_panels(tui: Any) -> tuple[InteractivePanel, ...]:
+def build_interactive_panels(tui: Any, *, active_menu: str | None = None) -> tuple[InteractivePanel, ...]:
     """Build the selectable panel model without importing curses."""
     dashboard = build_product_dashboard(tui.orchestrator)
     runtime = dashboard["runtime"]
@@ -51,17 +52,17 @@ def build_interactive_panels(tui: Any) -> tuple[InteractivePanel, ...]:
     active_task = active_rows[0] if active_rows else None
 
     nav_items = (
-        InteractiveItem("Overview", "Open the full posture dashboard.", "dashboard", "active"),
-        InteractiveItem("Tasks", "Review recent active-session tasks.", "tasks"),
-        InteractiveItem("Approvals", "Review pending approval gates.", "approvals", str(pending)),
-        InteractiveItem("Memory", "Open governed memory commands.", "memory health"),
-        InteractiveItem("Tools", "List governed tool catalog entries.", "tools list"),
-        InteractiveItem("Logs", "Tail audit receipts.", "audit"),
-        InteractiveItem("Setup", "Open guided setup mission control.", "setup"),
+        InteractiveItem("Overview", "Return to the overview deck and run the full posture dashboard.", "dashboard", "active", "overview"),
+        InteractiveItem("Tasks", "Open task actions and recent active-session work.", "", "", "tasks"),
+        InteractiveItem("Approvals", "Open approval gates and decision actions.", "", str(pending), "approvals"),
+        InteractiveItem("Memory", "Open governed memory actions.", "", "", "memory"),
+        InteractiveItem("Tools", "Open governed tool runtime actions.", "", "", "tools"),
+        InteractiveItem("Logs", "Open audit and evidence actions.", "", "", "logs"),
+        InteractiveItem("Setup", "Open guided setup mission control.", "", "", "setup"),
     )
     command_items = (
         InteractiveItem("/setup next", "Open the first setup step that still needs operator action.", "setup next"),
-        InteractiveItem("menu setup", "Open the hidden setup lane.", "menu setup"),
+        InteractiveItem("menu setup", "Open the hidden setup lane.", "menu setup", "", "setup"),
         InteractiveItem("/tasks", "Recent tasks in the current session.", "tasks"),
         InteractiveItem("/approvals", "Pending gates and decision hints.", "approvals"),
         InteractiveItem("/tools", "Tool runtime and governance posture.", "tools list"),
@@ -139,10 +140,23 @@ def build_interactive_panels(tui: Any) -> tuple[InteractivePanel, ...]:
         InteractiveItem("Health", "Memory quality and review posture.", "memory health", str(runtime.get("memory_health_score", 0))),
         InteractiveItem("Review", "Open memory review recommendations.", "memory review-queue", str(runtime.get("memory_review_recommendations", 0))),
     )
+    menu_title = "SETUP TOUR"
+    menu_items = tuple(setup_items)
+    if active_menu and active_menu != "overview":
+        menu_title, menu_items = _submenu_panel(
+            active_menu,
+            active_items=active_items,
+            setup_items=tuple(setup_items),
+            approval_items=approval_items,
+            tool_items=tool_items,
+            memory_items=memory_items,
+            policy_items=policy_items,
+            command_items=command_items,
+        )
     return (
         InteractivePanel("nav", "AGENT STATUS", nav_items),
         InteractivePanel("active", "ACTIVE TASK", active_items),
-        InteractivePanel("setup", "SETUP TOUR", tuple(setup_items)),
+        InteractivePanel("setup", menu_title, menu_items),
         InteractivePanel("policy", "POLICY POSTURE", policy_items),
         InteractivePanel("approvals", f"APPROVALS ({pending})", approval_items),
         InteractivePanel("tools", "TOOL RUNTIME", tool_items),
@@ -171,8 +185,13 @@ class _CursesAegisDeck:
         self.curses = curses_module
         self.focus_index = 0
         self.selected: dict[str, int] = {}
-        self.output_lines: list[str] = ["Select a panel item and press Enter. Press / to run a command."]
-        self.message = "Tab/Left/Right focus panels  Up/Down select  Enter open  / command  r refresh  q quit"
+        self.active_menu: str | None = None
+        self.should_exit = False
+        self.output_lines: list[str] = [
+            "Select a row and press Enter to open it.",
+            "Press / for slash commands. Press ? for key help.",
+        ]
+        self.message = "Tab/Left/Right focus panels  Up/Down select  Enter opens row/menu  / slash command  q quit"
         self.bounds: list[PanelBounds] = []
 
     def run(self) -> None:
@@ -187,8 +206,8 @@ class _CursesAegisDeck:
             self.curses.mousemask(self.curses.ALL_MOUSE_EVENTS)
         except Exception:
             pass
-        while True:
-            panels = list(build_interactive_panels(self.tui))
+        while not self.should_exit:
+            panels = list(build_interactive_panels(self.tui, active_menu=self.active_menu))
             focusable = [panel.panel_id for panel in panels if panel.items]
             if self.focus_index >= len(focusable):
                 self.focus_index = 0
@@ -212,7 +231,7 @@ class _CursesAegisDeck:
                 self._activate_selected(panels, focusable)
                 continue
             if key in (ord("/"), ord(":")):
-                command = self._prompt("/")
+                command = self._prompt("/" if key == ord("/") else "")
                 if command:
                     self._run_command(command)
                 continue
@@ -227,8 +246,15 @@ class _CursesAegisDeck:
                     "Up/Down: select within the focused panel",
                     "Enter: open selected command or detail",
                     "/: run any Aegis TUI command",
+                    "Any printable key: start typing a command immediately",
+                    "Mouse click: select and open a row when supported",
                     "q or Esc: exit to shell",
                 ]
+                continue
+            if 32 <= key <= 126:
+                command = self._prompt(chr(key))
+                if command:
+                    self._run_command(command)
                 continue
             if key == self.curses.KEY_MOUSE:
                 self._handle_mouse(panels, focusable)
@@ -256,12 +282,13 @@ class _CursesAegisDeck:
     def _render(self, panels: list[InteractivePanel], focusable: list[str]) -> None:
         self.stdscr.erase()
         height, width = self.stdscr.getmaxyx()
-        if height < 24 or width < 80:
+        if height < 26 or width < 80:
             self._render_small(panels, focusable, height, width)
             self.stdscr.refresh()
             return
-        self._draw_header(width)
-        self.bounds = self._layout_bounds(height, width)
+        header_h = self._header_height(height, width)
+        self._draw_header(width, header_h)
+        self.bounds = self._layout_bounds(height, width, header_h)
         panel_by_id = {panel.panel_id: panel for panel in panels}
         focused_id = focusable[self.focus_index] if focusable else ""
         for bound in self.bounds:
@@ -269,24 +296,39 @@ class _CursesAegisDeck:
             if panel is None:
                 continue
             self._draw_panel(bound, panel, focused=bound.panel_id == focused_id)
-        detail_bound = self._detail_bounds(height, width)
+        detail_bound = self._detail_bounds(height, width, header_h)
         self._draw_detail(detail_bound, panels, focused_id)
         self._draw_footer(height, width)
         self.stdscr.refresh()
 
-    def _draw_header(self, width: int) -> None:
+    def _header_height(self, height: int, width: int) -> int:
+        return 7 if height >= 32 and width >= 96 else 3
+
+    def _draw_header(self, width: int, header_h: int) -> None:
         session = self.tui.session
         title = " AEGIS-AGENT "
         meta = f"session {_short_id(session.get('id'))} | model {session.get('model') or 'alias/smart'} | /setup next"
         self._add(0, 0, " " * (width - 1), self._pair(7) | self.curses.A_BOLD)
         self._add(0, 2, title, self._pair(7) | self.curses.A_BOLD)
         self._add(0, max(2, width - len(meta) - 2), meta[: max(0, width - 4)], self._pair(7))
+        if header_h >= 7:
+            logo = (
+                "    /############\\    AEGIS-AGENT",
+                "   /## POLICY ##\\   LOCAL-FIRST GOVERNED RUNTIME",
+                "   \\## MEMORY ##/   SELECT ROWS WITH ARROWS OR MOUSE",
+                "    \\##########/    ENTER OPENS MENUS  / RUNS COMMANDS",
+            )
+            for row, line in enumerate(logo, start=1):
+                self._add(row, 2, self._clip(line, width - 4), self._pair(1 if row % 2 else 2) | self.curses.A_BOLD)
+            tabs_y = 6
+        else:
+            tabs_y = 1
+            self._add(2, 1, self._clip("COMMAND BUS: /slash commands are live | Enter opens focused row", width - 2), self._pair(2))
         tabs = " [OVERVIEW]  Tasks  Approvals  Memory  Tools  Logs  Setup "
-        self._add(1, 1, tabs[: width - 2], self._pair(1) | self.curses.A_BOLD)
+        self._add(tabs_y, 1, tabs[: width - 2], self._pair(1) | self.curses.A_BOLD)
 
-    def _layout_bounds(self, height: int, width: int) -> list[PanelBounds]:
-        body_y = 3
-        body_h = max(8, height - 6)
+    def _layout_bounds(self, height: int, width: int, body_y: int) -> list[PanelBounds]:
+        body_h = max(8, height - body_y - 4)
         if width < 104:
             left_w = 22
             right_w = 27
@@ -316,9 +358,8 @@ class _CursesAegisDeck:
             PanelBounds("memory", body_y + right_policy_h + right_approval_h + right_tools_h, right_x, max(3, right_memory_h), right_w),
         ]
 
-    def _detail_bounds(self, height: int, width: int) -> PanelBounds:
-        body_y = 3
-        body_h = max(8, height - 6)
+    def _detail_bounds(self, height: int, width: int, body_y: int) -> PanelBounds:
+        body_h = max(8, height - body_y - 4)
         left_w = 22 if width < 104 else 26
         right_w = 27 if width < 104 else 31
         center_w = max(28, width - left_w - right_w - 4)
@@ -367,7 +408,7 @@ class _CursesAegisDeck:
             y += 1
 
     def _render_small(self, panels: list[InteractivePanel], focusable: list[str], height: int, width: int) -> None:
-        self._add(0, 0, self._clip("AEGIS-AGENT interactive compact mode", width - 1), self._pair(7) | self.curses.A_BOLD)
+        self._add(0, 0, self._clip("/##\\ AEGIS-AGENT interactive compact mode", width - 1), self._pair(7) | self.curses.A_BOLD)
         focused_id = focusable[self.focus_index] if focusable else ""
         panel = next((candidate for candidate in panels if candidate.panel_id == focused_id), panels[0])
         self._add(2, 0, self._clip(panel.title, width - 1), self._pair(1) | self.curses.A_BOLD)
@@ -380,6 +421,8 @@ class _CursesAegisDeck:
         self._add(height - 2, 0, self._clip(footer, width - 1), self._pair(7))
 
     def _draw_footer(self, height: int, width: int) -> None:
+        self._add(height - 3, 0, " " * (width - 1), self._pair(1))
+        self._add(height - 3, 1, self._clip("COMMAND > press /, or just start typing a command", width - 2), self._pair(1) | self.curses.A_BOLD)
         self._add(height - 2, 0, " " * (width - 1), self._pair(7))
         self._add(height - 2, 1, self._clip(self.message, width - 2), self._pair(7))
 
@@ -401,6 +444,22 @@ class _CursesAegisDeck:
         if panel is None or not panel.items:
             return
         item = panel.items[min(self.selected.get(panel_id, 0), len(panel.items) - 1)]
+        if item.menu:
+            self.active_menu = None if item.menu == "overview" else item.menu
+            if item.menu == "overview":
+                self.focus_index = focusable.index("nav") if "nav" in focusable else 0
+            elif "setup" in focusable:
+                self.focus_index = focusable.index("setup")
+            self.selected["setup"] = 0
+            self.output_lines = [
+                f"Opened {item.label}",
+                item.detail,
+                "Use Up/Down inside this menu and press Enter to open a row.",
+            ]
+            self.message = f"Menu opened: {item.label}"
+            if item.menu == "overview" and item.command:
+                self._run_command(item.command)
+            return
         if item.command:
             self._run_command(item.command)
         else:
@@ -423,27 +482,31 @@ class _CursesAegisDeck:
                     panel = panel_by_id.get(bound.panel_id)
                     if panel and panel.items:
                         self.selected[bound.panel_id] = max(0, min(len(panel.items) - 1, row))
+                        self._activate_selected(panels, focusable)
             return
 
     def _run_command(self, command: str) -> None:
-        normalized = command.strip().lstrip("/")
+        normalized = normalize_interactive_command(command)
         if not normalized:
             return
         output = io.StringIO()
         try:
             with redirect_stdout(output):
-                self.tui.onecmd(normalized)
+                should_stop = bool(self.tui.onecmd(normalized))
         except Exception as exc:  # noqa: BLE001 - interactive shell should stay alive.
             self.output_lines = [f"Command failed: {exc}"]
             self.message = f"Command failed: {normalized}"
             return
         text = output.getvalue().strip()
-        self.output_lines = text.splitlines()[:240] if text else [f"Ran: {normalized}"]
+        self.output_lines = [f"$ {normalized}", ""] + (text.splitlines()[:238] if text else ["Command completed."])
         self.message = f"Opened: {normalized}"
+        if should_stop:
+            self.should_exit = True
 
-    def _prompt(self, prefix: str) -> str:
+    def _prompt(self, initial: str) -> str:
         height, width = self.stdscr.getmaxyx()
         self._add(height - 1, 0, " " * (width - 1), self._pair(7))
+        prefix = f"COMMAND {initial}"
         self._add(height - 1, 0, prefix, self._pair(7) | self.curses.A_BOLD)
         try:
             try:
@@ -458,7 +521,10 @@ class _CursesAegisDeck:
                 self.curses.curs_set(0)
             except Exception:
                 pass
-        return raw.decode("utf-8", errors="replace").strip()
+        suffix = raw.decode("utf-8", errors="replace")
+        if initial == "/" and suffix.startswith("/"):
+            return suffix.strip()
+        return f"{initial}{suffix}".strip()
 
     def _box(self, bound: PanelBounds, title: str, attr: int) -> None:
         if bound.h <= 1 or bound.w <= 1:
@@ -494,6 +560,77 @@ def _priority_setup_step(steps: tuple[dict[str, Any], ...]) -> dict[str, Any] | 
         if str(step.get("state") or "").lower() not in {"written", "ready", "ok"}:
             return step
     return None
+
+
+def _submenu_panel(
+    active_menu: str,
+    *,
+    active_items: tuple[InteractiveItem, ...],
+    setup_items: tuple[InteractiveItem, ...],
+    approval_items: tuple[InteractiveItem, ...],
+    tool_items: tuple[InteractiveItem, ...],
+    memory_items: tuple[InteractiveItem, ...],
+    policy_items: tuple[InteractiveItem, ...],
+    command_items: tuple[InteractiveItem, ...],
+) -> tuple[str, tuple[InteractiveItem, ...]]:
+    back = InteractiveItem("Back to overview", "Return to the main overview deck.", "", "", "overview")
+    menu = active_menu.lower().replace("_", "-")
+    if menu == "tasks":
+        items = (
+            InteractiveItem("Recent tasks", "Show current-session tasks.", "tasks"),
+            InteractiveItem("Task queue", "Show active work without raw requests.", "queue"),
+            InteractiveItem("Submit task", "Open task submission syntax and command hints.", "submit"),
+            *active_items,
+        )
+        return "TASKS MENU", (back, *items)
+    if menu == "approvals":
+        items = (
+            InteractiveItem("Approval queue", "Show pending approvals and action hints.", "approvals"),
+            InteractiveItem("Policy posture", "Open security posture before deciding.", "security"),
+            *approval_items,
+        )
+        return "APPROVALS MENU", (back, *items)
+    if menu == "memory":
+        items = (
+            *memory_items,
+            InteractiveItem("Search memory", "Search governed memories.", "memory search"),
+            InteractiveItem("Create memory", "Show memory create syntax.", "memory"),
+        )
+        return "MEMORY MENU", (back, *items)
+    if menu == "tools":
+        items = (
+            *tool_items,
+            InteractiveItem("Toolsets", "Show grouped runtime toolsets.", "toolsets"),
+            InteractiveItem("Sandbox", "Show sandbox/backend posture.", "sandbox"),
+        )
+        return "TOOLS MENU", (back, *items)
+    if menu == "logs":
+        items = (
+            InteractiveItem("Audit log", "Show recent audit receipts.", "audit"),
+            InteractiveItem("Verify audit", "Verify receipt hash-chain posture.", "audit verify"),
+            InteractiveItem("Evidence", "Open evidence for the latest task.", "evidence"),
+            InteractiveItem("Timeline", "Open timeline for the latest task.", "timeline"),
+            InteractiveItem("Events", "Open events for the latest task.", "events"),
+        )
+        return "LOGS MENU", (back, *items)
+    if menu == "policy":
+        return "POLICY MENU", (back, *policy_items)
+    if menu == "commands":
+        return "COMMAND MENU", (back, *command_items)
+    items = (
+        InteractiveItem("Guided next step", "Open the first setup step that still needs operator action.", "setup next"),
+        InteractiveItem("Setup lane", "Render the hidden setup lane.", "menu setup"),
+        *setup_items,
+    )
+    return "SETUP MENU", (back, *items)
+
+
+def normalize_interactive_command(command: str) -> str:
+    """Normalize command input while preserving slash-command dispatch."""
+    stripped = command.strip()
+    if stripped.startswith("//"):
+        return "/" + stripped.lstrip("/")
+    return stripped
 
 
 def _setup_route(step_id: str) -> str:
