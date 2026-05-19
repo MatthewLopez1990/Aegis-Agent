@@ -244,7 +244,14 @@ TOOLS_COMMANDS = ("list", "run", "disable", "enable")
 BACKEND_COMMANDS = ("list", "doctor", "select")
 SETUP_COMMANDS = (
     "tour",
+    "next",
     "status",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
     "initialize",
     "model-auth",
     "connectors",
@@ -2840,7 +2847,7 @@ class AegisTui(cmd.Cmd):
 
     def do_rollback(self, arg: str) -> None:
         """rollback -- show guarded rollback status."""
-        width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
+        width = _deck_width()
         print(
             _boxed_lines(
                 "Rollback",
@@ -3574,7 +3581,7 @@ class AegisTui(cmd.Cmd):
             )
             _print_json(result)
             return
-        width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
+        width = _deck_width()
         title = arg.strip() or self.session.get("title") or "Aegis TUI"
         print(
             _boxed_lines(
@@ -3782,7 +3789,7 @@ class AegisTui(cmd.Cmd):
         if target in {"json", "raw", "--json"}:
             _print_json(readiness)
             return
-        width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
+        width = _deck_width()
         print(_setup_menu(readiness, width, target=target))
 
     def do_setup_bedrock(self, arg: str) -> None:
@@ -5423,7 +5430,7 @@ class AegisTui(cmd.Cmd):
 
     def do_voice(self, arg: str) -> None:
         """voice -- show guarded voice-mode status."""
-        width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
+        width = _deck_width()
         print(
             _boxed_lines(
                 "Voice",
@@ -5606,9 +5613,19 @@ class AegisTui(cmd.Cmd):
 
     def do_menu(self, arg: str) -> None:
         """menu [group] -- show the grouped command menu or one nested group."""
-        width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
+        width = _deck_width()
         dashboard = build_product_dashboard(self.orchestrator)
-        group = arg.strip().lower() or None
+        try:
+            parts = shlex.split(arg)
+        except ValueError as exc:
+            print(f"menu args invalid: {exc}")
+            return
+        if parts and parts[0].lower() in {"setup", "3"}:
+            target = parts[1].lower() if len(parts) > 1 else "tour"
+            readiness = build_setup_readiness(self.orchestrator, config_path=self.orchestrator.config.data_dir / "config.toml")
+            print(_setup_menu(readiness, width, target=target))
+            return
+        group = parts[0].lower() if parts else None
         print(_command_menu(width, _dashboard_status_flags(dashboard["runtime"], self.session, workspace=self.workspace), group=group))
 
     def do_menus(self, arg: str) -> None:
@@ -5691,32 +5708,22 @@ class AegisTui(cmd.Cmd):
     def _render_home(self) -> str:
         dashboard = build_product_dashboard(self.orchestrator)
         runtime = dashboard["runtime"]
-        width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
+        width = _deck_width()
+        setup_readiness = build_setup_readiness(self.orchestrator, config_path=self.orchestrator.config.data_dir / "config.toml")
         return "\n".join(
             [
+                _terminal_chrome(width, self.session),
                 _aegis_logo(width, self._next_shield_frame(), compact=True),
                 _deck_tabs(width, active="Overview"),
-                _section(
-                    "Agent Status",
-                    _dashboard_status_flags(runtime, self.session, workspace=self.workspace),
-                    width,
-                ),
-                _section(
-                    "Command Palette",
-                    [
-                        "Type a plain request to submit a governed task.",
-                        "Type / and press Enter for the command palette; type /mem or /app to filter options.",
-                        "Use menu operate, menu govern, menu build, or menu explore for nested command groups.",
-                        "Use /setup for the guided first-run tour; drill into /setup model-auth, /setup connectors, or /setup interfaces only when needed.",
-                    ],
-                    width,
-                ),
+                _dashboard_command_center(dashboard, runtime, self.session, self.workspace, setup_readiness, width),
+                _command_input_bar(width),
+                _deck_footer(runtime, self.session, self.workspace, width),
             ]
         )
 
     def _render_slash_palette(self, prefix: str) -> str:
         dashboard = build_product_dashboard(self.orchestrator)
-        width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
+        width = _deck_width()
         flags = _dashboard_status_flags(dashboard["runtime"], self.session, workspace=self.workspace)
         return _slash_palette(
             width,
@@ -5871,8 +5878,10 @@ class AegisTui(cmd.Cmd):
     def _render_dashboard(self) -> str:
         dashboard = build_product_dashboard(self.orchestrator)
         runtime = dashboard["runtime"]
-        width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
+        width = _deck_width()
+        setup_readiness = build_setup_readiness(self.orchestrator, config_path=self.orchestrator.config.data_dir / "config.toml")
         lines = [
+            _terminal_chrome(width, self.session),
             _aegis_logo(width, self._next_shield_frame()),
             _banner(
                 "Aegis Agent Control Plane",
@@ -5880,19 +5889,10 @@ class AegisTui(cmd.Cmd):
                 "governed local runtime :: evidence-first operations :: slash-command deck",
             ),
             _deck_tabs(width, active="Overview"),
+            _dashboard_command_center(dashboard, runtime, self.session, self.workspace, setup_readiness, width),
             _section(
                 "Active Status Flags",
                 _dashboard_status_flags(runtime, self.session, workspace=self.workspace),
-                width,
-            ),
-            _section(
-                "Overview Deck",
-                [
-                    f"Active task lane: {runtime.get('running_task_count', 0)} running, {runtime.get('waiting_task_count', 0)} waiting, {runtime.get('paused_task_count', 0)} paused.",
-                    f"Policy posture: {'LOW RISK' if runtime.get('pending_approvals', 0) == 0 and runtime.get('audit_chain_ok') else 'REVIEW'} with {runtime.get('pending_approvals', 0)} pending approval gate(s).",
-                    f"Tool runtime: {runtime.get('tools', 0)} catalogued tools, {runtime.get('approval_gated_tools', 0)} approval gated, {runtime.get('model_providers', 0)} model providers.",
-                    "Setup tour: /setup opens the clean guided path; /setup model-auth, /setup connectors, /setup backends, /setup remote-control, and /setup interfaces reveal submenus.",
-                ],
                 width,
             ),
             _stat_line(
@@ -5970,6 +5970,8 @@ class AegisTui(cmd.Cmd):
                 ],
                 width,
             ),
+            _command_input_bar(width),
+            _deck_footer(runtime, self.session, self.workspace, width),
         ]
         return "\n".join(lines)
 
@@ -6779,7 +6781,7 @@ def _positional_without_flags(parts: list[str], flags: dict[str, int]) -> list[s
 
 
 def _command_reference() -> str:
-    width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
+    width = _deck_width()
     return "\n".join(
         (
             _aegis_logo(width),
@@ -6825,7 +6827,7 @@ def _command_reference() -> str:
             "privacy-settings       Local privacy, redaction, and telemetry posture",
             "whoami|yolo            Identity posture and approval-bypass refusal",
             "security-review        Security review posture alias",
-            "setup                 Guided local setup readiness",
+            "setup [next|1..6|verify|json] Guided local setup tour and hidden submenus",
             "doctor|debug|config|settings|heapdump Runtime diagnosis, safe debug, and config paths",
             "bug|feedback <summary> Capture a local-only bug report",
             "hooks list|add|run     Governed local lifecycle hooks",
@@ -6844,7 +6846,8 @@ def _command_reference() -> str:
             "channel events [limit]  Recent channel activity",
             "models|model           Model providers",
             "login|logout <provider> Model auth aliases",
-            "setup|setup-bedrock|setup-vertex Guided setup and cloud identity setup bridges",
+            "setup|setup-bedrock|setup-vertex Guided setup, cloud identity setup, and account boundary",
+            "model|models|provider|usage Provider routes, auth, and usage",
             "upgrade|extra-usage|passes Provider account and usage boundaries",
             "usage|stats|insights   Model usage and local analytics",
             "effort [level]         Guarded reasoning-effort status",
@@ -6913,6 +6916,21 @@ def _command_reference() -> str:
     )
 
 
+def _deck_width() -> int:
+    return min(max(shutil.get_terminal_size((140, 24)).columns, 100), 154)
+
+
+def _terminal_chrome(width: int, session: dict[str, Any]) -> str:
+    inner = width - 4
+    left = _paint("o o o", "38;2;255;92;92")
+    title = "aegis-agent"
+    right = f"session: {_short_id(session.get('id', ''))}   model: {session.get('model') or 'alias/smart'}"
+    plain_left = "o o o"
+    center_space = max(1, inner - len(plain_left) - len(right) - 4)
+    line = f"{left}  {title.center(center_space)}  {right}"
+    return _boxed_lines("Terminal", [line], width)
+
+
 def _aegis_logo(width: int, frame_index: int = 0, *, compact: bool = False) -> str:
     frame_name, frame_detail, frame_art = SHIELD_FRAMES[frame_index % len(SHIELD_FRAMES)]
     wordmark = _aegis_wordmark_lines(width)
@@ -6952,33 +6970,310 @@ def _deck_tabs(width: int, *, active: str) -> str:
     return _boxed_lines("Navigation Tabs", ["  |  ".join(parts)], width)
 
 
+def _command_input_bar(width: int) -> str:
+    return _boxed_lines(
+        "Command Palette  (type / for command)",
+        [
+            "> _",
+            "Type / and press Enter for the command palette; type /mem or /setup to filter options.",
+            "Suggested: /setup next    /menu setup    /dashboard    /tasks    /approvals",
+        ],
+        width,
+    )
+
+
+def _deck_footer(runtime: dict[str, Any], session: dict[str, Any], workspace: Path, width: int) -> str:
+    audit = "OK" if runtime.get("audit_chain_ok") else "FAILED"
+    risk = "LOW" if audit == "OK" and int(runtime.get("pending_approvals") or 0) == 0 else "REVIEW"
+    cells = [
+        f"SESSION {_short_id(session.get('id', ''))}",
+        f"WORKSPACE {workspace.name}",
+        "MODE LOCAL-FIRST",
+        f"AUDIT {audit}",
+        f"RISK {risk}",
+        f"TOOLS {runtime.get('tools', 0)}",
+        f"PROVIDERS {runtime.get('model_providers', 0)}",
+    ]
+    return _boxed_lines("Status Bar", ["  |  ".join(cells)], width)
+
+
+def _dashboard_command_center(
+    dashboard: dict[str, Any],
+    runtime: dict[str, Any],
+    session: dict[str, Any],
+    workspace: Path,
+    setup_readiness: dict[str, Any],
+    width: int,
+) -> str:
+    left_width, main_width, right_width = _deck_column_widths(width)
+    active_rows = dashboard.get("active_work_tasks", [])
+    active_task = active_rows[0] if active_rows else {}
+    setup_steps = [step for step in setup_readiness.get("setup_steps", []) if isinstance(step, dict)]
+    priority_step = _setup_priority_step(setup_steps)
+    pending = int(runtime.get("pending_approvals") or 0)
+    active_work = int(runtime.get("active_work_count") or 0)
+    audit_ok = bool(runtime.get("audit_chain_ok"))
+    risk_label = "LOW RISK" if audit_ok and pending == 0 else "REVIEW"
+    left_blocks = [
+        _panel_lines(
+            "AGENT STATUS",
+            [
+                f"state       {'ACTIVE' if active_work == 0 else 'WORKING'}",
+                f"audit       {'OK' if audit_ok else 'FAILED'}",
+                f"approvals   {pending}",
+                "",
+                "01 Overview  /dashboard",
+                "02 Tasks     /tasks",
+                "03 Approvals /approvals",
+                "04 Memory    /memory",
+                "05 Tools     /tools",
+                "06 Logs      /audit",
+                "07 Setup     /setup",
+            ],
+            left_width,
+        ),
+        _panel_lines(
+            "QUICK ACTIONS",
+            [
+                "/tasks       recent",
+                "/approve     gates",
+                "/dashboard   posture",
+                "/memory      search",
+                "/tools       runtime",
+                "/setup next  guided",
+            ],
+            left_width,
+        ),
+        _panel_lines(
+            "AGENT IDENTITY",
+            [
+                f"workspace  {workspace.name}",
+                f"session    {_short_id(session.get('id', ''))}",
+                f"mode       LOCAL-FIRST",
+                f"persona    {session.get('personality') or 'default'}",
+                f"model      {session.get('model') or 'alias/smart'}",
+            ],
+            left_width,
+        ),
+    ]
+    main_blocks = [
+        _panel_lines(
+            "ACTIVE TASK",
+            _active_task_panel_lines(active_task, priority_step),
+            main_width,
+        ),
+        _panel_lines(
+            "AGENT CONVERSATION",
+            [
+                "system  Session started in LOCAL-FIRST mode.",
+                f"system  Policy posture loaded. Risk posture: {risk_label}.",
+                "user    Plain text submits a governed task.",
+                "agent   Use /menu for lanes or /setup for the guided setup tour.",
+                "tool    setup(next) shows the first required action without exposing secrets.",
+            ],
+            main_width,
+        ),
+        _panel_lines(
+            "SUGGESTED COMMANDS",
+            [
+                "[/dashboard]  [/menu]  [/setup]  [/setup next]  [/tasks]  [/approvals]",
+                "Tip: menu setup opens the setup lane; setup 1..6 jumps to a step.",
+            ],
+            main_width,
+        ),
+    ]
+    right_blocks = [
+        _panel_lines(
+            "POLICY POSTURE",
+            [
+                f"core/runtime        {risk_label}",
+                f"Compliance   {_progress_bar(98 if audit_ok else 66)}",
+                f"Integrity    {_progress_bar(97 if audit_ok else 72)}",
+                f"Availability {_progress_bar(99)}",
+                f"Violations {0 if audit_ok else 1}    Warnings {pending}",
+            ],
+            right_width,
+        ),
+        _panel_lines(
+            f"APPROVALS ({pending} PENDING)",
+            _approval_panel_lines(dashboard),
+            right_width,
+        ),
+        _panel_lines(
+            "TOOL RUNTIME",
+            [
+                "Tool             Status  Calls",
+                f"catalog          ok      {runtime.get('tools', 0)}",
+                f"approval gates   ok      {runtime.get('approval_gated_tools', 0)}",
+                f"channels         ok      {runtime.get('channels', 0)}",
+                f"providers        ok      {runtime.get('model_providers', 0)}",
+            ],
+            right_width,
+        ),
+        _panel_lines(
+            "MEMORY",
+            [
+                f"Facts        {runtime.get('memories', 0)}",
+                f"Health       {runtime.get('memory_health_score', 0)}",
+                f"Review       {runtime.get('memory_review_recommendations', 0)}",
+                f"Context      {_progress_bar(28)}",
+            ],
+            right_width,
+        ),
+        _panel_lines(
+            "SETUP TOUR",
+            _setup_card_lines(setup_steps, priority_step),
+            right_width,
+        ),
+    ]
+    return _column_grid([left_blocks, main_blocks, right_blocks], [left_width, main_width, right_width])
+
+
+def _deck_column_widths(width: int) -> tuple[int, int, int]:
+    if width < 118:
+        left = 28
+        right = 32
+    elif width < 146:
+        left = 30
+        right = 34
+    else:
+        left = 32
+        right = 36
+    main = max(36, width - left - right - 4)
+    return left, main, right
+
+
+def _active_task_panel_lines(active_task: dict[str, Any], priority_step: dict[str, Any] | None) -> list[str]:
+    if active_task:
+        task_id = _short_id(active_task.get("id", ""))
+        status = str(active_task.get("status") or "unknown").upper()
+        request = str(active_task.get("request_summary") or active_task.get("title") or "governed task")
+        return [
+            f"{request}   governed",
+            f"id       {task_id}",
+            f"status   {status}",
+            f"owner    local-user",
+            f"progress {_progress_bar(62)}",
+            "next     /status <id>  /events <id>  /resume <id>",
+        ]
+    if priority_step:
+        route = SETUP_STEP_ROUTES.get(str(priority_step.get("id")), str(priority_step.get("id")))
+        return [
+            "No active task. Setup guidance is loaded.",
+            f"first setup step   {priority_step.get('label')}",
+            f"state              {priority_step.get('state')}",
+            f"open submenu       /setup {route}",
+            f"run/check          {priority_step.get('command')}",
+            "guided tour        /setup next",
+        ]
+    return [
+        "No active task. Runtime is standing by.",
+        "Submit plain text to start governed work.",
+        "Open /setup for first-run guidance.",
+    ]
+
+
+def _approval_panel_lines(dashboard: dict[str, Any]) -> list[str]:
+    approvals = dashboard.get("pending_approvals", [])
+    if not approvals:
+        return ["No pending approvals.", "Open /approvals when a gate appears."]
+    rows = []
+    for approval in approvals[:3]:
+        approval_id = _short_id(approval.get("id", ""))
+        action = str(approval.get("action") or approval.get("summary") or "approval")
+        risk = str(approval.get("risk") or approval.get("risk_level") or "review")
+        rows.append(f"{approval_id} {risk} {action}")
+    rows.append("Use /approve <id> or /deny <id>.")
+    return rows
+
+
+def _setup_card_lines(steps: list[dict[str, Any]], priority_step: dict[str, Any] | None) -> list[str]:
+    lines = [f"Progress {_setup_progress(steps)}"]
+    if priority_step:
+        route = SETUP_STEP_ROUTES.get(str(priority_step.get("id")), str(priority_step.get("id")))
+        lines.extend(
+            [
+                f"Start here: {priority_step.get('label')}",
+                f"Open: /setup {route}",
+                "Hidden: /setup 1..6",
+            ]
+        )
+    else:
+        lines.extend(["All setup lanes look ready.", "Review: /setup verify"])
+    return lines
+
+
+def _progress_bar(percent: int, *, width: int = 10) -> str:
+    bounded = max(0, min(100, int(percent)))
+    filled = round((bounded / 100) * width)
+    return f"[{'#' * filled}{'.' * (width - filled)}] {bounded}%"
+
+
+def _panel_lines(title: str, items: list[str], width: int) -> list[str]:
+    inner = max(10, width - 4)
+    rule = _paint("+" + "-" * (width - 2) + "+", "38;2;0;245;212")
+    title_line = f"| {_paint(title[:inner].ljust(inner), '38;2;0;245;212;1')} |"
+    body: list[str] = [rule, title_line, rule]
+    for item in items:
+        for line in _wrap_box_line(str(item), inner):
+            body.append(f"| {_pad_visible(line, inner)} |")
+    body.append(rule)
+    return body
+
+
+def _column_grid(columns: list[list[list[str]]], widths: list[int], *, gap: int = 2) -> str:
+    rendered_columns: list[list[str]] = []
+    for blocks, width in zip(columns, widths, strict=False):
+        lines: list[str] = []
+        for block_index, block in enumerate(blocks):
+            if block_index:
+                lines.append(" " * width)
+            lines.extend(_pad_visible(line, width) for line in block)
+        rendered_columns.append(lines)
+    height = max((len(column) for column in rendered_columns), default=0)
+    for index, column in enumerate(rendered_columns):
+        rendered_columns[index] = column + [" " * widths[index]] * (height - len(column))
+    rows = []
+    separator = " " * gap
+    for row_index in range(height):
+        rows.append(separator.join(rendered_columns[column_index][row_index] for column_index in range(len(rendered_columns))))
+    return "\n".join(rows)
+
+
 SETUP_STEP_ALIASES: dict[str, str] = {
     "tour": "tour",
+    "next": "next",
     "overview": "tour",
     "status": "tour",
     "guide": "tour",
+    "1": "initialize",
     "init": "initialize",
     "initialize": "initialize",
     "local": "initialize",
     "config": "initialize",
+    "2": "model_auth",
     "model": "model_auth",
     "models": "model_auth",
     "auth": "model_auth",
     "model-auth": "model_auth",
     "model_auth": "model_auth",
+    "3": "connectors_channels",
     "connector": "connectors_channels",
     "connectors": "connectors_channels",
     "channel": "connectors_channels",
     "channels": "connectors_channels",
     "connectors-channels": "connectors_channels",
+    "4": "execution_backends",
     "backend": "execution_backends",
     "backends": "execution_backends",
     "execution": "execution_backends",
     "execution-backends": "execution_backends",
+    "5": "remote_control",
     "remote": "remote_control",
     "remote-control": "remote_control",
     "remote_control": "remote_control",
     "rc": "remote_control",
+    "6": "interfaces",
     "interface": "interfaces",
     "interfaces": "interfaces",
     "tui": "interfaces",
@@ -6996,12 +7291,50 @@ SETUP_STEP_ROUTES: dict[str, str] = {
     "interfaces": "interfaces",
 }
 
+SETUP_STEP_GUIDES: dict[str, dict[str, str]] = {
+    "initialize": {
+        "purpose": "Locks in private local state before any provider, connector, or remote-control work.",
+        "how": "Run aegis setup --init, then review the config path and audit/database locations.",
+        "done": "aegis health reports ok and the private .aegis state directory exists.",
+    },
+    "model_auth": {
+        "purpose": "Teaches Aegis which model routes are usable without importing browser tokens.",
+        "how": "Run aegis models auth doctor, then follow only the brokered login or verify commands it lists.",
+        "done": "The auth doctor shows ready API-key, local, subscription, OAuth, or cloud-identity targets.",
+    },
+    "connectors_channels": {
+        "purpose": "Connects external read/write surfaces behind allowlists, approvals, and redacted receipts.",
+        "how": "Run aegis connector doctor, add credential handles out-of-band, and enable live flags per adapter.",
+        "done": "Connector/channel checks show configured handles and no unreviewed write path is enabled.",
+    },
+    "execution_backends": {
+        "purpose": "Chooses where tools may execute while keeping remote execution opt-in.",
+        "how": "Run aegis backend doctor, select local first, and approve Docker/SSH/hosted backends only after allowlists.",
+        "done": "Backend doctor reports a selected backend and activation blockers are understood.",
+    },
+    "remote_control": {
+        "purpose": "Pairs a scoped device or relay after the local runtime is ready.",
+        "how": "Run aegis remote-control status, create a short-lived pairing, and keep token material one-time only.",
+        "done": "A pairing directory shows only safe task/session metadata and old pairings are revoked.",
+    },
+    "interfaces": {
+        "purpose": "Opens the operator surfaces after the runtime setup has receipts.",
+        "how": "Start aegis tui for the command deck or aegis serve --host 127.0.0.1 --port 8765 for the web console.",
+        "done": "The TUI dashboard or local web console loads and /setup verify still reports the expected checks.",
+    },
+}
+
 
 def _setup_menu(readiness: dict[str, Any], width: int, *, target: str = "tour") -> str:
     normalized = SETUP_STEP_ALIASES.get(target, target)
+    steps = [step for step in readiness.get("setup_steps", []) if isinstance(step, dict)]
+    if normalized == "next":
+        priority = _setup_priority_step(steps)
+        if priority is not None:
+            return _setup_step_menu(readiness, steps, priority, width, guided=True)
+        return _setup_verification_menu(readiness, width)
     if normalized == "verify":
         return _setup_verification_menu(readiness, width)
-    steps = [step for step in readiness.get("setup_steps", []) if isinstance(step, dict)]
     if normalized in {"tour", ""}:
         return _setup_tour_menu(readiness, steps, width)
     step = next((item for item in steps if item.get("id") == normalized), None)
@@ -7019,26 +7352,36 @@ def _setup_menu(readiness: dict[str, Any], width: int, *, target: str = "tour") 
 
 
 def _setup_tour_menu(readiness: dict[str, Any], steps: list[dict[str, Any]], width: int) -> str:
+    priority = _setup_priority_step(steps)
     lines = [
-        "Guided Setup Tour :: open one submenu at a time so the deck stays clean.",
+        "Guided Setup Tour",
+        "SETUP MISSION CONTROL :: guided tour with hidden submenus.",
         f"Status: {readiness.get('status', 'unknown')}  {_setup_progress(steps)}",
         f"Config path: {readiness.get('config_path')}",
+        f"Start here: {priority.get('label') if priority else 'verification'}  -> /setup next",
         "",
-        "Tour route:",
+        "Tour route (select with /setup 1..6 or menu setup <step>):",
     ]
     for index, step in enumerate(steps, start=1):
         route = SETUP_STEP_ROUTES.get(str(step.get("id")), str(step.get("id")))
         label = str(step.get("label") or step.get("id"))
         state = str(step.get("state") or "unknown")
         command = str(step.get("command") or "")
-        lines.append(f"{index:02d}. {label} [{state}]")
-        lines.append(f"    open: /setup {route:<14} first command: {command}")
+        guide = _setup_step_guide(str(step.get("id") or ""))
+        marker = ">>" if priority is step else "  "
+        lines.append(f"{marker} [{index}] {label} [{state}]")
+        lines.append(f"       open: /setup {route:<14} first command: {command}")
+        lines.append(f"       goal: {guide['purpose']}")
     lines.extend(
         [
             "",
             "Hidden submenus:",
             "  /setup initialize  /setup model-auth  /setup connectors  /setup backends",
             "  /setup remote-control  /setup interfaces  /setup verify  /setup json",
+            "",
+            "Guided controls:",
+            "  /setup next      opens the first step that still needs operator action",
+            "  menu setup 2     opens the model-auth setup submenu",
             "",
             'Safety receipt: "setup_steps": '
             f"{len(steps)} | \"external_action_started\": false | \"raw_secret_values_included\": false",
@@ -7047,17 +7390,25 @@ def _setup_tour_menu(readiness: dict[str, Any], steps: list[dict[str, Any]], wid
     return _boxed_lines("Aegis Guided Setup", lines, width)
 
 
-def _setup_step_menu(readiness: dict[str, Any], steps: list[dict[str, Any]], step: dict[str, Any], width: int) -> str:
+def _setup_step_menu(readiness: dict[str, Any], steps: list[dict[str, Any]], step: dict[str, Any], width: int, *, guided: bool = False) -> str:
     step_id = str(step.get("id") or "")
     index = next((idx for idx, item in enumerate(steps, start=1) if item is step), 1)
     route = SETUP_STEP_ROUTES.get(step_id, step_id)
     next_step = steps[index] if index < len(steps) else None
     action_lines = _setup_action_lines(step)
+    guide = _setup_step_guide(step_id)
     lines = [
-        f"Setup submenu :: {index:02d}/{len(steps)} {step.get('label', step_id)}",
+        f"{'Guided next step' if guided else 'Setup submenu'} :: {index:02d}/{len(steps)} {step.get('label', step_id)}",
         f"id: {step_id}  state: {step.get('state', 'unknown')}",
         f"why: {step.get('detail', '')}",
         f"first command: {step.get('command', '')}",
+        "",
+        "What this unlocks:",
+        f"- {guide['purpose']}",
+        "How to set it up:",
+        f"- {guide['how']}",
+        "Done when:",
+        f"- {guide['done']}",
     ]
     if action_lines:
         lines.extend(["", "Guided next actions:", *action_lines])
@@ -7067,6 +7418,7 @@ def _setup_step_menu(readiness: dict[str, Any], steps: list[dict[str, Any]], ste
     lines.extend(
         [
             "Back to tour: /setup tour",
+            "Jump by number: /setup 1  /setup 2  /setup 3  /setup 4  /setup 5  /setup 6",
             "Verification: /setup verify",
             'Safety receipt: "setup_steps": '
             f"{len(steps)} | \"external_action_started\": false | \"raw_secret_values_included\": false",
@@ -7099,6 +7451,25 @@ def _setup_action_lines(step: dict[str, Any]) -> list[str]:
         for value in values[:6]:
             actions.append(f"- {value}")
     return actions
+
+
+def _setup_step_guide(step_id: str) -> dict[str, str]:
+    return SETUP_STEP_GUIDES.get(
+        step_id,
+        {
+            "purpose": "Completes one setup lane before broader runtime use.",
+            "how": "Open the submenu, run the first command, and review any listed blockers.",
+            "done": "The submenu state is ready, ok, written, or otherwise explicitly understood.",
+        },
+    )
+
+
+def _setup_priority_step(steps: list[dict[str, Any]]) -> dict[str, Any] | None:
+    done_states = {"written", "ready", "ok"}
+    for step in steps:
+        if str(step.get("state") or "").lower() not in done_states:
+            return step
+    return None
 
 
 def _setup_progress(steps: list[dict[str, Any]]) -> str:
@@ -7148,6 +7519,21 @@ COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
             ("bug|feedback <summary>", "local-only bug report capture"),
             ("hooks", "governed local lifecycle hooks"),
             ("audit|evidence|timeline|events", "receipts and replay"),
+        ),
+    ),
+    (
+        "Setup",
+        (
+            ("setup", "guided setup mission control"),
+            ("setup next", "open the first setup step that needs operator action"),
+            ("setup 1|setup initialize", "local config and private state"),
+            ("setup 2|setup model-auth", "model provider auth and subscriptions"),
+            ("setup 3|setup connectors", "connectors and channel activation"),
+            ("setup 4|setup backends", "execution backend activation"),
+            ("setup 5|setup remote-control", "scoped remote-control pairing"),
+            ("setup 6|setup interfaces", "TUI and web console launch"),
+            ("setup verify", "post-setup verification commands"),
+            ("setup json", "machine-readable setup packet"),
         ),
     ),
     (
@@ -7287,12 +7673,18 @@ def _command_menu(width: int, status_flags: list[str] | None = None, *, group: s
         lines.extend(("", "Active flags:", *status_flags))
     lines.append("")
     for group, commands in COMMAND_MENU_GROUPS:
-        command_lane = " ".join(_slash_command_label(command).split()[0] for command, _detail in commands[:4])
+        command_lane = _command_lane_preview(group, commands)
         lines.append(f"[{group:<7}] {command_lane}")
-        lines.append(f"          open nested menu: menu {group.lower()}  |  slash filter: /{commands[0][0].split()[0]}")
+        lines.append(f"          open nested menu: menu {group.lower()}  |  select: menu {COMMAND_MENU_GROUPS.index((group, commands)) + 1}")
     if lines and not lines[-1]:
         lines.pop()
     return _boxed_lines("Shield Command Menu", lines, width)
+
+
+def _command_lane_preview(group: str, commands: tuple[tuple[str, str], ...]) -> str:
+    if group == "Setup":
+        return "menu setup  /setup next  /setup 1..6  /setup verify"
+    return " ".join(_slash_command_label(command).split()[0] for command, _detail in commands[:4])
 
 
 def _slash_palette(
@@ -7336,7 +7728,7 @@ def _slash_palette(
     else:
         if not matches and not quick_matches:
             lines.append("No direct matches. Try /dashboard, /tasks, /memory, /approvals, or /menu.")
-    lines.extend(("", "Nested menus:", "  /menu operate   /menu govern   /menu build   /menu explore"))
+    lines.extend(("", "Nested menus:", "  /menu operate   /menu govern   /menu setup   /menu build   /menu explore"))
     return _boxed_lines("Slash Command Palette", lines, width)
 
 
@@ -7346,6 +7738,10 @@ def _command_group_names() -> tuple[str, ...]:
 
 def _command_group(name: str) -> tuple[str, tuple[tuple[str, str], ...]] | None:
     normalized = name.lower().strip()
+    if normalized.isdigit():
+        index = int(normalized) - 1
+        if 0 <= index < len(COMMAND_MENU_GROUPS):
+            return COMMAND_MENU_GROUPS[index]
     for group, commands in COMMAND_MENU_GROUPS:
         if group.lower().startswith(normalized):
             return group, commands
