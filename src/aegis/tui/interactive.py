@@ -1,4 +1,4 @@
-"""Curses-backed selectable TUI surface for Aegis Agent."""
+"""Curses-backed prompt-first TUI surface for Aegis Agent."""
 
 from __future__ import annotations
 
@@ -183,16 +183,20 @@ class _CursesAegisDeck:
         self.stdscr = stdscr
         self.tui = tui
         self.curses = curses_module
-        self.focus_index = 0
-        self.selected: dict[str, int] = {}
-        self.active_menu: str | None = None
+        self.input_buffer = ""
+        self.cursor = 0
+        self.history: list[str] = []
+        self.history_index: int | None = None
+        self.palette_index = 0
         self.should_exit = False
+        self._last_palette_top = 0
+        self._last_palette_rows = 0
         self.output_lines: list[str] = [
-            "Select a row and press Enter to open it.",
-            "Press / for slash commands. Press ? for key help.",
+            "Aegis Agent ready.",
+            "Type a request and press Enter, or type / to open slash commands.",
+            "Hermes-style mode: same sessions, same slash commands, prompt-first surface.",
         ]
-        self.message = "Tab/Left/Right focus panels  Up/Down select  Enter opens row/menu  / slash command  q quit"
-        self.bounds: list[PanelBounds] = []
+        self.message = "Enter send | / commands | Tab complete | Up/Down history or palette | Esc clear/exit"
 
     def run(self) -> None:
         try:
@@ -207,57 +211,58 @@ class _CursesAegisDeck:
         except Exception:
             pass
         while not self.should_exit:
-            panels = list(build_interactive_panels(self.tui, active_menu=self.active_menu))
-            focusable = [panel.panel_id for panel in panels if panel.items]
-            if self.focus_index >= len(focusable):
-                self.focus_index = 0
-            self._render(panels, focusable)
+            self._render()
             key = self.stdscr.getch()
-            if key in (ord("q"), ord("Q"), 27):
+            if key in (3, 4):
                 return
-            if key in (self.curses.KEY_RIGHT, 9):
-                self.focus_index = (self.focus_index + 1) % max(1, len(focusable))
-                continue
-            if key in (self.curses.KEY_LEFT, getattr(self.curses, "KEY_BTAB", -999999)):
-                self.focus_index = (self.focus_index - 1) % max(1, len(focusable))
-                continue
-            if key == self.curses.KEY_UP:
-                self._move_selection(panels, focusable, -1)
-                continue
-            if key == self.curses.KEY_DOWN:
-                self._move_selection(panels, focusable, 1)
-                continue
+            if key == 27:
+                if self.input_buffer:
+                    self.input_buffer = ""
+                    self.cursor = 0
+                    self.palette_index = 0
+                    self.message = "Input cleared."
+                    continue
+                return
             if key in (10, 13, self.curses.KEY_ENTER):
-                self._activate_selected(panels, focusable)
+                self._submit_input()
                 continue
-            if key in (ord("/"), ord(":")):
-                command = self._prompt("/" if key == ord("/") else "")
-                if command:
-                    self._run_command(command)
+            if key == self.curses.KEY_LEFT:
+                self.cursor = max(0, self.cursor - 1)
                 continue
-            if key in (ord("r"), ord("R")):
-                self.message = "Refreshed runtime posture."
+            if key == self.curses.KEY_RIGHT:
+                self.cursor = min(len(self.input_buffer), self.cursor + 1)
                 continue
-            if key in (ord("?"),):
-                self.output_lines = [
-                    "Keyboard",
-                    "Tab or Right: next panel",
-                    "Left: previous panel",
-                    "Up/Down: select within the focused panel",
-                    "Enter: open selected command or detail",
-                    "/: run any Aegis TUI command",
-                    "Any printable key: start typing a command immediately",
-                    "Mouse click: select and open a row when supported",
-                    "q or Esc: exit to shell",
-                ]
+            if key in (self.curses.KEY_HOME, 1):
+                self.cursor = 0
                 continue
-            if 32 <= key <= 126:
-                command = self._prompt(chr(key))
-                if command:
-                    self._run_command(command)
+            if key in (self.curses.KEY_END, 5):
+                self.cursor = len(self.input_buffer)
+                continue
+            if key in (self.curses.KEY_BACKSPACE, 127, 8):
+                if self.cursor > 0:
+                    self.input_buffer = self.input_buffer[: self.cursor - 1] + self.input_buffer[self.cursor :]
+                    self.cursor -= 1
+                    self.palette_index = 0
+                continue
+            if key == 21:
+                self.input_buffer = ""
+                self.cursor = 0
+                self.palette_index = 0
+                continue
+            if key in (self.curses.KEY_UP, self.curses.KEY_DOWN):
+                self._move_history_or_palette(-1 if key == self.curses.KEY_UP else 1)
+                continue
+            if key in (9, getattr(self.curses, "KEY_BTAB", -999999)):
+                self._complete_palette()
+                continue
+            if key in (12,):
+                self.message = "Redrew screen."
                 continue
             if key == self.curses.KEY_MOUSE:
-                self._handle_mouse(panels, focusable)
+                self._handle_mouse()
+                continue
+            if 32 <= key <= 126:
+                self._insert(chr(key))
 
     def _init_colors(self) -> None:
         if not self.curses.has_colors():
@@ -279,211 +284,173 @@ class _CursesAegisDeck:
             except Exception:
                 pass
 
-    def _render(self, panels: list[InteractivePanel], focusable: list[str]) -> None:
+    def _render(self) -> None:
         self.stdscr.erase()
         height, width = self.stdscr.getmaxyx()
-        if height < 26 or width < 80:
-            self._render_small(panels, focusable, height, width)
-            self.stdscr.refresh()
-            return
-        header_h = self._header_height(height, width)
-        self._draw_header(width, header_h)
-        self.bounds = self._layout_bounds(height, width, header_h)
-        panel_by_id = {panel.panel_id: panel for panel in panels}
-        focused_id = focusable[self.focus_index] if focusable else ""
-        for bound in self.bounds:
-            panel = panel_by_id.get(bound.panel_id)
-            if panel is None:
-                continue
-            self._draw_panel(bound, panel, focused=bound.panel_id == focused_id)
-        detail_bound = self._detail_bounds(height, width, header_h)
-        self._draw_detail(detail_bound, panels, focused_id)
+        header_lines = self._logo_lines(width)
+        header_h = min(len(header_lines) + 1, max(4, min(12, height - 8)))
+        for row, line in enumerate(header_lines[: max(1, header_h - 1)]):
+            self._add(row, 0, self._clip(line, width - 1), self._pair(1 if row % 2 == 0 else 2) | self.curses.A_BOLD)
+        self._draw_status_line(max(1, header_h - 1), width)
+        palette = self._palette_candidates()
+        palette_h = min(len(palette), max(0, height // 4)) if self.input_buffer.startswith("/") else 0
+        prompt_y = max(header_h + 4, height - 3)
+        palette_y = max(header_h + 1, prompt_y - palette_h - 1)
+        output_bottom = max(header_h + 1, palette_y - 1 if palette_h else prompt_y - 1)
+        self._draw_output(header_h, output_bottom, width)
+        if palette_h:
+            self._draw_palette(palette, palette_y, prompt_y - 1, width)
+            self._last_palette_top = palette_y
+            self._last_palette_rows = palette_h
+        else:
+            self._last_palette_top = 0
+            self._last_palette_rows = 0
+        self._draw_prompt(prompt_y, width)
         self._draw_footer(height, width)
         self.stdscr.refresh()
 
-    def _header_height(self, height: int, width: int) -> int:
-        return 7 if height >= 32 and width >= 96 else 3
-
-    def _draw_header(self, width: int, header_h: int) -> None:
-        session = self.tui.session
-        title = " AEGIS-AGENT "
-        meta = f"session {_short_id(session.get('id'))} | model {session.get('model') or 'alias/smart'} | /setup next"
-        self._add(0, 0, " " * (width - 1), self._pair(7) | self.curses.A_BOLD)
-        self._add(0, 2, title, self._pair(7) | self.curses.A_BOLD)
-        self._add(0, max(2, width - len(meta) - 2), meta[: max(0, width - 4)], self._pair(7))
-        if header_h >= 7:
-            logo = (
-                "    /############\\    AEGIS-AGENT",
-                "   /## POLICY ##\\   LOCAL-FIRST GOVERNED RUNTIME",
-                "   \\## MEMORY ##/   SELECT ROWS WITH ARROWS OR MOUSE",
-                "    \\##########/    ENTER OPENS MENUS  / RUNS COMMANDS",
-            )
-            for row, line in enumerate(logo, start=1):
-                self._add(row, 2, self._clip(line, width - 4), self._pair(1 if row % 2 else 2) | self.curses.A_BOLD)
-            tabs_y = 6
+    def _logo_lines(self, width: int) -> list[str]:
+        try:
+            from aegis.tui.main import AEGIS_AGENT_WORDMARK, AEGIS_COMPACT_WORDMARK, SHIELD_FRAMES
+        except ImportError:
+            return ["AEGIS AGENT", "local-first governed runtime", "/ opens slash commands"]
+        if width >= 112:
+            wordmark = list(AEGIS_AGENT_WORDMARK)
+        elif width >= 58:
+            wordmark = list(AEGIS_COMPACT_WORDMARK)
         else:
-            tabs_y = 1
-            self._add(2, 1, self._clip("COMMAND BUS: /slash commands are live | Enter opens focused row", width - 2), self._pair(2))
-        tabs = " [OVERVIEW]  Tasks  Approvals  Memory  Tools  Logs  Setup "
-        self._add(tabs_y, 1, tabs[: width - 2], self._pair(1) | self.curses.A_BOLD)
-
-    def _layout_bounds(self, height: int, width: int, body_y: int) -> list[PanelBounds]:
-        body_h = max(8, height - body_y - 4)
-        if width < 104:
-            left_w = 22
-            right_w = 27
-        else:
-            left_w = 26
-            right_w = 31
-        center_w = max(28, width - left_w - right_w - 4)
-        left_x = 0
-        center_x = left_w + 1
-        right_x = center_x + center_w + 1
-        left_nav_h = min(11, body_h // 2)
-        left_cmd_h = body_h - left_nav_h
-        center_active_h = min(8, max(6, body_h // 3))
-        center_setup_h = min(9, max(7, body_h // 3))
-        right_policy_h = 5 if body_h < 22 else 6
-        right_approval_h = min(6, max(5, body_h // 4))
-        right_tools_h = min(6, max(5, body_h // 4))
-        right_memory_h = body_h - right_policy_h - right_approval_h - right_tools_h
+            wordmark = ["AEGIS AGENT", "local-first governed runtime"]
+        frame_name, frame_detail, frame_art = SHIELD_FRAMES[0]
+        if width < 58:
+            return [f"AEGIS SHIELD [{frame_name}]", *wordmark, "type / for commands"]
         return [
-            PanelBounds("nav", body_y, left_x, left_nav_h, left_w),
-            PanelBounds("commands", body_y + left_nav_h, left_x, left_cmd_h, left_w),
-            PanelBounds("active", body_y, center_x, center_active_h, center_w),
-            PanelBounds("setup", body_y + center_active_h, center_x, center_setup_h, center_w),
-            PanelBounds("policy", body_y, right_x, right_policy_h, right_w),
-            PanelBounds("approvals", body_y + right_policy_h, right_x, right_approval_h, right_w),
-            PanelBounds("tools", body_y + right_policy_h + right_approval_h, right_x, right_tools_h, right_w),
-            PanelBounds("memory", body_y + right_policy_h + right_approval_h + right_tools_h, right_x, max(3, right_memory_h), right_w),
+            f"AEGIS SHIELD :: local-first governed runtime :: {frame_name} :: {frame_detail}",
+            *wordmark,
+            *frame_art[:2],
+            "COMMAND BUS :: plain request  //  / slash palette  //  Tab complete",
         ]
 
-    def _detail_bounds(self, height: int, width: int, body_y: int) -> PanelBounds:
-        body_h = max(8, height - body_y - 4)
-        left_w = 22 if width < 104 else 26
-        right_w = 27 if width < 104 else 31
-        center_w = max(28, width - left_w - right_w - 4)
-        center_x = left_w + 1
-        center_active_h = min(8, max(6, body_h // 3))
-        center_setup_h = min(9, max(7, body_h // 3))
-        detail_y = body_y + center_active_h + center_setup_h
-        return PanelBounds("details", detail_y, center_x, max(4, body_y + body_h - detail_y), center_w)
+    def _draw_status_line(self, y: int, width: int) -> None:
+        session = self.tui.session
+        dashboard = build_product_dashboard(self.tui.orchestrator)
+        runtime = dashboard["runtime"]
+        status = "ready"
+        if int(runtime.get("active_work_count") or 0):
+            status = "running"
+        elif int(runtime.get("pending_approvals") or 0):
+            status = "approval"
+        cells = [
+            status,
+            f"session {_short_id(session.get('id'))}",
+            f"model {session.get('model') or 'alias/smart'}",
+            f"cwd {self.tui.workspace.name}",
+            f"approvals {runtime.get('pending_approvals', 0)}",
+        ]
+        self._add(y, 0, self._clip(" | ".join(cells), width - 1), self._pair(7) | self.curses.A_BOLD)
 
-    def _draw_panel(self, bound: PanelBounds, panel: InteractivePanel, *, focused: bool) -> None:
-        attr = self._pair(2 if focused else 1) | (self.curses.A_BOLD if focused else 0)
-        self._box(bound, panel.title, attr)
-        inner_h = max(0, bound.h - 2)
-        selected = min(self.selected.get(panel.panel_id, 0), max(0, len(panel.items) - 1))
-        self.selected[panel.panel_id] = selected
-        start = max(0, selected - inner_h + 1)
-        for row, item in enumerate(panel.items[start : start + inner_h]):
-            item_index = start + row
-            item_attr = self._pair(4)
-            prefix = " "
-            if focused and item_index == selected:
-                item_attr = self._pair(3) | self.curses.A_BOLD
-                prefix = ">"
-            elif item.status.lower() in {"clear", "ok", "active", "low risk", "ready"}:
-                item_attr = self._pair(6)
-            elif item.status:
-                item_attr = self._pair(5)
-            status = f" [{item.status}]" if item.status else ""
-            line = f"{prefix} {item.label}{status}"
-            self._add(bound.y + 1 + row, bound.x + 1, self._clip(line, bound.w - 2), item_attr)
-
-    def _draw_detail(self, bound: PanelBounds, panels: list[InteractivePanel], focused_id: str) -> None:
-        self._box(bound, "DETAILS / OUTPUT", self._pair(1) | self.curses.A_BOLD)
-        panel = next((candidate for candidate in panels if candidate.panel_id == focused_id), None)
-        selected_item: InteractiveItem | None = None
-        if panel and panel.items:
-            selected_item = panel.items[min(self.selected.get(panel.panel_id, 0), len(panel.items) - 1)]
-        lines: list[str] = []
-        if selected_item is not None:
-            command = f"command: {selected_item.command}" if selected_item.command else "command: detail only"
-            lines.extend([selected_item.label, selected_item.detail, command, ""])
-        lines.extend(self.output_lines)
-        y = bound.y + 1
-        for line in _wrap_lines(lines, bound.w - 2)[: max(0, bound.h - 2)]:
-            self._add(y, bound.x + 1, self._clip(line, bound.w - 2), self._pair(4))
+    def _draw_output(self, top: int, bottom: int, width: int) -> None:
+        if bottom <= top:
+            return
+        visible_height = max(1, bottom - top)
+        wrapped = _wrap_lines(self.output_lines, width - 2)
+        visible = wrapped[-visible_height:]
+        y = top
+        for line in visible:
+            self._add(y, 1, self._clip(line, width - 2), self._pair(4))
             y += 1
 
-    def _render_small(self, panels: list[InteractivePanel], focusable: list[str], height: int, width: int) -> None:
-        self._add(0, 0, self._clip("/##\\ AEGIS-AGENT interactive compact mode", width - 1), self._pair(7) | self.curses.A_BOLD)
-        focused_id = focusable[self.focus_index] if focusable else ""
-        panel = next((candidate for candidate in panels if candidate.panel_id == focused_id), panels[0])
-        self._add(2, 0, self._clip(panel.title, width - 1), self._pair(1) | self.curses.A_BOLD)
-        selected = max(0, min(self.selected.get(panel.panel_id, 0), max(0, len(panel.items) - 1)))
-        self.selected[panel.panel_id] = selected
-        for index, item in enumerate(panel.items[: max(0, height - 8)]):
-            attr = self._pair(3) | self.curses.A_BOLD if index == selected else self._pair(4)
-            self._add(3 + index, 0, self._clip(f"{'>' if index == selected else ' '} {item.label} {item.status}", width - 1), attr)
-        footer = "Tab panel | Enter open | / command | q quit"
-        self._add(height - 2, 0, self._clip(footer, width - 1), self._pair(7))
+    def _draw_palette(self, palette: list[tuple[str, str]], top: int, bottom: int, width: int) -> None:
+        self._add(top, 0, self._clip(" slash commands ", width - 1), self._pair(2) | self.curses.A_BOLD)
+        rows = palette[: max(0, bottom - top)]
+        for offset, (command, detail) in enumerate(rows, start=1):
+            attr = self._pair(3) | self.curses.A_BOLD if offset - 1 == self.palette_index else self._pair(4)
+            line = f"{command:<24} {detail}"
+            self._add(top + offset, 1, self._clip(line, width - 2), attr)
 
     def _draw_footer(self, height: int, width: int) -> None:
-        self._add(height - 3, 0, " " * (width - 1), self._pair(1))
-        self._add(height - 3, 1, self._clip("COMMAND > press /, or just start typing a command", width - 2), self._pair(1) | self.curses.A_BOLD)
         self._add(height - 2, 0, " " * (width - 1), self._pair(7))
         self._add(height - 2, 1, self._clip(self.message, width - 2), self._pair(7))
 
-    def _move_selection(self, panels: list[InteractivePanel], focusable: list[str], delta: int) -> None:
-        if not focusable:
-            return
-        panel_id = focusable[self.focus_index]
-        panel = next((candidate for candidate in panels if candidate.panel_id == panel_id), None)
-        if panel is None or not panel.items:
-            return
-        current = self.selected.get(panel_id, 0)
-        self.selected[panel_id] = max(0, min(len(panel.items) - 1, current + delta))
-
-    def _activate_selected(self, panels: list[InteractivePanel], focusable: list[str]) -> None:
-        if not focusable:
-            return
-        panel_id = focusable[self.focus_index]
-        panel = next((candidate for candidate in panels if candidate.panel_id == panel_id), None)
-        if panel is None or not panel.items:
-            return
-        item = panel.items[min(self.selected.get(panel_id, 0), len(panel.items) - 1)]
-        if item.menu:
-            self.active_menu = None if item.menu == "overview" else item.menu
-            if item.menu == "overview":
-                self.focus_index = focusable.index("nav") if "nav" in focusable else 0
-            elif "setup" in focusable:
-                self.focus_index = focusable.index("setup")
-            self.selected["setup"] = 0
-            self.output_lines = [
-                f"Opened {item.label}",
-                item.detail,
-                "Use Up/Down inside this menu and press Enter to open a row.",
-            ]
-            self.message = f"Menu opened: {item.label}"
-            if item.menu == "overview" and item.command:
-                self._run_command(item.command)
-            return
-        if item.command:
-            self._run_command(item.command)
-        else:
-            self.output_lines = [item.detail]
-            self.message = f"Selected {item.label}"
-
-    def _handle_mouse(self, panels: list[InteractivePanel], focusable: list[str]) -> None:
+    def _draw_prompt(self, y: int, width: int) -> None:
+        prompt = "aegis> "
+        self._add(y, 0, " " * (width - 1), self._pair(1))
+        self._add(y, 0, self._clip(prompt + self.input_buffer, width - 1), self._pair(1) | self.curses.A_BOLD)
+        cursor_x = min(width - 2, len(prompt) + self.cursor)
         try:
-            _mouse_id, x, y, _z, _state = self.curses.getmouse()
+            self.curses.curs_set(1)
+            self.stdscr.move(y, cursor_x)
+        except Exception:
+            pass
+
+    def _insert(self, text: str) -> None:
+        self.input_buffer = self.input_buffer[: self.cursor] + text + self.input_buffer[self.cursor :]
+        self.cursor += len(text)
+        self.palette_index = 0
+        self.history_index = None
+
+    def _submit_input(self) -> None:
+        command = self.input_buffer.strip()
+        if not command:
+            self.message = "Type a request or /command."
+            return
+        if command.startswith("/"):
+            palette = self._palette_candidates()
+            if palette and (command == "/" or not any(command == candidate for candidate, _detail in palette)):
+                command = palette[min(self.palette_index, len(palette) - 1)][0]
+        self.history.append(command)
+        self.history_index = None
+        self.input_buffer = ""
+        self.cursor = 0
+        self.palette_index = 0
+        self._run_command(command)
+
+    def _move_history_or_palette(self, delta: int) -> None:
+        palette = self._palette_candidates()
+        if self.input_buffer.startswith("/") and palette:
+            self.palette_index = max(0, min(len(palette) - 1, self.palette_index + delta))
+            self.message = f"Highlighted {palette[self.palette_index][0]}; Tab accepts it."
+            return
+        if not self.history:
+            return
+        if self.history_index is None:
+            self.history_index = len(self.history) if delta < 0 else len(self.history) - 1
+        self.history_index = max(0, min(len(self.history) - 1, self.history_index + delta))
+        self.input_buffer = self.history[self.history_index]
+        self.cursor = len(self.input_buffer)
+
+    def _complete_palette(self) -> None:
+        palette = self._palette_candidates()
+        if not palette:
+            self.message = "No slash command matches."
+            return
+        command = palette[min(self.palette_index, len(palette) - 1)][0]
+        self.input_buffer = command + (" " if " " not in command else "")
+        self.cursor = len(self.input_buffer)
+        self.message = f"Completed {command}; add args or press Enter."
+
+    def _palette_candidates(self) -> list[tuple[str, str]]:
+        if not self.input_buffer.startswith("/"):
+            return []
+        return slash_palette_candidates(self.input_buffer)
+
+    def _handle_mouse(self) -> None:
+        try:
+            _mouse_id, _x, y, _z, _state = self.curses.getmouse()
         except Exception:
             return
-        panel_by_id = {panel.panel_id: panel for panel in panels}
-        for bound in self.bounds:
-            if not (bound.x <= x < bound.x + bound.w and bound.y <= y < bound.y + bound.h):
-                continue
-            if bound.panel_id in focusable:
-                self.focus_index = focusable.index(bound.panel_id)
-                row = y - bound.y - 1
-                if row >= 0:
-                    panel = panel_by_id.get(bound.panel_id)
-                    if panel and panel.items:
-                        self.selected[bound.panel_id] = max(0, min(len(panel.items) - 1, row))
-                        self._activate_selected(panels, focusable)
+        palette = self._palette_candidates()
+        if not palette:
             return
+        height, _width = self.stdscr.getmaxyx()
+        if not height:
+            return
+        if self._last_palette_top <= y <= self._last_palette_top + self._last_palette_rows:
+            index = y - self._last_palette_top - 1
+            if index < 0:
+                return
+            index = max(0, min(len(palette) - 1, index))
+            self.palette_index = index
+            self._complete_palette()
 
     def _run_command(self, command: str) -> None:
         normalized = normalize_interactive_command(command)
@@ -502,29 +469,6 @@ class _CursesAegisDeck:
         self.message = f"Opened: {normalized}"
         if should_stop:
             self.should_exit = True
-
-    def _prompt(self, initial: str) -> str:
-        height, width = self.stdscr.getmaxyx()
-        self._add(height - 1, 0, " " * (width - 1), self._pair(7))
-        prefix = f"COMMAND {initial}"
-        self._add(height - 1, 0, prefix, self._pair(7) | self.curses.A_BOLD)
-        try:
-            try:
-                self.curses.curs_set(1)
-            except Exception:
-                pass
-            self.curses.echo()
-            raw = self.stdscr.getstr(height - 1, len(prefix), max(1, width - len(prefix) - 1))
-        finally:
-            self.curses.noecho()
-            try:
-                self.curses.curs_set(0)
-            except Exception:
-                pass
-        suffix = raw.decode("utf-8", errors="replace")
-        if initial == "/" and suffix.startswith("/"):
-            return suffix.strip()
-        return f"{initial}{suffix}".strip()
 
     def _box(self, bound: PanelBounds, title: str, attr: int) -> None:
         if bound.h <= 1 or bound.w <= 1:
@@ -631,6 +575,52 @@ def normalize_interactive_command(command: str) -> str:
     if stripped.startswith("//"):
         return "/" + stripped.lstrip("/")
     return stripped
+
+
+def slash_palette_candidates(buffer: str, *, limit: int = 12) -> list[tuple[str, str]]:
+    """Return slash-command palette candidates for the live composer."""
+    stripped = buffer.lstrip()
+    if not stripped.startswith("/"):
+        return []
+    try:
+        from aegis.tui.main import _apply_live_completion, _complete_slash, _live_completion_context, _slash_completion_description
+    except ImportError:
+        return _fallback_slash_candidates(stripped, limit=limit)
+    text, begidx, endidx = _live_completion_context(stripped)
+    labels = _complete_slash(text, stripped, begidx, endidx)
+    if not labels:
+        return _fallback_slash_candidates(stripped, limit=limit)
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for label in labels:
+        command = _apply_live_completion(stripped, label, begidx, endidx)
+        if not command.startswith("/"):
+            command = f"/{command}"
+        if command in seen:
+            continue
+        seen.add(command)
+        root = command.split(maxsplit=1)[0]
+        candidates.append((command, _slash_completion_description(root)))
+        if len(candidates) >= limit:
+            break
+    return candidates
+
+
+def _fallback_slash_candidates(buffer: str, *, limit: int) -> list[tuple[str, str]]:
+    prefix = buffer.strip().lower()
+    fallback = (
+        ("/help", "full command reference"),
+        ("/dashboard", "full posture dashboard"),
+        ("/tasks", "recent tasks"),
+        ("/approvals", "pending approvals"),
+        ("/setup", "guided setup checklist"),
+        ("/setup next", "first unfinished setup step"),
+        ("/tools", "tool catalog"),
+        ("/memory", "governed memory commands"),
+        ("/models", "model routes"),
+        ("/quit", "exit"),
+    )
+    return [entry for entry in fallback if entry[0].startswith(prefix)][:limit]
 
 
 def _setup_route(step_id: str) -> str:

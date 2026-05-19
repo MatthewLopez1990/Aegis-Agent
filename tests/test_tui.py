@@ -16,7 +16,7 @@ from aegis.memory.models import MemoryType
 from aegis.research.harness import ResearchHarness
 from aegis.security.taint import RiskLevel, TrustClass
 from aegis.skills.manifest import SkillManifest
-from aegis.tui.interactive import _CursesAegisDeck, build_interactive_panels, normalize_interactive_command
+from aegis.tui.interactive import _CursesAegisDeck, build_interactive_panels, normalize_interactive_command, slash_palette_candidates
 from aegis.tui.main import AegisTui, _apply_live_completion, _complete_slash, _live_completion_context, _live_input_block, _visible_length
 
 from tests.test_mcp import FAKE_MCP_SERVER
@@ -67,7 +67,7 @@ class TuiTests(unittest.TestCase):
             self.assertEqual(normalize_interactive_command("//tasks"), "/tasks")
             self.assertEqual(normalize_interactive_command("tasks"), "tasks")
 
-    def test_interactive_tui_enter_drills_into_menu_and_slash_dispatches(self) -> None:
+    def test_interactive_tui_prompt_first_slash_dispatches(self) -> None:
         class FakeCurses:
             A_BOLD = 0
 
@@ -79,20 +79,42 @@ class TuiTests(unittest.TestCase):
             root = Path(temp)
             tui = AegisTui(data_dir=root / ".aegis", workspace=root)
             deck = _CursesAegisDeck(object(), tui, FakeCurses)
-            panels = list(build_interactive_panels(tui))
-            focusable = [panel.panel_id for panel in panels if panel.items]
 
-            deck.selected["nav"] = 6
-            deck._activate_selected(panels, focusable)
+            deck.input_buffer = "/ta"
+            deck.cursor = len(deck.input_buffer)
+            self.assertTrue(any(command == "/tasks" for command, _detail in deck._palette_candidates()))
+            deck._complete_palette()
 
-            self.assertEqual(deck.active_menu, "setup")
-            self.assertEqual(deck.focus_index, focusable.index("setup"))
-            self.assertIn("Opened Setup", "\n".join(deck.output_lines))
+            self.assertEqual(deck.input_buffer, "/tasks ")
 
-            deck._run_command("/tasks")
+            deck.input_buffer = "/ta"
+            deck.cursor = len(deck.input_buffer)
+            deck._submit_input()
 
             self.assertEqual(deck.output_lines[0], "$ /tasks")
+            self.assertEqual(deck.input_buffer, "")
             self.assertFalse(deck.should_exit)
+
+    def test_interactive_tui_restores_aegis_logo_and_command_palette(self) -> None:
+        class FakeCurses:
+            A_BOLD = 0
+
+            @staticmethod
+            def color_pair(_number: int) -> int:
+                return 0
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tui = AegisTui(data_dir=root / ".aegis", workspace=root)
+            deck = _CursesAegisDeck(object(), tui, FakeCurses)
+
+            logo = "\n".join(deck._logo_lines(120))
+
+            self.assertIn("AEGIS SHIELD", logo)
+            self.assertIn(".d8b.", logo)
+            self.assertIn("COMMAND BUS", logo)
+            self.assertTrue(any(command == "/setup" for command, _detail in slash_palette_candidates("/set")))
+            self.assertTrue(any(command.startswith("/setup ") for command, _detail in slash_palette_candidates("/setup ")))
 
     def test_tui_persists_private_readline_history(self) -> None:
         try:
