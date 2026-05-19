@@ -922,6 +922,8 @@ class CliTests(unittest.TestCase):
             self.assertFalse(result["send_probe_performed"])
             self.assertFalse(result["model_invocation_performed"])
             self.assertFalse(result["raw_secret_values_included"])
+            self.assertIn("quickstart_steps", result)
+            self.assertEqual([step["step"] for step in result["quickstart_steps"]], [1, 2, 3])
             steps = {step["id"]: step for step in result["setup_steps"]}
             self.assertIn("initialize", steps)
             self.assertIn("model_auth", steps)

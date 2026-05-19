@@ -3789,6 +3789,12 @@ class AegisTui(cmd.Cmd):
         if target in {"json", "raw", "--json"}:
             _print_json(readiness)
             return
+        if target in {"tour", ""}:
+            print("Aegis Setup")
+            for step in readiness.get("quickstart_steps", []):
+                print(f"{step['step']}. {step['label']} [{step['state']}]")
+                print(f"   {step['command']}")
+            print()
         width = _deck_width()
         print(_setup_menu(readiness, width, target=target))
 
@@ -8591,7 +8597,10 @@ def _add_tui_history(line: str) -> bool:
     readline = _readline_module()
     if readline is None:
         return False
-    readline.add_history(line)
+    try:
+        readline.add_history(line)
+    except OSError:
+        return False
     return True
 
 
@@ -8601,7 +8610,10 @@ def _load_tui_history(path: Path) -> bool:
         return False
     readline.set_history_length(TUI_HISTORY_LIMIT)
     if path.exists():
-        readline.read_history_file(str(path))
+        try:
+            readline.read_history_file(str(path))
+        except OSError:
+            return False
     return True
 
 
@@ -8611,8 +8623,11 @@ def _save_tui_history(path: Path) -> bool:
         return False
     path.parent.mkdir(parents=True, exist_ok=True)
     readline.set_history_length(TUI_HISTORY_LIMIT)
-    readline.write_history_file(str(path))
-    path.chmod(0o600)
+    try:
+        readline.write_history_file(str(path))
+        path.chmod(0o600)
+    except OSError:
+        return False
     return True
 
 

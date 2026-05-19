@@ -108,13 +108,14 @@ class ModelRegistry:
         )
         self.aliases: dict[str, str] = {
             "smart": "openrouter/anthropic/claude-sonnet-4.6",
-            "fast": "openai/gpt-4o-mini",
+            "fast": "openai/gpt-5.4-mini",
             "private": "ollama/llama3",
         }
         self.fallbacks: dict[str, tuple[str, ...]] = {
-            "openai/gpt-4o": ("anthropic/claude-sonnet-4.6", "ollama/llama3"),
-            "anthropic/claude-sonnet-4.6": ("openai/gpt-4o", "ollama/llama3"),
-            "openrouter/anthropic/claude-sonnet-4.6": ("openai/gpt-4o", "ollama/llama3"),
+            "openai/gpt-5.5": ("openai/gpt-4o", "anthropic/claude-sonnet-4.6", "ollama/llama3"),
+            "openai/gpt-4o": ("openai/gpt-5.5", "anthropic/claude-sonnet-4.6", "ollama/llama3"),
+            "anthropic/claude-sonnet-4.6": ("openai/gpt-5.5", "openai/gpt-4o", "ollama/llama3"),
+            "openrouter/anthropic/claude-sonnet-4.6": ("openai/gpt-5.5", "openai/gpt-4o", "ollama/llama3"),
         }
         self.external_auth_links: dict[str, dict[str, Any]] = {}
         self._load_persisted_routes()
@@ -262,7 +263,10 @@ class ModelRegistry:
                 subscription_profile = provider.get("subscription_auth") if isinstance(provider.get("subscription_auth"), dict) else {}
                 if subscription_profile and "subscription" in required_auth:
                     target_row["external_command"] = subscription_profile.get("external_command", target_row.get("external_command"))
+                    target_row["external_command_argv"] = subscription_profile.get("external_command_argv", target_row.get("external_command_argv", []))
+                    target_row["external_command_available"] = subscription_profile.get("external_command_available", target_row.get("external_command_available", False))
                     target_row["external_status_command"] = subscription_profile.get("external_status_command", target_row.get("external_status_command"))
+                    target_row["external_status_command_argv"] = subscription_profile.get("external_status_command_argv", target_row.get("external_status_command_argv", []))
                     target_row["external_login_instruction"] = subscription_profile.get("external_login_instruction", target_row.get("external_login_instruction"))
                     target_row["invocation_bridge"] = subscription_profile.get("invocation_bridge", target_row.get("invocation_bridge"))
                     target_row["bridge_status"] = subscription_profile.get("aegis_bridge_status", "not_implemented")
@@ -280,6 +284,7 @@ class ModelRegistry:
                         target_row["bridge_status"] = "official_cli_bridge_ready"
                         target_row["token_captured"] = False
                         target_row["token_capture_supported"] = False
+                        verified_external.append(str(target["target"]))
                     elif "subscription" in required_auth and target_row["subscription_auth_supported"]:
                         target_row["status"] = target_row["bridge_status"]
                         login_required.append(str(target["target"]))
@@ -371,7 +376,7 @@ class ModelRegistry:
             target = str(row.get("target") or "")
             login_name = str(row.get("aegis_provider") or row.get("provider") or _normalize_auth_key(target))
             command_argv = row.get("external_command_argv") if isinstance(row.get("external_command_argv"), list) else []
-            if not command_argv and row.get("status") == "official_cli_bridge_available":
+            if not command_argv and method in {"subscription", "cloud_identity"}:
                 command = str(row.get("external_command") or "").strip()
                 if command:
                     command_argv = shlex.split(command)
@@ -3439,7 +3444,20 @@ def default_providers(
     google_vertex_location: str | None = None,
 ) -> dict[str, ModelProviderSpec]:
     providers = (
-        ModelProviderSpec("openai", ("gpt-4o", "gpt-4o-mini", "o1", "o3", "o3-mini"), "OPENAI_API_KEY", "https://api.openai.com/v1", False, True, True, True, 2.5, 10.0, 128000, "openai"),
+        ModelProviderSpec(
+            "openai",
+            ("gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-4o", "gpt-4o-mini", "o1", "o3", "o3-mini"),
+            "OPENAI_API_KEY",
+            "https://api.openai.com/v1",
+            False,
+            True,
+            True,
+            True,
+            2.5,
+            10.0,
+            128000,
+            "openai",
+        ),
         ModelProviderSpec("anthropic", ("claude-opus", "claude-sonnet-4.6", "claude-haiku"), "ANTHROPIC_API_KEY", "https://api.anthropic.com/v1", False, True, True, False, 3.0, 15.0, 200000, "anthropic"),
         ModelProviderSpec(
             "google",

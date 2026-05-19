@@ -1390,6 +1390,43 @@ class TaskStateTests(unittest.TestCase):
             self.assertEqual(result["receipt"]["model_response"]["decision"], "require_approval")
             self.assertIn("openrouter.ai", result["receipt"]["model_response"]["reason"])
 
+    def test_verified_subscription_bridge_does_not_require_direct_provider_allowlist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            orchestrator = build_orchestrator(data_dir=root / ".aegis", workspace=root)
+            orchestrator.models._remember_external_auth_link(  # noqa: SLF001 - test seeds verified non-secret auth link.
+                "openai",
+                "subscription",
+                {
+                    "target": "OpenAI Codex / ChatGPT subscription",
+                    "auth_source": "subscription_cli",
+                    "aegis_bridge_status": "official_cli_bridge_ready",
+                    "external_command": "codex login",
+                    "external_status_command": "codex login status",
+                    "invocation_bridge": "codex_exec",
+                },
+            )
+            orchestrator.models.set_alias("smart", "openai/gpt-4o")
+
+            class FakeModelClient:
+                def chat(self, route, messages, *, temperature=0.2):
+                    return ModelInvocationResult(
+                        provider=route.provider.provider,
+                        model=route.model,
+                        content="subscription bridge ok",
+                        input_tokens=3,
+                        output_tokens=2,
+                        raw_usage={"source": "subscription_cli", "bridge": "codex_exec"},
+                    )
+
+            orchestrator.model_client = FakeModelClient()
+
+            result = orchestrator.submit_task("answer through subscription bridge")
+
+            self.assertEqual(result["receipt"]["model_response"]["status"], "completed")
+            self.assertEqual(result["receipt"]["model_response"]["identifier"], "openai/gpt-4o")
+            self.assertEqual(result["receipt"]["model_response"]["content"], "subscription bridge ok")
+
     def test_http_step_policy_uses_target_domain_before_connector_execution(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

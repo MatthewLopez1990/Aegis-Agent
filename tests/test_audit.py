@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -35,6 +36,28 @@ class AuditTests(unittest.TestCase):
             self.assertNotIn("sk-1234567890abcdef", text)
             self.assertIn("[REDACTED_VALUE]", text)
             self.assertTrue(audit.verify_chain())
+
+    def test_parallel_audit_appends_keep_hash_chain_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "audit.jsonl"
+            start = threading.Barrier(6)
+
+            def append_events(worker: int) -> None:
+                audit = AuditLogger(path)
+                start.wait()
+                for index in range(25):
+                    audit.append("parallel.event", {"worker": worker, "index": index})
+
+            threads = [threading.Thread(target=append_events, args=(worker,)) for worker in range(5)]
+            for thread in threads:
+                thread.start()
+            start.wait()
+            for thread in threads:
+                thread.join()
+
+            audit = AuditLogger(path)
+            self.assertTrue(audit.verify_chain())
+            self.assertEqual(len(audit.events()), 125)
 
     def test_audit_can_query_full_task_history_beyond_recent_tail(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

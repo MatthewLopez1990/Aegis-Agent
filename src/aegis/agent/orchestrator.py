@@ -2457,7 +2457,7 @@ class AgentOrchestrator:
                     operation="invoke_model",
                     requested_scopes=("model.invoke",),
                     data_sensitivity=Sensitivity.INTERNAL,
-                    target_domain=_provider_domain(route.provider.base_url),
+                    target_domain=_model_policy_target_domain(route),
                 ),
                 task_id=task_id,
             )
@@ -2654,7 +2654,7 @@ class AgentOrchestrator:
                     requested_scopes=("model.invoke", "subagent.review"),
                     data_sensitivity=Sensitivity.INTERNAL,
                     approval_state="approved",
-                    target_domain=_provider_domain(route.provider.base_url),
+                    target_domain=_model_policy_target_domain(route),
                 ),
                 task_id=parent_task_id,
             )
@@ -3737,6 +3737,12 @@ def _provider_domain(base_url: str | None) -> str | None:
         return None
     parsed = urlparse(base_url)
     return parsed.hostname
+
+
+def _model_policy_target_domain(route: Any) -> str | None:
+    if getattr(route, "auth_method", None) == "subscription_cli":
+        return None
+    return _provider_domain(route.provider.base_url)
 
 
 def _short_identifier(value: str | None) -> str | None:

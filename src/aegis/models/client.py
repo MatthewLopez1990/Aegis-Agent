@@ -216,8 +216,8 @@ class LiveModelClient:
                 "--ignore-rules",
                 "--sandbox",
                 "read-only",
-                "--ask-for-approval",
-                "never",
+                "-c",
+                'approval_policy="never"',
                 "-m",
                 route.model,
                 "--output-last-message",
@@ -239,7 +239,10 @@ class LiveModelClient:
             except OSError as exc:
                 raise RuntimeError(f"official Codex CLI model invocation failed: {exc}") from exc
             if completed.returncode != 0:
-                raise RuntimeError(f"official Codex CLI model invocation exited with {completed.returncode}")
+                raise RuntimeError(
+                    f"official Codex CLI model invocation exited with {completed.returncode}: "
+                    f"{_process_error_summary(completed.stdout, completed.stderr)}"
+                )
             content = output_path.read_text(encoding="utf-8").strip() if output_path.exists() else completed.stdout.strip()
         if not content:
             raise RuntimeError("official Codex CLI model invocation returned no final message")
@@ -1801,6 +1804,18 @@ def _is_loopback_host(hostname: str) -> bool:
         return ipaddress.ip_address(hostname).is_loopback
     except ValueError:
         return False
+
+
+def _process_error_summary(stdout: str, stderr: str) -> str:
+    lines = [
+        line.strip()
+        for line in f"{stderr}\n{stdout}".splitlines()
+        if "ERROR:" in line or "invalid_request_error" in line or "not supported" in line.lower()
+    ]
+    if not lines:
+        return "no provider error detail was returned"
+    summary = " | ".join(lines[-3:])
+    return summary[:700]
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):

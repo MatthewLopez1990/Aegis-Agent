@@ -5,8 +5,14 @@ from __future__ import annotations
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
+from contextlib import contextmanager
 import hashlib
 import json
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Aegis targets Linux/macOS, but keep import portable.
+    fcntl = None
 
 from aegis.config.defaults import SECRET_FIELD_NAMES
 from aegis.security.context_firewall import redact_secret_values
@@ -33,20 +39,21 @@ class AuditLogger:
         task_id: str | None = None,
         correlation_id: str | None = None,
     ) -> dict[str, Any]:
-        prev_hash = self._last_hash()
-        entry = {
-            "timestamp": now_utc(),
-            "event_type": event_type,
-            "task_id": task_id,
-            "correlation_id": correlation_id or task_id,
-            "payload": redact(payload or {}),
-            "prev_hash": prev_hash,
-        }
-        entry["event_hash"] = self._hash_entry(entry)
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry, sort_keys=True) + "\n")
-        ensure_private_file(self.path)
-        return entry
+        with self._append_lock():
+            prev_hash = self._last_hash()
+            entry = {
+                "timestamp": now_utc(),
+                "event_type": event_type,
+                "task_id": task_id,
+                "correlation_id": correlation_id or task_id,
+                "payload": redact(payload or {}),
+                "prev_hash": prev_hash,
+            }
+            entry["event_hash"] = self._hash_entry(entry)
+            with self.path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(entry, sort_keys=True) + "\n")
+            ensure_private_file(self.path)
+            return entry
 
     def tail(self, limit: int = 20) -> list[dict[str, Any]]:
         if not self.path.exists():
@@ -140,6 +147,19 @@ class AuditLogger:
         body.pop("event_hash", None)
         encoded = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+    @contextmanager
+    def _append_lock(self):
+        lock_path = self.path.with_name(f"{self.path.name}.lock")
+        ensure_private_file(lock_path)
+        with lock_path.open("a", encoding="utf-8") as handle:
+            if fcntl is not None:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def redact(value: Any) -> Any:

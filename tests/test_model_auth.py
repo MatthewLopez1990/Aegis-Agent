@@ -241,6 +241,11 @@ class ModelAuthTests(unittest.TestCase):
             self.assertEqual(registry.auth_status("openai")["auth_source"], "subscription_cli")
             target_rows = {row["target"]: row for row in registry.auth_targets()["targets"]}
             self.assertEqual(target_rows["OpenAI Codex / ChatGPT subscription"]["status"], "subscription_cli_ready")
+            self.assertIn("OpenAI Codex / ChatGPT subscription", registry.auth_targets()["verified_external_auth_targets"])
+            with patch("aegis.models.registry.shutil.which", return_value="/usr/bin/codex"):
+                doctor_checks = {row["target"]: row for row in registry.auth_doctor()["checks"]}
+            self.assertEqual(doctor_checks["OpenAI Codex / ChatGPT subscription"]["activation_state"], "verified_ready")
+            self.assertTrue(doctor_checks["OpenAI Codex / ChatGPT subscription"]["external_command_available"])
 
             reloaded = ModelRegistry(LocalStore(root / ".aegis" / "aegis.db"), AuditLogger(audit_path), broker)
             route = reloaded.route("openai/gpt-4o-mini")
@@ -253,7 +258,7 @@ class ModelAuthTests(unittest.TestCase):
                 self.assertIn("--ephemeral", command)
                 self.assertIn("--ignore-rules", command)
                 self.assertIn("read-only", command)
-                self.assertIn("never", command)
+                self.assertIn('approval_policy="never"', command)
                 self.assertEqual(command[command.index("-m") + 1], "gpt-4o-mini")
                 self.assertIn("[USER]\nhello from aegis", kwargs["input"])
                 output_path = Path(command[command.index("--output-last-message") + 1])

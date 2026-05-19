@@ -17,7 +17,17 @@ from aegis.research.harness import ResearchHarness
 from aegis.security.taint import RiskLevel, TrustClass
 from aegis.skills.manifest import SkillManifest
 from aegis.tui.interactive import _CursesAegisDeck, build_interactive_panels, normalize_interactive_command, slash_palette_candidates
-from aegis.tui.main import AegisTui, _apply_live_completion, _complete_slash, _live_completion_context, _live_input_block, _visible_length
+from aegis.tui.main import (
+    AegisTui,
+    _add_tui_history,
+    _apply_live_completion,
+    _complete_slash,
+    _live_completion_context,
+    _live_input_block,
+    _load_tui_history,
+    _save_tui_history,
+    _visible_length,
+)
 
 from tests.test_mcp import FAKE_MCP_SERVER
 from tests.test_plugins import _write_plugin_catalog, _write_plugin_fixture
@@ -134,6 +144,22 @@ class TuiTests(unittest.TestCase):
             self.assertTrue(history_path.exists())
             self.assertIn("dashboard", history_path.read_text(encoding="utf-8"))
             self.assertEqual(os.stat(history_path).st_mode & 0o777, 0o600)
+
+    def test_tui_history_helpers_do_not_block_startup_on_os_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            history_path = root / ".aegis" / "tui_history"
+            history_path.parent.mkdir()
+            history_path.write_text("_HiStOrY_V2_\n", encoding="utf-8")
+            with patch("aegis.tui.main._readline_module") as readline_module:
+                fake_readline = readline_module.return_value
+                fake_readline.add_history.side_effect = PermissionError("blocked")
+                fake_readline.read_history_file.side_effect = PermissionError("blocked")
+                fake_readline.write_history_file.side_effect = PermissionError("blocked")
+
+                self.assertFalse(_add_tui_history("dashboard"))
+                self.assertFalse(_load_tui_history(history_path))
+                self.assertFalse(_save_tui_history(history_path))
 
     def test_tui_dashboard_and_capabilities_show_implementation_readiness(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -755,6 +781,10 @@ class TuiTests(unittest.TestCase):
             self.assertIn('"status": "session_recap"', alias_commands)
             self.assertIn('"status": "local_release_metadata"', alias_commands)
             self.assertIn('"preference": "scroll_speed"', alias_commands)
+            self.assertIn("Aegis Setup", alias_commands)
+            self.assertIn("1. Create local Aegis state", alias_commands)
+            self.assertIn("2. Connect ChatGPT through Codex", alias_commands)
+            self.assertIn("3. Start the prompt", alias_commands)
             self.assertIn('"setup_steps"', alias_commands)
             self.assertIn("Aegis Guided Setup", alias_commands)
             self.assertIn("Guided Setup Tour", alias_commands)

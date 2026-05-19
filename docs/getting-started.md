@@ -34,6 +34,18 @@ Check the local schema migration status:
 PYTHONPATH=src python3 -m aegis.cli.main migrate schema
 ```
 
+## Connect ChatGPT / Codex
+
+For a ChatGPT subscription, Aegis uses the official Codex CLI login instead of importing browser cookies or session tokens.
+
+```bash
+codex login status
+PYTHONPATH=src python3 -m aegis.cli.main model auth login openai --subscription --verify-external
+PYTHONPATH=src python3 -m aegis.cli.main tui --model openai/gpt-5.5
+```
+
+If `codex login status` is not already logged in, run `codex login` first, then repeat the Aegis verification command.
+
 ## Submit a Safe Task
 
 ```bash

@@ -127,6 +127,7 @@ PYTHONPATH=src python3 -m aegis.cli.main model auth readiness-packet
 PYTHONPATH=src python3 -m aegis.cli.main model auth verify-readiness-packet <packet-id-or-path>
 PYTHONPATH=src python3 -m aegis.cli.main model providers
 PYTHONPATH=src python3 -m aegis.cli.main model route alias/smart
+PYTHONPATH=src python3 -m aegis.cli.main model route openai/gpt-5.5
 PYTHONPATH=src python3 -m aegis.cli.main model alias localfast ollama/llama3
 PYTHONPATH=src python3 -m aegis.cli.main model fallbacks ollama/llama3 lmstudio/local
 PYTHONPATH=src python3 -m aegis.cli.main model usage
