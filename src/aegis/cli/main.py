@@ -116,6 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
     tui.add_argument("--session-id", help="Join an existing session")
     tui.add_argument("--model", help="Model alias or identifier for a new TUI session")
     tui.add_argument("--personality", choices=PERSONALITY_NAMES, help="Personality for a new TUI session")
+    tui.add_argument("--classic", action="store_true", help="Use the line-oriented command deck instead of the selectable fullscreen deck")
 
     task = subcommands.add_parser("task", help="Submit and inspect tasks")
     task_sub = task.add_subparsers(dest="task_command", required=True)
@@ -1384,6 +1385,7 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any] | None:
             session_id=args.session_id,
             model=args.model,
             personality=args.personality,
+            interactive=not args.classic,
         )
         return None
 
@@ -2857,12 +2859,13 @@ def _tui_enterprise_readiness() -> dict[str, Any]:
         "ready": True,
         "status": "ready",
         "command": "tui",
-        "cli_flags": ["--workspace", "--session-id", "--model", "--personality"],
+        "cli_flags": ["--workspace", "--session-id", "--model", "--personality", "--classic"],
         "active_flags": ["audit", "approvals", "session", "mode", "tools", "providers", "model", "workspace"],
         "shield_frames": len(SHIELD_FRAMES),
         "slash_aliases": True,
         "slash_palette": True,
         "nested_menus": True,
+        "selectable_panels": True,
         "operator_gates": ["interactive local session", "existing approval and policy gates"],
     }
 

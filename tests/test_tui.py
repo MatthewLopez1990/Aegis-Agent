@@ -16,6 +16,7 @@ from aegis.memory.models import MemoryType
 from aegis.research.harness import ResearchHarness
 from aegis.security.taint import RiskLevel, TrustClass
 from aegis.skills.manifest import SkillManifest
+from aegis.tui.interactive import build_interactive_panels
 from aegis.tui.main import AegisTui, _apply_live_completion, _complete_slash, _live_completion_context, _live_input_block, _visible_length
 
 from tests.test_mcp import FAKE_MCP_SERVER
@@ -23,6 +24,29 @@ from tests.test_plugins import _write_plugin_catalog, _write_plugin_fixture
 
 
 class TuiTests(unittest.TestCase):
+    def test_interactive_tui_panel_model_is_selectable_and_command_backed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tui = AegisTui(data_dir=root / ".aegis", workspace=root)
+
+            panels = build_interactive_panels(tui)
+
+            titles = {panel.title for panel in panels}
+            self.assertIn("AGENT STATUS", titles)
+            self.assertIn("ACTIVE TASK", titles)
+            self.assertIn("SETUP TOUR", titles)
+            self.assertIn("POLICY POSTURE", titles)
+            self.assertIn("TOOL RUNTIME", titles)
+            self.assertIn("MEMORY", titles)
+            commands = {item.command for panel in panels for item in panel.items if item.command}
+            self.assertIn("setup next", commands)
+            self.assertIn("menu setup", commands)
+            self.assertIn("dashboard", commands)
+            self.assertIn("approvals", commands)
+            setup_panel = next(panel for panel in panels if panel.panel_id == "setup")
+            self.assertTrue(any(item.command == "setup model-auth" for item in setup_panel.items))
+            self.assertTrue(any(item.status for panel in panels for item in panel.items))
+
     def test_tui_persists_private_readline_history(self) -> None:
         try:
             import readline

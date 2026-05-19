@@ -6094,8 +6094,17 @@ def run_tui(
     session_id: str | None = None,
     model: str | None = None,
     personality: str | None = None,
+    interactive: bool = True,
 ) -> None:
-    AegisTui(data_dir=data_dir, workspace=workspace, session_id=session_id, model=model, personality=personality).cmdloop()
+    tui = AegisTui(data_dir=data_dir, workspace=workspace, session_id=session_id, model=model, personality=personality)
+    if interactive:
+        try:
+            from aegis.tui.interactive import run_interactive_tui
+        except ImportError:
+            run_interactive_tui = None
+        if run_interactive_tui is not None and run_interactive_tui(tui):
+            return
+    tui.cmdloop()
 
 
 def _compact_task(task: dict[str, object]) -> dict[str, object]:

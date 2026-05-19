@@ -47,6 +47,8 @@ Terminal UI:
 
 ```bash
 PYTHONPATH=src python3 -m aegis.cli.main tui
+# fallback line-oriented deck:
+PYTHONPATH=src python3 -m aegis.cli.main tui --classic
 ```
 
 High-risk actions pause for approval:
@@ -70,7 +72,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -v
 
 - CLI task submission, status, resume, evidence, approvals, memory, skills, connectors, and audit commands.
 - Dependency-free local API server for the product dashboard, health checks, connector listing, task submission, status, approvals, schedules, boards, and resume.
-- Dependency-free TUI command deck with a neon three-column startup control center, animated multi-frame Aegis Shield ASCII identity banner, Codex-style `/` command palette, nested `menu operate|govern|setup|build|explore` views, guided `/setup next` onboarding, hidden setup submenus, and browser GUI with shield-branded runtime control, task resume/cancel, security posture, approvals, recent tasks, session-linked task recovery, models, channels, tools, schedules, work boards, and audit evidence.
+- Curses-backed selectable TUI command deck with a compact neon three-column startup control center, keyboard/mouse panel focus, selectable dashboard/setup/tool/memory/approval items, a detail/output pane, animated multi-frame Aegis Shield ASCII identity banner, Codex-style `/` command prompt, nested `menu operate|govern|setup|build|explore` views, guided `/setup next` onboarding, hidden setup submenus, and a `--classic` fallback line-oriented deck.
 - Approval responses include portable action hints and chat-style utterances such as `approve`, `yes proceed`, `deny`, `no do not do that`, and `let's revert`; inbound channel events can record those replies as approval intents, and an explicit event-id plus approval-id resolver lets future Slack/Discord adapters keep payload-matched safeguards while making operator decisions quick.
 - Durable SQLite task, memory, skill, and approval records in `.aegis/aegis.db`.
 - Append-only JSONL audit log with secret redaction and hash-chain verification.
