@@ -242,6 +242,19 @@ MODEL_COMMANDS = ("list", "route", "alias", "fallbacks", "usage", "auth", "provi
 MODEL_AUTH_COMMANDS = ("login", "logout", "methods", "targets", "doctor", "readiness-packet", "verify-readiness-packet")
 TOOLS_COMMANDS = ("list", "run", "disable", "enable")
 BACKEND_COMMANDS = ("list", "doctor", "select")
+SETUP_COMMANDS = (
+    "tour",
+    "status",
+    "initialize",
+    "model-auth",
+    "connectors",
+    "channels",
+    "backends",
+    "remote-control",
+    "interfaces",
+    "verify",
+    "json",
+)
 SKILLS_COMMANDS = ("hub", "search", "browse", "inspect", "install", "disable", "enable")
 PLUGIN_COMMANDS = ("list", "install", "enable", "disable", "remove", "reload", "marketplace", "updates", "fetch-manifest", "fetch-bundle", "install-bundle", "install-marketplace", "update-marketplace", "prepare-update", "apply-prepared-update")
 CURATOR_COMMANDS = ("status", "run", "draft", "verify-draft", "install-draft", "pin", "unpin", "archive", "restore", "pause", "resume")
@@ -536,6 +549,9 @@ class AegisTui(cmd.Cmd):
 
     def complete_menu(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return _complete_options(_command_group_names(), text)
+
+    def complete_setup(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
+        return _complete_subcommand(SETUP_COMMANDS, text, line, begidx)
 
     def complete_memory(self, text: str, line: str, begidx: int, endidx: int) -> list[str]:
         return _complete_subcommand(MEMORY_COMMANDS, text, line, begidx)
@@ -3755,8 +3771,19 @@ class AegisTui(cmd.Cmd):
         self.do_models(f"auth logout {shlex.quote(provider)}")
 
     def do_setup(self, arg: str) -> None:
-        """setup -- show guided local setup readiness."""
-        _print_json(build_setup_readiness(self.orchestrator, config_path=self.orchestrator.config.data_dir / "config.toml"))
+        """setup [tour|step|verify|json] -- open the guided local setup deck."""
+        try:
+            parts = shlex.split(arg)
+        except ValueError as exc:
+            print(f"setup args invalid: {exc}")
+            return
+        target = parts[0].lower() if parts else "tour"
+        readiness = build_setup_readiness(self.orchestrator, config_path=self.orchestrator.config.data_dir / "config.toml")
+        if target in {"json", "raw", "--json"}:
+            _print_json(readiness)
+            return
+        width = min(max(shutil.get_terminal_size((100, 24)).columns, 88), 118)
+        print(_setup_menu(readiness, width, target=target))
 
     def do_setup_bedrock(self, arg: str) -> None:
         """setup_bedrock -- show AWS Bedrock cloud-identity setup bridge."""
@@ -5668,17 +5695,19 @@ class AegisTui(cmd.Cmd):
         return "\n".join(
             [
                 _aegis_logo(width, self._next_shield_frame(), compact=True),
+                _deck_tabs(width, active="Overview"),
                 _section(
-                    "Live Flags",
+                    "Agent Status",
                     _dashboard_status_flags(runtime, self.session, workspace=self.workspace),
                     width,
                 ),
                 _section(
-                    "Start",
+                    "Command Palette",
                     [
                         "Type a plain request to submit a governed task.",
                         "Type / and press Enter for the command palette; type /mem or /app to filter options.",
                         "Use menu operate, menu govern, menu build, or menu explore for nested command groups.",
+                        "Use /setup for the guided first-run tour; drill into /setup model-auth, /setup connectors, or /setup interfaces only when needed.",
                     ],
                     width,
                 ),
@@ -5850,9 +5879,20 @@ class AegisTui(cmd.Cmd):
                 width,
                 "governed local runtime :: evidence-first operations :: slash-command deck",
             ),
+            _deck_tabs(width, active="Overview"),
             _section(
                 "Active Status Flags",
                 _dashboard_status_flags(runtime, self.session, workspace=self.workspace),
+                width,
+            ),
+            _section(
+                "Overview Deck",
+                [
+                    f"Active task lane: {runtime.get('running_task_count', 0)} running, {runtime.get('waiting_task_count', 0)} waiting, {runtime.get('paused_task_count', 0)} paused.",
+                    f"Policy posture: {'LOW RISK' if runtime.get('pending_approvals', 0) == 0 and runtime.get('audit_chain_ok') else 'REVIEW'} with {runtime.get('pending_approvals', 0)} pending approval gate(s).",
+                    f"Tool runtime: {runtime.get('tools', 0)} catalogued tools, {runtime.get('approval_gated_tools', 0)} approval gated, {runtime.get('model_providers', 0)} model providers.",
+                    "Setup tour: /setup opens the clean guided path; /setup model-auth, /setup connectors, /setup backends, /setup remote-control, and /setup interfaces reveal submenus.",
+                ],
                 width,
             ),
             _stat_line(
@@ -6901,6 +6941,175 @@ def _aegis_wordmark_lines(width: int) -> list[str]:
     return [_paint(line, colors[index % len(colors)]) for index, line in enumerate(raw_lines)]
 
 
+def _deck_tabs(width: int, *, active: str) -> str:
+    labels = ("Overview", "Tasks", "Approvals", "Memory", "Tools", "Logs", "Setup")
+    parts: list[str] = []
+    for label in labels:
+        if label.lower() == active.lower():
+            parts.append(_paint(f"[{label.upper()}]", "38;2;0;245;212;1"))
+        else:
+            parts.append(label)
+    return _boxed_lines("Navigation Tabs", ["  |  ".join(parts)], width)
+
+
+SETUP_STEP_ALIASES: dict[str, str] = {
+    "tour": "tour",
+    "overview": "tour",
+    "status": "tour",
+    "guide": "tour",
+    "init": "initialize",
+    "initialize": "initialize",
+    "local": "initialize",
+    "config": "initialize",
+    "model": "model_auth",
+    "models": "model_auth",
+    "auth": "model_auth",
+    "model-auth": "model_auth",
+    "model_auth": "model_auth",
+    "connector": "connectors_channels",
+    "connectors": "connectors_channels",
+    "channel": "connectors_channels",
+    "channels": "connectors_channels",
+    "connectors-channels": "connectors_channels",
+    "backend": "execution_backends",
+    "backends": "execution_backends",
+    "execution": "execution_backends",
+    "execution-backends": "execution_backends",
+    "remote": "remote_control",
+    "remote-control": "remote_control",
+    "remote_control": "remote_control",
+    "rc": "remote_control",
+    "interface": "interfaces",
+    "interfaces": "interfaces",
+    "tui": "interfaces",
+    "web": "interfaces",
+    "verify": "verify",
+    "verification": "verify",
+}
+
+SETUP_STEP_ROUTES: dict[str, str] = {
+    "initialize": "initialize",
+    "model_auth": "model-auth",
+    "connectors_channels": "connectors",
+    "execution_backends": "backends",
+    "remote_control": "remote-control",
+    "interfaces": "interfaces",
+}
+
+
+def _setup_menu(readiness: dict[str, Any], width: int, *, target: str = "tour") -> str:
+    normalized = SETUP_STEP_ALIASES.get(target, target)
+    if normalized == "verify":
+        return _setup_verification_menu(readiness, width)
+    steps = [step for step in readiness.get("setup_steps", []) if isinstance(step, dict)]
+    if normalized in {"tour", ""}:
+        return _setup_tour_menu(readiness, steps, width)
+    step = next((item for item in steps if item.get("id") == normalized), None)
+    if step is None:
+        return _boxed_lines(
+            "Aegis Guided Setup",
+            [
+                f"Unknown setup submenu: {target}",
+                f"Available submenus: {', '.join(SETUP_COMMANDS)}",
+                "Open /setup tour for the guided path or /setup json for machine-readable readiness.",
+            ],
+            width,
+        )
+    return _setup_step_menu(readiness, steps, step, width)
+
+
+def _setup_tour_menu(readiness: dict[str, Any], steps: list[dict[str, Any]], width: int) -> str:
+    lines = [
+        "Guided Setup Tour :: open one submenu at a time so the deck stays clean.",
+        f"Status: {readiness.get('status', 'unknown')}  {_setup_progress(steps)}",
+        f"Config path: {readiness.get('config_path')}",
+        "",
+        "Tour route:",
+    ]
+    for index, step in enumerate(steps, start=1):
+        route = SETUP_STEP_ROUTES.get(str(step.get("id")), str(step.get("id")))
+        label = str(step.get("label") or step.get("id"))
+        state = str(step.get("state") or "unknown")
+        command = str(step.get("command") or "")
+        lines.append(f"{index:02d}. {label} [{state}]")
+        lines.append(f"    open: /setup {route:<14} first command: {command}")
+    lines.extend(
+        [
+            "",
+            "Hidden submenus:",
+            "  /setup initialize  /setup model-auth  /setup connectors  /setup backends",
+            "  /setup remote-control  /setup interfaces  /setup verify  /setup json",
+            "",
+            'Safety receipt: "setup_steps": '
+            f"{len(steps)} | \"external_action_started\": false | \"raw_secret_values_included\": false",
+        ]
+    )
+    return _boxed_lines("Aegis Guided Setup", lines, width)
+
+
+def _setup_step_menu(readiness: dict[str, Any], steps: list[dict[str, Any]], step: dict[str, Any], width: int) -> str:
+    step_id = str(step.get("id") or "")
+    index = next((idx for idx, item in enumerate(steps, start=1) if item is step), 1)
+    route = SETUP_STEP_ROUTES.get(step_id, step_id)
+    next_step = steps[index] if index < len(steps) else None
+    action_lines = _setup_action_lines(step)
+    lines = [
+        f"Setup submenu :: {index:02d}/{len(steps)} {step.get('label', step_id)}",
+        f"id: {step_id}  state: {step.get('state', 'unknown')}",
+        f"why: {step.get('detail', '')}",
+        f"first command: {step.get('command', '')}",
+    ]
+    if action_lines:
+        lines.extend(["", "Guided next actions:", *action_lines])
+    if next_step:
+        next_route = SETUP_STEP_ROUTES.get(str(next_step.get("id")), str(next_step.get("id")))
+        lines.extend(["", f"Next submenu: /setup {next_route}"])
+    lines.extend(
+        [
+            "Back to tour: /setup tour",
+            "Verification: /setup verify",
+            'Safety receipt: "setup_steps": '
+            f"{len(steps)} | \"external_action_started\": false | \"raw_secret_values_included\": false",
+        ]
+    )
+    return _boxed_lines(f"Aegis Setup - {route}", lines, width)
+
+
+def _setup_verification_menu(readiness: dict[str, Any], width: int) -> str:
+    commands = [str(command) for command in readiness.get("verification_commands", [])]
+    lines = [
+        "Verification submenu :: run these after setup changes to confirm the local runtime is ready.",
+        f"Status before verification: {readiness.get('status', 'unknown')}",
+        "",
+        *[f"{index:02d}. {command}" for index, command in enumerate(commands, start=1)],
+        "",
+        "Return to tour: /setup tour",
+        "Machine-readable packet: /setup json",
+        f'"external_action_started": false | "model_invocation_performed": false | "send_probe_performed": false',
+    ]
+    return _boxed_lines("Aegis Setup - Verify", lines, width)
+
+
+def _setup_action_lines(step: dict[str, Any]) -> list[str]:
+    actions: list[str] = []
+    for key in ("next_commands", "next_steps"):
+        values = step.get(key, [])
+        if not isinstance(values, list):
+            continue
+        for value in values[:6]:
+            actions.append(f"- {value}")
+    return actions
+
+
+def _setup_progress(steps: list[dict[str, Any]]) -> str:
+    if not steps:
+        return "progress [----------] 0/0"
+    ready_states = {"available", "written", "ready", "ok"}
+    reviewed = sum(1 for step in steps if str(step.get("state") or "").lower() in ready_states)
+    filled = round((reviewed / len(steps)) * 10)
+    return f"progress [{'#' * filled}{'-' * (10 - filled)}] {reviewed}/{len(steps)} baseline-ready"
+
+
 COMMAND_MENU_GROUPS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     (
         "Operate",
@@ -7408,6 +7617,7 @@ SLASH_SUBCOMMANDS: dict[str, tuple[str, ...]] = {
     "tools": TOOLS_COMMANDS,
     "backends": BACKEND_COMMANDS,
     "sandbox": BACKEND_COMMANDS,
+    "setup": SETUP_COMMANDS,
     "skills": SKILLS_COMMANDS,
     "curator": CURATOR_COMMANDS,
     "plugin": PLUGIN_COMMANDS,
@@ -8011,19 +8221,19 @@ def _readline_module() -> Any | None:
 
 def _banner(title: str, width: int, subtitle: str | None = None) -> str:
     inner = width - 4
-    rule = "+" + "-" * (width - 2) + "+"
-    title_line = f"| {_paint(title.ljust(inner), '36;1')} |"
+    rule = _paint("+" + "=" * (width - 2) + "+", "38;2;0;245;212;1")
+    title_line = f"| {_paint(title.ljust(inner), '38;2;0;245;212;1')} |"
     lines = ["", rule, title_line]
     if subtitle:
-        lines.append(f"| {subtitle.ljust(inner)} |")
+        lines.append(f"| {_paint(subtitle.ljust(inner), '38;2;172;37;194')} |")
     lines.append(rule)
     return "\n".join(lines)
 
 
 def _boxed_lines(title: str, items: list[str], width: int) -> str:
     inner = width - 4
-    rule = "+" + "-" * (width - 2) + "+"
-    title_line = f"| {_paint(title.ljust(inner), '36;1')} |"
+    rule = _paint("+" + "-" * (width - 2) + "+", "38;2;0;245;212")
+    title_line = f"| {_paint(title.ljust(inner), '38;2;0;245;212;1')} |"
     body = []
     for item in items:
         for line in _wrap_box_line(item, inner):
@@ -8045,12 +8255,7 @@ def _pad_visible(line: str, width: int) -> str:
 
 
 def _section(title: str, items: list[str], width: int) -> str:
-    inner = width - 4
-    lines = ["", _paint(title, "36;1"), "-" * min(width, len(title) + 8)]
-    for item in items:
-        wrapped = textwrap.wrap(item, width=inner, replace_whitespace=True) or [""]
-        lines.extend(f"  {line}" for line in wrapped)
-    return "\n".join(lines)
+    return _boxed_lines(title, items, width)
 
 
 def _stat_line(stats: tuple[tuple[str, object], ...], width: int) -> str:
